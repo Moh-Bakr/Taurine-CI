@@ -1,0 +1,191 @@
+name: Orchestrate skill and dashboard validation (protected)
+
+# This is a trusted, manually dispatched source-bearing job. It intentionally
+# has no pull-request, push, reusable, or repository-dispatch trigger. The
+# source-read environment is the only place where the App key is available.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to validate from private Taurine
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orchestrate-validation-${{ github.workflow }}-${{ inputs.source_sha }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPOSITORY_ID: '1330267721'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: Taurine
+
+jobs:
+  validate:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Orchestrate skill and dashboard validation
+    environment: source-read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate protected dispatch input
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo 'orchestrate-validation must run only from the protected main branch' >&2
+            exit 1
+          fi
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
+
+      - name: Mint read-only private-source token
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.SOURCE_READER_APP_ID }}
+          private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
+          permission-contents: read
+          skip-token-revoke: true
+
+      - name: Check out exact private source SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY_OWNER }}/${{ env.SOURCE_REPOSITORY_NAME }}
+          ref: ${{ inputs.source_sha }}
+          token: ${{ steps.source-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Verify identity, exact checkout, and revoke source token
+        if: always()
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          set +x
+          failed=0
+          requested_sha="${REQUESTED_SOURCE_SHA,,}"
+
+          if [[ -z "${SOURCE_TOKEN}" ]]; then
+            echo 'No source token was minted; refusing to continue' >&2
+            exit 1
+          fi
+
+          if ! identity="$(curl --fail --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}")"; then
+            echo 'The configured source repository identity could not be resolved' >&2
+            failed=1
+          elif [[ "$(jq -r '.id' <<<"${identity}")" != "${SOURCE_REPOSITORY_ID}" || \
+            "$(jq -r '.owner.login' <<<"${identity}")" != "${SOURCE_REPOSITORY_OWNER}" || \
+            "$(jq -r '.name' <<<"${identity}")" != "${SOURCE_REPOSITORY_NAME}" ]]; then
+            echo 'The configured source repository identity did not match' >&2
+            failed=1
+          fi
+
+          if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
+            echo 'The private source checkout did not complete' >&2
+            failed=1
+          elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
+            echo 'The checked-out commit does not match source_sha' >&2
+            failed=1
+          fi
+
+          if ! api_sha="$(curl --fail --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/${requested_sha}" | \
+            jq -er '.sha | ascii_downcase')" || [[ "${api_sha}" != "${requested_sha}" ]]; then
+            echo 'The requested source SHA was not resolved from the configured repository' >&2
+            failed=1
+          fi
+
+          # Revoke before any project-controlled command is started. This is
+          # the boundary that makes the following skill tests credential-free.
+          if ! curl --fail --silent --show-error --retry 2 \
+            -X DELETE \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "${GITHUB_API_URL}/installation/token"; then
+            echo 'Source token revocation failed; refusing to execute project code' >&2
+            failed=1
+          fi
+
+          unset SOURCE_TOKEN
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all credential.helper 2>/dev/null || true
+          find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
+
+          if (( failed != 0 )); then
+            exit 1
+          fi
+
+      - name: Run dashboard contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/orchestrate-dashboard-tests.log"
+          if node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs >"${log}" 2>&1; then
+            echo 'dashboard-contract-tests: passed'
+          else
+            echo 'dashboard-contract-tests: failed' >&2
+            exit 1
+          fi
+
+      - name: Run complete orchestrate release verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/orchestrate-release-verification.log"
+          if node skills/orchestrate/scripts/verify.mjs --json >"${log}" 2>&1; then
+            echo 'orchestrate-release-verification: passed'
+          else
+            echo 'orchestrate-release-verification: failed' >&2
+            exit 1
+          fi
+
+      - name: Publish sanitized validation proof
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
+          requested_sha="${REQUESTED_SOURCE_SHA,,}"
+          [[ "${checked_out_sha}" == "${requested_sha}" ]]
+          {
+            echo '## Orchestrate skill and dashboard validation'
+            echo
+            echo 'The protected workflow validated the requested exact private SHA.'
+            echo
+            echo "- Source SHA: \`${checked_out_sha}\`"
+            echo '- Dashboard contract suite: passed'
+            echo '- Full release verification: passed'
+            echo '- Source token: revoked before project commands'
+            echo '- Outputs: no source files, logs, reports, or artifacts published'
+          } >> "${GITHUB_STEP_SUMMARY}"
