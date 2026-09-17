@@ -158,8 +158,8 @@ jobs:
                 # remain private on the ephemeral runner.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
-                  grep -E '^(error|Error:|failed to|Could not|Cannot|npm ERR!|node:internal)' |
-                  head -10 >&2 || true
+                  grep -E '(error|Error:|failed to|Could not|Cannot|npm ERR!|node:internal|MODULE_NOT_FOUND|ENOENT)' |
+                  head -20 >&2 || true
               fi
               exit 1
             fi
