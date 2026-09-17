@@ -234,9 +234,17 @@ jobs:
               # Keep hosted diagnostics actionable while redacting workspace
               # paths and excluding compiler/source output from the public log.
               sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+              sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|xcodebuild|cargo|clang|target)' |
                 tail -30 >&2 || true
+              if [[ "${label}" == mobile-tests ]]; then
+                # Preserve only test names and assertion metadata needed to
+                # diagnose hosted-only failures; never publish source lines.
+                sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
+                  tail -80 >&2 || true
+              fi
               exit 1
             fi
           }
