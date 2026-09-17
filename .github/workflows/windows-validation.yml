@@ -157,6 +157,8 @@ jobs:
                 reason='TypeScript compilation failure'
               elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
                 reason='memory exhaustion'
+              elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
+                reason='pinned vendor fetch or verification failure'
               elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
                 reason='test failure'
               fi
@@ -167,11 +169,6 @@ jobs:
           run_quiet npm-root npm ci --include=optional --ignore-scripts
           run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
-          # The private workspace's Cargo.toml patches boringtun to a verified
-          # local tree. The vendor directory is intentionally ignored, so every
-          # hosted source checkout must materialize it before any Rust-aware
-          # package build or test can load Cargo metadata.
-          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
 
       - name: Run Windows app and orchestrate skill validation
         shell: bash
@@ -193,6 +190,8 @@ jobs:
                 reason='TypeScript compilation failure'
               elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
                 reason='memory exhaustion'
+              elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
+                reason='pinned vendor fetch or verification failure'
               elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
                 reason='test failure'
               fi
@@ -206,7 +205,7 @@ jobs:
           # Keep typechecking and bundling separate so a hosted failure names
           # the failing phase without exposing source-bearing compiler output.
           run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
-          run_quiet desktop-vite-build npm --prefix taurine-desktop exec -- vite build
+          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec -- vite build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet desktop-tests npm --prefix taurine-desktop run test
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
