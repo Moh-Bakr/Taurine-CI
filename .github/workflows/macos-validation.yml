@@ -152,6 +152,15 @@ jobs:
                 reason='test failure'
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
+              if [[ "${label}" == desktop-vite-build ]]; then
+                # Vite's top-level error line is safe to publish after absolute
+                # workspace paths are removed; source excerpts and full logs
+                # remain private on the ephemeral runner.
+                sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  grep -E '^(error|Error:|failed to|Could not|Cannot|npm ERR!|node:internal)' |
+                  head -10 >&2 || true
+              fi
               exit 1
             fi
           }
@@ -199,7 +208,8 @@ jobs:
           # Keep typechecking and bundling separate so a hosted failure names
           # the failing phase without exposing source-bearing compiler output.
           run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
-          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && ./node_modules/.bin/vite build'
+          run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
+          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && node ./node_modules/vite/bin/vite.js build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet desktop-tests npm --prefix taurine-desktop run test
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
