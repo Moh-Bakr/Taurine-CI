@@ -16,7 +16,9 @@ permissions:
 
 concurrency:
   group: android-validation-${{ github.workflow }}-${{ inputs.source_sha }}
-  cancel-in-progress: true
+  # Never cancel a source-bearing run mid-revocation; let the active token
+  # cleanup boundary complete before another dispatch starts.
+  cancel-in-progress: false
 
 env:
   SOURCE_REPOSITORY_ID: '1330267721'
