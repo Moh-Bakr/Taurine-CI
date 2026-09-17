@@ -187,7 +187,9 @@ jobs:
           run_quiet contracts npm run check:contracts
           run_quiet wire npm run check:wire
           run_quiet packages-tests npm run test:packages
-          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=2 --minWorkers=1
+          run_quiet desktop-build npm --prefix taurine-desktop run build
+          run_quiet mobile-build npm --prefix taurine-mobile run build
+          run_quiet desktop-tests npm --prefix taurine-desktop run test
           # Keep the mobile Vitest pool single-worker on hosted runners. The
           # suite is deterministic locally but can fail during worker teardown
           # when multiple workers share jsdom storage state.
@@ -196,8 +198,6 @@ jobs:
           run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
           run_quiet desktop-lint npm --prefix taurine-desktop run lint
           run_quiet mobile-lint npm --prefix taurine-mobile run lint
-          run_quiet desktop-build npm --prefix taurine-desktop run build
-          run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet bundle-budget npm run check:bundle
 
       - name: Publish sanitized validation proof
