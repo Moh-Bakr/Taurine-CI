@@ -147,6 +147,11 @@ jobs:
           # The shared package test runner uses taurine-desktop's Vitest binary.
           run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
+          # Cargo.toml patches boringtun to a pinned, locally fetched crate.
+          # vendor/ is intentionally ignored and therefore absent from the
+          # private checkout; materialize and verify the pinned dependencies on
+          # this ephemeral runner before Cargo resolves the mobile workspace.
+          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
 
       - name: Generate the ephemeral iOS project
         shell: bash
