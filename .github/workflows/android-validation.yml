@@ -227,6 +227,18 @@ jobs:
                 sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
+              # Preserve diagnostic headers and source locations without
+              # publishing private source excerpts.
+              sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                grep -E 'error\\[E[0-9]+\\]|--> [^ ]+:[0-9]+:[0-9]+' |
+                head -30 >&2 || true
+              if [[ "${label}" == android-debug-build ]]; then
+                sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  grep -E 'error\\[E[0-9]+\\]|--> [^ ]+:[0-9]+:[0-9]+' |
+                  head -30 >&2 || true
+              fi
               exit 1
             fi
           }
@@ -267,6 +279,15 @@ jobs:
                 sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
+              if [[ "${label}" == android-debug-build ]]; then
+                # Rust's primary error can be far above the final Cargo
+                # summary. Keep only error codes and locations so the public
+                # control plane never publishes private source excerpts.
+                sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
+                  head -30 >&2 || true
+              fi
               exit 1
             fi
           }
