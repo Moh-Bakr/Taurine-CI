@@ -224,8 +224,9 @@ jobs:
               echo "${label}: failed" >&2
               # Keep diagnostics useful without publishing source snippets or full logs.
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|BUILD FAILED|.*(linker|not found|No such file))' |
-                tail -20 >&2 || true
+                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
+                tail -40 >&2 || true
               exit 1
             fi
           }
@@ -263,8 +264,9 @@ jobs:
             else
               echo "${label}: failed" >&2
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|BUILD FAILED|.*(linker|not found|No such file))' |
-                tail -20 >&2 || true
+                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
+                tail -40 >&2 || true
               exit 1
             fi
           }
