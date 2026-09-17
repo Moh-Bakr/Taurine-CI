@@ -139,7 +139,7 @@ jobs:
           run_quiet contracts npm run check:contracts
           run_quiet wire npm run check:wire
           run_quiet packages-tests npm run test:packages
-          run_quiet desktop-tests npm --prefix taurine-desktop run test
+          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=2 --minWorkers=1
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
           run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
           run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
