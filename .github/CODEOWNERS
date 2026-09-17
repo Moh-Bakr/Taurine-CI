@@ -1,0 +1,4 @@
+# Protect workflow and security policy changes.
+/.github/ @Moh-Bakr
+/SECURITY.md @Moh-Bakr
+/CODEOWNERS @Moh-Bakr
