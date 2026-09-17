@@ -1,0 +1,92 @@
+name: Validate public CI policy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# This workflow intentionally has no OIDC permission, secrets, private checkout,
+# cache write, or artifact upload. It validates only this public repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: public-policy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Validate workflow policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out public policy repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reject private-source and credential material
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          forbidden_path_re='(^|/)(src|target|node_modules|vendor|taurine-desktop|taurine-mobile)(/|$)|\.(rs|ts|tsx|js|jsx|json|toml|lock|pem|p12|pfx|jks|keystore)$'
+          forbidden_name_re='(^|/)(README|SECURITY|CODEOWNERS|LICENSE)(\.|$)'
+
+          while IFS= read -r -d '' path; do
+            if [[ "$path" == .github/workflows/* ]]; then
+              continue
+            fi
+            if [[ "$path" == .gitignore ]]; then
+              continue
+            fi
+            echo "Unexpected tracked path in the public CI repository: $path" >&2
+            exit 1
+          done < <(git ls-files -z)
+
+          if git ls-files | grep -E "$forbidden_path_re|$forbidden_name_re"; then
+            echo "The public repository contains a forbidden source, credential, or starter-document path." >&2
+            exit 1
+          fi
+
+          if git grep -nI -E 'GH_APP_PRIVATE_KEY|TAURINE_(PAT|TOKEN|PRIVATE_KEY)|GITHUB_TOKEN[[:space:]]*[:=]|TAURI_SIGNING_PRIVATE_KEY|DEPLOY_KEY|BEGIN (RSA|OPENSSH|EC|PRIVATE) KEY|secrets\.(TAURINE|GH_APP|PAT|DEPLOY|SIGNING)' -- . ':!*.lock' ':!.github/workflows/validate-public-changes.yml'; then
+            echo "A reusable source, signing, or deployment credential pattern was found." >&2
+            exit 1
+          fi
+
+      - name: Enforce immutable reviewed Actions and safe workflow features
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r -d '' workflow; do
+            if grep -nE '^\s*uses:\s*[^#[:space:]]+@(v[0-9]|main|master|stable|latest|[[:alnum:]_.-]+)$' "$workflow"; then
+              echo "Every Action reference must use a full 40-character commit SHA: $workflow" >&2
+              exit 1
+            fi
+
+            while IFS= read -r reference; do
+              case "$reference" in
+                actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683) ;;
+                '') ;;
+                *)
+                  echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^#[:space:]]+).*/\1/p' "$workflow")
+
+            if [[ "$workflow" != "./.github/workflows/validate-public-changes.yml" && "$workflow" != ".github/workflows/validate-public-changes.yml" ]]; then
+              if grep -nE 'pull_request_target:|workflow_run:|workflow_call:|actions/(upload|download)-artifact|actions/cache|id-token:[[:space:]]*write|secrets\.' "$workflow"; then
+                echo "Unsafe trigger, artifact/cache path, OIDC grant, or Actions secret found in public policy workflows: $workflow" >&2
+                exit 1
+              fi
+            fi
+          done < <(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
+
+          if find . -type f -not -path './.git/*' -not -path './.github/workflows/*' -not -name '.gitignore' -print -quit | grep -q .; then
+            echo "Only workflow files (and an optional .gitignore) may be tracked at this bootstrap phase." >&2
+            exit 1
+          fi
