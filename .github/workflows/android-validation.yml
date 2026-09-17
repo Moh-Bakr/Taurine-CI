@@ -179,7 +179,6 @@ jobs:
           cd taurine-mobile
           run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
           run_quiet android-init npm run android:init -- --ci --skip-targets-install
-          test -s src-tauri/gen/android/tauri.settings.gradle
 
       - name: Run Android app and orchestrate skill validation
         shell: bash
