@@ -176,7 +176,9 @@ jobs:
             else
               echo "${label}: failed" >&2
               # Keep diagnostics useful without publishing source snippets or full logs.
-              grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|BUILD FAILED)' "${log}" | tail -20 >&2 || true
+              sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|BUILD FAILED|.*(linker|not found|No such file))' |
+                tail -20 >&2 || true
               exit 1
             fi
           }
@@ -206,7 +208,9 @@ jobs:
               echo "${label}: passed"
             else
               echo "${label}: failed" >&2
-              grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|BUILD FAILED)' "${log}" | tail -20 >&2 || true
+              sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|BUILD FAILED|.*(linker|not found|No such file))' |
+                tail -20 >&2 || true
               exit 1
             fi
           }
