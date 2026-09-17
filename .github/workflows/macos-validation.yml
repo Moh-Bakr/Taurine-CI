@@ -199,7 +199,7 @@ jobs:
           # Keep typechecking and bundling separate so a hosted failure names
           # the failing phase without exposing source-bearing compiler output.
           run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
-          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec -- vite build'
+          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && ./node_modules/.bin/vite build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet desktop-tests npm --prefix taurine-desktop run test
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
