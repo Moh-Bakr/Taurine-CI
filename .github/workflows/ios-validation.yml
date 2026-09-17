@@ -178,11 +178,10 @@ jobs:
           llvm_prefix="$(brew --prefix llvm)"
           [[ -f "${llvm_prefix}/lib/libclang.dylib" ]] || { echo 'libclang dylib is unavailable' >&2; exit 1; }
           echo "LIBCLANG_PATH=${llvm_prefix}/lib" >> "${GITHUB_ENV}"
-          # Cargo names the Rust target `aarch64-apple-ios-sim`, while Apple
-          # clang accepts `-simulator` (not `-sim`) in a target triple. Without
-          # this bindgen override libclang rejects the target before compiling
-          # any Rust code.
-          echo 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim=--target=arm64-apple-ios-simulator' >> "${GITHUB_ENV}"
+          # Cargo names the Rust simulator target `aarch64-apple-ios-sim`, but
+          # that suffix is not a valid clang target triple. Bindgen only needs
+          # the Apple ABI while Cargo/Xcode still selects the simulator SDK.
+          echo 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim=--target=aarch64-apple-ios' >> "${GITHUB_ENV}"
           test -f taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj/project.pbxproj
 
       - name: Run iOS app and orchestrate skill validation
