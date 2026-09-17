@@ -158,7 +158,7 @@ jobs:
                 # remain private on the ephemeral runner.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
-                  grep -E '(error|Error:|failed to|Could not|Cannot|npm ERR!|node:internal|MODULE_NOT_FOUND|ENOENT)' |
+                  grep -Ei '(vite|rollup|tailwind|oxide|error|failed|could not|cannot|npm (err|error|warn)|node:internal|module_not_found|enoent|command not found|not cached)' |
                   head -20 >&2 || true
               fi
               exit 1
@@ -209,7 +209,7 @@ jobs:
           # the failing phase without exposing source-bearing compiler output.
           run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
           run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
-          run_quiet vite-native-preflight bash -c 'cd taurine-desktop && node -e '\''console.log(`node=${process.version} platform=${process.platform} arch=${process.arch}`); require("vite"); require("rollup"); require("@tailwindcss/oxide")'\'''
+          run_quiet vite-native-preflight bash -c 'cd taurine-desktop && node -e '\''console.log(`node=${process.version} platform=${process.platform} arch=${process.arch}`); require("vite"); require("rollup"); require("rollup/dist/native.js"); require("@tailwindcss/oxide")'\'''
           run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet desktop-tests npm --prefix taurine-desktop run test
