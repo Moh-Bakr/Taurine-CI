@@ -29,7 +29,10 @@ jobs:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: iOS app and skill validation
     environment: source-read
-    runs-on: macos-14
+    # The generated Xcode project uses objectVersion 77, which requires the
+    # Xcode toolchain shipped on macos-15. macos-14's older Xcode rejects it
+    # before Tauri can compile the Rust framework.
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - name: Check out public control plane
