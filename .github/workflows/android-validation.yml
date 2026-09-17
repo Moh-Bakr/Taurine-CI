@@ -187,7 +187,9 @@ jobs:
           # the unhelpful `No such file or directory` from Cargo's build script.
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends clang libclang-dev
-          libclang_file="$(find /usr/lib -type f -name 'libclang.so*' -print -quit)"
+          # Debian/Ubuntu package revisions commonly expose this as
+          # libclang-18.so.1 rather than the unversioned libclang.so symlink.
+          libclang_file="$(find /usr/lib -type f \( -name 'libclang.so*' -o -name 'libclang-*.so*' \) -print -quit)"
           [[ -n "${libclang_file}" ]] || { echo 'libclang shared library is unavailable' >&2; exit 1; }
           echo "LIBCLANG_PATH=$(dirname "${libclang_file}")" >> "${GITHUB_ENV}"
           rustup target add aarch64-linux-android
