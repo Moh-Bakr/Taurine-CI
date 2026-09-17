@@ -16,7 +16,9 @@ permissions:
 
 concurrency:
   group: linux-validation-${{ github.workflow }}-${{ inputs.source_sha }}
-  cancel-in-progress: true
+  # Never cancel a source-bearing run: cancellation can interrupt the cleanup
+  # step that revokes the short-lived private-source token.
+  cancel-in-progress: false
 
 env:
   SOURCE_REPOSITORY_ID: '1330267721'
@@ -161,7 +163,21 @@ jobs:
             if "$@" >"${log}" 2>&1; then
               echo "${label}: passed"
             else
-              echo "${label}: failed" >&2
+              # Keep source-bearing logs private while leaving an actionable,
+              # non-sensitive failure class in the public run summary.
+              reason='command returned non-zero'
+              if grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
+                reason='missing command'
+              elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
+                reason='missing dependency or file'
+              elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then
+                reason='TypeScript compilation failure'
+              elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
+                reason='memory exhaustion'
+              elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
+                reason='test failure'
+              fi
+              echo "${label}: failed (${reason}; detailed output withheld)" >&2
               exit 1
             fi
           }
