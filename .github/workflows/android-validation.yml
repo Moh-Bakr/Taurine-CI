@@ -168,7 +168,6 @@ jobs:
           run_quiet npm-root npm ci --ignore-scripts
           run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
-          run_quiet cargo-fetch cargo fetch --locked --manifest-path taurine-mobile/src-tauri/Cargo.toml
 
       - name: Regenerate runner-specific Android project metadata
         shell: bash
