@@ -152,6 +152,15 @@ jobs:
                 reason='test failure'
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
+              if [[ "${label}" == desktop-vite-build ]]; then
+                # Vite's top-level error line is safe to publish after absolute
+                # workspace paths are removed; source excerpts and full logs
+                # remain private on the ephemeral runner.
+                sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  grep -E '^(error|Error:|failed to|Could not|Cannot|npm ERR!|node:internal)' |
+                  head -10 >&2 || true
+              fi
               exit 1
             fi
           }
