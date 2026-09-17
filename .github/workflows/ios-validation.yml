@@ -165,7 +165,6 @@ jobs:
           # Rust target required by the explicit build below instead.
           rustup target add aarch64-apple-ios-sim aarch64-apple-ios
           test -f taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj/project.pbxproj
-          xcodebuild -project taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj -list >/dev/null
 
       - name: Run iOS app and orchestrate skill validation
         shell: bash
