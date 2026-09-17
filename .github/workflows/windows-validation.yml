@@ -1,7 +1,7 @@
 name: Windows source validation (protected)
 
-# Trusted, manually dispatched validation of an exact private-source commit.
-# Pull requests and pushes can never enter source-read or receive its secret.
+# Manual, protected, source-bearing validation. Pull requests and pushes never
+# enter the source-read environment or receive a private-source token.
 on:
   workflow_dispatch:
     inputs:
@@ -25,10 +25,10 @@ env:
 jobs:
   validate:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    name: Windows validation
+    name: Windows app and skill validation
     environment: source-read
     runs-on: windows-2022
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,26 +84,17 @@ jobs:
           set +x
           failed=0
           requested_sha="${REQUESTED_SOURCE_SHA,,}"
-
           if [[ -z "${SOURCE_TOKEN}" ]]; then
             echo 'No source token was minted; refusing to continue' >&2
             exit 1
           fi
-
-          if ! identity="$(curl --fail --silent --show-error \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}")"; then
+          if ! identity="$(curl --fail --silent --show-error -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}")"; then
             echo 'The configured source repository identity could not be resolved' >&2
             failed=1
-          elif [[ "$(jq -r '.id' <<<"${identity}")" != "${SOURCE_REPOSITORY_ID}" || \
-            "$(jq -r '.owner.login' <<<"${identity}")" != "${SOURCE_REPOSITORY_OWNER}" || \
-            "$(jq -r '.name' <<<"${identity}")" != "${SOURCE_REPOSITORY_NAME}" ]]; then
+          elif [[ "$(jq -r '.id' <<<"${identity}")" != "${SOURCE_REPOSITORY_ID}" || "$(jq -r '.owner.login' <<<"${identity}")" != "${SOURCE_REPOSITORY_OWNER}" || "$(jq -r '.name' <<<"${identity}")" != "${SOURCE_REPOSITORY_NAME}" ]]; then
             echo 'The configured source repository identity did not match' >&2
             failed=1
           fi
-
           if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
             echo 'The private source checkout did not complete' >&2
             failed=1
@@ -111,40 +102,20 @@ jobs:
             echo 'The checked-out commit does not match source_sha' >&2
             failed=1
           fi
-
-          if ! api_sha="$(curl --fail --silent --show-error \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/${requested_sha}" | \
-            jq -er '.sha | ascii_downcase')" || [[ "${api_sha}" != "${requested_sha}" ]]; then
+          if ! api_sha="$(curl --fail --silent --show-error -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/${requested_sha}" | jq -er '.sha | ascii_downcase')" || [[ "${api_sha}" != "${requested_sha}" ]]; then
             echo 'The requested source SHA was not resolved from the configured repository' >&2
             failed=1
           fi
-
-          if ! curl --fail --silent --show-error --retry 2 \
-            -X DELETE \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/installation/token"; then
+          if ! curl --fail --silent --show-error --retry 2 -X DELETE -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/installation/token"; then
             echo 'Source token revocation failed; refusing to execute project code' >&2
             failed=1
           fi
-
           unset SOURCE_TOKEN
           git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all credential.helper 2>/dev/null || true
-          # Git for Windows exposes RUNNER_TEMP as a path understood by bash.
-          # Clear the App action output command files after revocation.
-          if [[ -d "${RUNNER_TEMP}" ]]; then
-            find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \; || true
-          fi
-
-          if (( failed != 0 )); then
-            exit 1
-          fi
+          find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
+          (( failed == 0 ))
 
       - name: Set up the pinned Node.js release
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -155,36 +126,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          run_quiet() {
-            local label="$1"
-            shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              echo "${label}: failed" >&2
-              exit 1
-            fi
-          }
+          run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
           run_quiet npm-root npm ci --ignore-scripts
           run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
 
-      - name: Run Windows app validation
+      - name: Run Windows app and orchestrate skill validation
         shell: bash
         run: |
           set -euo pipefail
-          run_quiet() {
-            local label="$1"
-            shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              echo "${label}: failed" >&2
-              exit 1
-            fi
-          }
+          run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
           run_quiet contracts npm run check:contracts
           run_quiet wire npm run check:wire
           run_quiet packages-tests npm run test:packages
@@ -197,6 +148,8 @@ jobs:
           run_quiet desktop-build npm --prefix taurine-desktop run build
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet bundle-budget npm run check:bundle
+          run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
+          run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
 
       - name: Publish sanitized validation proof
         shell: bash
@@ -205,15 +158,13 @@ jobs:
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
-          requested_sha="${REQUESTED_SOURCE_SHA,,}"
-          [[ "${checked_out_sha}" == "${requested_sha}" ]]
+          [[ "${checked_out_sha}" == "${REQUESTED_SOURCE_SHA,,}" ]]
           {
-            echo '## Windows private-source validation'
-            echo
-            echo 'The protected workflow validated the requested exact private SHA.'
+            echo '## Windows app and orchestrate skill validation'
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
-            echo '- Validation: contracts, wire, tests, typechecks, lint, frontend builds, and bundle budget passed'
+            echo '- App: contracts, wire, tests, typechecks, lint, frontend builds, and bundle budget passed'
+            echo '- Skill: dashboard contract suite and full release verification passed'
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
           } >> "${GITHUB_STEP_SUMMARY}"
