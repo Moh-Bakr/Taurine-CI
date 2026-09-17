@@ -155,15 +155,33 @@ jobs:
           fi
           [[ -n "${sdkmanager_bin}" && -x "${sdkmanager_bin}" ]] || { echo 'sdkmanager is unavailable' >&2; exit 1; }
           yes | "${sdkmanager_bin}" --sdk_root="${ANDROID_HOME}" --licenses >/dev/null || true
+          # Tauri 2's Android Gradle plugin and bindgen are validated against
+          # NDK r27c.  Do not rely on whichever NDK happens to be preinstalled
+          # on the hosted image: a newer image can otherwise change the linker
+          # layout underneath a source-bearing run.
+          local_ndk_version='27.2.12479018'
           "${sdkmanager_bin}" --sdk_root="${ANDROID_HOME}" \
-            'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' >/dev/null
-          export NDK_HOME="${ANDROID_HOME}/ndk/28.2.13676358"
-          [[ -x "${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]] || { echo 'required Android NDK is unavailable' >&2; exit 1; }
+            'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' "ndk;${local_ndk_version}" >/dev/null
+          export NDK_HOME="${ANDROID_HOME}/ndk/${local_ndk_version}"
+          ndk_bin="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          ndk_sysroot="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          [[ -x "${ndk_bin}/clang" && -d "${ndk_sysroot}" ]] || { echo 'required Android NDK is unavailable' >&2; exit 1; }
+          # Some hosted NDK images omit the versioned clang launcher names.
+          # Cargo needs a real executable path, so use a runner-local wrapper
+          # that supplies the Android target and sysroot to the stable clang.
+          linker_wrapper="${RUNNER_TEMP}/aarch64-linux-android-linker"
+          cat >"${linker_wrapper}" <<EOF
+#!/usr/bin/env bash
+exec "${ndk_bin}/clang" --target=aarch64-linux-android24 --sysroot="${ndk_sysroot}" "\$@"
+EOF
+          chmod 700 "${linker_wrapper}"
+          "${linker_wrapper}" --version >/dev/null
           echo "NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
           echo "ANDROID_NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
           echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "${GITHUB_ENV}"
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" >> "${GITHUB_ENV}"
-          echo "CC_aarch64_linux_android=${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" >> "${GITHUB_ENV}"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${linker_wrapper}" >> "${GITHUB_ENV}"
+          echo "CC_aarch64_linux_android=${linker_wrapper}" >> "${GITHUB_ENV}"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android24 --sysroot=${ndk_sysroot}" >> "${GITHUB_ENV}"
           rustup target add aarch64-linux-android
 
       - name: Install locked JavaScript and Rust dependencies
@@ -196,8 +214,10 @@ jobs:
           # whose path points into the local Cargo registry. Generate it on the
           # runner rather than trusting a developer's absolute path.
           cd taurine-mobile
+          rm -f src-tauri/gen/android/tauri.settings.gradle
           run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
           run_quiet android-init npm run android:init -- --ci --skip-targets-install
+          grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle && { echo 'Android metadata contains a developer-local path' >&2; exit 1; } || true
 
       - name: Run Android app and orchestrate skill validation
         shell: bash
