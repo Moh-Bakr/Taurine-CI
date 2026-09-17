@@ -70,6 +70,7 @@ jobs:
             while IFS= read -r reference; do
               case "$reference" in
                 actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1) ;;
+                actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1) ;;
                 '') ;;
                 *)
                   echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2
@@ -78,7 +79,60 @@ jobs:
               esac
             done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^#[:space:]]+).*/\1/p' "$workflow")
 
-            if [[ "$workflow" != "./.github/workflows/validate-public-changes.yml" && "$workflow" != ".github/workflows/validate-public-changes.yml" ]]; then
+            if [[ "$workflow" == "./.github/workflows/source-read.yml" || "$workflow" == ".github/workflows/source-read.yml" ]]; then
+              if ! grep -qE '^on:[[:space:]]*$' "$workflow" || ! grep -qE '^[[:space:]]+workflow_dispatch:[[:space:]]*$' "$workflow"; then
+                echo "The source-read workflow must be workflow_dispatch-only: $workflow" >&2
+                exit 1
+              fi
+              if grep -nE '^[[:space:]]+(pull_request|pull_request_target|push|schedule|workflow_run|repository_dispatch|workflow_call):' "$workflow"; then
+                echo "The source-read workflow has an unapproved trigger: $workflow" >&2
+                exit 1
+              fi
+              if ! grep -qE '^    environment:[[:space:]]+source-read[[:space:]]*$' "$workflow"; then
+                echo "The source-read workflow must use the protected source-read environment: $workflow" >&2
+                exit 1
+              fi
+              if ! grep -qE 'SOURCE_REPOSITORY_ID:[[:space:]]*['"'"']?[0-9]{7,}['"'"']?[[:space:]]*$' "$workflow"; then
+                echo "The source-read workflow must pin a numeric source repository ID: $workflow" >&2
+                exit 1
+              fi
+              if ! grep -qE '^[[:space:]]+source_sha:' "$workflow" || ! grep -qE '\^\[0-9a-fA-F\]\{40\}' "$workflow"; then
+                echo "The source-read workflow must require and validate a full source SHA: $workflow" >&2
+                exit 1
+              fi
+              if ! grep -qE 'SOURCE_READER_PRIVATE_KEY' "$workflow" || ! grep -qE 'SOURCE_READER_APP_ID' "$workflow"; then
+                echo "The source-read workflow must use only the reviewed source-reader settings: $workflow" >&2
+                exit 1
+              fi
+              if grep -nE 'id-token:[[:space:]]*write|actions/(upload|download)-artifact|actions/cache|secrets\[[^]]+\]' "$workflow"; then
+                echo "The source-read workflow contains an unsafe secret, OIDC, artifact, or cache pattern: $workflow" >&2
+                exit 1
+              fi
+              while IFS= read -r secret_reference; do
+                case "$secret_reference" in
+                  secrets.SOURCE_READER_PRIVATE_KEY) ;;
+                  '') ;;
+                  *)
+                    echo "The source-read workflow references an unapproved secret: $secret_reference" >&2
+                    exit 1
+                    ;;
+                esac
+              done < <(grep -oE 'secrets\.[A-Za-z0-9_]+' "$workflow" | sort -u)
+              while IFS= read -r variable_reference; do
+                case "$variable_reference" in
+                  vars.SOURCE_READER_APP_ID) ;;
+                  '') ;;
+                  *)
+                    echo "The source-read workflow references an unapproved variable: $variable_reference" >&2
+                    exit 1
+                    ;;
+                esac
+              done < <(grep -oE 'vars\.[A-Za-z0-9_]+' "$workflow" | sort -u)
+              if ! grep -qE 'skip-token-revoke:[[:space:]]*true' "$workflow" || ! grep -qE 'installation/token' "$workflow"; then
+                echo "The source-read workflow must explicitly revoke its token before project code: $workflow" >&2
+                exit 1
+              fi
+            elif [[ "$workflow" != "./.github/workflows/validate-public-changes.yml" && "$workflow" != ".github/workflows/validate-public-changes.yml" ]]; then
               if grep -nE 'pull_request_target:|workflow_run:|workflow_call:|actions/(upload|download)-artifact|actions/cache|id-token:[[:space:]]*write|secrets\.' "$workflow"; then
                 echo "Unsafe trigger, artifact/cache path, OIDC grant, or Actions secret found in public policy workflows: $workflow" >&2
                 exit 1

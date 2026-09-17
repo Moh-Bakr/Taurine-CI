@@ -1,0 +1,183 @@
+name: Read private source (protected)
+
+# This is deliberately manual and protected. Public pull requests never enter
+# this workflow and therefore never receive the source-read environment secret.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to read from the private source repository
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-source-${{ github.workflow }}-${{ inputs.source_sha }}
+  cancel-in-progress: true
+
+# These identifiers are configuration, not credentials. The repository ID is
+# used as an additional guard so the source repository cannot be substituted by
+# changing a workflow input. No private repository URL is stored in this file.
+env:
+  SOURCE_REPOSITORY_ID: '1330267721'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: Taurine
+
+jobs:
+  source-read:
+    # workflow_dispatch can be selected on another branch in the UI. Fail
+    # closed unless this exact workflow came from the protected default branch.
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Fetch exact private source SHA
+    environment: source-read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate protected dispatch input
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo 'source-read must run only from the protected main branch' >&2
+            exit 1
+          fi
+
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
+
+          printf 'Requested source SHA: %s\n' "${REQUESTED_SOURCE_SHA,,}"
+
+      - name: Mint read-only private-source token
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.SOURCE_READER_APP_ID }}
+          private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
+          permission-contents: read
+          skip-token-revoke: true
+
+      - name: Resolve and check out the exact private SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY_OWNER }}/${{ env.SOURCE_REPOSITORY_NAME }}
+          ref: ${{ inputs.source_sha }}
+          token: ${{ steps.source-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Verify exact checkout and revoke source token
+        if: always()
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          set +x
+          verification_failed=0
+
+          requested_sha="${REQUESTED_SOURCE_SHA,,}"
+          if [[ -z "${SOURCE_TOKEN}" ]]; then
+            echo 'No source token was minted; refusing to continue' >&2
+            exit 1
+          fi
+
+          # Resolve repository identity through its numeric ID before accepting
+          # any checkout. This prevents a name substitution from redirecting
+          # the token to another repository.
+          if ! identity="$(curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}")"; then
+            echo 'The configured source repository identity could not be resolved' >&2
+            verification_failed=1
+          elif [[ "$(jq -r '.id' <<<"${identity}")" != "${SOURCE_REPOSITORY_ID}" || \
+            "$(jq -r '.owner.login' <<<"${identity}")" != "${SOURCE_REPOSITORY_OWNER}" || \
+            "$(jq -r '.name' <<<"${identity}")" != "${SOURCE_REPOSITORY_NAME}" ]]; then
+            echo 'The configured source repository identity did not match' >&2
+            verification_failed=1
+          fi
+
+          if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
+            echo 'The private source checkout did not complete' >&2
+            verification_failed=1
+          elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
+            echo 'The checked-out commit does not match source_sha' >&2
+            verification_failed=1
+          fi
+
+          # Resolve the commit through authenticated Git before revocation.
+          if ! api_sha="$(
+            GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer ${SOURCE_TOKEN}" \
+            git ls-remote --refs \
+              "https://github.com/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}.git" 2>/dev/null |
+              awk -v requested="${requested_sha}" 'tolower($1) == requested { print tolower($1); found = 1; exit } END { if (!found) exit 1 }'
+          )" || [[ "${api_sha}" != "${requested_sha}" ]]; then
+            echo 'The requested source SHA was not resolved from the configured repository' >&2
+            verification_failed=1
+          fi
+
+          # Do not execute project-controlled code while the source credential
+          # remains valid. A failed revocation fails the job closed. This step
+          # runs even when checkout failed, so a minted token is not stranded.
+          if ! curl --fail --silent --show-error --retry 2 \
+            -X DELETE \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/installation/token"; then
+            echo 'Source token revocation failed; refusing to continue' >&2
+            verification_failed=1
+          fi
+
+          unset SOURCE_TOKEN
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all credential.helper 2>/dev/null || true
+
+          # The App action writes its output to a runner command file. No later
+          # step needs any output, so remove those files after revocation.
+          find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
+
+          if (( verification_failed != 0 )); then
+            exit 1
+          fi
+
+      - name: Publish sanitized checkout proof
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
+          requested_sha="${REQUESTED_SOURCE_SHA,,}"
+          [[ "${checked_out_sha}" == "${requested_sha}" ]]
+          {
+            echo '## Private source checkout'
+            echo
+            echo 'The protected source-read job checked out the requested exact SHA.'
+            echo
+            echo "- Source SHA: \`${checked_out_sha}\`"
+            echo '- Source token: revoked before any project command'
+            echo '- Outputs: no source files or artifacts published'
+          } >> "${GITHUB_STEP_SUMMARY}"
