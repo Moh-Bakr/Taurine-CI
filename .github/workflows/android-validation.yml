@@ -158,6 +158,10 @@ jobs:
           export NDK_HOME="${ANDROID_HOME}/ndk/28.2.13676358"
           [[ -x "${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]] || { echo 'required Android NDK is unavailable' >&2; exit 1; }
           echo "NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
+          echo "ANDROID_NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "${GITHUB_ENV}"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" >> "${GITHUB_ENV}"
+          echo "CC_aarch64_linux_android=${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" >> "${GITHUB_ENV}"
           rustup target add aarch64-linux-android
 
       - name: Install locked JavaScript and Rust dependencies
