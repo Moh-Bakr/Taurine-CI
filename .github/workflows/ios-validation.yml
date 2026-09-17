@@ -126,7 +126,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
+          run_quiet() {
+            local label="$1"; shift
+            local log="${RUNNER_TEMP}/${label}.log"
+            if "$@" >"${log}" 2>&1; then
+              echo "${label}: passed"
+            else
+              echo "${label}: failed" >&2
+              # Keep diagnostics useful without publishing source snippets or full logs.
+              grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|xcodebuild: error:|BUILD FAILED)' "${log}" | tail -20 >&2 || true
+              exit 1
+            fi
+          }
           run_quiet npm-root npm ci --ignore-scripts
           # The shared package test runner uses taurine-desktop's Vitest binary.
           run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
@@ -148,7 +159,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
+          run_quiet() {
+            local label="$1"; shift
+            local log="${RUNNER_TEMP}/${label}.log"
+            if "$@" >"${log}" 2>&1; then
+              echo "${label}: passed"
+            else
+              echo "${label}: failed" >&2
+              grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|xcodebuild: error:|BUILD FAILED)' "${log}" | tail -20 >&2 || true
+              exit 1
+            fi
+          }
           run_quiet contracts npm run check:contracts
           run_quiet wire npm run check:wire
           run_quiet packages-tests npm run test:packages
