@@ -170,10 +170,9 @@ jobs:
           # Cargo needs a real executable path, so use a runner-local wrapper
           # that supplies the Android target and sysroot to the stable clang.
           linker_wrapper="${RUNNER_TEMP}/aarch64-linux-android-linker"
-          cat >"${linker_wrapper}" <<EOF
-#!/usr/bin/env bash
-exec "${ndk_bin}/clang" --target=aarch64-linux-android24 --sysroot="${ndk_sysroot}" "\$@"
-EOF
+          printf '%s\n' '#!/usr/bin/env bash' \
+            "exec \"${ndk_bin}/clang\" --target=aarch64-linux-android24 --sysroot=\"${ndk_sysroot}\" \"\$@\"" \
+            >"${linker_wrapper}"
           chmod 700 "${linker_wrapper}"
           "${linker_wrapper}" --version >/dev/null
           echo "NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
