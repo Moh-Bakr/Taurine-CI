@@ -124,14 +124,17 @@ jobs:
             verification_failed=1
           fi
 
-          # Resolve the commit through authenticated Git before revocation.
+          # Resolve the commit through the authenticated GitHub API before
+          # revocation. `git ls-remote --refs` cannot prove an arbitrary commit
+          # SHA because it only lists commits currently named by refs; a valid
+          # historical commit may no longer be the tip of any branch or tag.
           if ! api_sha="$(
-            GIT_CONFIG_COUNT=1 \
-            GIT_CONFIG_KEY_0=http.extraheader \
-            GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer ${SOURCE_TOKEN}" \
-            git ls-remote --refs \
-              "https://github.com/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}.git" 2>/dev/null |
-              awk -v requested="${requested_sha}" 'tolower($1) == requested { print tolower($1); found = 1; exit } END { if (!found) exit 1 }'
+            curl --fail --silent --show-error \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/${requested_sha}" |
+              jq -er '.sha | ascii_downcase'
           )" || [[ "${api_sha}" != "${requested_sha}" ]]; then
             echo 'The requested source SHA was not resolved from the configured repository' >&2
             verification_failed=1
