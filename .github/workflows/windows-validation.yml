@@ -117,6 +117,17 @@ jobs:
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
           (( failed == 0 ))
 
+      # Git for Windows may materialize tracked text as CRLF.  Re-check out the
+      # exact tree with LF so source parsers see the same bytes on every host.
+      # This runs after token revocation and publishes nothing.
+      - name: Normalize private source line endings
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.autocrlf false
+          git config core.eol lf
+          git checkout-index --all --force
+
       - name: Set up the pinned Node.js release
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
