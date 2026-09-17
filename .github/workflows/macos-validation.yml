@@ -83,7 +83,7 @@ jobs:
           set -euo pipefail
           set +x
           failed=0
-          requested_sha="${REQUESTED_SOURCE_SHA,,}"
+          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
           if [[ -z "${SOURCE_TOKEN}" ]]; then
             echo 'No source token was minted; refusing to continue' >&2
             exit 1
@@ -158,7 +158,8 @@ jobs:
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
-          [[ "${checked_out_sha}" == "${REQUESTED_SOURCE_SHA,,}" ]]
+          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
+          [[ "${checked_out_sha}" == "${requested_sha}" ]]
           {
             echo '## macOS app and orchestrate skill validation'
             echo
