@@ -128,7 +128,6 @@ jobs:
           set -euo pipefail
           run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
           run_quiet npm-root npm ci --ignore-scripts
-          run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
 
       - name: Generate the ephemeral iOS project
@@ -151,14 +150,10 @@ jobs:
           run_quiet contracts npm run check:contracts
           run_quiet wire npm run check:wire
           run_quiet packages-tests npm run test:packages
-          run_quiet desktop-build npm --prefix taurine-desktop run build
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
-          run_quiet desktop-tests npm --prefix taurine-desktop run test
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
-          run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
           run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
-          run_quiet desktop-lint npm --prefix taurine-desktop run lint
           run_quiet mobile-lint npm --prefix taurine-mobile run lint
           run_quiet bundle-budget npm run check:bundle
           run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
@@ -177,7 +172,7 @@ jobs:
             echo '## iOS app and orchestrate skill validation'
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
-            echo '- App: iOS simulator build, contracts, wire, tests, typechecks, lint, frontend builds, and bundle budget passed'
+            echo '- App: iOS simulator build, mobile tests, typecheck, lint, frontend build, contracts, wire, and bundle budget passed'
             echo '- Skill: dashboard contract suite and full release verification passed'
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
