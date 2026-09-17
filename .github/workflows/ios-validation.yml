@@ -154,6 +154,16 @@ jobs:
             echo 'ios-init: failed' >&2
             exit 1
           fi
+          # Tauri's generated Xcode project is workspace-based. Install the
+          # (currently empty) Podfile so xcodebuild receives a complete workspace
+          # on a clean hosted runner rather than relying on developer state.
+          pod_log="${RUNNER_TEMP}/ios-pod-install.log"
+          if (cd taurine-mobile/src-tauri/gen/apple && pod install) >"${pod_log}" 2>&1; then
+            echo 'ios-pods: passed'
+          else
+            echo 'ios-pods: failed' >&2
+            exit 1
+          fi
 
       - name: Run iOS app and orchestrate skill validation
         shell: bash
