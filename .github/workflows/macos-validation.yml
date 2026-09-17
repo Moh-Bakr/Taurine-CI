@@ -153,19 +153,49 @@ jobs:
               exit 1
             fi
           }
-          run_quiet npm-root npm ci --ignore-scripts
-          run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
-          run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
+          run_quiet npm-root npm ci --include=optional --ignore-scripts
+          run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
+          run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
+          # The private workspace's Cargo.toml patches boringtun to a verified
+          # local tree. The vendor directory is intentionally ignored, so every
+          # hosted source checkout must materialize it before any Rust-aware
+          # package build or test can load Cargo metadata.
+          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
 
       - name: Run macOS app and orchestrate skill validation
         shell: bash
         run: |
           set -euo pipefail
-          run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
+          run_quiet() {
+            local label="$1"
+            shift
+            local log="${RUNNER_TEMP}/${label}.log"
+            if "$@" >"${log}" 2>&1; then
+              echo "${label}: passed"
+            else
+              local reason='command returned non-zero'
+              if grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
+                reason='missing command'
+              elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
+                reason='missing dependency or file'
+              elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then
+                reason='TypeScript compilation failure'
+              elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
+                reason='memory exhaustion'
+              elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
+                reason='test failure'
+              fi
+              echo "${label}: failed (${reason}; detailed output withheld)" >&2
+              exit 1
+            fi
+          }
           run_quiet contracts npm run check:contracts
           run_quiet wire npm run check:wire
           run_quiet packages-tests npm run test:packages
-          run_quiet desktop-build npm --prefix taurine-desktop run build
+          # Keep typechecking and bundling separate so a hosted failure names
+          # the failing phase without exposing source-bearing compiler output.
+          run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
+          run_quiet desktop-vite-build npm --prefix taurine-desktop exec -- vite build
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet desktop-tests npm --prefix taurine-desktop run test
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
