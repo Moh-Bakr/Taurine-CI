@@ -128,6 +128,8 @@ jobs:
           set -euo pipefail
           run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
           run_quiet npm-root npm ci --ignore-scripts
+          # The shared package test runner uses taurine-desktop's Vitest binary.
+          run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
 
       - name: Generate the ephemeral iOS project
