@@ -167,6 +167,12 @@ jobs:
           # workspace that Tauri does not consume. Install the exact simulator
           # Rust target required by the explicit build below instead.
           rustup target add aarch64-apple-ios-sim aarch64-apple-ios
+          # rquickjs bindgen is shared by the mobile Rust target. Xcode ships
+          # clang, but the bindgen loader needs the standalone libclang dylib.
+          brew list llvm >/dev/null 2>&1 || brew install llvm
+          llvm_prefix="$(brew --prefix llvm)"
+          [[ -f "${llvm_prefix}/lib/libclang.dylib" ]] || { echo 'libclang dylib is unavailable' >&2; exit 1; }
+          echo "LIBCLANG_PATH=${llvm_prefix}/lib" >> "${GITHUB_ENV}"
           test -f taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj/project.pbxproj
 
       - name: Run iOS app and orchestrate skill validation
@@ -180,7 +186,12 @@ jobs:
               echo "${label}: passed"
             else
               echo "${label}: failed" >&2
-              grep -E '^(error(\[[^]]+\])?:|failed to build|could not compile|Caused by:|xcodebuild: error:|BUILD FAILED)' "${log}" | tail -20 >&2 || true
+              # Keep hosted diagnostics actionable while redacting workspace
+              # paths and excluding compiler/source output from the public log.
+              sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|xcodebuild|cargo|clang|target)' |
+                tail -30 >&2 || true
               exit 1
             fi
           }
