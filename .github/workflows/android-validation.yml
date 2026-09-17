@@ -279,6 +279,14 @@ jobs:
                 sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
+              if [[ "${label}" == mobile-tests ]]; then
+                # Preserve only test names and assertion metadata needed to
+                # diagnose hosted-only failures; never publish source lines.
+                sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
+                  tail -80 >&2 || true
+              fi
               if [[ "${label}" == android-debug-build ]]; then
                 # Rust's primary error can be far above the final Cargo
                 # summary. Keep only error codes and locations so the public
