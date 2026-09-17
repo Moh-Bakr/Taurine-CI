@@ -175,11 +175,28 @@ jobs:
             >"${linker_wrapper}"
           chmod 700 "${linker_wrapper}"
           "${linker_wrapper}" --version >/dev/null
+          # OpenSSL's Android build helper asks PATH for the target-prefixed
+          # binutils names. NDK r27 ships the LLVM implementations without
+          # those aliases, so provide runner-local aliases rather than relying
+          # on an image-specific PATH.
+          android_bin="${RUNNER_TEMP}/android-bin"
+          mkdir -p "${android_bin}"
+          for tool in ar ranlib strip; do
+            ln -s "${ndk_bin}/llvm-${tool}" "${android_bin}/aarch64-linux-android-${tool}"
+            ln -s "${ndk_bin}/llvm-${tool}" "${android_bin}/aarch64-linux-android24-${tool}"
+          done
+          echo "${android_bin}" >> "${GITHUB_PATH}"
           echo "NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
           echo "ANDROID_NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
           echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "${GITHUB_ENV}"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${linker_wrapper}" >> "${GITHUB_ENV}"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=${android_bin}/aarch64-linux-android-ar" >> "${GITHUB_ENV}"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB=${android_bin}/aarch64-linux-android-ranlib" >> "${GITHUB_ENV}"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_STRIP=${android_bin}/aarch64-linux-android-strip" >> "${GITHUB_ENV}"
           echo "CC_aarch64_linux_android=${linker_wrapper}" >> "${GITHUB_ENV}"
+          echo "AR_aarch64_linux_android=${android_bin}/aarch64-linux-android-ar" >> "${GITHUB_ENV}"
+          echo "RANLIB_aarch64_linux_android=${android_bin}/aarch64-linux-android-ranlib" >> "${GITHUB_ENV}"
+          echo "STRIP_aarch64_linux_android=${android_bin}/aarch64-linux-android-strip" >> "${GITHUB_ENV}"
           echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android24 --sysroot=${ndk_sysroot}" >> "${GITHUB_ENV}"
           # taurine-scripting enables rquickjs bindgen for Android. The
           # hosted Ubuntu image has clang, but not always the libclang shared
