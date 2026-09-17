@@ -214,7 +214,7 @@ jobs:
           # the failing phase without exposing source-bearing compiler output.
           run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
           run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
-          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && node ./node_modules/vite/bin/vite.js build'
+          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet desktop-tests npm --prefix taurine-desktop run test
           # Keep the mobile Vitest pool single-worker on hosted runners. The
