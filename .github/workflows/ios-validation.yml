@@ -259,6 +259,13 @@ jobs:
           run_quiet contracts npm run check:contracts
           run_quiet wire npm run check:wire
           run_quiet packages-tests npm run test:packages
+          # Bundle budgets cover both frontends. Build the desktop bundle on
+          # iOS runners as well; the native iOS build does not populate
+          # taurine-desktop/dist, so checking the budget immediately after the
+          # mobile build would always fail with a missing desktop artifact.
+          run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
+          run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
+          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
           run_quiet ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
