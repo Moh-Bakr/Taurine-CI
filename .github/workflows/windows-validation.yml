@@ -129,6 +129,15 @@ jobs:
           git config core.autocrlf false
           git config core.eol lf
           git checkout-index --all --force
+          # Git for Windows can still leave CRLF materialized when the source
+          # checkout was created before these settings were applied. Normalize
+          # every tracked text format consumed by parsers and tests; binaries
+          # are intentionally excluded by the explicit pathspec list.
+          git ls-files -z -- \
+            '*.c' '*.cc' '*.cpp' '*.css' '*.csv' '*.h' '*.html' '*.ini' \
+            '*.java' '*.js' '*.json' '*.mjs' '*.md' '*.rs' '*.sh' '*.sql' \
+            '*.toml' '*.ts' '*.tsx' '*.txt' '*.vue' '*.yml' '*.yaml' |
+            xargs -0 -r sed -i 's/\r$//'
 
       - name: Set up the pinned Node.js release
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
