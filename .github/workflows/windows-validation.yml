@@ -30,7 +30,12 @@ jobs:
     name: Windows app and skill validation
     environment: source-read
     runs-on: windows-2022
-    timeout-minutes: 45
+    # The complete Windows suite is intentionally exhaustive (two desktop
+    # shards plus mobile, lint, dashboard, and release verification). Hosted
+    # Windows performance varies substantially, so 45 minutes can cancel a
+    # healthy run before the final safety checks. Keep the workflow bounded,
+    # but leave enough headroom for the full suite to finish.
+    timeout-minutes: 60
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
