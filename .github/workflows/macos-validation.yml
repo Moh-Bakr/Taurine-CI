@@ -210,9 +210,10 @@ jobs:
           run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
           run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
           run_quiet vite-native-preflight bash -c 'cd taurine-desktop && node -e '\''console.log(`node=${process.version} platform=${process.platform} arch=${process.arch}`); require("vite"); require("rollup"); require("rollup/dist/native.js"); require("@tailwindcss/oxide")'\'''
-          # Resolve only the lockfile-installed local binary. `--yes` prevents
-          # npm from waiting for an install confirmation on a hosted runner.
-          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline --yes -- vite build'
+          # Invoke the lockfile-installed Vite entrypoint directly from the
+          # desktop workspace. This avoids npm exec's hosted-runner package
+          # resolution layer while preserving the exact installed toolchain.
+          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && node ./node_modules/vite/bin/vite.js build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
           # Keep the desktop Vitest pool single-worker on hosted runners too.
           # The component suite mounts heavyweight editors and is sensitive to
