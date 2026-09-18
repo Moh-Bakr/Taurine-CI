@@ -199,6 +199,15 @@ jobs:
                 reason='test failure'
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
+              if [[ "${label}" == desktop-vite-build ]]; then
+                # Publish only a redacted tool/runtime diagnostic.  Restrict
+                # this to known error markers so source-bearing build output
+                # never enters the public log.
+                sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  grep -Ei '(^|[[:space:]])(error|failed|cannot|could not|not found|enoent|rollup|vite|npm (err|error))([:[:space:]]|$)' |
+                  head -20 >&2 || true
+              fi
               exit 1
             fi
           }
