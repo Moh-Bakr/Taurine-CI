@@ -28,10 +28,17 @@ env:
 jobs:
   validate:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    name: Android app and orchestrate skill validation
+    name: Android ${{ matrix.concern }} validation
     environment: source-read
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        concern:
+          - android-native
+          - mobile-quality
+          - orchestrate-skill
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,6 +149,7 @@ jobs:
           node-version: 22.14.0
 
       - name: Prepare Android SDK, JDK, and Rust targets
+        if: matrix.concern == 'android-native'
         shell: bash
         run: |
           set -euo pipefail
@@ -243,15 +251,17 @@ jobs:
             fi
           }
           run_quiet npm-root npm ci --ignore-scripts
-          run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
           # Cargo.toml patches boringtun to a pinned, locally fetched crate.
           # vendor/ is intentionally ignored and therefore absent from the
           # private checkout; materialize and verify the pinned dependencies on
           # this ephemeral runner before Cargo resolves the mobile workspace.
-          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
+          if [[ "${{ matrix.concern }}" == 'android-native' ]]; then
+            run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
+          fi
 
       - name: Regenerate runner-specific Android project metadata
+        if: matrix.concern == 'android-native'
         shell: bash
         run: |
           set -euo pipefail
@@ -264,8 +274,10 @@ jobs:
           run_quiet android-init npm run android:init -- --ci --skip-targets-install
           grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle && { echo 'Android metadata contains a developer-local path' >&2; exit 1; } || true
 
-      - name: Run Android app and orchestrate skill validation
+      - name: Run isolated Android validation concern
         shell: bash
+        env:
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           run_quiet() {
@@ -299,32 +311,44 @@ jobs:
               exit 1
             fi
           }
-          run_quiet contracts npm run check:contracts
-          run_quiet wire npm run check:wire
-          run_quiet packages-tests npm run test:packages
-          run_quiet mobile-build npm --prefix taurine-mobile run build
-          run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
-          run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
-          run_quiet mobile-lint npm --prefix taurine-mobile run lint
-          run_quiet android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
-          run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
-          run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
+          case "${CONCERN}" in
+            android-native)
+              run_quiet android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
+              ;;
+            mobile-quality)
+              run_quiet mobile-build npm --prefix taurine-mobile run build
+              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
+              run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
+              run_quiet mobile-lint npm --prefix taurine-mobile run lint
+              ;;
+            orchestrate-skill)
+              run_quiet contracts npm run check:contracts
+              run_quiet wire npm run check:wire
+              run_quiet packages-tests npm run test:packages
+              run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
+              run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
+              ;;
+            *)
+              echo "Unknown Android validation concern: ${CONCERN}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Publish sanitized validation proof
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
           requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
           [[ "${checked_out_sha}" == "${requested_sha}" ]]
           {
-            echo '## Android app and orchestrate skill validation'
+            echo "## Android ${CONCERN} validation"
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
-            echo '- App: Android arm64 debug APK, contracts, wire, tests, typecheck, lint, and frontend build passed'
-            echo '- Skill: dashboard contract suite and full release verification passed'
+            echo '- Isolated concern passed; no private artifacts were shared between runners'
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
           } >> "${GITHUB_STEP_SUMMARY}"
