@@ -3,7 +3,11 @@ name: Windows source validation (protected)
 # The public control plane owns this dispatch, while each concern independently
 # checks out and validates the exact private source SHA on an ephemeral runner.
 # Keeping the concerns as separate reusable-workflow jobs makes a slow desktop
-# shard unable to block contracts, mobile, bundle-budget, or skill validation.
+# shard unable to block contracts, mobile, bundle-budget, or other app checks.
+# Windows deliberately covers app/platform concerns only. The complete
+# orchestrate skill and dashboard verification runs on the protected Ubuntu
+# workflow, with the macOS app lane retaining its cross-platform skill smoke
+# checks.
 on:
   workflow_dispatch:
     inputs:
@@ -52,7 +56,6 @@ jobs:
           - mobile
           - contracts
           - bundle-budget
-          - orchestrate-skill
     uses: ./.github/workflows/windows-validation-concern.yml
     secrets: inherit
     with:

@@ -78,6 +78,25 @@ jobs:
           reusable_protected_workflow=".github/workflows/windows-validation-concern.yml"
           protected_dispatch_workflow=".github/workflows/windows-validation.yml"
 
+          # Windows is intentionally app-only. The full skill verifier is
+          # required in the protected Ubuntu lane, while macOS retains a
+          # cross-platform smoke check; it must not be reintroduced as a
+          # Windows concern that duplicates native process fixtures.
+          if grep -nE '^[[:space:]]*-[[:space:]]*orchestrate-skill[[:space:]]*$|^[[:space:]]*orchestrate-skill\)' \
+            .github/workflows/windows-validation.yml \
+            .github/workflows/windows-validation-concern.yml; then
+            echo 'Windows validation must remain app-only; orchestrate-skill is covered by Ubuntu/macOS workflows.' >&2
+            exit 1
+          fi
+          for skill_workflow in \
+            .github/workflows/orchestrate-validation.yml \
+            .github/workflows/macos-validation.yml; do
+            if ! grep -q 'skills/orchestrate/scripts/verify.mjs --json' "${skill_workflow}"; then
+              echo "Required orchestrate skill coverage is missing from ${skill_workflow}." >&2
+              exit 1
+            fi
+          done
+
           while IFS= read -r -d '' workflow; do
             if grep -nE '^\s*uses:\s*[^#[:space:]]+@(v[0-9]|main|master|stable|latest|[[:alnum:]_.-]+)$' "$workflow"; then
               echo "Every Action reference must use a full 40-character commit SHA: $workflow" >&2
