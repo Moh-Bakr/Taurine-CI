@@ -35,7 +35,9 @@ jobs:
       fail-fast: false
       matrix:
         concern:
-          - desktop
+          - desktop-shard-1
+          - desktop-shard-2
+          - desktop-quality
           - mobile
           - bundle-budget
           - orchestrate-skill
@@ -222,12 +224,17 @@ jobs:
             fi
           }
           case "${CONCERN}" in
-            desktop)
+            desktop-shard-1)
+              run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --maxWorkers=1 --minWorkers=1
+              ;;
+            desktop-shard-2)
+              run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --maxWorkers=1 --minWorkers=1
+              ;;
+            desktop-quality)
               run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
               run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
               run_quiet vite-native-preflight bash -c 'cd taurine-desktop && node -e '\''require("vite"); require("rollup"); require("rollup/dist/native.js"); require("@tailwindcss/oxide")'\'''
               run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
-              run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1
               run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
               run_quiet desktop-lint npm --prefix taurine-desktop run lint
               ;;
