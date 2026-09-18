@@ -221,6 +221,13 @@ jobs:
               run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
               ;;
             budget-skill)
+              # This concern has its own clean runner, so create the same
+              # build outputs that the monolithic validator produced before
+              # checking the bundle budget. Nothing is uploaded or retained.
+              run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
+              run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
+              run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
+              run_quiet mobile-build npm --prefix taurine-mobile run build
               run_quiet bundle-budget npm run check:bundle
               run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
               ;;
