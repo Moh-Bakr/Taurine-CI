@@ -138,14 +138,14 @@ jobs:
               # Keep source-bearing logs private while leaving an actionable,
               # non-sensitive failure class in the public run summary.
               local reason='command returned non-zero'
-              if grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
+              if grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
+                reason='memory exhaustion'
+              elif grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
                 reason='missing command'
               elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
                 reason='missing dependency or file'
               elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then
                 reason='TypeScript compilation failure'
-              elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
-                reason='memory exhaustion'
               elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
                 reason='pinned vendor fetch or verification failure'
               elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
@@ -185,14 +185,14 @@ jobs:
               echo "${label}: passed"
             else
               local reason='command returned non-zero'
-              if grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
+              if grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
+                reason='memory exhaustion'
+              elif grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
                 reason='missing command'
               elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
                 reason='missing dependency or file'
               elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then
                 reason='TypeScript compilation failure'
-              elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
-                reason='memory exhaustion'
               elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
                 reason='pinned vendor fetch or verification failure'
               elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
@@ -222,7 +222,10 @@ jobs:
           # Invoke the lockfile-installed Vite entrypoint directly from the
           # desktop workspace. This avoids npm exec's hosted-runner package
           # resolution layer while preserving the exact installed toolchain.
-          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && node ./node_modules/vite/bin/vite.js build'
+          # Vite's production bundle exceeds Node's default macOS hosted heap.
+          # Bound it below the runner's available memory while retaining the
+          # normal process-level OOM failure if the bundle grows unexpectedly.
+          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
           # Keep the desktop Vitest pool single-worker on hosted runners too.
           # The component suite mounts heavyweight editors and is sensitive to
