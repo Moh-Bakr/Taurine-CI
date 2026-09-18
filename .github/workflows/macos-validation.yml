@@ -27,10 +27,18 @@ env:
 jobs:
   validate:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    name: macOS app and skill validation
+    name: macOS ${{ matrix.concern }} validation
     environment: source-read
     runs-on: macos-14
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        concern:
+          - desktop
+          - mobile
+          - bundle-budget
+          - orchestrate-skill
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -173,8 +181,10 @@ jobs:
           # package build or test can load Cargo metadata.
           run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
 
-      - name: Run macOS app and orchestrate skill validation
+      - name: Run isolated macOS validation concern
         shell: bash
+        env:
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           run_quiet() {
@@ -211,51 +221,57 @@ jobs:
               exit 1
             fi
           }
-          run_quiet contracts npm run check:contracts
-          run_quiet wire npm run check:wire
-          run_quiet packages-tests npm run test:packages
-          # Keep typechecking and bundling separate so a hosted failure names
-          # the failing phase without exposing source-bearing compiler output.
-          run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
-          run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
-          run_quiet vite-native-preflight bash -c 'cd taurine-desktop && node -e '\''console.log(`node=${process.version} platform=${process.platform} arch=${process.arch}`); require("vite"); require("rollup"); require("rollup/dist/native.js"); require("@tailwindcss/oxide")'\'''
-          # Invoke the lockfile-installed Vite entrypoint directly from the
-          # desktop workspace. This avoids npm exec's hosted-runner package
-          # resolution layer while preserving the exact installed toolchain.
-          # Vite's production bundle exceeds Node's default macOS hosted heap.
-          # Bound it below the runner's available memory while retaining the
-          # normal process-level OOM failure if the bundle grows unexpectedly.
-          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
-          run_quiet mobile-build npm --prefix taurine-mobile run build
-          # Keep the desktop Vitest pool single-worker on hosted runners too.
-          # The component suite mounts heavyweight editors and is sensitive to
-          # cross-platform worker starvation; deterministic serialization avoids
-          # platform-only flakes without weakening test coverage.
-          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1
-          run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
-          run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
-          run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
-          run_quiet desktop-lint npm --prefix taurine-desktop run lint
-          run_quiet mobile-lint npm --prefix taurine-mobile run lint
-          run_quiet bundle-budget npm run check:bundle
-          run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
-          run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
+          case "${CONCERN}" in
+            desktop)
+              run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
+              run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
+              run_quiet vite-native-preflight bash -c 'cd taurine-desktop && node -e '\''require("vite"); require("rollup"); require("rollup/dist/native.js"); require("@tailwindcss/oxide")'\'''
+              run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
+              run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1
+              run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
+              run_quiet desktop-lint npm --prefix taurine-desktop run lint
+              ;;
+            mobile)
+              run_quiet mobile-build npm --prefix taurine-mobile run build
+              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
+              run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
+              run_quiet mobile-lint npm --prefix taurine-mobile run lint
+              ;;
+            bundle-budget)
+              # The checker compares both frontend dist trees. Build them on
+              # this isolated runner instead of passing private artifacts.
+              run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
+              run_quiet mobile-build npm --prefix taurine-mobile run build
+              run_quiet bundle-budget npm run check:bundle
+              ;;
+            orchestrate-skill)
+              run_quiet contracts npm run check:contracts
+              run_quiet wire npm run check:wire
+              run_quiet packages-tests npm run test:packages
+              run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
+              run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
+              ;;
+            *)
+              echo "Unknown macOS validation concern: ${CONCERN}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Publish sanitized validation proof
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
           requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
           [[ "${checked_out_sha}" == "${requested_sha}" ]]
           {
-            echo '## macOS app and orchestrate skill validation'
+            echo "## macOS ${CONCERN} validation"
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
-            echo '- App: contracts, wire, tests, typechecks, lint, frontend builds, and bundle budget passed'
-            echo '- Skill: dashboard contract suite and full release verification passed'
+            echo '- Isolated concern passed; no other concern relies on this runner'
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
           } >> "${GITHUB_STEP_SUMMARY}"

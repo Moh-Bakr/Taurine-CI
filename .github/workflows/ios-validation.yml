@@ -27,13 +27,21 @@ env:
 jobs:
   validate:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    name: iOS app and skill validation
+    name: iOS ${{ matrix.concern }} validation
     environment: source-read
     # The generated Xcode project uses objectVersion 77, which requires the
     # Xcode toolchain shipped on macos-15. macos-14's older Xcode rejects it
     # before Tauri can compile the Rust framework.
     runs-on: macos-15
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        concern:
+          - ios-native
+          - mobile-quality
+          - bundle-budget
+          - orchestrate-skill
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -151,9 +159,12 @@ jobs:
           # vendor/ is intentionally ignored and therefore absent from the
           # private checkout; materialize and verify the pinned dependencies on
           # this ephemeral runner before Cargo resolves the mobile workspace.
-          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
+          if [[ "${{ matrix.concern }}" == 'ios-native' ]]; then
+            run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
+          fi
 
       - name: Generate the ephemeral iOS project
+        if: matrix.concern == 'ios-native'
         shell: bash
         run: |
           set -euo pipefail
@@ -191,6 +202,7 @@ jobs:
           test -f taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj/project.pbxproj
 
       - name: Patch rquickjs simulator bindgen target on runner
+        if: matrix.concern == 'ios-native'
         shell: bash
         run: |
           set -euo pipefail
@@ -220,8 +232,10 @@ jobs:
           path.write_text(text.replace(old, new, 1))
           PY
 
-      - name: Run iOS app and orchestrate skill validation
+      - name: Run isolated iOS validation concern
         shell: bash
+        env:
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           run_quiet() {
@@ -256,42 +270,51 @@ jobs:
               exit 1
             fi
           }
-          run_quiet contracts npm run check:contracts
-          run_quiet wire npm run check:wire
-          run_quiet packages-tests npm run test:packages
-          # Bundle budgets cover both frontends. Build the desktop bundle on
-          # iOS runners as well; the native iOS build does not populate
-          # taurine-desktop/dist, so checking the budget immediately after the
-          # mobile build would always fail with a missing desktop artifact.
-          run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
-          run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
-          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
-          run_quiet mobile-build npm --prefix taurine-mobile run build
-          run_quiet ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
-          run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
-          run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
-          run_quiet mobile-lint npm --prefix taurine-mobile run lint
-          # The iOS lane validates the mobile frontend. The shared bundle
-          # budget covers both desktop and mobile artifacts and is enforced by
-          # the Linux, macOS, and Windows lanes after they build both apps.
-          run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
-          run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
+          case "${CONCERN}" in
+            ios-native)
+              run_quiet ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
+              ;;
+            mobile-quality)
+              run_quiet mobile-build npm --prefix taurine-mobile run build
+              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
+              run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
+              run_quiet mobile-lint npm --prefix taurine-mobile run lint
+              ;;
+            bundle-budget)
+              run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
+              run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
+              run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
+              run_quiet mobile-build npm --prefix taurine-mobile run build
+              run_quiet bundle-budget npm run check:bundle
+              ;;
+            orchestrate-skill)
+              run_quiet contracts npm run check:contracts
+              run_quiet wire npm run check:wire
+              run_quiet packages-tests npm run test:packages
+              run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
+              run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
+              ;;
+            *)
+              echo "Unknown iOS validation concern: ${CONCERN}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Publish sanitized validation proof
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
           requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
           [[ "${checked_out_sha}" == "${requested_sha}" ]]
           {
-            echo '## iOS app and orchestrate skill validation'
+            echo "## iOS ${CONCERN} validation"
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
-            echo '- App: iOS simulator build, mobile tests, typecheck, lint, frontend build, contracts, wire, and bundle budget passed'
-            echo '- Skill: dashboard contract suite and full release verification passed'
+            echo '- Isolated concern passed; no private artifacts were shared between runners'
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
           } >> "${GITHUB_STEP_SUMMARY}"
