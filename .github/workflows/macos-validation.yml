@@ -214,7 +214,11 @@ jobs:
           # npm from waiting for an install confirmation on a hosted runner.
           run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline --yes -- vite build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
-          run_quiet desktop-tests npm --prefix taurine-desktop run test
+          # Keep the desktop Vitest pool single-worker on hosted runners too.
+          # The component suite mounts heavyweight editors and is sensitive to
+          # cross-platform worker starvation; deterministic serialization avoids
+          # platform-only flakes without weakening test coverage.
+          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
           run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
           run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
