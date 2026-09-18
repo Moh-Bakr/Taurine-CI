@@ -205,8 +205,8 @@ jobs:
                 reason='test failure'
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
-              if [[ "${label}" == desktop-tests-shard-* || "${label}" == mobile-tests ]]; then
-                # Keep diagnostics to Vitest's summary/assertion markers. Do
+              if [[ "${label}" == desktop-tests-shard-* || "${label}" == mobile-tests || "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
+                # Keep diagnostics to test summary/assertion markers. Do
                 # not publish source excerpts or full test output from the
                 # private checkout; paths are redacted before the allow-list.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
