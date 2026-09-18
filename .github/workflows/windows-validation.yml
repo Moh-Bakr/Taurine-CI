@@ -205,7 +205,7 @@ jobs:
                 reason='test failure'
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
-              if [[ "${label}" == desktop-tests-shard-* ]]; then
+              if [[ "${label}" == desktop-tests-shard-* || "${label}" == mobile-tests ]]; then
                 # Keep diagnostics to Vitest's summary/assertion markers. Do
                 # not publish source excerpts or full test output from the
                 # private checkout; paths are redacted before the allow-list.
