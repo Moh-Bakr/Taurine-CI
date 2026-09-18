@@ -196,7 +196,7 @@ jobs:
                 reason='test failure'
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
-              if [[ "${label}" == desktop-tests ]]; then
+              if [[ "${label}" == desktop-tests-shard-* ]]; then
                 # Keep diagnostics to Vitest's summary/assertion markers. Do
                 # not publish source excerpts or full test output from the
                 # private checkout; paths are redacted before the allow-list.
@@ -217,15 +217,12 @@ jobs:
           run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
           run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
-          # Keep the desktop Vitest pool single-worker on hosted runners too.
-          # The component suite mounts heavyweight editors and is sensitive to
-          # cross-platform worker starvation; deterministic serialization avoids
-          # platform-only flakes without weakening test coverage.
-          # Use one forked Vitest process on Windows. The suite's jsdom and
-          # editor fixtures are stable when serialized, but Windows worker
-          # threads still report a late test failure; a single fork avoids
-          # that host-specific worker lifecycle while retaining all tests.
-          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1 --pool=forks --poolOptions.forks.singleFork=true
+          # Split the complete desktop suite into two deterministic shards.
+          # Windows worker threads/forks can stall late in this large jsdom
+          # suite; sharding isolates a problematic file and keeps progress
+          # bounded without omitting any tests.
+          run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --maxWorkers=1 --minWorkers=1
+          run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --maxWorkers=1 --minWorkers=1
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
           run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
           run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
