@@ -1,4 +1,10 @@
-name: Windows validation concern (protected)
+name: Windows app validation concern (protected)
+
+# This reusable workflow intentionally contains only app/platform concerns.
+# Full orchestrate skill verification is owned by the protected Ubuntu
+# orchestrate-validation workflow; macOS continues to provide a cross-platform
+# skill smoke check. Keeping the process-heavy release verifier off Windows
+# avoids a duplicate native-process suite without weakening required coverage.
 
 on:
   workflow_call:
@@ -229,13 +235,6 @@ jobs:
               run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
               run_quiet mobile-build npm --prefix taurine-mobile run build
               run_quiet bundle-budget npm run check:bundle
-              ;;
-            orchestrate-skill)
-              # The skill verifier is intentionally isolated from frontend
-              # builds. It exercises the skill's own contracts, dashboard,
-              # and process boundaries on a clean runner; no build outputs
-              # are uploaded or retained.
-              run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
               ;;
             desktop-quality)
               run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
