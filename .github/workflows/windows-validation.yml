@@ -212,7 +212,11 @@ jobs:
           # The component suite mounts heavyweight editors and is sensitive to
           # cross-platform worker starvation; deterministic serialization avoids
           # platform-only flakes without weakening test coverage.
-          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1
+          # Use one forked Vitest process on Windows. The suite's jsdom and
+          # editor fixtures are stable when serialized, but Windows worker
+          # threads still report a late test failure; a single fork avoids
+          # that host-specific worker lifecycle while retaining all tests.
+          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1 --pool=forks --poolOptions.forks.singleFork=true
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
           run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
           run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
