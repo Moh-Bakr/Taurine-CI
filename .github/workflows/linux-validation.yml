@@ -216,7 +216,11 @@ jobs:
           run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
           run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
           run_quiet mobile-build npm --prefix taurine-mobile run build
-          run_quiet desktop-tests npm --prefix taurine-desktop run test
+          # Keep the desktop Vitest pool single-worker on hosted runners too.
+          # The component suite mounts heavyweight editors and is sensitive to
+          # cross-platform worker starvation; deterministic serialization avoids
+          # platform-only flakes without weakening test coverage.
+          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1
           # Keep the mobile Vitest pool single-worker on hosted runners. The
           # suite is deterministic locally but can fail during worker teardown
           # when multiple workers share jsdom storage state.
