@@ -245,6 +245,14 @@ jobs:
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
               fi
+              if [[ "${label}" == bundle-budget ]]; then
+                # Keep only package names and budget arithmetic; the public
+                # log must not include generated/private file contents.
+                sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  grep -Ei '(budget|ceiling|exceeded|package|dist|bytes|allowed|actual)' |
+                  tail -80 >&2 || true
+              fi
               exit 1
             fi
           }
