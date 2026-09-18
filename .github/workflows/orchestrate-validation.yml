@@ -26,10 +26,16 @@ env:
 jobs:
   validate:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    name: Orchestrate skill and dashboard validation
+    name: Orchestrate ${{ matrix.concern }} validation
     environment: source-read
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        concern:
+          - dashboard
+          - release-verification
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -151,6 +157,7 @@ jobs:
           node-version: 22.14.0
 
       - name: Run dashboard contract tests
+        if: matrix.concern == 'dashboard'
         shell: bash
         run: |
           set -euo pipefail
@@ -163,6 +170,7 @@ jobs:
           fi
 
       - name: Run complete orchestrate release verification
+        if: matrix.concern == 'release-verification'
         shell: bash
         run: |
           set -euo pipefail
@@ -178,19 +186,23 @@ jobs:
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
           requested_sha="${REQUESTED_SOURCE_SHA,,}"
           [[ "${checked_out_sha}" == "${requested_sha}" ]]
           {
-            echo '## Orchestrate skill and dashboard validation'
+            echo "## Orchestrate ${CONCERN} validation"
             echo
             echo 'The protected workflow validated the requested exact private SHA.'
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
-            echo '- Dashboard contract suite: passed'
-            echo '- Full release verification: passed'
+            if [[ "${CONCERN}" == 'dashboard' ]]; then
+              echo '- Dashboard contract suite: passed'
+            else
+              echo '- Full release verification: passed'
+            fi
             echo '- Source token: revoked before project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
           } >> "${GITHUB_STEP_SUMMARY}"
