@@ -251,6 +251,13 @@ jobs:
             fi
           }
           run_quiet npm-root npm ci --ignore-scripts
+          # The package-contract test runner imports the desktop workspace's
+          # Vitest/runtime dependencies even when no desktop tests execute.
+          # Install that lockfile only for the skill concern; mobile/native
+          # lanes stay smaller and do not need the desktop workspace.
+          if [[ "${{ matrix.concern }}" == 'orchestrate-skill' ]]; then
+            run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
+          fi
           run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
           # Cargo.toml patches boringtun to a pinned, locally fetched crate.
           # vendor/ is intentionally ignored and therefore absent from the
