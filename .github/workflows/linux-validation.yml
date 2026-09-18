@@ -52,6 +52,8 @@ jobs:
         concern:
           - contracts
           - frontend-build-budget
+          - desktop-shard-1
+          - desktop-shard-2
           - desktop-quality
           - mobile-quality
     uses: ./.github/workflows/linux-validation-concern.yml
