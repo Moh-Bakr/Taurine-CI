@@ -220,7 +220,7 @@ jobs:
               run_quiet packages-tests npm run test:packages
               run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
               ;;
-            budget-skill)
+            bundle-budget)
               # This concern has its own clean runner, so create the same
               # build outputs that the monolithic validator produced before
               # checking the bundle budget. Nothing is uploaded or retained.
@@ -229,6 +229,12 @@ jobs:
               run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
               run_quiet mobile-build npm --prefix taurine-mobile run build
               run_quiet bundle-budget npm run check:bundle
+              ;;
+            orchestrate-skill)
+              # The skill verifier is intentionally isolated from frontend
+              # builds. It exercises the skill's own contracts, dashboard,
+              # and process boundaries on a clean runner; no build outputs
+              # are uploaded or retained.
               run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
               ;;
             desktop-quality)
