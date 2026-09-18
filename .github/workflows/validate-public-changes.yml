@@ -71,10 +71,12 @@ jobs:
             ".github/workflows/linux-validation.yml"
             ".github/workflows/macos-validation.yml"
             ".github/workflows/windows-validation.yml"
+            ".github/workflows/windows-validation-concern.yml"
             ".github/workflows/android-validation.yml"
             ".github/workflows/ios-validation.yml"
             ".github/workflows/orchestrate-validation.yml"
           )
+          reusable_protected_workflow=".github/workflows/windows-validation-concern.yml"
 
           while IFS= read -r -d '' workflow; do
             if grep -nE '^\s*uses:\s*[^#[:space:]]+@(v[0-9]|main|master|stable|latest|[[:alnum:]_.-]+)$' "$workflow"; then
@@ -87,6 +89,7 @@ jobs:
                 actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1) ;;
                 actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1) ;;
                 actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020) ;;
+                ./.github/workflows/windows-validation-concern.yml) ;;
                 '') ;;
                 *)
                   echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2
@@ -104,13 +107,24 @@ jobs:
             done
 
             if (( protected_source )); then
-              if ! grep -qE '^on:[[:space:]]*$' "$workflow" || ! grep -qE '^[[:space:]]+workflow_dispatch:[[:space:]]*$' "$workflow"; then
-                echo "The protected source workflow must be workflow_dispatch-only: $workflow" >&2
-                exit 1
-              fi
-              if grep -nE '^[[:space:]]+(pull_request|pull_request_target|push|schedule|workflow_run|repository_dispatch|workflow_call):' "$workflow"; then
-                echo "The source-read workflow has an unapproved trigger: $workflow" >&2
-                exit 1
+              if [[ "$workflow" == "$reusable_protected_workflow" ]]; then
+                if ! grep -qE '^on:[[:space:]]*$' "$workflow" || ! grep -qE '^[[:space:]]+workflow_call:[[:space:]]*$' "$workflow"; then
+                  echo "The protected reusable workflow must be workflow_call-only: $workflow" >&2
+                  exit 1
+                fi
+                if grep -nE '^[[:space:]]+(pull_request|pull_request_target|push|schedule|workflow_run|repository_dispatch|workflow_dispatch):' "$workflow"; then
+                  echo "The protected reusable workflow has an unapproved trigger: $workflow" >&2
+                  exit 1
+                fi
+              else
+                if ! grep -qE '^on:[[:space:]]*$' "$workflow" || ! grep -qE '^[[:space:]]+workflow_dispatch:[[:space:]]*$' "$workflow"; then
+                  echo "The protected source workflow must be workflow_dispatch-only: $workflow" >&2
+                  exit 1
+                fi
+                if grep -nE '^[[:space:]]+(pull_request|pull_request_target|push|schedule|workflow_run|repository_dispatch|workflow_call):' "$workflow"; then
+                  echo "The source-read workflow has an unapproved trigger: $workflow" >&2
+                  exit 1
+                fi
               fi
               if ! grep -qE '^    environment:[[:space:]]+source-read[[:space:]]*$' "$workflow"; then
                 echo "The protected source workflow must use the protected source-read environment: $workflow" >&2
