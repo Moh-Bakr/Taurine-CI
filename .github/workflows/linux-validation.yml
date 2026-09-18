@@ -1,8 +1,8 @@
 name: Linux source validation (protected)
 
-# This is a trusted, manually dispatched source-bearing job. It is intentionally
-# not a pull-request, push, reusable, or repository-dispatch workflow: only the
-# protected public default branch may enter the source-read environment.
+# This is a trusted, manually dispatched dispatcher. Each matrix concern is a
+# separate source-bearing runner so a slow test suite cannot block contracts,
+# builds, or other independent Linux checks.
 on:
   workflow_dispatch:
     inputs:
@@ -26,227 +26,36 @@ env:
   SOURCE_REPOSITORY_NAME: Taurine
 
 jobs:
-  validate:
+  validate-input:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    name: Linux validation
-    environment: source-read
+    name: Validate protected dispatch input
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
-      - name: Check out public control plane
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Validate protected dispatch input
+      - name: Validate exact source SHA
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
-            echo 'linux-validation must run only from the protected main branch' >&2
-            exit 1
-          fi
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
             exit 1
           fi
 
-      - name: Mint read-only private-source token
-        id: source-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ vars.SOURCE_READER_APP_ID }}
-          private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
-          owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
-          repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
-          permission-contents: read
-          skip-token-revoke: true
-
-      - name: Check out exact private source SHA
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ env.SOURCE_REPOSITORY_OWNER }}/${{ env.SOURCE_REPOSITORY_NAME }}
-          ref: ${{ inputs.source_sha }}
-          token: ${{ steps.source-token.outputs.token }}
-          fetch-depth: 1
-          persist-credentials: false
-          submodules: false
-          lfs: false
-
-      - name: Verify identity, exact checkout, and revoke source token
-        if: always()
-        shell: bash
-        env:
-          SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
-          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          set -euo pipefail
-          set +x
-          failed=0
-          requested_sha="${REQUESTED_SOURCE_SHA,,}"
-
-          if [[ -z "${SOURCE_TOKEN}" ]]; then
-            echo 'No source token was minted; refusing to continue' >&2
-            exit 1
-          fi
-
-          if ! identity="$(curl --fail --silent --show-error \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}")"; then
-            echo 'The configured source repository identity could not be resolved' >&2
-            failed=1
-          elif [[ "$(jq -r '.id' <<<"${identity}")" != "${SOURCE_REPOSITORY_ID}" || \
-            "$(jq -r '.owner.login' <<<"${identity}")" != "${SOURCE_REPOSITORY_OWNER}" || \
-            "$(jq -r '.name' <<<"${identity}")" != "${SOURCE_REPOSITORY_NAME}" ]]; then
-            echo 'The configured source repository identity did not match' >&2
-            failed=1
-          fi
-
-          if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
-            echo 'The private source checkout did not complete' >&2
-            failed=1
-          elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
-            echo 'The checked-out commit does not match source_sha' >&2
-            failed=1
-          fi
-
-          if ! api_sha="$(curl --fail --silent --show-error \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/${requested_sha}" | \
-            jq -er '.sha | ascii_downcase')" || [[ "${api_sha}" != "${requested_sha}" ]]; then
-            echo 'The requested source SHA was not resolved from the configured repository' >&2
-            failed=1
-          fi
-
-          if ! curl --fail --silent --show-error --retry 2 \
-            -X DELETE \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/installation/token"; then
-            echo 'Source token revocation failed; refusing to execute project code' >&2
-            failed=1
-          fi
-
-          unset SOURCE_TOKEN
-          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
-          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
-          git config --global --unset-all credential.helper 2>/dev/null || true
-          find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
-
-          if (( failed != 0 )); then
-            exit 1
-          fi
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22.14.0
-
-      # Keep project output out of public logs. A failure is intentionally
-      # summarized without echoing test output, source paths, or diagnostics.
-      - name: Install locked JavaScript dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          run_quiet() {
-            local label="$1"
-            shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              # Keep source-bearing logs private while leaving an actionable,
-              # non-sensitive failure class in the public run summary.
-              reason='command returned non-zero'
-              if grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
-                reason='missing command'
-              elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
-                reason='missing dependency or file'
-              elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then
-                reason='TypeScript compilation failure'
-              elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
-                reason='memory exhaustion'
-              elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
-                reason='pinned vendor fetch or verification failure'
-              elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
-                reason='test failure'
-              fi
-              echo "${label}: failed (${reason}; detailed output withheld)" >&2
-              exit 1
-            fi
-          }
-          run_quiet npm-root npm ci --include=optional --ignore-scripts
-          run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
-          run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
-          # The private workspace's Cargo.toml patches boringtun to a verified
-          # local tree. The vendor directory is intentionally ignored, so every
-          # hosted source checkout must materialize it before any Rust-aware
-          # package build or test can load Cargo metadata.
-          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
-
-      - name: Run contracts, wire, tests, typechecks, lint, and frontend builds
-        shell: bash
-        run: |
-          set -euo pipefail
-          run_quiet() {
-            local label="$1"
-            shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              echo "${label}: failed" >&2
-              exit 1
-            fi
-          }
-          run_quiet contracts npm run check:contracts
-          run_quiet wire npm run check:wire
-          run_quiet packages-tests npm run test:packages
-          # Keep typechecking and bundling separate so a hosted failure names
-          # the failing phase without exposing source-bearing compiler output.
-          run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
-          run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
-          run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
-          run_quiet mobile-build npm --prefix taurine-mobile run build
-          # Keep the desktop Vitest pool single-worker on hosted runners too.
-          # The component suite mounts heavyweight editors and is sensitive to
-          # cross-platform worker starvation; deterministic serialization avoids
-          # platform-only flakes without weakening test coverage.
-          run_quiet desktop-tests npm --prefix taurine-desktop run test -- --maxWorkers=1 --minWorkers=1
-          # Keep the mobile Vitest pool single-worker on hosted runners. The
-          # suite is deterministic locally but can fail during worker teardown
-          # when multiple workers share jsdom storage state.
-          run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
-          run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
-          run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
-          run_quiet desktop-lint npm --prefix taurine-desktop run lint
-          run_quiet mobile-lint npm --prefix taurine-mobile run lint
-          run_quiet bundle-budget npm run check:bundle
-
-      - name: Publish sanitized validation proof
-        shell: bash
-        env:
-          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          set -euo pipefail
-          checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
-          requested_sha="${REQUESTED_SOURCE_SHA,,}"
-          [[ "${checked_out_sha}" == "${requested_sha}" ]]
-          {
-            echo '## Linux private-source validation'
-            echo
-            echo 'The protected workflow validated the requested exact private SHA.'
-            echo
-            echo "- Source SHA: \`${checked_out_sha}\`"
-            echo '- Validation: contracts, wire, tests, typechecks, lint, frontend builds, and bundle budget passed'
-            echo '- Source token: revoked before dependency installation and project commands'
-            echo '- Outputs: no source files, logs, reports, or artifacts published'
-          } >> "${GITHUB_STEP_SUMMARY}"
+  validate:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    needs: validate-input
+    strategy:
+      fail-fast: false
+      matrix:
+        concern:
+          - contracts
+          - frontend-build-budget
+          - desktop-quality
+          - mobile-quality
+    uses: ./.github/workflows/linux-validation-concern.yml
+    secrets: inherit
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
