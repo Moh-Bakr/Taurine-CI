@@ -183,6 +183,10 @@ jobs:
                 echo "The protected dispatcher must require a full source SHA: $workflow" >&2
                 exit 1
               fi
+              if ! grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit[[:space:]]*$' "$workflow"; then
+                echo "The protected dispatcher must explicitly pass reviewed secrets to the concern workflow: $workflow" >&2
+                exit 1
+              fi
               if ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/windows-validation-concern\.yml' "$workflow"; then
                 echo "The protected dispatcher must call the reviewed Windows concern workflow: $workflow" >&2
                 exit 1
