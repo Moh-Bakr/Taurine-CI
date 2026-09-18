@@ -53,6 +53,7 @@ jobs:
           - contracts
           - budget-skill
     uses: ./.github/workflows/windows-validation-concern.yml
+    secrets: inherit
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
