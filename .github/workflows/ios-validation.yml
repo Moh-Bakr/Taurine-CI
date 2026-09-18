@@ -271,7 +271,9 @@ jobs:
           run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
           run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
           run_quiet mobile-lint npm --prefix taurine-mobile run lint
-          run_quiet bundle-budget npm run check:bundle
+          # The iOS lane validates the mobile frontend. The shared bundle
+          # budget covers both desktop and mobile artifacts and is enforced by
+          # the Linux, macOS, and Windows lanes after they build both apps.
           run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
           run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
 
