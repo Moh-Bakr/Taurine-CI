@@ -196,6 +196,15 @@ jobs:
                 reason='test failure'
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
+              if [[ "${label}" == desktop-tests ]]; then
+                # Keep diagnostics to Vitest's summary/assertion markers. Do
+                # not publish source excerpts or full test output from the
+                # private checkout; paths are redacted before the allow-list.
+                sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
+                  sed -E 's#([A-Za-z]:)?\\[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  grep -Ei '^[[:space:]]*(FAIL|PASS|Test Files|Tests|Snapshots|Time|Assertion|Error|expected|received|timed out)|[[:space:]](assertion|expected|received|timed out|unhandled)' |
+                  head -20 >&2 || true
+              fi
               exit 1
             fi
           }
