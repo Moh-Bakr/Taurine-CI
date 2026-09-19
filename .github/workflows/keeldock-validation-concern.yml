@@ -1,0 +1,324 @@
+name: KeelDock Cloud validation concern (protected)
+
+# One operating system per call, on a clean ephemeral runner doing its own exact
+# private checkout. No source-bearing artifact, cache or output crosses a job
+# boundary, matching the rule the Taurine concerns already follow.
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to validate from private keeldock-cloud
+        required: true
+        type: string
+      platform:
+        description: linux, macos or windows
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # A different private source from the Taurine concerns. The numeric id is what
+  # the identity check below actually verifies, so a repository renamed or
+  # swapped underneath this workflow fails rather than being silently accepted.
+  SOURCE_REPOSITORY_ID: '1377321992'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: keeldock-cloud
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  TESTINGPLATFORM_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+  CI: 'true'
+
+jobs:
+  validate:
+    name: KeelDock ${{ inputs.platform }}
+    environment: source-read
+    runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-24.04' || (inputs.platform == 'macos' && 'macos-15' || 'windows-2022') }}
+    # Linux additionally starts PostgreSQL containers for the persistence and
+    # messaging suites; the other two run the structural gates only.
+    timeout-minutes: ${{ inputs.platform == 'linux' && 45 || 40 }}
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate protected call input
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo 'keeldock-validation must run only from the protected main branch' >&2
+            exit 1
+          fi
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
+          case "${REQUESTED_PLATFORM}" in
+            linux|macos|windows) ;;
+            *) echo "Unsupported platform: ${REQUESTED_PLATFORM}" >&2; exit 1 ;;
+          esac
+
+      - name: Mint read-only private-source token
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SOURCE_READER_APP_ID }}
+          private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          # The source-reader app installation must include keeldock-cloud. If it
+          # does not, this step fails here — before any checkout — rather than
+          # producing a confusing empty working directory later.
+          repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
+          permission-contents: read
+          skip-token-revoke: true
+
+      - name: Check out exact private source SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY_OWNER }}/${{ env.SOURCE_REPOSITORY_NAME }}
+          ref: ${{ inputs.source_sha }}
+          token: ${{ steps.source-token.outputs.token }}
+          # Full history, unlike the Taurine concerns: the SDL snapshot gate runs
+          # `git diff --exit-code`, which needs a working index against the
+          # checked-out commit. fetch-depth 1 still provides that, but the
+          # snapshot check also reports the commit, so the ref must be exact.
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Verify identity, exact checkout, and revoke source token
+        if: always()
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          set +x
+          failed=0
+          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
+          if [[ -z "${SOURCE_TOKEN}" ]]; then
+            echo 'No source token was minted; refusing to continue' >&2
+            exit 1
+          fi
+          if ! identity="$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}")"; then
+            echo 'The configured source repository identity could not be resolved' >&2
+            failed=1
+          elif [[ "$(jq -r '.id' <<<"${identity}")" != "${SOURCE_REPOSITORY_ID}" || "$(jq -r '.owner.login' <<<"${identity}")" != "${SOURCE_REPOSITORY_OWNER}" || "$(jq -r '.name' <<<"${identity}")" != "${SOURCE_REPOSITORY_NAME}" ]]; then
+            echo 'The configured source repository identity did not match' >&2
+            failed=1
+          fi
+          if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
+            echo 'The private source checkout did not complete' >&2
+            failed=1
+          elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
+            echo 'The checked-out commit does not match source_sha' >&2
+            failed=1
+          fi
+          if ! api_sha="$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/${requested_sha}" | jq -er '.sha | ascii_downcase')" || [[ "${api_sha}" != "${requested_sha}" ]]; then
+            echo 'The requested source SHA was not resolved from the configured repository' >&2
+            failed=1
+          fi
+          if ! curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors -X DELETE -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/installation/token"; then
+            echo 'Source token revocation failed; refusing to execute project code' >&2
+            failed=1
+          fi
+          unset SOURCE_TOKEN
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all credential.helper 2>/dev/null || true
+          find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
+          (( failed == 0 ))
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          # The SDK band is pinned by the source's own global.json, so the
+          # toolchain is decided by the commit under test, not by this workflow.
+          global-json-file: global.json
+
+      - name: Restore with the committed lock files
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --locked-mode: a dependency the lock files do not describe is a
+          # failure, not something to resolve quietly. This is also the first
+          # real cross-platform signal — the lock files were generated on macOS,
+          # so a Linux or Windows mismatch surfaces here.
+          if ! dotnet restore KeelDock.Cloud.slnx --locked-mode >"${RUNNER_TEMP}/restore.log" 2>&1; then
+            echo 'restore: failed' >&2
+            # Restore failures name packages and versions, not source, so the
+            # tail is safe to surface and is the whole diagnostic.
+            tail -40 "${RUNNER_TEMP}/restore.log" >&2 || true
+            exit 1
+          fi
+          echo 'restore: passed'
+
+      - name: Verify formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! dotnet format KeelDock.Cloud.slnx --verify-no-changes --no-restore >"${RUNNER_TEMP}/format.log" 2>&1; then
+            echo 'format: failed (run `dotnet format KeelDock.Cloud.slnx` and commit)' >&2
+            exit 1
+          fi
+          echo 'format: passed'
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Warnings are errors in Directory.Build.props, so this compiles every
+          # analyzer gate as well. Release, because that is what publishes.
+          if ! dotnet build KeelDock.Cloud.slnx --no-restore --configuration Release >"${RUNNER_TEMP}/build.log" 2>&1; then
+            echo 'build: failed' >&2
+            # Compiler diagnostics quote private source lines, so only the error
+            # identifiers and their file paths are surfaced.
+            grep -oE '[^ ]+\.cs\([0-9]+,[0-9]+\): error [A-Z0-9]+' "${RUNNER_TEMP}/build.log" |
+              sed -E 's#^.*/(src|tests)/#\1/#' | sort -u | tail -40 >&2 || true
+            exit 1
+          fi
+          echo 'build: passed'
+
+      - name: Structural gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `dotnet test` is not used, and cannot be: xunit.v3 runs on
+          # Microsoft.Testing.Platform, and the SDK band this source pins still
+          # routes `dotnet test` through the removed VSTest bridge, which fails
+          # before a single test runs. Each suite is its own executable.
+          run_suite() {
+            local label="$1" project="$2"
+            local log="${RUNNER_TEMP}/${label}.log"
+            if dotnet run --project "${project}" --no-build --configuration Release >"${log}" 2>&1; then
+              # The platform prints its own counts; echo the summary line only.
+              grep -E '^\s+(total|failed|succeeded|skipped):' "${log}" | sed "s/^/  ${label} /" || true
+              echo "${label}: passed"
+            else
+              echo "${label}: failed" >&2
+              # Assertion text names types and rules, not source bodies; paths
+              # are stripped so no private directory layout is published.
+              sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g; s#[A-Z]:\\\\[^ ]+#<private-path>#g' "${log}" |
+                grep -E '^(failed|  )' | tail -60 >&2 || true
+              exit 1
+            fi
+          }
+
+          run_suite architecture tests/Architecture/KeelDock.Cloud.ArchitectureTests
+          run_suite extraction-fitness tests/Architecture/KeelDock.Cloud.ExtractionFitnessTests
+          run_suite graphql-composition tests/System/KeelDock.Cloud.GraphQLCompositionTests
+          run_suite sessions-domain tests/Modules/Ade/Sessions/KeelDock.Modules.Ade.Sessions.Domain.Tests
+
+      - name: Confirm the SDL snapshot is committed
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The snapshot test writes the file when it is missing and reports
+          # skipped rather than passing, so a contributor who regenerated it and
+          # forgot to commit would otherwise get a green build. The diff is
+          # checked, never printed: the schema is private source.
+          if ! git diff --quiet -- contracts/graphql/schema.graphql; then
+            echo 'The composed GraphQL schema differs from the committed snapshot.' >&2
+            echo 'Regenerate with KEELDOCK_UPDATE_SNAPSHOTS=1 and commit contracts/graphql/schema.graphql.' >&2
+            exit 1
+          fi
+          echo 'sdl-snapshot: committed and unchanged'
+
+      - name: Database-backed gates
+        # Linux only, and this is a capability limit rather than a choice. The
+        # persistence and messaging suites start a real PostgreSQL container
+        # through Testcontainers: the macOS runners have no Docker daemon, and
+        # the Windows runners run Windows containers, not the Linux image these
+        # suites pin. Running them on one operating system is the honest option;
+        # pretending otherwise would mean skipping silently on two.
+        if: inputs.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_suite() {
+            local label="$1" project="$2"
+            local log="${RUNNER_TEMP}/${label}.log"
+            if dotnet run --project "${project}" --no-build --configuration Release >"${log}" 2>&1; then
+              grep -E '^\s+(total|failed|succeeded|skipped):' "${log}" | sed "s/^/  ${label} /" || true
+              echo "${label}: passed"
+            else
+              echo "${label}: failed" >&2
+              sed -E 's#/home/runner/work/[^ ]+#<private-path>#g' "${log}" |
+                grep -E '^(failed|  )' | tail -60 >&2 || true
+              exit 1
+            fi
+          }
+
+          run_suite messaging tests/System/KeelDock.Cloud.MessagingTests
+          run_suite sessions-persistence tests/Modules/Ade/Sessions/KeelDock.Modules.Ade.Sessions.Persistence.IntegrationTests
+
+      - name: Publish the hosts and smoke the Migrator
+        shell: bash
+        run: |
+          set -euo pipefail
+          for host in Api Worker Migrator; do
+            if ! dotnet publish "src/Hosts/KeelDock.Cloud.${host}" \
+              --no-restore --configuration Release \
+              --output "${RUNNER_TEMP}/publish/${host}" >"${RUNNER_TEMP}/publish-${host}.log" 2>&1; then
+              echo "publish-${host}: failed" >&2
+              exit 1
+            fi
+            echo "publish-${host}: passed"
+          done
+
+          # With no connection string configured the Migrator must fail loudly
+          # and by name. It is the cheapest possible check that the published
+          # artifact is the program we think it is, and it runs identically on
+          # all three operating systems.
+          set +e
+          output="$(dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll" 2>&1)"
+          migrator_rc=$?
+          set -e
+          if [[ "${migrator_rc}" -eq 0 ]]; then
+            echo 'migrator-smoke: failed (reported success with no database configured)' >&2
+            exit 1
+          fi
+          if ! grep -q 'owner connection string' <<<"${output}"; then
+            echo 'migrator-smoke: failed (exited for an unexpected reason)' >&2
+            exit 1
+          fi
+          echo 'migrator-smoke: passed'
+
+      - name: Publish sanitized validation proof
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
+          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
+          [[ "${checked_out_sha}" == "${requested_sha}" ]]
+          {
+            echo "## KeelDock Cloud — ${PLATFORM}"
+            echo
+            echo "- Source SHA: \`${checked_out_sha}\`"
+            echo "- Runner: \`${RUNNER_OS}\` / \`${RUNNER_ARCH}\`"
+            echo '- Restore was locked, build was Release with warnings as errors.'
+            echo '- Architecture, extraction-fitness, GraphQL-composition and domain gates passed.'
+            echo '- SDL snapshot matches the committed schema.'
+            echo '- API, Worker and Migrator published; Migrator smoke passed.'
+            if [[ "${PLATFORM}" == 'linux' ]]; then
+              echo '- Persistence and messaging gates passed against a real PostgreSQL container.'
+            else
+              echo '- Persistence and messaging gates were NOT run: no Linux container runtime on this platform.'
+            fi
+            echo '- Source token: revoked before any project code executed.'
+            echo '- Outputs: no source files, logs, reports or artifacts published.'
+          } >> "${GITHUB_STEP_SUMMARY}"
