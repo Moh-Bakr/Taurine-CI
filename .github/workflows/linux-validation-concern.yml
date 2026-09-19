@@ -356,7 +356,20 @@ jobs:
               # Format and lint first: they are seconds and need almost nothing
               # compiled, so a style failure does not arrive after a full build.
               run_quiet cli-fmt cargo fmt --package taurine-cli -- --check
-              run_quiet cli-clippy cargo clippy --package taurine-cli --all-targets -- --deny warnings
+
+              # `--keep-going` because this lane is dispatched, not pushed, and
+              # every dispatch costs the whole matrix. Cargo stops the build at
+              # the first unit that errors, so a denied lint anywhere in the
+              # closure hides every lint behind it and each one costs another
+              # full run to discover. Keeping going reports them all at once;
+              # the exit status is unchanged, so the gate is no weaker.
+              #
+              # The closure, not just this package: `cargo clippy` wraps every
+              # *workspace* member with clippy-driver and clippy-driver applies
+              # the trailing `--deny warnings` to each of them, so `--package
+              # taurine-cli` still lints the sibling crates it depends on. That
+              # is why a failure here can name a file outside `taurine-cli`.
+              run_quiet cli-clippy cargo clippy --package taurine-cli --all-targets --keep-going -- --deny warnings
               run_quiet cli-tests cargo test --package taurine-cli
               run_quiet cli-build cargo build --package taurine-cli --release
 
