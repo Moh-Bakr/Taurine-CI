@@ -292,6 +292,10 @@ jobs:
           # asserts the Migrator's own checker catches it. Needs a live cluster, so Linux only.
           run_suite catalog-invariants tests/System/KeelDock.Cloud.SecurityTests
           run_suite sessions-persistence tests/Modules/Ade/Sessions/KeelDock.Modules.Ade.Sessions.Persistence.IntegrationTests
+          # Boots the real host against a real migrated database and executes GraphQL over HTTP.
+          # The only suite in which a resolver actually runs, and the only one that executes the
+          # committed migrations.
+          run_suite api-functional tests/System/KeelDock.Cloud.Api.FunctionalTests
 
       - name: Publish the hosts and smoke the Migrator
         shell: bash
