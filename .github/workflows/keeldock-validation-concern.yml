@@ -164,138 +164,57 @@ jobs:
           fi
           echo 'restore: passed'
 
-      - name: Verify formatting
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! dotnet format KeelDock.Cloud.slnx --verify-no-changes --no-restore >"${RUNNER_TEMP}/format.log" 2>&1; then
-            echo 'format: failed (run `dotnet format KeelDock.Cloud.slnx` and commit)' >&2
-            exit 1
-          fi
-          echo 'format: passed'
-
-      - name: Build
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Warnings are errors in Directory.Build.props, so this compiles every
-          # analyzer gate as well. Release, because that is what publishes.
-          if ! dotnet build KeelDock.Cloud.slnx --no-restore --configuration Release >"${RUNNER_TEMP}/build.log" 2>&1; then
-            echo 'build: failed' >&2
-            # Compiler diagnostics quote private source lines, so only the error
-            # identifiers and their file paths are surfaced.
-            grep -oE '[^ ]+\.cs\([0-9]+,[0-9]+\): error [A-Z0-9]+' "${RUNNER_TEMP}/build.log" |
-              sed -E 's#^.*/(src|tests)/#\1/#' | sort -u | tail -40 >&2 || true
-            exit 1
-          fi
-          echo 'build: passed'
-
-      - name: Structural gates
-        shell: bash
-        run: |
-          set -euo pipefail
-          # `dotnet test` is not used, and cannot be: xunit.v3 runs on
-          # Microsoft.Testing.Platform, and the SDK band this source pins still
-          # routes `dotnet test` through the removed VSTest bridge, which fails
-          # before a single test runs. Each suite is its own executable.
-          run_suite() {
-            local label="$1" project="$2"
-            local log="${RUNNER_TEMP}/${label}.log"
-            if dotnet run --project "${project}" --no-build --configuration Release >"${log}" 2>&1; then
-              # The platform prints its own counts; echo the summary line only.
-              grep -E '^\s+(total|failed|succeeded|skipped):' "${log}" | sed "s/^/  ${label} /" || true
-              echo "${label}: passed"
-            else
-              echo "${label}: failed" >&2
-              # Assertion text names types and rules, not source bodies; paths
-              # are stripped so no private directory layout is published.
-              sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g; s#[A-Z]:\\\\[^ ]+#<private-path>#g' "${log}" |
-                grep -E '^(failed|  )' | tail -60 >&2 || true
-              exit 1
-            fi
-          }
-
-          run_suite architecture tests/Architecture/KeelDock.Cloud.ArchitectureTests
-          run_suite extraction-fitness tests/Architecture/KeelDock.Cloud.ExtractionFitnessTests
-          run_suite graphql-composition tests/System/KeelDock.Cloud.GraphQLCompositionTests
-          # Frozen wire shapes. Runs on every platform because it needs no container and a
-          # serialization difference would be a genuine cross-platform defect.
-          run_suite contract-compatibility tests/System/KeelDock.Cloud.CompatibilityTests
-          run_suite sessions-domain tests/Modules/Ade/Sessions/KeelDock.Modules.Ade.Sessions.Domain.Tests
-
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
 
-      - name: Generated TypeScript contract is current
+      - name: Install the generated-contract toolchain
         shell: bash
         run: |
           set -euo pipefail
-          # This check called itself the CI gate while being wired to nothing — no build, local
-          # or hosted, ran it, so drift in the generated client contract could not fail anything.
-          # Runs on all three platforms because byte-identical output across them is the claim.
+          # Installed before the suite because run-tests.sh checks the generated TypeScript only
+          # when node_modules is present and otherwise reports it skipped. Skipped is not passed,
+          # and the hosted run is the one that must always check.
           if ! npm --prefix tools/graphql-codegen ci >"${RUNNER_TEMP}/npm-ci.log" 2>&1; then
             echo 'typescript-install: failed' >&2
             exit 1
           fi
-          if ! npm --prefix tools/graphql-codegen run verify >"${RUNNER_TEMP}/ts-verify.log" 2>&1; then
-            echo 'typescript: drift or typecheck failure' >&2
-            # Names and types only; no generated bodies and no private paths.
-            grep -E '^(Missing|Unexpected|Changed|error TS)' "${RUNNER_TEMP}/ts-verify.log" | head -20 >&2 || true
-            exit 1
-          fi
-          echo 'typescript: current'
 
-      - name: Confirm the SDL snapshot is committed
+      - name: Full suite
         shell: bash
         run: |
           set -euo pipefail
-          # The snapshot test writes the file when it is missing and reports
-          # skipped rather than passing, so a contributor who regenerated it and
-          # forgot to commit would otherwise get a green build. The diff is
-          # checked, never printed: the schema is private source.
-          if ! git diff --quiet -- contracts/graphql/schema.graphql; then
-            echo 'The composed GraphQL schema differs from the committed snapshot.' >&2
-            echo 'Regenerate with KEELDOCK_UPDATE_SNAPSHOTS=1 and commit contracts/graphql/schema.graphql.' >&2
-            exit 1
+          # Invokes the repository's own runner rather than repeating its suite list. The list
+          # used to live here as well, and two copies of "what the full suite is" drift the
+          # moment somebody adds a suite and updates one — silently, because a gate nobody runs
+          # looks exactly like a gate that passes. The script discovers suites from the
+          # filesystem, so a new one is covered on the day it is written.
+          #
+          # --sanitize strips absolute paths from failure output; assertion text and counts are
+          # what makes a hosted failure diagnosable, private checkout layout is not.
+          # --no-docker on macOS and Windows: those runners have no Linux container runtime, and
+          # the summary below states which platforms therefore proved less.
+          args=(--configuration Release --sanitize)
+          if [[ "${{ inputs.platform }}" != "linux" ]]; then
+            args+=(--no-docker)
           fi
-          echo 'sdl-snapshot: committed and unchanged'
 
-      - name: Database-backed gates
-        # Linux only, and this is a capability limit rather than a choice. The
-        # persistence and messaging suites start a real PostgreSQL container
-        # through Testcontainers: the macOS runners have no Docker daemon, and
-        # the Windows runners run Windows containers, not the Linux image these
-        # suites pin. Running them on one operating system is the honest option;
-        # pretending otherwise would mean skipping silently on two.
-        if: inputs.platform == 'linux'
+          bash scripts/run-tests.sh "${args[@]}"
+
+      - name: Confirm the generated artefacts are committed
         shell: bash
         run: |
           set -euo pipefail
-          run_suite() {
-            local label="$1" project="$2"
-            local log="${RUNNER_TEMP}/${label}.log"
-            if dotnet run --project "${project}" --no-build --configuration Release >"${log}" 2>&1; then
-              grep -E '^\s+(total|failed|succeeded|skipped):' "${log}" | sed "s/^/  ${label} /" || true
-              echo "${label}: passed"
-            else
-              echo "${label}: failed" >&2
-              sed -E 's#/home/runner/work/[^ ]+#<private-path>#g' "${log}" |
-                grep -E '^(failed|  )' | tail -60 >&2 || true
-              exit 1
-            fi
-          }
-
-          run_suite messaging tests/System/KeelDock.Cloud.MessagingTests
-          # Builds real schemas, roles and RLS policies, then breaks one invariant at a time and
-          # asserts the Migrator's own checker catches it. Needs a live cluster, so Linux only.
-          run_suite catalog-invariants tests/System/KeelDock.Cloud.SecurityTests
-          run_suite sessions-persistence tests/Modules/Ade/Sessions/KeelDock.Modules.Ade.Sessions.Persistence.IntegrationTests
-          # Boots the real host against a real migrated database and executes GraphQL over HTTP.
-          # The only suite in which a resolver actually runs, and the only one that executes the
-          # committed migrations.
-          run_suite api-functional tests/System/KeelDock.Cloud.Api.FunctionalTests
+          # The snapshot and fixture tests write their baseline when it is missing and report
+          # skipped rather than passing, so a contributor who regenerated and forgot to commit
+          # would otherwise get a green build. Checked, never printed: these are private source.
+          if ! git diff --quiet -- contracts/; then
+            echo 'Generated contracts differ from what is committed. Regenerate and commit:' >&2
+            git diff --name-only -- contracts/ >&2
+            exit 1
+          fi
+          echo 'contracts: committed and unchanged'
 
       - name: Publish the hosts and smoke the Migrator
         shell: bash
@@ -345,13 +264,13 @@ jobs:
             echo "- Source SHA: \`${checked_out_sha}\`"
             echo "- Runner: \`${RUNNER_OS}\` / \`${RUNNER_ARCH}\`"
             echo '- Restore was locked, build was Release with warnings as errors.'
-            echo '- Architecture, extraction-fitness, GraphQL-composition and domain gates passed.'
-            echo '- SDL snapshot matches the committed schema.'
+            echo '- The full suite ran via scripts/run-tests.sh, which discovers suites from the repository.'
+            echo '- Generated contracts match what is committed.'
             echo '- API, Worker and Migrator published; Migrator smoke passed.'
             if [[ "${PLATFORM}" == 'linux' ]]; then
-              echo '- Persistence, messaging and catalog-invariant gates passed against a real PostgreSQL container.'
+              echo '- Container-backed suites ran against a real PostgreSQL instance.'
             else
-              echo '- Persistence, messaging and catalog-invariant gates were NOT run: no Linux container runtime on this platform.'
+              echo '- Container-backed suites were NOT run: no Linux container runtime on this platform.'
             fi
             echo '- Source token: revoked before any project code executed.'
             echo '- Outputs: no source files, logs, reports or artifacts published.'
