@@ -237,13 +237,66 @@ jobs:
           CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
+
+          # Why the Rust labels are sanitized rather than withheld outright.
+          #
+          # `cargo fmt --check` and `cargo clippy -- --deny warnings` are the
+          # first style and lint gates this crate has ever had, so the failures
+          # nobody can predict are exactly their first ones. A bare "failed"
+          # tells a reader outside the private repository nothing they can act
+          # on — not even whether the cause was a lint, a broken build script,
+          # a missing toolchain component or a crate that would not compile —
+          # and the private source is not readable from here to work it out.
+          #
+          # So the headline diagnostic, its file and line, and the note naming
+          # the lint are published. What cargo prints *around* those is not:
+          # the quoted source excerpt, the `help:` rewrite and rustfmt's diff
+          # body are the private source itself, and none of them pass the
+          # allow-list below. The same rule the e2e branch already follows —
+          # publish what names the failure, never what the failure was in.
+          cargo_sanitize() {
+            sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
+              sed -E "s#${GITHUB_WORKSPACE}/##g" |
+              sed -E 's#/home/runner/work/[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g' |
+              cut -c1-200
+          }
+
+          cargo_detail() {
+            cargo_sanitize "$1" |
+              grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^[[:space:]]*= note: .*(lint level|-D |-W |deny\(|warn\()|^Diff in |^test .* FAILED$|^test result: |^failures:$|^smoke: ' |
+              head -40 >&2 || true
+          }
+
+          # One line saying which kind of failure it was, so the classification
+          # survives even when no diagnostic line clears the allow-list above.
+          cargo_reason() {
+            local log="$1"
+            if grep -qE 'no such command|not installed for the toolchain|clippy-driver' "${log}"; then echo 'missing Rust toolchain component'
+            elif grep -qE '^Diff in ' "${log}"; then echo 'rustfmt formatting difference'
+            elif grep -qE 'clippy::[a-z_]+' "${log}"; then echo 'clippy lint promoted to an error by --deny warnings'
+            elif grep -qE 'implied by .-D warnings.|requested on the command line with .-D warnings.' "${log}"; then echo 'rustc warning promoted to an error by --deny warnings'
+            elif grep -qE 'Unable to find libclang|libclang.*[Nn]o such file' "${log}"; then echo 'libclang or bindgen failure'
+            elif grep -qE 'failed to run custom build command' "${log}"; then echo 'dependency build script failure'
+            elif grep -qE 'test result: FAILED|^failures:$' "${log}"; then echo 'test failure'
+            elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
+            elif grep -qE 'failed to (download|select|get|load|parse)' "${log}"; then echo 'dependency download or resolution failure'
+            elif grep -qE 'No space left on device' "${log}"; then echo 'runner disk exhaustion'
+            else echo 'command returned non-zero'
+            fi
+          }
+
           run_quiet() {
             local label="$1"; shift
             local log="${RUNNER_TEMP}/${label}.log"
             if "$@" >"${log}" 2>&1; then
               echo "${label}: passed"
             else
-              echo "${label}: failed (detailed output withheld)" >&2
+              if [[ "${label}" == cli-* ]]; then
+                echo "${label}: failed ($(cargo_reason "${log}"); sanitized detail below)" >&2
+                cargo_detail "${log}"
+              else
+                echo "${label}: failed (detailed output withheld)" >&2
+              fi
               if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
                 # Keep hosted-only diagnostics useful without publishing
                 # private source paths or compiler/test output.
@@ -312,14 +365,29 @@ jobs:
               # could drift. `taurine-cli` unit tests cover report shapes; what
               # they cannot cover is whether the produced executable still
               # starts and still exits with the codes CI pipelines branch on.
+              # Each expectation says what it observed when it fails. A bare
+              # `test` under `set -e` exits silently, which would leave
+              # `cli-smoke: failed` with an empty log and nothing to read. Exit
+              # codes and flag names are the binary's documented contract, not
+              # source, so they are safe to print.
               run_quiet cli-smoke bash -c '
                 set -euo pipefail
                 bin=target/release/taurine
-                test -x "$bin"
+                if [ ! -x "$bin" ]; then
+                  echo "smoke: the release build produced no executable at the expected path" >&2
+                  exit 1
+                fi
 
                 # --help must succeed: a pipeline that probes for the CLI would
                 # otherwise read a non-zero exit as "not installed".
-                "$bin" --help >/dev/null
+                set +e
+                "$bin" --help >/dev/null 2>&1
+                help_status=$?
+                set -e
+                if [ "$help_status" -ne 0 ]; then
+                  echo "smoke: --help exited $help_status, expected 0" >&2
+                  exit 1
+                fi
 
                 # An unreadable collection must exit 2, not 1. The difference is
                 # load-bearing: 1 means tests failed and 2 means the run never
@@ -329,7 +397,10 @@ jobs:
                 "$bin" test /nonexistent/collection.json >/dev/null 2>&1
                 missing_status=$?
                 set -e
-                test "$missing_status" -eq 2
+                if [ "$missing_status" -ne 2 ]; then
+                  echo "smoke: a missing collection exited $missing_status, expected 2" >&2
+                  exit 1
+                fi
 
                 # Malformed JSON is the same class of failure and must agree.
                 tmp="$(mktemp -d)"
@@ -339,7 +410,10 @@ jobs:
                 bad_status=$?
                 set -e
                 rm -rf "$tmp"
-                test "$bad_status" -eq 2
+                if [ "$bad_status" -ne 2 ]; then
+                  echo "smoke: a malformed collection exited $bad_status, expected 2" >&2
+                  exit 1
+                fi
               '
               ;;
             mobile-quality)

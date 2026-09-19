@@ -218,6 +218,9 @@ jobs:
           run_suite architecture tests/Architecture/KeelDock.Cloud.ArchitectureTests
           run_suite extraction-fitness tests/Architecture/KeelDock.Cloud.ExtractionFitnessTests
           run_suite graphql-composition tests/System/KeelDock.Cloud.GraphQLCompositionTests
+          # Frozen wire shapes. Runs on every platform because it needs no container and a
+          # serialization difference would be a genuine cross-platform defect.
+          run_suite contract-compatibility tests/System/KeelDock.Cloud.CompatibilityTests
           run_suite sessions-domain tests/Modules/Ade/Sessions/KeelDock.Modules.Ade.Sessions.Domain.Tests
 
       - name: Confirm the SDL snapshot is committed
