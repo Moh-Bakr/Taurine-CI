@@ -261,6 +261,9 @@ jobs:
           }
 
           run_suite messaging tests/System/KeelDock.Cloud.MessagingTests
+          # Builds real schemas, roles and RLS policies, then breaks one invariant at a time and
+          # asserts the Migrator's own checker catches it. Needs a live cluster, so Linux only.
+          run_suite catalog-invariants tests/System/KeelDock.Cloud.SecurityTests
           run_suite sessions-persistence tests/Modules/Ade/Sessions/KeelDock.Modules.Ade.Sessions.Persistence.IntegrationTests
 
       - name: Publish the hosts and smoke the Migrator
@@ -315,9 +318,9 @@ jobs:
             echo '- SDL snapshot matches the committed schema.'
             echo '- API, Worker and Migrator published; Migrator smoke passed.'
             if [[ "${PLATFORM}" == 'linux' ]]; then
-              echo '- Persistence and messaging gates passed against a real PostgreSQL container.'
+              echo '- Persistence, messaging and catalog-invariant gates passed against a real PostgreSQL container.'
             else
-              echo '- Persistence and messaging gates were NOT run: no Linux container runtime on this platform.'
+              echo '- Persistence, messaging and catalog-invariant gates were NOT run: no Linux container runtime on this platform.'
             fi
             echo '- Source token: revoked before any project code executed.'
             echo '- Outputs: no source files, logs, reports or artifacts published.'
