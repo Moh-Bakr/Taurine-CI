@@ -271,7 +271,8 @@ jobs:
           # survives even when no diagnostic line clears the allow-list above.
           cargo_reason() {
             local log="$1"
-            if grep -qE 'no such command|not installed for the toolchain|clippy-driver' "${log}"; then echo 'missing Rust toolchain component'
+            if grep -qE '^smoke: ' "${log}"; then echo 'the built binary did not meet its documented contract'
+            elif grep -qE 'no such command|not installed for the toolchain|clippy-driver' "${log}"; then echo 'missing Rust toolchain component'
             elif grep -qE '^Diff in ' "${log}"; then echo 'rustfmt formatting difference'
             elif grep -qE 'clippy::[a-z_]+' "${log}"; then echo 'clippy lint promoted to an error by --deny warnings'
             elif grep -qE 'implied by .-D warnings.|requested on the command line with .-D warnings.' "${log}"; then echo 'rustc warning promoted to an error by --deny warnings'
