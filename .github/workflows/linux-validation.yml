@@ -56,6 +56,17 @@ jobs:
           - desktop-shard-2
           - desktop-quality
           - mobile-quality
+          # The Rust headless runner. It is the artifact CI pipelines outside
+          # Taurine actually execute, and until this concern existed nothing
+          # hosted compiled it: `cargo test --workspace` is not run anywhere in
+          # this control plane, and the CLI's 222 lines of report tests were
+          # reachable only from a contributor's laptop.
+          #
+          # It is its own concern rather than a step in `contracts` because it
+          # shares nothing with the JavaScript lanes — no npm install, no
+          # node_modules — and folding it in would make every contracts run pay
+          # for a Rust toolchain it does not use.
+          - taurine-cli
           # Browser tiers. Until these existed the Playwright suite ran only on
           # a contributor's laptop, so `verification.md`'s "hosted desktop
           # concern with pointer and keyboard coverage" had no runner behind it.

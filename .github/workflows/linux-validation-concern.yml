@@ -29,7 +29,11 @@ jobs:
     runs-on: ubuntu-24.04
     # The browser tiers start a dev server, download a browser and drive a
     # real page; the unit and contract concerns stay on the reviewed 30.
-    timeout-minutes: ${{ startsWith(inputs.concern, 'e2e-') && 60 || 30 }}
+    # 45 for the Rust concern. Nothing is cached — no job in this control plane
+    # caches anything, and `target/` could not be cached anyway because it holds
+    # compiled private source — so every run compiles rquickjs, which builds C
+    # and generates bindings through libclang, plus reqwest's TLS stack, cold.
+    timeout-minutes: ${{ startsWith(inputs.concern, 'e2e-') && 60 || (inputs.concern == 'taurine-cli' && 45 || 30) }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,11 +139,19 @@ jobs:
           (( failed == 0 ))
 
       - name: Set up Node.js
+        if: inputs.concern != 'taurine-cli'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.14.0
 
+      # The Rust concern needs no node_modules, so it skips three `npm ci` runs.
+      # It still needs the vendor fetch below: `[patch.crates-io]` in the
+      # workspace root points at `vendor/boringtun` by path, and cargo refuses to
+      # load a manifest that is not there — so *every* cargo command in this
+      # repository fails on a fresh checkout until the script has run. That is
+      # documented in `vendor.lock` and is not specific to this workflow.
       - name: Install locked JavaScript dependencies
+        if: inputs.concern != 'taurine-cli'
         shell: bash
         run: |
           set -euo pipefail
@@ -164,6 +176,44 @@ jobs:
           run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
           run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
+
+      - name: Set up the Rust toolchain
+        if: inputs.concern == 'taurine-cli'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The runner's own rustup, not a third-party action: android-validation
+          # and ios-validation already do it this way, and this control plane
+          # adds no action it does not have to.
+          rustup component add rustfmt clippy
+
+          # taurine-scripting depends on rquickjs with the `bindgen` feature, so
+          # this concern needs libclang at build-script runtime. The hosted image
+          # ships clang but not reliably the shared library bindgen loads, and
+          # the failure surfaces only as an unhelpful `No such file or directory`
+          # from Cargo. android-validation carries the same block for the same
+          # reason.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang libclang-dev
+          # Debian/Ubuntu commonly expose this as libclang-18.so.1 rather than an
+          # unversioned libclang.so symlink.
+          libclang_file="$(find /usr/lib -type f \( -name 'libclang.so*' -o -name 'libclang-*.so*' \) -print -quit)"
+          [[ -n "${libclang_file}" ]] || { echo 'libclang shared library is unavailable' >&2; exit 1; }
+          echo "LIBCLANG_PATH=$(dirname "${libclang_file}")" >> "${GITHUB_ENV}"
+
+      - name: Fetch pinned vendored sources
+        if: inputs.concern == 'taurine-cli'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `fetch` verifies each download against the sha256 pinned in
+          # vendor.lock and applies the reviewed boringtun zeroize patch, so this
+          # is a supply-chain check as much as a prerequisite.
+          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
+            echo 'vendor-fetch: failed (detailed output withheld)' >&2
+            exit 1
+          fi
+          echo 'vendor-fetch: passed'
 
       - name: Install the pinned Playwright browser
         if: startsWith(inputs.concern, 'e2e-')
@@ -247,6 +297,50 @@ jobs:
               # workflow edit. The shard index is the concern's own suffix.
               run_quiet "${CONCERN}" npx --no-install playwright test \
                 --project=regression --shard="${CONCERN##*-}/4"
+              ;;
+            taurine-cli)
+              # Format and lint first: they are seconds and need almost nothing
+              # compiled, so a style failure does not arrive after a full build.
+              run_quiet cli-fmt cargo fmt --package taurine-cli -- --check
+              run_quiet cli-clippy cargo clippy --package taurine-cli --all-targets -- --deny warnings
+              run_quiet cli-tests cargo test --package taurine-cli
+              run_quiet cli-build cargo build --package taurine-cli --release
+
+              # The binary's documented contract, exercised on the artifact that
+              # was just built rather than on the library behind it. Both cases
+              # are hermetic: no network, no fixture server, no collection that
+              # could drift. `taurine-cli` unit tests cover report shapes; what
+              # they cannot cover is whether the produced executable still
+              # starts and still exits with the codes CI pipelines branch on.
+              run_quiet cli-smoke bash -c '
+                set -euo pipefail
+                bin=target/release/taurine
+                test -x "$bin"
+
+                # --help must succeed: a pipeline that probes for the CLI would
+                # otherwise read a non-zero exit as "not installed".
+                "$bin" --help >/dev/null
+
+                # An unreadable collection must exit 2, not 1. The difference is
+                # load-bearing: 1 means tests failed and 2 means the run never
+                # started, and a pipeline that confuses them reports a broken
+                # config as a failing test suite.
+                set +e
+                "$bin" test /nonexistent/collection.json >/dev/null 2>&1
+                missing_status=$?
+                set -e
+                test "$missing_status" -eq 2
+
+                # Malformed JSON is the same class of failure and must agree.
+                tmp="$(mktemp -d)"
+                printf "{ not json" > "$tmp/bad.json"
+                set +e
+                "$bin" test "$tmp/bad.json" >/dev/null 2>&1
+                bad_status=$?
+                set -e
+                rm -rf "$tmp"
+                test "$bad_status" -eq 2
+              '
               ;;
             mobile-quality)
               run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
