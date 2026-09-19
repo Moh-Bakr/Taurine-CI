@@ -223,6 +223,30 @@ jobs:
           run_suite contract-compatibility tests/System/KeelDock.Cloud.CompatibilityTests
           run_suite sessions-domain tests/Modules/Ade/Sessions/KeelDock.Modules.Ade.Sessions.Domain.Tests
 
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: Generated TypeScript contract is current
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This check called itself the CI gate while being wired to nothing — no build, local
+          # or hosted, ran it, so drift in the generated client contract could not fail anything.
+          # Runs on all three platforms because byte-identical output across them is the claim.
+          if ! npm --prefix tools/graphql-codegen ci >"${RUNNER_TEMP}/npm-ci.log" 2>&1; then
+            echo 'typescript-install: failed' >&2
+            exit 1
+          fi
+          if ! npm --prefix tools/graphql-codegen run verify >"${RUNNER_TEMP}/ts-verify.log" 2>&1; then
+            echo 'typescript: drift or typecheck failure' >&2
+            # Names and types only; no generated bodies and no private paths.
+            grep -E '^(Missing|Unexpected|Changed|error TS)' "${RUNNER_TEMP}/ts-verify.log" | head -20 >&2 || true
+            exit 1
+          fi
+          echo 'typescript: current'
+
       - name: Confirm the SDL snapshot is committed
         shell: bash
         run: |
