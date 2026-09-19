@@ -27,7 +27,9 @@ jobs:
     name: Linux ${{ inputs.concern }}
     environment: source-read
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The browser tiers start a dev server, download a browser and drive a
+    # real page; the unit and contract concerns stay on the reviewed 30.
+    timeout-minutes: ${{ startsWith(inputs.concern, 'e2e-') && 60 || 30 }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -163,6 +165,22 @@ jobs:
           run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
           run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
 
+      - name: Install the pinned Playwright browser
+        if: startsWith(inputs.concern, 'e2e-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --no-install keeps the CLI resolving from the locked devDependency
+          # rather than fetching a floating one from the registry; the browser
+          # build it then downloads is the one that version pins. Only Chromium:
+          # every Playwright project in the suite uses Desktop Chrome.
+          if ! (cd taurine-desktop && npx --no-install playwright install --with-deps chromium) \
+            >"${RUNNER_TEMP}/playwright-install.log" 2>&1; then
+            echo 'playwright-install: failed (detailed output withheld)' >&2
+            exit 1
+          fi
+          echo 'playwright-install: passed'
+
       - name: Run isolated Linux validation concern
         shell: bash
         env:
@@ -176,17 +194,18 @@ jobs:
               echo "${label}: passed"
             else
               echo "${label}: failed (detailed output withheld)" >&2
-              if [[ "${label}" == mobile-tests ]]; then
+              if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
                 # Keep hosted-only diagnostics useful without publishing
                 # private source paths or compiler/test output.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
-                  grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
+                  grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|timed out|(^|[[:space:]])[0-9]+ (passed|failed|flaky|skipped)|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
               fi
               exit 1
             fi
           }
+          if [[ "${CONCERN}" == e2e-* ]]; then cd taurine-desktop; fi
           case "${CONCERN}" in
             contracts)
               run_quiet contracts npm run check:contracts
@@ -209,6 +228,25 @@ jobs:
             desktop-quality)
               run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
               run_quiet desktop-lint npm --prefix taurine-desktop run lint
+              ;;
+            e2e-critical)
+              # The three narrow tiers together: they share a dev server start,
+              # and splitting 156 tests across three runners would spend more on
+              # `npm ci` than on testing.
+              run_quiet e2e-critical npx --no-install playwright test \
+                --project=smoke --project=critical --project=shell-browser
+              ;;
+            e2e-a11y)
+              # Serial by the project's own config: axe walks the whole tree, and
+              # two of them racing on one dev server produced a timeout rather
+              # than a finding.
+              run_quiet e2e-a11y npx --no-install playwright test --project=a11y
+              ;;
+            e2e-regression-1|e2e-regression-2|e2e-regression-3|e2e-regression-4)
+              # Playwright's own sharding, so a rebalanced suite does not need a
+              # workflow edit. The shard index is the concern's own suffix.
+              run_quiet "${CONCERN}" npx --no-install playwright test \
+                --project=regression --shard="${CONCERN##*-}/4"
               ;;
             mobile-quality)
               run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1

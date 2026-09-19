@@ -56,6 +56,18 @@ jobs:
           - desktop-shard-2
           - desktop-quality
           - mobile-quality
+          # Browser tiers. Until these existed the Playwright suite ran only on
+          # a contributor's laptop, so `verification.md`'s "hosted desktop
+          # concern with pointer and keyboard coverage" had no runner behind it.
+          # The `visual` project is deliberately absent: its five baselines are
+          # darwin-only, so a Linux runner would write new ones and fail for a
+          # reason that is not a regression.
+          - e2e-critical
+          - e2e-a11y
+          - e2e-regression-1
+          - e2e-regression-2
+          - e2e-regression-3
+          - e2e-regression-4
     uses: ./.github/workflows/linux-validation-concern.yml
     secrets: inherit
     with:
