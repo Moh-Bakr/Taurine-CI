@@ -74,14 +74,18 @@ jobs:
             ".github/workflows/android-validation.yml"
             ".github/workflows/ios-validation.yml"
             ".github/workflows/orchestrate-validation.yml"
+            # Second private source: Moh-Bakr/keeldock-cloud rather than Taurine.
+            ".github/workflows/keeldock-validation-concern.yml"
           )
           reusable_protected_workflows=(
             ".github/workflows/windows-validation-concern.yml"
             ".github/workflows/linux-validation-concern.yml"
+            ".github/workflows/keeldock-validation-concern.yml"
           )
           protected_dispatch_workflows=(
             ".github/workflows/windows-validation.yml"
             ".github/workflows/linux-validation.yml"
+            ".github/workflows/keeldock-validation.yml"
           )
 
           # Windows is intentionally app-only. The full skill verifier is
@@ -114,8 +118,10 @@ jobs:
                 actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1) ;;
                 actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1) ;;
                 actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020) ;;
+                actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68) ;;
                 ./.github/workflows/windows-validation-concern.yml) ;;
                 ./.github/workflows/linux-validation-concern.yml) ;;
+                ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;
                 *)
                   echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2
@@ -237,6 +243,10 @@ jobs:
               fi
               if [[ "$workflow" == ".github/workflows/windows-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/windows-validation-concern\.yml' "$workflow"; then
                 echo "The protected Windows dispatcher must call the reviewed concern workflow: $workflow" >&2
+                exit 1
+              fi
+              if [[ "$workflow" == ".github/workflows/keeldock-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/keeldock-validation-concern\.yml' "$workflow"; then
+                echo "The protected KeelDock dispatcher must call the reviewed concern workflow: $workflow" >&2
                 exit 1
               fi
               if [[ "$workflow" == ".github/workflows/linux-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/linux-validation-concern\.yml' "$workflow"; then

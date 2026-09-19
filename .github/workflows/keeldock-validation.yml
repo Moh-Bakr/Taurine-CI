@@ -1,0 +1,79 @@
+name: KeelDock Cloud source validation (protected)
+
+# The second private source this control plane validates.
+#
+# `Moh-Bakr/keeldock-cloud` is a private repository, and GitHub currently refuses
+# to start Actions jobs on this account's private repositories at all — a billing
+# or spending-limit block, the same condition that stripped every automatic
+# trigger from the Taurine repository on 2026-08-19. Its own `.github/workflows/ci.yml`
+# has therefore never executed a single job.
+#
+# Running the gates from here fixes that: this repository is public, so its
+# minutes are free, and the existing source-read pattern already knows how to
+# check out an exact private SHA and destroy the token before project code runs.
+#
+# It also closes a real gap rather than merely relocating one. KeelDock Cloud's
+# Phase 0 evidence records "clean-machine topology start on macOS, Windows and
+# Linux" as NOT MET, because the 104 passing tests had only ever run on one
+# contributor's macOS/arm64 laptop. Three operating systems, from a clean
+# checkout, is exactly the missing evidence.
+#
+# **Scope, stated honestly.** This proves the solution restores, builds and
+# passes its structural gates on all three operating systems, and that the
+# database-backed gates pass on Linux. It does *not* start the Aspire topology:
+# that needs a Linux Docker daemon, which only the Ubuntu runner has, and a full
+# cold AppHost start is a separate piece of work. The Phase 0 criterion is
+# therefore partly, not wholly, satisfied by a green run here.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to validate from private keeldock-cloud
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keeldock-validation-${{ github.workflow }}-${{ inputs.source_sha }}
+  # Never cancel a source-bearing run: cancellation can interrupt the cleanup
+  # step that revokes the short-lived private-source token.
+  cancel-in-progress: false
+
+jobs:
+  validate-input:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Validate protected dispatch input
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate exact source SHA
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
+
+  validate:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    needs: validate-input
+    strategy:
+      # Each operating system is independent evidence. A Windows path-separator
+      # bug must not hide the Linux result, and vice versa — that is the whole
+      # point of running three.
+      fail-fast: false
+      matrix:
+        platform:
+          - linux
+          - macos
+          - windows
+    uses: ./.github/workflows/keeldock-validation-concern.yml
+    secrets: inherit
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      platform: ${{ matrix.platform }}
