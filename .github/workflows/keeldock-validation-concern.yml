@@ -200,7 +200,76 @@ jobs:
             args+=(--no-docker)
           fi
 
-          bash scripts/run-tests.sh "${args[@]}"
+          # Tee'd so the next step can publish per-suite totals. The log still carries
+          # everything; what it does not carry is a reader who will scroll ten thousand lines to
+          # find out whether a suite quietly stopped existing.
+          bash scripts/run-tests.sh "${args[@]}" 2>&1 | tee "${RUNNER_TEMP}/suite.log"
+
+          # PIPESTATUS, not $?: with a pipe, $? is tee's exit code, which is 0 even when the
+          # suite failed. This is the one line that decides whether the gate is a gate.
+          exit "${PIPESTATUS[0]}"
+
+      - name: Summarise per-suite totals
+        # Runs even when the suite failed, because a failing run is exactly when knowing which
+        # suite, and how many of its tests, is worth having on the summary rather than in a log.
+        if: always()
+        shell: bash
+        env:
+          # Through the environment, not interpolated into the script: a workflow input spliced
+          # into a shell body is a script-injection site, and this file already routes every
+          # other input this way.
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+
+          log="${RUNNER_TEMP}/suite.log"
+          if [[ ! -s "${log}" ]]; then
+            echo 'suite-totals: no suite output was captured' >&2
+            exit 1
+          fi
+
+          # Parsed rather than re-derived: the numbers published here are the ones the run
+          # actually printed. Re-running anything to produce a summary would let the summary and
+          # the gate disagree, which is worse than having no summary.
+          awk '
+            /^--- SKIP / { name = $3; printf "%s\tskipped\t-\t-\n", name; next }
+            /^--- /      { name = substr($0, 5); next }
+            /^  total:/     { total = $2 }
+            /^  failed:/    { failed = $2
+                              if (name != "") { printf "%s\t%s\t%s\t%s\n",
+                                                name, (failed == 0 ? "pass" : "FAIL"), total, failed
+                                                name = "" } }
+          ' "${log}" > "${RUNNER_TEMP}/suite-totals.tsv"
+
+          rows="$(wc -l < "${RUNNER_TEMP}/suite-totals.tsv" | tr -d ' ')"
+
+          # A summary that lists nothing reads exactly like a summary of a clean run. The whole
+          # point of publishing totals is to make a shrinking gate visible, so a parse that
+          # found no suites fails the job rather than printing an empty table.
+          if [[ "${rows}" -eq 0 ]]; then
+            echo 'suite-totals: parsed no suites from the run output' >&2
+            exit 1
+          fi
+
+          discovered="$(grep -E '^Discovered [0-9]+ suite\(s\); ran [0-9]+\.$' "${log}" || true)"
+          if [[ -z "${discovered}" ]]; then
+            echo 'suite-totals: the run did not report a discovery count' >&2
+            exit 1
+          fi
+
+          {
+            echo "### Suites — ${PLATFORM}"
+            echo
+            echo '| Suite | Result | Tests | Failed |'
+            echo '|---|---|---:|---:|'
+            while IFS=$'\t' read -r name result total failed; do
+              echo "| \`${name}\` | ${result} | ${total} | ${failed} |"
+            done < "${RUNNER_TEMP}/suite-totals.tsv"
+            echo
+            echo "${discovered}"
+            awk -F'\t' '$3 != "-" { t += $3; f += $4 } END { printf "\n**%d tests, %d failed.**\n", t, f }' \
+              "${RUNNER_TEMP}/suite-totals.tsv"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Confirm the generated artefacts are committed
         shell: bash
