@@ -225,10 +225,14 @@ jobs:
           }
           case "${CONCERN}" in
             desktop-shard-1)
-              run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --maxWorkers=1 --minWorkers=1
+              run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --maxWorkers=1 --minWorkers=1 \
+                --reporter=default --reporter=json \
+                --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-1.json"
               ;;
             desktop-shard-2)
-              run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --maxWorkers=1 --minWorkers=1
+              run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --maxWorkers=1 --minWorkers=1 \
+                --reporter=default --reporter=json \
+                --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-2.json"
               ;;
             desktop-quality)
               run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
@@ -240,7 +244,9 @@ jobs:
               ;;
             mobile)
               run_quiet mobile-build npm --prefix taurine-mobile run build
-              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
+              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1 \
+                --reporter=default --reporter=json \
+                --outputFile.json="${RUNNER_TEMP}/test-ids/mobile.json"
               run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
               run_quiet mobile-lint npm --prefix taurine-mobile run lint
               ;;
@@ -254,7 +260,9 @@ jobs:
             orchestrate-skill)
               run_quiet contracts npm run check:contracts
               run_quiet wire npm run check:wire
-              run_quiet packages-tests npm run test:packages
+              run_quiet packages-tests npm run test:packages -- \
+                --reporter=default --reporter=json \
+                --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"
               run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
               run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
               ;;
@@ -282,3 +290,44 @@ jobs:
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      # The sanitized proof above says validation passed; this section names the
+      # tests that passed, so a public run shows exactly which tests a SHA
+      # exercised. The inventory is repo-relative file paths and test titles,
+      # plus status and duration — never test source, fixtures, data values or
+      # environment details. The collector (checked out with the source it
+      # reports on) re-scans every path and title with the repository's own
+      # secret-shape rules and drops rather than publishes anything that
+      # matches; it builds the whole section in memory and writes it once, so
+      # nothing reaches the summary unless the sanitized render completed. The
+      # runner's raw reporter JSON stays in RUNNER_TEMP and is not uploaded.
+      - name: Publish test identities exercised by this concern
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONCERN: ${{ matrix.concern }}
+        run: |
+          set -euo pipefail
+          # Only the concerns that ran a JavaScript test suite have an
+          # inventory; every other concern leaves its summary as it was.
+          case "${CONCERN}" in
+            desktop-shard-1|desktop-shard-2|mobile|orchestrate-skill) ;;
+            *) exit 0 ;;
+          esac
+          checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
+          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
+          [[ "${checked_out_sha}" == "${requested_sha}" ]]
+          # The collector exits zero even when it cannot collect (fail closed:
+          # a fixed "unavailable" line instead of an error or a partial list),
+          # but if the collector itself fails to run, publish the same fixed
+          # line rather than letting the step turn a green concern red.
+          if ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
+            TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}" \
+            taurine-desktop/node_modules/.bin/vite-node scripts/ci/collect-test-ids.ts \
+            >> "${GITHUB_STEP_SUMMARY}"; then
+            {
+              echo "### Tests exercised by this run"
+              echo
+              echo "Test inventory unavailable: the collector did not complete."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
