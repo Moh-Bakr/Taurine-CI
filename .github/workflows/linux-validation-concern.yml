@@ -510,14 +510,20 @@ jobs:
           # The collector exits zero even when it cannot collect (fail closed:
           # a fixed "unavailable" line instead of an error or a partial list),
           # but if the collector itself fails to run, publish the same fixed
-          # line rather than letting the step turn a green concern red.
+          # line rather than letting the step turn a green concern red. The
+          # section goes to the step log as well as the summary: the summary is
+          # what a reader sees, the log is the greppable record of exactly
+          # which identities were published to this run.
+          section_file="${RUNNER_TEMP}/test-ids/summary-section.md"
           if ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
             TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}" \
             taurine-desktop/node_modules/.bin/vite-node scripts/ci/collect-test-ids.ts \
-            >> "${GITHUB_STEP_SUMMARY}"; then
+            > "${section_file}"; then
             {
               echo "### Tests exercised by this run"
               echo
               echo "Test inventory unavailable: the collector did not complete."
-            } >> "${GITHUB_STEP_SUMMARY}"
+            } > "${section_file}"
           fi
+          cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
+          cat "${section_file}"
