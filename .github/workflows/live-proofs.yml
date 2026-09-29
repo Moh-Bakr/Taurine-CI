@@ -254,7 +254,7 @@ jobs:
               # register and report its tablets after its container starts —
               # the wait below polls the FE for a live backend and allows
               # 15 minutes before giving up. Root ships with an empty
-              # password; the `default` database exists on a fresh cluster.
+              # password.
               docker network create --subnet=172.20.80.0/24 dbx-doris-net
               docker run -d --name dbx-doris-fe --hostname fe \
                 --network dbx-doris-net --ip 172.20.80.2 \
@@ -278,6 +278,13 @@ jobs:
                 docker logs dbx-doris-be 2>&1 | tail -20 >&2 || true
                 exit 1
               fi
+              # Two lab facts a fresh single-BE cluster needs pinned, the way
+              # db-lab creates `payments` and sets compatibility knobs for
+              # the engines it hosts: modern Doris ships no `default`
+              # database, and a table's default replication of 3 cannot be
+              # satisfied by one backend. Both are measured, not assumed.
+              mysql -h127.0.0.1 -P9030 -uroot -e 'CREATE DATABASE IF NOT EXISTS `default`'
+              mysql -h127.0.0.1 -P9030 -uroot -e 'ADMIN SET FRONTEND CONFIG ("force_olap_table_replication_num" = "1")'
               version="$(mysql -h127.0.0.1 -P9030 -uroot -N -e 'select version()' 2>/dev/null | head -1)"
               {
                 echo "TAURINE_TEST_DORIS=127.0.0.1:9030"
@@ -292,8 +299,8 @@ jobs:
               # readiness shape as Doris: poll the FE's MySQL wire on 9030
               # for a live backend, 20 minutes budget. Root ships with an
               # empty password. A fresh cluster has no `default` database
-              # (Doris does; StarRocks does not), so create it — the suite's
-              # flavour qualifies table paths by database.
+              # (neither engine ships one any more), so create it — the
+              # suite's flavour qualifies table paths by database.
               docker run -d --name dbx-starrocks --hostname dbx-sr \
                 -p 127.0.0.1:9030:9030 \
                 starrocks/allin1-ubuntu:3.2.3
