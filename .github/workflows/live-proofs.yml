@@ -405,8 +405,17 @@ jobs:
               # since minute one — the probe, not the server, was the
               # suspect, and a single signal makes a twenty-minute round
               # trip the only way to learn that.
+              # `onstat` exits non-zero as a status bitmask even while the
+              # server is On-Line (exit 5 measured on 14.10.FC7W1DE), so the
+              # answer is what it prints, never what it returns — and with
+              # `pipefail` its exit code must not reach the probe. The same
+              # bitmask killed the version capture below through `set -e`:
+              # the server came up, the database was created, and the step
+              # died mid-assignment without a word.
+              informix_online=""
               for attempt in $(seq 1 90); do
-                if docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -E -- '-- On-?Line'; then
+                informix_online="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -E -- '-- On-?Line' || true)"
+                if [[ -n "${informix_online}" ]]; then
                   ready=1
                   break
                 fi
@@ -433,7 +442,7 @@ jobs:
                   docker exec -i dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/dbaccess -' 2>&1 | tail -10 >&2 || true
                 exit 1
               fi
-              version="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | head -1)"
+              version="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -m1 'IBM Informix' || true)"
               {
                 echo "TAURINE_TEST_INFORMIX=127.0.0.1:9088"
                 echo "TAURINE_TEST_INFORMIX_DB=taurine"
