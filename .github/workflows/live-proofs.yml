@@ -456,11 +456,16 @@ jobs:
             echo 'No proof log was produced; the run step did not execute' >&2
             exit 1
           fi
-          header="$(grep -E '^[a-z0-9]+ — [0-9]+ checks: ' "${log}" | tail -1 || true)"
+          header="$(grep -E '^[a-z0-9]+.*[0-9]+ checks: [0-9]+ passed' "${log}" | tail -1 || true)"
           outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  ' "${log}" | sed -E 's/[[:space:]]+$//' || true)"
           result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
           test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 || true)"
-          panicked="$(grep -E '^panicked at' "${log}" | head -2 || true)"
+          # The panic block carries the assertion that named the failure: the
+          # connect outcome, the suite's report header, the sign-off's counts.
+          # Paths are redacted and lines cut before anything is published; the
+          # content is server error strings and the suite's own synthetic
+          # constants, never credentials or captured data.
+          panicked="$(grep -B2 -A30 'panicked at' "${log}" | head -80 | sed -E 's#/home/runner/work/[^ ]+#<private-path>#g' | cut -c1-200 || true)"
           {
             echo "## Live proof — ${ENGINE}"
             echo
@@ -494,10 +499,10 @@ jobs:
               echo '```'
             fi
             if [[ -n "${panicked}" ]]; then
-              echo 'Failure location (paths redacted):'
+              echo 'Failure block (paths redacted, truncated):'
               echo
               echo '```'
-              printf '%s\n' "${panicked}" | sed -E 's#/home/runner/work/[^ ]+#<private-path>#g'
+              printf '%s\n' "${panicked}"
               echo '```'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
