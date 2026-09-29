@@ -392,15 +392,32 @@ jobs:
                 -p 127.0.0.1:9088:9088 -p 127.0.0.1:9089:9089 \
                 -e LICENSE=accept \
                 ibmcom/informix-developer-database:14.10.FC7W1DE
-              for attempt in $(seq 1 60); do
+              # Two independent readiness signals, either of which proves the
+              # server is open for business: the engine's own onstat by
+              # binary path, and the SQLI listener socket the agent will
+              # dial. (The second exists because the first failed for twenty
+              # minutes on a runner where the container log showed the
+              # server online since minute one — the probe, not the server,
+              # was the suspect, and a single signal makes a twenty-minute
+              # round trip the only way to learn that.)
+              for attempt in $(seq 1 90); do
                 if docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -E -- '-- On-?Line'; then
                   ready=1
+                  break
+                fi
+                if (exec 3<>/dev/tcp/127.0.0.1/9088) 2>/dev/null; then
+                  echo 'informix: onstat did not answer but the SQLI listener is accepting'
+                  ready=2
                   break
                 fi
                 sleep 20
               done
               if (( ready == 0 )); then
-                echo 'informix: not online after 20 minutes; log tail below' >&2
+                echo 'informix: not online after 30 minutes' >&2
+                echo 'the onstat probe said:' >&2
+                docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>&1 | tail -5 >&2 || echo '  (the probe itself could not run)' >&2
+                docker exec dbx-informix bash -c 'echo exec-alive' 2>&1 | tail -1 >&2 || echo '  (docker exec itself failed)' >&2
+                echo 'container log tail:' >&2
                 docker logs dbx-informix 2>&1 | tail -30 >&2 || true
                 exit 1
               fi
