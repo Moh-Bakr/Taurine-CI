@@ -76,6 +76,11 @@ jobs:
             ".github/workflows/orchestrate-validation.yml"
             # Second private source: Moh-Bakr/keeldock-cloud rather than Taurine.
             ".github/workflows/keeldock-validation-concern.yml"
+            # Env-gated live database proofs: dispatch-only, checks out the
+            # exact private SHA, runs one engine's conformance suite against
+            # its documented single-node Docker server, publishes only a
+            # sanitized summary (check titles and counts, never data values).
+            ".github/workflows/live-proofs.yml"
           )
           reusable_protected_workflows=(
             ".github/workflows/windows-validation-concern.yml"
