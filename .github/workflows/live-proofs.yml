@@ -476,7 +476,7 @@ jobs:
           # step that proved nothing. Published beside the label: the content
           # is the suite's own synthetic constants and server error strings,
           # never credentials or captured data. Paths are redacted below.
-          outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  |^        (proved nothing|descriptor\.|flavour\.)' "${log}" | sed -E 's/[[:space:]]+$//' | sed -E 's#/home/runner/work/[^ ]+#<private-path>#g' | cut -c1-200 || true)"
+          outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  |^        ' "${log}" | sed -E 's/[[:space:]]+$//' | sed -E 's#/home/runner/work/[^ ]+#<private-path>#g' | cut -c1-200 || true)"
           result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
           test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 || true)"
           # The panic block carries the assertion that named the failure: the
