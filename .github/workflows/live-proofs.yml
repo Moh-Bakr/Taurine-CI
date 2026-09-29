@@ -392,21 +392,26 @@ jobs:
                 -p 127.0.0.1:9088:9088 -p 127.0.0.1:9089:9089 \
                 -e LICENSE=accept \
                 ibmcom/informix-developer-database:14.10.FC7W1DE
-              # Two independent readiness signals, either of which proves the
-              # server is open for business: the engine's own onstat by
-              # binary path, and the SQLI listener socket the agent will
-              # dial. (The second exists because the first failed for twenty
-              # minutes on a runner where the container log showed the
-              # server online since minute one — the probe, not the server,
-              # was the suspect, and a single signal makes a twenty-minute
-              # round trip the only way to learn that.)
+              # Two readiness signals, either of which proves the server is
+              # open for business: the engine's own onstat by binary path,
+              # and the SQLI listener dialled **inside the container** — the
+              # host-mapped port is useless here, because docker's userland
+              # proxy accepts a connection the moment the mapping exists,
+              # before the server listens (measured: a 250-millisecond-old
+              # container "passed" that probe and the lane sailed past a
+              # server that had not finished init). The listener probe
+              # exists because the exec probe failed for twenty minutes on
+              # one runner while the container log showed the server online
+              # since minute one — the probe, not the server, was the
+              # suspect, and a single signal makes a twenty-minute round
+              # trip the only way to learn that.
               for attempt in $(seq 1 90); do
                 if docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -E -- '-- On-?Line'; then
                   ready=1
                   break
                 fi
-                if (exec 3<>/dev/tcp/127.0.0.1/9088) 2>/dev/null; then
-                  echo 'informix: onstat did not answer but the SQLI listener is accepting'
+                if docker exec dbx-informix bash -c 'exec 3<>/dev/tcp/127.0.0.1/9088' 2>/dev/null; then
+                  echo 'informix: onstat did not answer but the SQLI listener is accepting (in-container)'
                   ready=2
                   break
                 fi
