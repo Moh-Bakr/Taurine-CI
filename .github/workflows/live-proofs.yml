@@ -376,17 +376,24 @@ jobs:
               # entitlement; this Docker Hub image is the anonymously
               # pullable one the driver's descriptor names). Privileged, and
               # run with a TTY as its documentation recommends. Readiness is
-              # the server's own onstat reporting the engine online; the
-              # developer image ships no empty application database, so the
-              # lane creates a logged database for the suite, the way the
-              # local lab creates `payments` for other engines. The password
-              # is the image's published default for user `informix`.
+              # the server's own onstat reporting the engine online — run by
+              # binary path with the environment spelled out, because `su -
+              # informix` demands a password this image's account cannot
+              # answer (measured: every readiness probe silently failed
+              # auth while the server had been online for twenty minutes).
+              # The developer image ships no empty application database, so
+              # the lane creates a logged database for the suite, the way
+              # the local lab creates `payments` for other engines. The
+              # password is the image's published default for user
+              # `informix`.
+              # onstat/dbaccess need three variables the image's own layout
+              # implies and no login profile exports to `docker exec`.
               docker run -d -t --name dbx-informix --hostname dbx-ifx --privileged \
                 -p 127.0.0.1:9088:9088 -p 127.0.0.1:9089:9089 \
                 -e LICENSE=accept \
                 ibmcom/informix-developer-database:14.10.FC7W1DE
               for attempt in $(seq 1 60); do
-                if docker exec dbx-informix su - informix -c 'onstat -' 2>/dev/null | grep -qE 'On-?Line'; then
+                if docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -E -- '-- On-?Line'; then
                   ready=1
                   break
                 fi
@@ -398,13 +405,13 @@ jobs:
                 exit 1
               fi
               if ! printf 'create database taurine with log;\n' |
-                docker exec -i dbx-informix su - informix -c 'dbaccess -' >/dev/null 2>&1; then
+                docker exec -i dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/dbaccess -' >/dev/null 2>&1; then
                 echo 'informix: creating the proof database failed; dbaccess output below' >&2
                 printf 'create database taurine with log;\n' |
-                  docker exec -i dbx-informix su - informix -c 'dbaccess -' 2>&1 | tail -10 >&2 || true
+                  docker exec -i dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/dbaccess -' 2>&1 | tail -10 >&2 || true
                 exit 1
               fi
-              version="$(docker exec dbx-informix su - informix -c 'onstat -' 2>/dev/null | head -1)"
+              version="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | head -1)"
               {
                 echo "TAURINE_TEST_INFORMIX=127.0.0.1:9088"
                 echo "TAURINE_TEST_INFORMIX_DB=taurine"
