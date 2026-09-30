@@ -230,20 +230,37 @@ jobs:
               echo "${label}: passed"
             else
               echo "${label}: failed" >&2
+              # The keyword greps below can match a rustc or vitest
+              # source-excerpt line whose code happens to contain a keyword
+              # (a variable named `target`, an assertion over `error`s), and
+              # one such line leaked in round 3. Every publish path therefore
+              # drops the excerpt shapes first: a numbered source line
+              # (`12 | code`), a caret/underline annotation (`| ^^^^`,
+              # `| ___^`, `| |___`), and the bare separator (`|`). Location
+              # (`--> file:line:col`) and error-header lines carry no source
+              # text and survive.
+              strip_excerpts() {
+                sed -E '/^[[:space:]]*[0-9]+[[:space:]]*[|]/d;
+                        /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
+                        /^[[:space:]]*[|][[:space:]]*$/d'
+              }
               # Keep diagnostics useful without publishing source snippets or full logs.
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
                 sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
               # Preserve diagnostic headers and source locations without
               # publishing private source excerpts.
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
                 sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                strip_excerpts |
                 grep -E 'error\\[E[0-9]+\\]|--> [^ ]+:[0-9]+:[0-9]+' |
                 head -30 >&2 || true
               if [[ "${label}" == android-debug-build ]]; then
                 sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  strip_excerpts |
                   grep -E 'error\\[E[0-9]+\\]|--> [^ ]+:[0-9]+:[0-9]+' |
                   head -30 >&2 || true
               fi
@@ -294,8 +311,23 @@ jobs:
               echo "${label}: passed"
             else
               echo "${label}: failed" >&2
+              # The keyword greps below can match a rustc or vitest
+              # source-excerpt line whose code happens to contain a keyword
+              # (a variable named `target`, an assertion over `error`s), and
+              # one such line leaked in round 3. Every publish path therefore
+              # drops the excerpt shapes first: a numbered source line
+              # (`12 | code`), a caret/underline annotation (`| ^^^^`,
+              # `| ___^`, `| |___`), and the bare separator (`|`). Location
+              # (`--> file:line:col`) and error-header lines carry no source
+              # text and survive.
+              strip_excerpts() {
+                sed -E '/^[[:space:]]*[0-9]+[[:space:]]*[|]/d;
+                        /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
+                        /^[[:space:]]*[|][[:space:]]*$/d'
+              }
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
                 sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
               if [[ "${label}" == mobile-tests ]]; then
@@ -303,6 +335,7 @@ jobs:
                 # diagnose hosted-only failures; never publish source lines.
                 sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  strip_excerpts |
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
               fi
@@ -312,6 +345,7 @@ jobs:
                 # control plane never publishes private source excerpts.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  strip_excerpts |
                   grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                   head -30 >&2 || true
               fi
