@@ -183,6 +183,12 @@ jobs:
           # workspace that Tauri does not consume. Install the exact simulator
           # Rust target required by the explicit build below instead.
           rustup target add aarch64-apple-ios-sim aarch64-apple-ios
+          # swift-rs 1.0.8 under Xcode >= 27 promotes Swift static-archive
+          # @_cdecl exports with llvm-objcopy; the rustup llvm-tools
+          # component ships it in the sysroot the private build script
+          # probes. Missing it fails the app link with undefined arm64
+          # symbols (_register_plugin and friends).
+          rustup component add llvm-tools
           # rquickjs bindgen is shared by the mobile Rust target. Xcode ships
           # clang, but the bindgen loader needs the standalone libclang dylib.
           brew list llvm >/dev/null 2>&1 || brew install llvm
@@ -199,6 +205,23 @@ jobs:
           # that suffix is not a valid clang target triple. Bindgen only needs
           # the Apple ABI while Cargo/Xcode still selects the simulator SDK.
           echo 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim=--target=aarch64-apple-ios' >> "${GITHUB_ENV}"
+          # hickory-resolver's Apple system-configuration reader (feature-
+          # unified in via mongodb's dns-resolver) binds SystemConfiguration
+          # through a cargo build-script flag that Xcode's libapp.a link
+          # drops. Declare the framework in the generated project so the
+          # app link keeps it, then regenerate the project.
+          if ! grep -q 'SystemConfiguration.framework' taurine-mobile/src-tauri/gen/apple/project.yml; then
+            python3 - <<'PY'
+            p = 'taurine-mobile/src-tauri/gen/apple/project.yml'
+            s = open(p).read()
+            needle = '      - sdk: UIKit.framework'
+            assert needle in s, 'UIKit framework entry not found in project.yml'
+            s = s.replace(needle, '      - sdk: SystemConfiguration.framework\n' + needle, 1)
+            open(p, 'w').write(s)
+            PY
+          fi
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          (cd taurine-mobile/src-tauri/gen/apple && xcodegen generate)
           test -f taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj/project.pbxproj
 
       - name: Patch rquickjs simulator bindgen target on runner
