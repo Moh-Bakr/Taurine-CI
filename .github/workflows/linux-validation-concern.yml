@@ -299,10 +299,30 @@ jobs:
                 echo "${label}: failed (detailed output withheld)" >&2
               fi
               if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
+                # The keyword grep below can match a vitest or Playwright
+                # code-frame line whose quoted source happens to contain a
+                # keyword (an assertion over an `expected`/`received` value),
+                # which would publish a private test-source line. The excerpt
+                # shapes are therefore dropped before the allow-list: a
+                # numbered source line (`12 | code`), the babel/vitest
+                # code-frame form whose failing line is marked with a `>`
+                # gutter (`> 12 | code`), a caret/underline annotation
+                # (`| ^^^^`, `| ___^`, `| |___`), and the bare separator (`|`).
+                # The assertion library's own expected/received VALUE lines
+                # and pass/fail headers are test expectations, not app
+                # source, so they are the publishable diagnostic and stay;
+                # only the adjacent raw source lines are removed. Location
+                # lines carry no source text and survive.
+                strip_excerpts() {
+                  sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
+                          /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
+                          /^[[:space:]]*[|][[:space:]]*$/d'
+                }
                 # Keep hosted-only diagnostics useful without publishing
                 # private source paths or compiler/test output.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  strip_excerpts |
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|timed out|(^|[[:space:]])[0-9]+ (passed|failed|flaky|skipped)|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
               fi

@@ -165,8 +165,28 @@ jobs:
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
               if [[ "${label}" == desktop-tests-* || "${label}" == mobile-tests || "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
+                # The keyword grep below can match a vitest, Jest, or node
+                # --test code-frame line whose quoted source happens to
+                # contain a keyword, which would publish a private
+                # test-source line. The excerpt shapes are therefore dropped
+                # before the allow-list: a numbered source line
+                # (`12 | code`), the babel/vitest code-frame form whose
+                # failing line is marked with a `>` gutter (`> 12 | code`),
+                # a caret/underline annotation (`| ^^^^`, `| ___^`, `| |___`),
+                # and the bare separator (`|`). The assertion library's own
+                # expected/received VALUE lines and pass/fail headers are
+                # test expectations, not app source, so they are the
+                # publishable diagnostic and stay; only the adjacent raw
+                # source lines are removed. Location lines carry no source
+                # text and survive.
+                strip_excerpts() {
+                  sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
+                          /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
+                          /^[[:space:]]*[|][[:space:]]*$/d'
+                }
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#([A-Za-z]:)?\\[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  strip_excerpts |
                   grep -Ei '(FAIL|PASS|Test Files|Tests|Snapshots|Time|Assertion|Error:|expected|received|timed out|unhandled|ENOENT|EACCES|EPERM|not ok)' |
                   head -20 >&2 || true
               fi
@@ -199,8 +219,28 @@ jobs:
               elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then reason='test failure'; fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
               if [[ "${label}" == desktop-tests-* || "${label}" == mobile-tests || "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
+                # The keyword grep below can match a vitest, Jest, or node
+                # --test code-frame line whose quoted source happens to
+                # contain a keyword, which would publish a private
+                # test-source line. The excerpt shapes are therefore dropped
+                # before the allow-list: a numbered source line
+                # (`12 | code`), the babel/vitest code-frame form whose
+                # failing line is marked with a `>` gutter (`> 12 | code`),
+                # a caret/underline annotation (`| ^^^^`, `| ___^`, `| |___`),
+                # and the bare separator (`|`). The assertion library's own
+                # expected/received VALUE lines and pass/fail headers are
+                # test expectations, not app source, so they are the
+                # publishable diagnostic and stay; only the adjacent raw
+                # source lines are removed. Location lines carry no source
+                # text and survive.
+                strip_excerpts() {
+                  sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
+                          /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
+                          /^[[:space:]]*[|][[:space:]]*$/d'
+                }
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#([A-Za-z]:)?\\[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  strip_excerpts |
                   grep -Ei '(FAIL|PASS|Test Files|Tests|Snapshots|Time|Assertion|Error:|expected|received|timed out|unhandled|ENOENT|EACCES|EPERM|not ok)' |
                   head -20 >&2 || true
               fi
