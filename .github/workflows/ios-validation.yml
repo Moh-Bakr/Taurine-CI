@@ -211,14 +211,14 @@ jobs:
           # drops. Declare the framework in the generated project so the
           # app link keeps it, then regenerate the project.
           if ! grep -q 'SystemConfiguration.framework' taurine-mobile/src-tauri/gen/apple/project.yml; then
-            python3 - <<'PY'
-            p = 'taurine-mobile/src-tauri/gen/apple/project.yml'
-            s = open(p).read()
-            needle = '      - sdk: UIKit.framework'
-            assert needle in s, 'UIKit framework entry not found in project.yml'
-            s = s.replace(needle, '      - sdk: SystemConfiguration.framework\n' + needle, 1)
-            open(p, 'w').write(s)
-            PY
+          python3 - <<'PY'
+          p = 'taurine-mobile/src-tauri/gen/apple/project.yml'
+          s = open(p).read()
+          needle = '      - sdk: UIKit.framework'
+          assert needle in s, 'UIKit framework entry not found in project.yml'
+          s = s.replace(needle, '      - sdk: SystemConfiguration.framework\n' + needle, 1)
+          open(p, 'w').write(s)
+          PY
           fi
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
           (cd taurine-mobile/src-tauri/gen/apple && xcodegen generate)
