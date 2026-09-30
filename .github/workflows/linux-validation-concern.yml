@@ -286,6 +286,19 @@ jobs:
             fi
           }
 
+          # On failure the advisory findings are published: the RUSTSEC/CVE
+          # id, the crate, and the locked version are public registry facts
+          # that name the finding — the same rule the Rust concern follows,
+          # publish what names the failure, never what the failure was in.
+          # Everything cargo-audit prints around them (the dependency-graph
+          # context, the advisory-db fetch log, local paths) stays withheld.
+          cargo_audit_detail() {
+            sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
+              sed -E 's#/home/runner/work/[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g' |
+              grep -E '^error: |^warning: |^Crate: |^Version: |^ID: |^Warning: |^Severity: |^URL: |RUSTSEC-[0-9]{4}-[0-9]{4,}|CVE-[0-9]{4}-[0-9]+' |
+              head -40 >&2 || true
+          }
+
           run_quiet() {
             local label="$1"; shift
             local log="${RUNNER_TEMP}/${label}.log"
@@ -295,6 +308,9 @@ jobs:
               if [[ "${label}" == cli-* ]]; then
                 echo "${label}: failed ($(cargo_reason "${log}"); sanitized detail below)" >&2
                 cargo_detail "${log}"
+              elif [[ "${label}" == cargo-audit ]]; then
+                echo "${label}: failed (advisory findings below; remaining output withheld)" >&2
+                cargo_audit_detail "${log}"
               else
                 echo "${label}: failed (detailed output withheld)" >&2
               fi
@@ -337,6 +353,37 @@ jobs:
               run_quiet packages-tests npm run test:packages -- \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"
+
+              # Supply-chain sweep (milestone-1 audit, tooling-gap finding):
+              # the RustSec advisory database is swept against the private
+              # source's committed Cargo.lock on every contracts concern. The
+              # scanner is the RustSec project's own release tarball, pinned
+              # here to an exact version AND an exact sha256 recorded in this
+              # file — a changed or moved release fails the checksum gate
+              # instead of being silently installed, so this step cannot
+              # float. No Rust toolchain is pulled in for it: a scanner that
+              # could compile anything is also a step that could execute
+              # anything, and this one only needs to read a lock file.
+              # Unmaintained-crate warnings (rustls-pemfile, paste) are
+              # recorded acceptances tracked in the private repository and do
+              # not fail the concern; only vulnerabilities do.
+              run_quiet cargo-audit-install bash -c '
+                set -euo pipefail
+                bin_dir="${RUNNER_TEMP}/cargo-audit-bin"
+                mkdir -p "${bin_dir}"
+                tgz="${RUNNER_TEMP}/cargo-audit-v0.22.2.tgz"
+                curl --fail --silent --show-error --retry 2 --location \
+                  --output "${tgz}" \
+                  "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz"
+                echo "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  ${tgz}" | sha256sum --check --status
+                tar -xzf "${tgz}" -C "${bin_dir}"
+                "${bin_dir}/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit" --version
+              '
+              run_quiet cargo-audit bash -c '
+                set -euo pipefail
+                "${RUNNER_TEMP}/cargo-audit-bin/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit" \
+                  audit --file Cargo.lock
+              '
               ;;
             frontend-build-budget)
               run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
