@@ -235,12 +235,13 @@ jobs:
               # (a variable named `target`, an assertion over `error`s), and
               # one such line leaked in round 3. Every publish path therefore
               # drops the excerpt shapes first: a numbered source line
-              # (`12 | code`), a caret/underline annotation (`| ^^^^`,
-              # `| ___^`, `| |___`), and the bare separator (`|`). Location
-              # (`--> file:line:col`) and error-header lines carry no source
-              # text and survive.
+              # (`12 | code`), the babel/vitest code-frame form whose failing
+              # line is marked with a `>` gutter (`> 12 | code`), a
+              # caret/underline annotation (`| ^^^^`, `| ___^`, `| |___`),
+              # and the bare separator (`|`). Location (`--> file:line:col`)
+              # and error-header lines carry no source text and survive.
               strip_excerpts() {
-                sed -E '/^[[:space:]]*[0-9]+[[:space:]]*[|]/d;
+                sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
                         /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
                         /^[[:space:]]*[|][[:space:]]*$/d'
               }
@@ -255,13 +256,13 @@ jobs:
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
                 sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
                 strip_excerpts |
-                grep -E 'error\\[E[0-9]+\\]|--> [^ ]+:[0-9]+:[0-9]+' |
+                grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                 head -30 >&2 || true
               if [[ "${label}" == android-debug-build ]]; then
                 sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
                   strip_excerpts |
-                  grep -E 'error\\[E[0-9]+\\]|--> [^ ]+:[0-9]+:[0-9]+' |
+                  grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                   head -30 >&2 || true
               fi
               exit 1
@@ -316,12 +317,13 @@ jobs:
               # (a variable named `target`, an assertion over `error`s), and
               # one such line leaked in round 3. Every publish path therefore
               # drops the excerpt shapes first: a numbered source line
-              # (`12 | code`), a caret/underline annotation (`| ^^^^`,
-              # `| ___^`, `| |___`), and the bare separator (`|`). Location
-              # (`--> file:line:col`) and error-header lines carry no source
-              # text and survive.
+              # (`12 | code`), the babel/vitest code-frame form whose failing
+              # line is marked with a `>` gutter (`> 12 | code`), a
+              # caret/underline annotation (`| ^^^^`, `| ___^`, `| |___`),
+              # and the bare separator (`|`). Location (`--> file:line:col`)
+              # and error-header lines carry no source text and survive.
               strip_excerpts() {
-                sed -E '/^[[:space:]]*[0-9]+[[:space:]]*[|]/d;
+                sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
                         /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
                         /^[[:space:]]*[|][[:space:]]*$/d'
               }
