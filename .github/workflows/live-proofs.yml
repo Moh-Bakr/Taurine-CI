@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: Engine to prove (doris | starrocks | db2 | informix)
+        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq)
         required: true
         type: string
       source_sha:
@@ -72,8 +72,8 @@ jobs:
             exit 1
           fi
           case "${REQUESTED_ENGINE}" in
-            doris|starrocks|db2|informix) ;;
-            *) echo "engine must be one of: doris, starrocks, db2, informix" >&2; exit 1 ;;
+            doris|starrocks|db2|informix|rocketmq) ;;
+            *) echo "engine must be one of: doris, starrocks, db2, informix, rocketmq" >&2; exit 1 ;;
           esac
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
@@ -217,6 +217,7 @@ jobs:
             doris|starrocks) target_args=(--test live_servers) ;;
             db2)             target_args=(--test db2_live) ;;
             informix)        target_args=(--test informix_live) ;;
+            rocketmq)        target_args=(--test rocketmq_live) ;;
             *) echo "Unsupported engine: ${ENGINE}" >&2; exit 2 ;;
           esac
           if ! cargo test -p taurine-db-conformance "${target_args[@]}" --no-run \
@@ -452,6 +453,69 @@ jobs:
               } >> "${GITHUB_ENV}"
               ;;
 
+            rocketmq)
+              # Apache RocketMQ 5.3.2, the NameServer-plus-broker pair the
+              # official quick start describes, on a docker network (the
+              # image is a few hundred MB compressed — the smallest guest
+              # this workflow hosts). The one RocketMQ quirk a loopback lab
+              # has is the broker's *advertised* address: what the broker
+              # registers with the NameServer is the address the client
+              # dials next, so it must be one the host can reach — hence the
+              # mounted broker.conf pinning brokerIP1 to 127.0.0.1 with the
+              # broker port published beside it. Readiness is the admin
+              # conversation itself (mqadmin clusterList answering with the
+              # broker), 10 minutes budget. The lane pre-creates the two
+              # fixtures the suite names — a topic and a consumer group —
+              # because a pristine broker legitimately answers an empty
+              # group table, and a run that cannot tell "empty because
+              # fresh" from "folder answered with real content" proves
+              # nothing about the folder.
+              docker network create dbx-rocketmq-net
+              printf '%s\n' \
+                'brokerClusterName = DefaultCluster' \
+                'brokerName = broker-a' \
+                'brokerId = 0' \
+                'brokerRole = ASYNC_MASTER' \
+                'flushDiskType = ASYNC_FLUSH' \
+                'brokerIP1 = 127.0.0.1' \
+                'listenPort = 10911' \
+                'autoCreateTopicEnable = false' \
+                > "${RUNNER_TEMP}/broker.conf"
+              docker run -d --name dbx-rocketmq-namesrv --hostname namesrv \
+                --network dbx-rocketmq-net \
+                -p 127.0.0.1:9876:9876 \
+                -e JAVA_OPT_EXT="-Xms256m -Xmx256m" \
+                apache/rocketmq:5.3.2 sh mqnamesrv
+              docker run -d --name dbx-rocketmq-broker --hostname broker \
+                --network dbx-rocketmq-net \
+                -p 127.0.0.1:10911:10911 -p 127.0.0.1:10909:10909 \
+                -v "${RUNNER_TEMP}/broker.conf:/home/rocketmq/conf/broker.conf" \
+                -e JAVA_OPT_EXT="-Xms512m -Xmx512m" \
+                apache/rocketmq:5.3.2 sh mqbroker -n namesrv:9876 -c /home/rocketmq/conf/broker.conf
+              for attempt in $(seq 1 30); do
+                if docker exec dbx-rocketmq-broker sh mqadmin clusterList -n namesrv:9876 2>/dev/null | grep -q 'broker-a'; then
+                  ready=1
+                  break
+                fi
+                sleep 20
+              done
+              if (( ready == 0 )); then
+                echo 'rocketmq: no live broker after 10 minutes; log tails below' >&2
+                docker logs dbx-rocketmq-namesrv 2>&1 | tail -20 >&2 || true
+                docker logs dbx-rocketmq-broker 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              docker exec dbx-rocketmq-broker sh mqadmin updateTopic -n namesrv:9876 -c DefaultCluster -t taurine_proof_topic >/dev/null
+              docker exec dbx-rocketmq-broker sh mqadmin updateSubGroup -n namesrv:9876 -c DefaultCluster -g taurine_proof_group >/dev/null
+              version="$(docker exec dbx-rocketmq-broker sh mqadmin clusterList -n namesrv:9876 2>/dev/null | awk 'NR>1 && $2 == "broker-a" {print $5; exit}')"
+              {
+                echo "TAURINE_TEST_ROCKETMQ=127.0.0.1:9876"
+                echo "TAURINE_TEST_ROCKETMQ_TOPIC=taurine_proof_topic"
+                echo "TAURINE_TEST_ROCKETMQ_GROUP=taurine_proof_group"
+                echo "PROOF_SERVER_VERSION=Apache RocketMQ ${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
             *)
               echo "Unsupported engine: ${ENGINE}" >&2
               exit 2
@@ -476,10 +540,15 @@ jobs:
             starrocks) target=live_servers;   filter=starrocks_passes_every_check ;;
             db2)       target=db2_live;       filter=db2_passes_every_check_against_a_live_server ;;
             informix)  target=informix_live;  filter=informix_passes_every_check_against_a_live_server ;;
+            # Both tests in the file are the proof: the admin-surface run and
+            # the refusal run, so no filter — the whole file runs.
+            rocketmq)  target=rocketmq_live;  filter="" ;;
             *) echo "Unsupported engine: ${ENGINE}" >&2; exit 2 ;;
           esac
           set +e
-          cargo test -p taurine-db-conformance --test "${target}" "${filter}" -- --nocapture \
+          filter_args=()
+          [[ -n "${filter}" ]] && filter_args=("${filter}")
+          cargo test -p taurine-db-conformance --test "${target}" "${filter_args[@]}" -- --nocapture \
             >"${RUNNER_TEMP}/live-proof.log" 2>&1
           status=$?
           set -e
@@ -526,6 +595,7 @@ jobs:
               starrocks) echo '- Image: starrocks/allin1-ubuntu:3.2.3 (all-in-one fe + be)' ;;
               db2)       echo '- Image: icr.io/db2_community/db2:11.5.9.0 (privileged, amd64)' ;;
               informix)  echo '- Image: ibmcom/informix-developer-database:14.10.FC7W1DE (privileged, amd64)' ;;
+              rocketmq)  echo '- Images: apache/rocketmq:5.3.2 (NameServer + broker, brokerIP1 pinned to 127.0.0.1)' ;;
             esac
             echo "- Source token: revoked before any project command"
             echo "- Runner: $(nproc) vCPU, $(free -m | awk '/^Mem:/{print $2}') MB RAM, $(df -BG --output=avail / | tail -1 | tr -d ' ') GB disk free after the run"
