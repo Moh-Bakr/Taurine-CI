@@ -354,9 +354,11 @@ jobs:
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"
 
-              # Supply-chain sweep (milestone-1 audit, tooling-gap finding):
-              # the RustSec advisory database is swept against the private
-              # source's committed Cargo.lock on every contracts concern. The
+              # Supply-chain sweep (milestone-1 audit, tooling-gap finding;
+              # coverage widened per the 2026-10-02 security conformance
+              # audit): the RustSec advisory database is swept against EVERY
+              # Cargo.lock committed to the private source on every
+              # contracts concern. The
               # scanner is the RustSec project's own release tarball, pinned
               # here to an exact version AND an exact sha256 recorded in this
               # file — a changed or moved release fails the checksum gate
@@ -379,33 +381,47 @@ jobs:
                 tar -xzf "${tgz}" -C "${bin_dir}"
                 "${bin_dir}/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit" --version
               '
-              # Accepted vulnerability advisories (each one reviewed against
-              # the locked graph; the reachability note lives with the private
-              # disposition record, and each flag is dropped the moment the
-              # relevant pin clears the fixed version):
-              # - RUSTSEC-2026-0258 (h2) and RUSTSEC-2026-0104, -0098, -0099,
-              #   -0049 (rustls-webpki): the fixed versions are not reachable
-              #   inside the locked dependency set — they land across
-              #   semver-major boundaries of upstream database drivers whose
-              #   current stable releases still pin the vulnerable series, so
-              #   no stable carrier exists to update to. Exposure is
-              #   client-side, against operator-configured endpoints only;
-              #   the CRL-dependent ones (-0104, -0049) are additionally
-              #   unreachable because no certificate-revocation checking is
-              #   configured anywhere in the product.
-              # - RUSTSEC-2023-0071 (rsa): no patched release exists upstream
-              #   at all; the exposed path is client-side SSH public-key
-              #   signing with operator-supplied keys.
+              # Accepted advisories are recorded in exactly one place: the
+              # reviewed `.cargo/audit.toml` committed at the root of the
+              # private source, which cargo-audit picks up automatically from
+              # its working directory. This workflow hard-codes no advisory
+              # ids, so the suppression list and its review record cannot
+              # drift apart across the repository boundary: an entry removed
+              # from that baseline un-suppresses CI on the next run (fail
+              # closed), and a finding the baseline does not name fails the
+              # concern. Each entry's crate, locked version, dependency path,
+              # rationale and review-by note live in the baseline itself,
+              # beside the lock it qualifies — the reachability record and
+              # the suppression are the same artifact.
+              #
+              # Why every lock, not just the root one: vendored forks and
+              # sub-workspaces commit their own resolved pins (the backend
+              # sub-workspaces and the vendored rumqttc fork each carry a
+              # Cargo.lock), so sweeping only the workspace root leaves whole
+              # dependency sets unscanned. The enumeration is `find`,
+              # excluding only build output (target/) and npm's installed
+              # tree (node_modules/, gitignored — a lock an npm package
+              # ships there is not this repository's resolution). All
+              # discovered locks are audited even after one fails, so a
+              # single run names every failing lock, and on failure the
+              # findings are published exactly as the single-lock sweep
+              # published them.
               run_quiet cargo-audit bash -c '
                 set -euo pipefail
-                "${RUNNER_TEMP}/cargo-audit-bin/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit" \
-                  audit --file Cargo.lock \
-                  --ignore RUSTSEC-2026-0258 \
-                  --ignore RUSTSEC-2026-0104 \
-                  --ignore RUSTSEC-2026-0098 \
-                  --ignore RUSTSEC-2026-0099 \
-                  --ignore RUSTSEC-2026-0049 \
-                  --ignore RUSTSEC-2023-0071
+                audit_bin="${RUNNER_TEMP}/cargo-audit-bin/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit"
+                failed=0
+                while IFS= read -r lock; do
+                  if "${audit_bin}" audit --file "${lock}"; then
+                    echo "cargo-audit: ${lock}: passed"
+                  else
+                    echo "error: unaccepted advisory findings in ${lock}" >&2
+                    failed=1
+                  fi
+                done < <(find . -name Cargo.lock -not -path "*/target/*" -not -path "*/node_modules/*" | sort)
+                if [[ "${failed}" -ne 0 ]]; then
+                  echo "error: the committed Cargo.lock advisory sweep failed" >&2
+                fi
+                exit "${failed}"
               '
               ;;
             frontend-build-budget)
