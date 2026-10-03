@@ -10,6 +10,11 @@ on:
         description: Exact 40-character commit SHA to validate from private Taurine
         required: true
         type: string
+      rust:
+        description: Run the mobile Rust test-target build
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -26,7 +31,40 @@ env:
   SOURCE_REPOSITORY_NAME: Taurine
 
 jobs:
+  # Builds the concern matrix from the `rust` input and reports the choice. It
+  # holds no source, token or environment. The mobile Rust test-target build is
+  # opt-in, as the Rust concerns are on macOS and Windows: dispatch with
+  # `-f rust=true` for plan tips, develop/uat/main tips and mobile-touching branches.
+  plan:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Plan Android concerns
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Select the concerns and report the Rust cadence
+        id: plan
+        shell: bash
+        env:
+          RUST_REQUESTED: ${{ inputs.rust }}
+        run: |
+          set -euo pipefail
+          base='"android-native","mobile-quality","orchestrate-skill"'
+          {
+            echo '## Android Rust concern'
+            echo
+            if [[ "${RUST_REQUESTED}" == true ]]; then
+              echo "matrix={\"concern\":[${base},\"android-rust\"]}" >> "${GITHUB_OUTPUT}"
+              echo '- Requested (rust=true): android-rust is scheduled.'
+            else
+              echo "matrix={\"concern\":[${base}]}" >> "${GITHUB_OUTPUT}"
+              echo '- **Not requested** (rust=false): android-rust was not scheduled. It is neither passed nor failed on this run; dispatch with -f rust=true to run it.'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   validate:
+    needs: plan
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Android ${{ matrix.concern }} validation
     environment: source-read
@@ -34,11 +72,12 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        concern:
-          - android-native
-          - mobile-quality
-          - orchestrate-skill
+      # android-rust (the mobile crate's test targets, compile-only) is added by the
+      # `plan` job when rust=true. The emulator-free hosted runner is x86_64, so the
+      # aarch64 test binaries are built and linked but cannot be executed here; the
+      # host-side Rust tests of the same crate run in the macOS and Linux rust-app
+      # concerns.
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,7 +188,7 @@ jobs:
           node-version: 22.14.0
 
       - name: Prepare Android SDK, JDK, and Rust targets
-        if: matrix.concern == 'android-native'
+        if: matrix.concern == 'android-native' || matrix.concern == 'android-rust'
         shell: bash
         run: |
           set -euo pipefail
@@ -268,20 +307,24 @@ jobs:
               exit 1
             fi
           }
-          run_quiet npm-root npm ci --ignore-scripts
+          if [[ "${{ matrix.concern }}" != 'android-rust' ]]; then
+            run_quiet npm-root npm ci --ignore-scripts
+          fi
           # The mobile Vitest setup and package-contract runner import the
           # desktop workspace's jsdom/Vitest runtime even when no desktop
           # tests execute. Keep the native-only lane smaller, but provision
           # the shared desktop test runtime for mobile and skill concerns.
-          if [[ "${{ matrix.concern }}" != 'android-native' ]]; then
+          if [[ "${{ matrix.concern }}" != 'android-native' && "${{ matrix.concern }}" != 'android-rust' ]]; then
             run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
           fi
-          run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
+          if [[ "${{ matrix.concern }}" != 'android-rust' ]]; then
+            run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
+          fi
           # Cargo.toml patches boringtun to a pinned, locally fetched crate.
           # vendor/ is intentionally ignored and therefore absent from the
           # private checkout; materialize and verify the pinned dependencies on
           # this ephemeral runner before Cargo resolves the mobile workspace.
-          if [[ "${{ matrix.concern }}" == 'android-native' ]]; then
+          if [[ "${{ matrix.concern }}" == 'android-native' || "${{ matrix.concern }}" == 'android-rust' ]]; then
             run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
           fi
 
@@ -357,6 +400,13 @@ jobs:
           case "${CONCERN}" in
             android-native)
               run_quiet android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
+              ;;
+            android-rust)
+              # Compile-only: build and link every test target of the mobile crate for
+              # the Android triple, so the `cfg(target_os = "android")` code and its
+              # tests are type-checked and linked on a hosted runner. They are not
+              # executed (no device or emulator here).
+              run_quiet android-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-linux-android
               ;;
             mobile-quality)
               run_quiet mobile-build npm --prefix taurine-mobile run build
