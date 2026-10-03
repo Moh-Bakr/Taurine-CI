@@ -198,12 +198,15 @@ jobs:
             next unless env_name == 'source-read'
             steps = job['steps'] || []
             revoke_at = steps.index { |st| st['run'].to_s.include?('installation/token') }
+            # The source-checkout composite performs mint, checkout, verification and
+            # revocation as one step; its own structure is enforced separately.
+            revoke_at ||= steps.index { |st| st['uses'].to_s == './.github/actions/source-checkout' }
             if revoke_at.nil?
               failures << "job #{job_id}: no step revokes the source token (installation/token)"
               next
             end
             revoke = steps[revoke_at]
-            unless revoke['if'].to_s.include?('always()')
+            unless revoke['uses'].to_s == './.github/actions/source-checkout' || revoke['if'].to_s.include?('always()')
               failures << "job #{job_id}: the revocation step #{revoke['name'].inspect} is not conditioned on always()"
             end
             steps[0...revoke_at].each do |st|
@@ -243,6 +246,28 @@ jobs:
           file = ARGV[0]
           doc = YAML.safe_load(File.read(file), aliases: false)
           failures = []
+          if file == '.github/actions/source-checkout/action.yml'
+            # The private-source action: mint, then check out, then verify and revoke
+            # under always(), no project command anywhere in it, skip-token-revoke on
+            # the mint (the explicit step owns revocation) and no outputs at all, so
+            # the token can never leave the action.
+            steps = (doc['runs'] || {})['steps'] || []
+            mint = steps.index { |st| st['uses'].to_s.start_with?('actions/create-github-app-token@') }
+            checkout = steps.index { |st| st['uses'].to_s.start_with?('actions/checkout@') }
+            revoke = steps.index { |st| st['run'].to_s.include?('installation/token') }
+            if mint.nil? || checkout.nil? || revoke.nil? || !(mint < checkout && checkout < revoke)
+              failures << "#{file}: steps must be mint, then checkout, then the revoking step"
+            else
+              failures << "#{file}: the revoking step must run under always()" unless steps[revoke]['if'].to_s.include?('always()')
+              failures << "#{file}: the mint step must set skip-token-revoke: true" unless steps[mint].dig('with', 'skip-token-revoke') == true
+            end
+            failures << "#{file}: must not declare outputs" if doc.key?('outputs')
+            steps.each do |st|
+              st['run'].to_s.each_line do |line|
+                failures << "#{file}: project command in the source-checkout action: #{line.strip[0, 50]}" if line =~ /^\s*(npm|npx|cargo|dotnet|xcodebuild|gradle|make|pip|brew|bash\s+scripts\/)(\s|$)/
+              end
+            end
+          end
           runs = doc['runs'] || {}
           failures << "#{file}: runs.using must be composite" unless runs['using'] == 'composite'
           (runs['steps'] || []).each_with_index do |st, i|
@@ -328,6 +353,9 @@ jobs:
                 actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020) ;;
                 actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68) ;;
                 ./.github/workflows/windows-validation-concern.yml) ;;
+                # Local composite actions are reviewed in this repository; each one is added
+                # here deliberately and held to the composite rules below.
+                ./.github/actions/source-checkout) ;;
                 ./.github/workflows/linux-validation-concern.yml) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;
@@ -450,7 +478,16 @@ jobs:
                 echo "The source-read workflow must pin a numeric source repository ID: $workflow" >&2
                 exit 1
               fi
-              if ! grep -qE '^[[:space:]]+source_sha:' "$workflow" || ! grep -qE '\^\[0-9a-fA-F\]\{40\}' "$workflow"; then
+              # A job that uses the source-checkout composite gets the SHA validation, the
+              # identity check and the revocation from it (and the composite's own
+              # structure is enforced in check_composite_action); only a workflow with
+              # its own inline checkout must show them in its own text.
+              uses_source_checkout=0
+              if grep -qE '^[[:space:]]+uses:[[:space:]]+\./\.github/actions/source-checkout([[:space:]]|$)' "$workflow"; then
+                uses_source_checkout=1
+              fi
+              if ! grep -qE '^[[:space:]]+source_sha:' "$workflow" \
+                || { (( ! uses_source_checkout )) && ! grep -qE '\^\[0-9a-fA-F\]\{40\}' "$workflow"; }; then
                 echo "The source-read workflow must require and validate a full source SHA: $workflow" >&2
                 exit 1
               fi
@@ -551,7 +588,7 @@ jobs:
                     ;;
                 esac
               done < <(grep -oE 'vars\.[A-Za-z0-9_]+' "$workflow" | sort -u)
-              if ! grep -qE 'skip-token-revoke:[[:space:]]*true' "$workflow" || ! grep -qE 'installation/token' "$workflow"; then
+              if (( ! uses_source_checkout )) && { ! grep -qE 'skip-token-revoke:[[:space:]]*true' "$workflow" || ! grep -qE 'installation/token' "$workflow"; }; then
                 echo "The source-read workflow must explicitly revoke its token before project code: $workflow" >&2
                 exit 1
               fi
