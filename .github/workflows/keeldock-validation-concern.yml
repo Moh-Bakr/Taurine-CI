@@ -130,10 +130,9 @@ jobs:
           repository: ${{ env.SOURCE_REPOSITORY_OWNER }}/${{ env.SOURCE_REPOSITORY_NAME }}
           ref: ${{ inputs.source_sha }}
           token: ${{ steps.source-token.outputs.token }}
-          # Full history, unlike the Taurine concerns: the SDL snapshot gate runs
-          # `git diff --exit-code`, which needs a working index against the
-          # checked-out commit. fetch-depth 1 still provides that, but the
-          # snapshot check also reports the commit, so the ref must be exact.
+          # A single-commit checkout, like the Taurine concerns. The generated-contract
+          # check runs `git diff` against the checked-out commit, which needs only a working
+          # tree and index, not history; the exact ref is what the identity step verifies.
           fetch-depth: 1
           persist-credentials: false
           submodules: false
