@@ -1,8 +1,26 @@
 name: KeelDock Cloud validation concern (protected)
 
-# One operating system per call, on a clean ephemeral runner doing its own exact
-# private checkout. No source-bearing artifact, cache or output crosses a job
-# boundary, matching the rule the Taurine concerns already follow.
+# One concern on one operating system per call, on a clean ephemeral runner doing its
+# own exact private checkout. No source-bearing artifact or output crosses a job
+# boundary, matching the rule the Taurine concerns already follow, so every concern
+# restores and rebuilds what it needs.
+#
+# Concerns (all three operating systems unless stated):
+#   build-format            whole-solution Release build (warnings are errors, so every
+#                           analyzer gate) and `dotnet format --verify-no-changes`.
+#   structural              architecture, contract-compatibility and GraphQL composition /
+#                           SDL-snapshot suites, then the generated-contract diff.
+#   unit                    every other suite that needs no container runtime.
+#   db-containers           (Linux only) every suite that references Testcontainers; the
+#                           Docker daemon only the Ubuntu runner has.
+#   contracts-publish-smoke generated TypeScript contract check, publish of Api / Worker /
+#                           Migrator, and the Migrator smoke.
+#
+# Suites are assigned by the same rule scripts/run-tests.sh uses to classify them (a
+# Testcontainers package reference means a container runtime), so a new suite lands in a
+# concern the day it is written: container suites in db-containers, the three named
+# structural suites in structural, everything else in unit. None can be assigned to no
+# concern, and build-format fails if a named structural suite disappears.
 
 on:
   workflow_call:
@@ -13,6 +31,10 @@ on:
         type: string
       platform:
         description: linux, macos or windows
+        required: true
+        type: string
+      concern:
+        description: build-format, structural, unit, db-containers or contracts-publish-smoke
         required: true
         type: string
 
@@ -34,12 +56,12 @@ env:
 
 jobs:
   validate:
-    name: KeelDock ${{ inputs.platform }}
+    name: KeelDock ${{ inputs.platform }} ${{ inputs.concern }}
     environment: source-read
     runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-24.04' || (inputs.platform == 'macos' && 'macos-15' || 'windows-2022') }}
-    # Linux additionally starts PostgreSQL containers for the persistence and
-    # messaging suites; the other two run the structural gates only.
-    timeout-minutes: ${{ inputs.platform == 'linux' && 45 || 40 }}
+    # db-containers pulls and starts PostgreSQL containers per suite; every other
+    # concern is a build plus a handful of in-process suites.
+    timeout-minutes: ${{ inputs.concern == 'db-containers' && 45 || 30 }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,6 +74,7 @@ jobs:
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           REQUESTED_PLATFORM: ${{ inputs.platform }}
+          REQUESTED_CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
@@ -65,6 +88,16 @@ jobs:
           case "${REQUESTED_PLATFORM}" in
             linux|macos|windows) ;;
             *) echo "Unsupported platform: ${REQUESTED_PLATFORM}" >&2; exit 1 ;;
+          esac
+          case "${REQUESTED_CONCERN}" in
+            build-format|structural|unit|contracts-publish-smoke) ;;
+            db-containers)
+              if [[ "${REQUESTED_PLATFORM}" != linux ]]; then
+                echo 'db-containers needs a Linux container runtime' >&2
+                exit 1
+              fi
+              ;;
+            *) echo "Unsupported concern: ${REQUESTED_CONCERN}" >&2; exit 1 ;;
           esac
 
       - name: Mint read-only private-source token
@@ -149,31 +182,30 @@ jobs:
           global-json-file: global.json
 
       - name: Set up Node
+        if: inputs.concern == 'contracts-publish-smoke'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
 
-      # One step, every sub-step reported.
-      #
-      # The previous layout made each stage its own step with the default
-      # "stop on first failure" behaviour, so a failing suite left the generated-contract
-      # check, the publish and the Migrator smoke unknown — and its `tee` printed the whole
-      # suite log, assertion text included, to this public repository's job log. Here every
-      # sub-step runs regardless of the others (a sub-step that structurally needs an earlier
-      # one is reported as skipped, never silently dropped), the full output of each is kept
-      # in files under RUNNER_TEMP that are never printed, and only three kinds of text are
-      # published: a fixed reason per sub-step, the per-suite totals the runner itself
-      # printed, and the names of failing tests. Assertion text, stack traces and source
-      # excerpts never leave the runner. The concern fails at the end, with the table.
+      # One step, every sub-step reported. Each sub-step runs regardless of the others (one
+      # that structurally needs an earlier one is reported as skipped, never silently
+      # dropped), the full output of each is kept in files under RUNNER_TEMP that are never
+      # printed, and only three kinds of text are published: a fixed reason per sub-step,
+      # the per-suite totals the runner itself printed, and the names of failing tests.
+      # Assertion text, stack traces and source excerpts never leave the runner. The
+      # concern fails at the end, with the table.
       - name: Validate every sub-step
         shell: bash
         env:
           PLATFORM: ${{ inputs.platform }}
+          CONCERN: ${{ inputs.concern }}
         run: |
           set -uo pipefail
 
           results="${RUNNER_TEMP}/substeps.tsv"
-          : > "${results}"
+          suite_rows="${RUNNER_TEMP}/suite-totals.tsv"
+          failed_names="${RUNNER_TEMP}/failed-tests.tsv"
+          : > "${results}"; : > "${suite_rows}"; : > "${failed_names}"
           any_failed=0
 
           strip_ansi() { sed -E $'s/\033\\[[0-9;]*[[:alpha:]]//g'; }
@@ -218,162 +250,192 @@ jobs:
             elif grep -q 'NU1403' "$1"; then echo "package content hash differs from the lock file (${codes})"
             else echo "restore failed (diagnostic ids: ${codes:-none})"; fi
           }
-          reason_npm() { echo "npm ci failed (diagnostic ids: $(diag_codes "$1" || true))"; }
-          reason_publish() { echo "publish failed (diagnostic ids: $(diag_codes "$1" || true))"; }
-          reason_plain() { echo 'failed'; }
+          reason_text() { head -c 300 "$1" | tr '\n' ' '; }
+          reason_npm() { echo "npm ci diagnostic ids: $(diag_codes "$1" || true)"; }
+          reason_build() { echo "build diagnostic ids: $(diag_codes "$1" || true)"; }
+          reason_publish() { echo "publish diagnostic ids: $(diag_codes "$1" || true)"; }
+          reason_format() { echo 'formatting drift (run dotnet format) or the formatter could not run'; }
+          reason_typescript() { echo 'generated TypeScript contract differs from the committed files, or does not typecheck'; }
+          reason_smoke() { echo 'Migrator failed for an unexpected reason or reported success with no database'; }
+          reason_contracts() { echo "generated contracts differ from the commit ($(grep -c . "$1") area(s) changed; regenerate and commit)"; }
+
+          # ---- Suite assignment ----------------------------------------------------------
+          # The rule scripts/run-tests.sh uses: a suite needs a container runtime exactly
+          # when its project references Testcontainers. Matched on the package reference
+          # itself, not the bare word.
+          needs_docker() { grep -Eq '<PackageReference[^>]+Include="Testcontainers' "$1"; }
+          structural_suites=' KeelDock.Cloud.ArchitectureTests KeelDock.Cloud.CompatibilityTests KeelDock.Cloud.GraphQLCompositionTests '
+          suite_concern() {
+            local name; name="$(basename "$1" .csproj)"
+            if needs_docker "$1"; then echo db-containers
+            elif [[ "${structural_suites}" == *" ${name} "* ]]; then echo structural
+            else echo unit; fi
+          }
+          structural_present() {
+            local name p found=0
+            for name in ${structural_suites}; do
+              found=0
+              while IFS= read -r p; do
+                if [[ "$(basename "${p}" .csproj)" == "${name}" && "$(suite_concern "${p}")" == structural ]]; then found=1; fi
+              done < <(find tests -name '*.csproj')
+              if [[ "${found}" -eq 0 ]]; then echo "structural suite ${name} is missing or now needs a container runtime"; return 1; fi
+            done
+          }
 
           sub_step restore reason_restore dotnet restore KeelDock.Cloud.slnx --locked-mode
-          # Installed before the suite because run-tests.sh checks the generated TypeScript
-          # only when node_modules is present and otherwise reports it skipped. Skipped is
-          # not passed, and the hosted run is the one that must always check.
-          sub_step typescript-install reason_npm npm --prefix tools/graphql-codegen ci
 
-          # ---- The repository's own runner -----------------------------------------------
-          # Invoked rather than repeating its suite list: the list used to live here as well,
-          # and two copies of "what the full suite is" drift the moment somebody adds a suite
-          # and updates one. The script discovers suites from the filesystem. --no-docker on
-          # macOS and Windows: no Linux container runtime there.
-          suite_log="${RUNNER_TEMP}/suite.log"
-          : > "${suite_log}"
-          if passed restore; then
-            args=(--configuration Release --sanitize)
-            if [[ "${PLATFORM}" != 'linux' ]]; then args+=(--no-docker); fi
-            bash scripts/run-tests.sh "${args[@]}" >"${suite_log}" 2>&1
-            suite_rc=$?
-          else
-            suite_rc=99
-          fi
-
-          # Pass/fail of the build, format and TypeScript-contract stages is read from the
-          # runner's own stage markers, not re-derived.
-          clean_log="${RUNNER_TEMP}/suite.clean.log"
-          strip_ansi < "${suite_log}" | tr -d '\r' > "${clean_log}"
-          if [[ "${suite_rc}" -eq 99 ]]; then
-            skip_step build 'restore failed'
-            skip_step format 'restore failed'
-          elif ! grep -q '^Verifying formatting\.' "${clean_log}"; then
-            record build FAIL "build failed (diagnostic ids: $(diag_codes "${clean_log}" || true))"
-            echo "build: failed (diagnostic ids: $(diag_codes "${clean_log}" || true); output withheld)" >&2
-            any_failed=1
-            skip_step format 'build failed'
-          else
-            echo 'build: passed'; record build pass '-'
-            if grep -q '^FAILED: formatting' "${clean_log}"; then
-              echo 'format: failed (dotnet format --verify-no-changes reported drift; output withheld)' >&2
-              record format FAIL 'formatting drift (run dotnet format)'
-              any_failed=1
-            else
-              echo 'format: passed'; record format pass '-'
-            fi
-          fi
-
-          # Per-suite totals, exactly as the runner printed them. A suite with no parsed
-          # total is a failure, never an empty row.
-          awk '
-            /^--- SKIP / { name = $3; printf "%s\tskipped\t-\t-\n", name; next }
-            /^--- /      { name = substr($0, 5); next }
-            /^  total:/  { total = $2 }
-            /^  failed:/ { failed = $2
-                           if (name != "") { printf "%s\t%s\t%s\t%s\n", name, (failed == 0 ? "pass" : "FAIL"), total, failed; name = "" } }
-          ' "${clean_log}" > "${RUNNER_TEMP}/suite-totals.tsv"
-
-          # Failing test identities only: the fully qualified test name, with theory
-          # arguments cut off and every character outside a conservative identifier set
-          # replaced. The assertion text that follows each name is never read.
-          awk '
-            /^--- SKIP / { next }
-            /^--- /      { suite = substr($0, 5); next }
-            /^failed /   { line = $0; sub(/^failed /, "", line)
-                           sub(/ \([0-9.]+ ?(ms|s|m|h)[^)]*\)$/, "", line)
-                           sub(/\(.*$/, "", line)
-                           gsub(/[^A-Za-z0-9_.+<>,-]/, "?", line)
-                           print suite "\t" substr(line, 1, 200) }
-          ' "${clean_log}" | head -60 > "${RUNNER_TEMP}/failed-tests.tsv"
-
-          if [[ "${suite_rc}" -ne 99 ]] && passed build && passed format; then
-            suites_failed_line="$(grep -E '^FAILED: ' "${clean_log}" | head -1 || true)"
-            if [[ ! -s "${RUNNER_TEMP}/suite-totals.tsv" ]]; then
-              record suites FAIL 'no per-suite totals were parsed from the run output'
-              echo 'suites: failed (no per-suite totals were parsed from the run output)' >&2
-              any_failed=1
-            fi
-            while IFS=$'\t' read -r name result total failed; do
-              [[ "${result}" == FAIL ]] || continue
-              any_failed=1
-              echo "suite ${name}: failed (${failed} of ${total} tests; names below)" >&2
-            done < "${RUNNER_TEMP}/suite-totals.tsv"
-            if [[ -s "${RUNNER_TEMP}/failed-tests.tsv" ]]; then
-              echo 'failing tests:' >&2
-              awk -F'\t' '{ print "  " $2 }' "${RUNNER_TEMP}/failed-tests.tsv" >&2
-            fi
-            # Suites the runner itself flagged without a failing total: no summary at all
-            # (a crash or timeout) or zero discovered tests.
-            for name in ${suites_failed_line#FAILED: }; do
-              if ! awk -F'\t' -v n="${name}" '$1 == n && $2 == "FAIL" { f = 1 } END { exit !f }' "${RUNNER_TEMP}/suite-totals.tsv"; then
-                reason='suite ended without a passing test summary (crash, timeout or zero tests discovered)'
-                [[ "${name}" == typescript ]] && reason='generated TypeScript contract drifted from the committed files'
-                [[ "${name}" == formatting ]] && continue
-                echo "suite ${name}: failed (${reason})" >&2
+          case "${CONCERN}" in
+            build-format)
+              if passed restore; then
+                sub_step build reason_build dotnet build KeelDock.Cloud.slnx --no-restore --nologo -v quiet --configuration Release
+              else
+                skip_step build 'restore failed'
               fi
-            done
-            if grep -q '^typescript: current' "${clean_log}"; then echo 'typescript-contract: passed'; record typescript-contract pass '-'
-            elif grep -q '^typescript: DRIFT' "${clean_log}"; then record typescript-contract FAIL 'generated TypeScript differs from the committed files'
-            else record typescript-contract FAIL 'not checked (skipped is not passed)'; fi
-            passed typescript-contract || any_failed=1
-            if [[ "${suite_rc}" -ne 0 ]]; then
-              record test-suites FAIL "runner exited ${suite_rc}"
-              any_failed=1
-            else
-              record test-suites pass '-'
-            fi
-          else
-            skip_step test-suites 'restore, build or format did not pass'
-          fi
+              if passed build; then
+                sub_step format reason_format dotnet format KeelDock.Cloud.slnx --verify-no-changes --no-restore
+              else
+                skip_step format 'build did not pass'
+              fi
+              sub_step suite-assignment reason_text structural_present
+              ;;
 
-          # The snapshot and fixture tests write their baseline when it is missing and
-          # report skipped rather than passing, so a contributor who regenerated and forgot
-          # to commit would otherwise get a green build. Checked, never printed.
-          contracts_diff() {
-            if git diff --quiet -- contracts/; then return 0; fi
-            git diff --name-only -- contracts/ | awk -F/ '{ print $2 }' | sort | uniq -c
-            return 1
-          }
-          reason_contracts() { echo "generated contracts differ from the commit ($(grep -c . "$1") area(s) changed; regenerate and commit)"; }
-          sub_step contracts-committed reason_contracts contracts_diff
+            structural|unit|db-containers)
+              selected=()
+              while IFS= read -r project; do
+                if [[ "$(suite_concern "${project}")" == "${CONCERN}" ]]; then selected+=("${project}"); fi
+              done < <(find tests -name '*.csproj' | sort)
+              echo "${CONCERN}: ${#selected[@]} suite(s) assigned"
+              if [[ "${#selected[@]}" -eq 0 ]]; then
+                record suites FAIL 'no suite is assigned to this concern (discovery is broken)'
+                echo 'suites: failed (no suite is assigned to this concern; discovery is broken)' >&2
+                any_failed=1
+              else
+                if [[ "${CONCERN}" == structural ]]; then sub_step suite-assignment reason_text structural_present; fi
 
-          # The publish needs the restore (it runs --no-restore) and a compilable tree; it
-          # still runs when a test suite failed, because the artifact is a separate fact.
-          for host in Api Worker Migrator; do
-            if passed restore; then
-              sub_step "publish-${host}" reason_publish dotnet publish "src/Hosts/KeelDock.Cloud.${host}" \
-                --no-restore --configuration Release --output "${RUNNER_TEMP}/publish/${host}"
-            else
-              skip_step "publish-${host}" 'restore failed'
-            fi
-          done
+                build_suites() {
+                  local project
+                  for project in "${selected[@]}"; do
+                    dotnet build "${project}" --no-restore --nologo -v quiet --configuration Release || return 1
+                  done
+                }
+                if passed restore; then
+                  sub_step build reason_build build_suites
+                else
+                  skip_step build 'restore failed'
+                fi
 
-          # With no connection string configured the Migrator must fail loudly and by
-          # name. It is the cheapest possible check that the published artifact is the
-          # program we think it is.
-          migrator_smoke() {
-            local output rc
-            output="$(dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll" 2>&1)"
-            rc=$?
-            if [[ "${rc}" -eq 0 ]]; then return 10; fi
-            grep -q 'owner connection string' <<<"${output}" || return 11
-          }
-          reason_smoke() {
-            if [[ -f "$1" ]]; then echo 'Migrator failed for an unexpected reason or reported success with no database'; fi
-          }
-          if passed publish-Migrator; then
-            sub_step migrator-smoke reason_smoke migrator_smoke
-          else
-            skip_step migrator-smoke 'Migrator publish did not pass'
-          fi
+                if passed build; then
+                  suites_total=0; suites_failed=0
+                  for project in "${selected[@]}"; do
+                    name="$(basename "${project}" .csproj)"
+                    log="${RUNNER_TEMP}/suite-${name}.log"
+                    clean="${log}.clean"
+                    dotnet run --project "${project}" --no-build --configuration Release >"${log}" 2>&1
+                    rc=$?
+                    strip_ansi < "${log}" | tr -d '\r' > "${clean}"
+                    # The last total / failed the runner printed. Colour escapes are stripped
+                    # first: the runner colours its summary on a hosted runner and not on a
+                    # redirected local stream, which made an anchored match environment-dependent.
+                    total="$(grep -oE '^[[:space:]]*total:[[:space:]]*[0-9]+' "${clean}" | tail -1 | grep -oE '[0-9]+$' || true)"
+                    failed="$(grep -oE '^[[:space:]]*failed:[[:space:]]*[0-9]+' "${clean}" | tail -1 | grep -oE '[0-9]+$' || true)"
+                    # A suite that ran no tests is not a suite that passed: a project whose
+                    # tests stopped being discovered reports total 0 and a zero exit code.
+                    if [[ -z "${total}" || -z "${failed}" ]]; then
+                      result=FAIL; reason='no test summary printed (crash, timeout or build output only)'; total='-'; failed='-'
+                    elif [[ "${total}" -eq 0 ]]; then
+                      result=FAIL; reason='0 tests discovered; an empty suite is not a passing suite'
+                    elif [[ "${failed}" -gt 0 ]]; then
+                      result=FAIL; reason="${failed} of ${total} tests failed"
+                    elif [[ "${rc}" -ne 0 ]]; then
+                      result=FAIL; reason="exit code ${rc} with no failing test"
+                    else
+                      result=pass; reason='-'
+                    fi
+                    printf '%s\t%s\t%s\t%s\t%s\n' "${name}" "${result}" "${total}" "${failed}" "${reason}" >> "${suite_rows}"
+                    # Failing test identities only: the fully qualified test name, with
+                    # theory arguments cut off and every character outside a conservative
+                    # identifier set replaced. The assertion text after each name is never read.
+                    awk -v suite="${name}" '
+                      /^failed / { line = $0; sub(/^failed /, "", line)
+                                   sub(/ \([0-9.]+ ?(ms|s|m|h)[^)]*\)$/, "", line)
+                                   sub(/\(.*$/, "", line)
+                                   gsub(/[^A-Za-z0-9_.+<>,-]/, "?", line)
+                                   print suite "\t" substr(line, 1, 200) }
+                    ' "${clean}" | head -20 >> "${failed_names}"
+                    suites_total=$((suites_total + 1))
+                    if [[ "${result}" == pass ]]; then
+                      echo "suite ${name}: passed (${total} tests)"
+                    else
+                      suites_failed=$((suites_failed + 1))
+                      echo "suite ${name}: failed (${reason})" >&2
+                    fi
+                    rm -f "${log}" "${clean}"
+                  done
+                  if [[ -s "${failed_names}" ]]; then
+                    echo 'failing tests (names only):' >&2
+                    head -60 "${failed_names}" | awk -F'\t' '{ print "  " $2 }' >&2
+                  fi
+                  if [[ "${suites_failed}" -eq 0 ]]; then
+                    record test-suites pass '-'
+                    echo "test-suites: passed (${suites_total} suites)"
+                  else
+                    record test-suites FAIL "${suites_failed} of ${suites_total} suites failed"
+                    any_failed=1
+                  fi
+                else
+                  skip_step test-suites 'build did not pass'
+                fi
+                # The snapshot and fixture tests write their baseline when it is missing and
+                # report skipped rather than passing, so a contributor who regenerated and
+                # forgot to commit would otherwise get a green build. Checked, never printed.
+                contracts_diff() {
+                  if git diff --quiet -- contracts/; then return 0; fi
+                  git diff --name-only -- contracts/ | awk -F/ '{ print $2 }' | sort | uniq -c
+                  return 1
+                }
+                sub_step contracts-committed reason_contracts contracts_diff
+              fi
+              ;;
+
+            contracts-publish-smoke)
+              # Installed before the check: the generated TypeScript is verified only when
+              # node_modules exists, and skipped is not passed.
+              sub_step typescript-install reason_npm npm --prefix tools/graphql-codegen ci
+              if passed typescript-install; then
+                sub_step typescript-contract reason_typescript npm --prefix tools/graphql-codegen run verify --silent
+              else
+                skip_step typescript-contract 'npm ci failed'
+              fi
+              # The publish runs --no-restore, so it needs the restore.
+              for host in Api Worker Migrator; do
+                if passed restore; then
+                  sub_step "publish-${host}" reason_publish dotnet publish "src/Hosts/KeelDock.Cloud.${host}" \
+                    --no-restore --configuration Release --output "${RUNNER_TEMP}/publish/${host}"
+                else
+                  skip_step "publish-${host}" 'restore failed'
+                fi
+              done
+              # With no connection string configured the Migrator must fail loudly and by
+              # name. It is the cheapest possible check that the published artifact is the
+              # program we think it is.
+              migrator_smoke() {
+                local output rc
+                output="$(dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll" 2>&1)"
+                rc=$?
+                if [[ "${rc}" -eq 0 ]]; then return 10; fi
+                grep -q 'owner connection string' <<<"${output}" || return 11
+              }
+              if passed publish-Migrator; then
+                sub_step migrator-smoke reason_smoke migrator_smoke
+              else
+                skip_step migrator-smoke 'Migrator publish did not pass'
+              fi
+              ;;
+          esac
 
           # ---- Summary: sub-step table, per-suite totals, failing test names -------------
           {
-            echo "### Sub-steps — ${PLATFORM}"
+            echo "### ${CONCERN} sub-steps — ${PLATFORM}"
             echo
             echo '| Sub-step | Result | Reason |'
             echo '|---|---|---|'
@@ -381,30 +443,28 @@ jobs:
               echo "| \`${label}\` | ${result} | ${reason} |"
             done < "${results}"
             echo
-            if [[ -s "${RUNNER_TEMP}/suite-totals.tsv" ]]; then
-              echo "### Suites — ${PLATFORM}"
+            if [[ -s "${suite_rows}" ]]; then
+              echo "### Suites — ${CONCERN} on ${PLATFORM}"
               echo
-              echo '| Suite | Result | Tests | Failed |'
-              echo '|---|---|---:|---:|'
-              while IFS=$'\t' read -r name result total failed; do
-                echo "| \`${name}\` | ${result} | ${total} | ${failed} |"
-              done < "${RUNNER_TEMP}/suite-totals.tsv"
-              echo
-              grep -E '^Discovered [0-9]+ suite\(s\); ran [0-9]+\.$' "${clean_log}" || true
-              awk -F'\t' '$3 != "-" { t += $3; f += $4 } END { printf "\n**%d tests, %d failed.**\n", t, f }' "${RUNNER_TEMP}/suite-totals.tsv"
+              echo '| Suite | Result | Tests | Failed | Reason |'
+              echo '|---|---|---:|---:|---|'
+              while IFS=$'\t' read -r name result total failed reason; do
+                echo "| \`${name}\` | ${result} | ${total} | ${failed} | ${reason} |"
+              done < "${suite_rows}"
+              awk -F'\t' '$3 != "-" { t += $3; f += $4 } END { printf "\n**%d tests, %d failed.**\n", t, f }' "${suite_rows}"
             fi
-            if [[ -s "${RUNNER_TEMP}/failed-tests.tsv" ]]; then
+            if [[ -s "${failed_names}" ]]; then
               echo
               echo '### Failing tests (names only)'
               echo
               while IFS=$'\t' read -r suite test; do
                 echo "- \`${suite}\`: \`${test}\`"
-              done < "${RUNNER_TEMP}/failed-tests.tsv"
+              done < "${failed_names}"
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
           if [[ "${any_failed}" -ne 0 ]]; then
-            echo 'validation: failed (one or more sub-steps failed or were skipped; each is listed above)' >&2
+            echo "${CONCERN}: failed (one or more sub-steps failed or were skipped; each is listed above)" >&2
             exit 1
           fi
 
@@ -414,6 +474,7 @@ jobs:
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           PLATFORM: ${{ inputs.platform }}
+          CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
@@ -424,25 +485,35 @@ jobs:
           # failed or never started must not read like a clean one.
           proved() { [[ -f "${results}" ]] && awk -F'\t' -v l="$1" '$1 == l && $2 == "pass" { f = 1 } END { exit !f }' "${results}"; }
           {
-            echo "## KeelDock Cloud — ${PLATFORM}"
+            echo "## KeelDock Cloud — ${CONCERN} — ${PLATFORM}"
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
             echo "- Runner: \`${RUNNER_OS}\` / \`${RUNNER_ARCH}\`"
             proved restore && echo '- Restore was locked.'
-            proved build && echo '- Build was Release with warnings as errors.'
-            proved format && echo '- Formatting verified.'
-            proved test-suites && echo '- Every discovered suite passed (scripts/run-tests.sh discovers suites from the repository).'
-            proved typescript-contract && echo '- Generated TypeScript contract is current.'
-            proved contracts-committed && echo '- Generated contracts match what is committed.'
-            if proved publish-Api && proved publish-Worker && proved publish-Migrator; then
-              echo '- API, Worker and Migrator published.'
-            fi
-            proved migrator-smoke && echo '- Migrator smoke passed.'
-            if [[ "${PLATFORM}" == 'linux' ]]; then
-              proved test-suites && echo '- Container-backed suites ran against a real PostgreSQL instance.'
-            else
-              echo '- Container-backed suites were NOT run: no Linux container runtime on this platform.'
-            fi
+            case "${CONCERN}" in
+              build-format)
+                proved build && echo '- Whole-solution build was Release with warnings as errors.'
+                proved format && echo '- Formatting verified.'
+                proved suite-assignment && echo '- Every named structural suite exists and needs no container runtime.'
+                ;;
+              structural|unit)
+                proved build && echo '- Suite projects built in Release.'
+                proved test-suites && echo "- Every ${CONCERN} suite passed."
+                proved contracts-committed && echo '- Generated contracts match what is committed.'
+                ;;
+              db-containers)
+                proved build && echo '- Suite projects built in Release.'
+                proved test-suites && echo '- Every container-backed suite passed against real PostgreSQL started through Testcontainers.'
+                proved contracts-committed && echo '- Generated contracts match what is committed.'
+                ;;
+              contracts-publish-smoke)
+                proved typescript-contract && echo '- Generated TypeScript contract is current and typechecks.'
+                if proved publish-Api && proved publish-Worker && proved publish-Migrator; then
+                  echo '- API, Worker and Migrator published.'
+                fi
+                proved migrator-smoke && echo '- Migrator smoke passed.'
+                ;;
+            esac
             echo '- Source token: revoked before any project code executed.'
             echo '- Outputs: no source files, logs, reports or artifacts published; failing test names only.'
           } >> "${GITHUB_STEP_SUMMARY}"
