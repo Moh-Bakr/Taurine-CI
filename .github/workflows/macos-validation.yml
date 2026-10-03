@@ -30,7 +30,12 @@ jobs:
     name: macOS ${{ matrix.concern }} validation
     environment: source-read
     runs-on: macos-14
-    timeout-minutes: 45
+    # The TypeScript concerns stay on the reviewed 45. The Rust concerns compile
+    # their closure cold on a three-core runner, because nothing is cached in
+    # this control plane: `rust-app` carries DuckDB's C++ amalgamation, Tauri and
+    # over a hundred test binaries (about 40 minutes on the four-core Linux
+    # runner), `rust-db` the same drivers' offline suites (about 10 there).
+    timeout-minutes: ${{ matrix.concern == 'rust-app' && 120 || matrix.concern == 'rust-db' && 90 || startsWith(matrix.concern, 'rust-') && 60 || 45 }}
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +46,18 @@ jobs:
           - mobile
           - bundle-budget
           - orchestrate-skill
+          # The Rust crate-test concerns, one runner each so a slow one cannot
+          # hold the others back. They are the macOS counterparts of the Linux
+          # rust-domain, rust-db, rust-net and rust-app concerns. rust-dbx is
+          # not repeated here: dbx-core's engine and protocol tests are
+          # platform-neutral and stay on Linux; its OS-keyring feature is
+          # opt-in (not built by `npm run test:dbx-core`), its Postgres tests
+          # need a Docker daemon that macOS hosted runners do not have, and its
+          # vendored OpenSSL is a from-source C build with no macOS-only code.
+          - rust-domain
+          - rust-db
+          - rust-net
+          - rust-app
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -129,12 +146,18 @@ jobs:
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
           (( failed == 0 ))
 
+      # The Rust concerns need no node_modules, so they skip Node and the three
+      # `npm ci` runs, as the Linux ones do. They still need the vendor fetch
+      # (their own step below): the workspace root path-depends on
+      # vendor/boringtun, and no cargo command loads without it.
       - name: Set up the pinned Node.js release
+        if: ${{ !startsWith(matrix.concern, 'rust-') }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.14.0
 
       - name: Install locked JavaScript dependencies
+        if: ${{ !startsWith(matrix.concern, 'rust-') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -183,7 +206,99 @@ jobs:
           # package build or test can load Cargo metadata.
           run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
 
+      - name: Set up the Rust toolchain and native dependencies
+        if: ${{ startsWith(matrix.concern, 'rust-') }}
+        shell: bash
+        env:
+          CONCERN: ${{ matrix.concern }}
+        run: |
+          # Homebrew's own bottles, from homebrew-core only (as ios-validation already
+          # does for llvm). Homebrew cannot pin a formula version, so these float with
+          # the runner image's tap snapshot; each bottle is sha256-verified by brew.
+          # Analytics and the auto-update of the tap are off.
+          export HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1
+
+          rustc --version
+          cargo --version
+
+          # taurine-scripting's rquickjs `bindgen` feature needs the standalone libclang
+          # dylib at build-script runtime, the same reason ios-validation installs llvm.
+          brew list llvm >/dev/null 2>&1 || brew install llvm
+          llvm_prefix="$(brew --prefix llvm)"
+          [[ -f "${llvm_prefix}/lib/libclang.dylib" ]] || { echo 'libclang dylib is unavailable' >&2; exit 1; }
+          echo "LIBCLANG_PATH=${llvm_prefix}/lib" >> "${GITHUB_ENV}"
+
+          # openssl@3 and pkg-config: any crate that links the system OpenSSL finds it
+          # through pkg-config, and Homebrew's openssl@3 is keg-only (not on the default
+          # search path), so its pkgconfig directory is handed over explicitly.
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          brew list pkg-config >/dev/null 2>&1 || brew install pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "${GITHUB_ENV}"
+
+          # taurine-ovpn-sys compiles vendored openvpn3-core C++ against these; the list
+          # is the private docs/architecture/vendored-openvpn3.md macOS install line.
+          # Only `rust-net` builds that crate.
+          if [[ "${CONCERN}" == rust-net ]]; then
+            brew install asio fmt jsoncpp lz4 xxhash
+          fi
+
+          # Same settings as the Linux crate-test concerns, about the runner not the
+          # code: no incremental state (nothing is cached, so it would be written and
+          # never read) and no debug info for tests and their dependencies (this
+          # workflow publishes no backtrace, and `rust-app` links over a hundred
+          # binaries that each carry the whole command tier).
+          {
+            echo 'CARGO_INCREMENTAL=0'
+            echo 'CARGO_PROFILE_DEV_DEBUG=0'
+            echo 'CARGO_PROFILE_TEST_DEBUG=0'
+          } >> "${GITHUB_ENV}"
+
+          # Disk. A hosted macOS runner is short of space for the heaviest closure, and
+          # the Android SDK is the largest thing on the image that no Rust concern reads.
+          # Removed only when free space is under 30 GiB, and only for rust-app. Free
+          # space is printed either way so a first run measures it.
+          df -h "${GITHUB_WORKSPACE}"
+          if [[ "${CONCERN}" == rust-app ]]; then
+            avail_kib="$(df -k "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}')"
+            if [[ "${avail_kib}" -lt 31457280 && -d "${HOME}/Library/Android" ]]; then
+              rm -rf "${HOME}/Library/Android"
+              df -h "${GITHUB_WORKSPACE}"
+            fi
+          fi
+
+          # taurine-crypt's `keychain` feature talks to the real macOS Keychain, and its
+          # callers treat a locked or missing keychain as a miss, so a bare runner would
+          # pass with the keychain path never exercised. A throwaway, already unlocked
+          # keychain in RUNNER_TEMP becomes the user's only search keychain and default,
+          # so the real Keychain API is exercised without touching the runner's login
+          # keychain, no dialog can wait for an unlock, and nothing outlives the job.
+          # The passphrase is random, used on three commands and never printed.
+          keychain="${RUNNER_TEMP}/taurine-ci.keychain-db"
+          keychain_secret="$(uuidgen)"
+          security create-keychain -p "${keychain_secret}" "${keychain}"
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p "${keychain_secret}" "${keychain}"
+          unset keychain_secret
+          security list-keychains -d user -s "${keychain}"
+          security default-keychain -d user -s "${keychain}"
+          security show-keychain-info "${keychain}"
+
+      - name: Fetch pinned vendored sources
+        if: ${{ startsWith(matrix.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `fetch` verifies each download against the sha256 pinned in vendor.lock and
+          # applies the reviewed boringtun zeroize patch, so this is a supply-chain check
+          # as much as a prerequisite.
+          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
+            echo 'vendor-fetch: failed (detailed output withheld)' >&2
+            exit 1
+          fi
+          echo 'vendor-fetch: passed'
+
       - name: Run isolated macOS validation concern
+        if: ${{ !startsWith(matrix.concern, 'rust-') }}
         shell: bash
         env:
           CONCERN: ${{ matrix.concern }}
@@ -271,6 +386,229 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Run isolated macOS Rust concern
+        if: ${{ startsWith(matrix.concern, 'rust-') }}
+        shell: bash
+        env:
+          CONCERN: ${{ matrix.concern }}
+          OS_LABEL: macOS
+        run: |
+          set -euo pipefail
+
+          # The helpers below are the Linux `rust-*` concerns' own (see
+          # linux-validation-concern.yml, which is where the reasoning for each lives),
+          # with the changes a macOS or Windows runner needs and nothing else:
+          # - carriage returns are stripped before any pattern runs, because Windows
+          #   tools end lines with CRLF and the anchored patterns below would never match;
+          # - the path rules also cover a Windows drive path, the `\\?\` prefix and the
+          #   registry checkout of a dependency, so no absolute runner path is published;
+          # - the failure classes a Windows or macOS test binary can add (a missing entry
+          #   point or DLL, a stack overflow, a dynamic library that would not load) and a
+          #   vcpkg port build failure get their own fixed one-line classification.
+          # Everything else, including what is and is not published, is unchanged: only
+          # failing test names, `error[Ennnn]` headers with their location, and cargo's
+          # own fixed failure shapes leave this runner.
+          workspace_strip='s#^$##'
+          if [[ "${GITHUB_WORKSPACE}" != *\\* ]]; then
+            workspace_strip="s#${GITHUB_WORKSPACE}/##g"
+          fi
+
+          cargo_sanitize() {
+            tr -d '\r' <"$1" |
+              sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' |
+              sed -E 's#\\\\\?\\##g' |
+              sed -E 's#[^ ]*[\\/]registry[\\/]src[\\/][^\\/ ]+[\\/]#<registry>/#g' |
+              sed -E "${workspace_strip}" |
+              sed -E 's#[A-Za-z]:\\ct\\#<target>/#g; s#[A-Za-z]:\\[^ ]*#<private-path>#g' |
+              sed -E 's#/Users/[^ ]+#<private-path>#g; s#/private/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+              cut -c1-200
+          }
+
+          # A failed test's captured output (`---- name stdout ----` up to the next
+          # `failures:`) is dropped whole, compiler warnings are dropped, an
+          # `error[Ennnn]` header is published with its `-->` location, and an uncoded
+          # `error:` line only when it is followed by a `-->` location or is one of
+          # cargo's own fixed shapes. `error: building <port>:<triplet> failed` is
+          # vcpkg's own fixed line naming a public third-party port, never private code.
+          cargo_test_detail() {
+            cargo_sanitize "$1" | awk '
+              /^---- .* (stdout|stderr) ----$/ { in_output = 1; next }
+              /^failures:$/ { in_output = 0; next }
+              in_output { next }
+              /^warning: / { block = "warning"; pending = ""; next }
+              /^error\[E[0-9]+\]: / { block = "error"; pending = ""; print; next }
+              /^error: building [A-Za-z0-9_.+-]+:[A-Za-z0-9_-]+ failed/ { block = "vcpkg"; pending = ""; print; next }
+              /^error: / {
+                block = "error"; pending = ""
+                if ($0 ~ /^error: (could not compile|test failed, to rerun pass|[0-9]+ targets? failed:|failed to run custom build command for|workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
+                else pending = $0
+                next
+              }
+              /^[[:space:]]*--> / {
+                if (block == "error") { if (pending != "") print pending; pending = ""; print }
+                next
+              }
+              /^test .* FAILED$/ || /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }
+            ' | head -80 >&2 || true
+          }
+
+          cargo_test_reason() {
+            local log="$1"
+            if grep -qE '^error: workspace member ' "${log}"; then echo "a workspace member is assigned to no ${OS_LABEL} Rust test concern"
+            elif grep -qE 'needs to be updated but --locked was passed|lock file .* needs to be updated' "${log}"; then echo 'committed Cargo.lock is out of date (refused by --locked)'
+            elif grep -qE '^error: building .* failed|vcpkg install failed|error: vcpkg' "${log}"; then echo 'vcpkg dependency install failure'
+            elif grep -qE 'Unable to find libclang|libclang.*[Nn]o such file' "${log}"; then echo 'libclang or bindgen failure'
+            elif grep -qE 'failed to run custom build command' "${log}"; then echo 'dependency or crate build script failure'
+            elif grep -qE 'No space left on device|not enough space on the disk|os error 112' "${log}"; then echo 'runner disk exhaustion'
+            elif grep -qE '^error: linking with ' "${log}"; then echo 'link failure (missing system library or resource exhaustion)'
+            elif grep -qE 'signal: 9|SIGKILL' "${log}"; then echo 'a process was killed (likely memory exhaustion)'
+            elif grep -qE '0xc0000139|STATUS_ENTRYPOINT_NOT_FOUND|0xc0000135|STATUS_DLL_NOT_FOUND|Library not loaded' "${log}"; then echo 'a test binary could not start (missing entry point, DLL or dynamic library)'
+            elif grep -qE '0xc00000fd|STATUS_STACK_OVERFLOW|has overflowed its stack' "${log}"; then echo 'a test binary overflowed its stack'
+            elif grep -qE 'test result: FAILED|^error: test failed|^error: [0-9]+ targets? failed' "${log}"; then echo 'test failure'
+            elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
+            elif grep -qE 'failed to (download|select|get|load|parse|fetch)' "${log}"; then echo 'dependency download or resolution failure'
+            else echo 'command returned non-zero'
+            fi
+          }
+
+          run_quiet() {
+            local label="$1"; shift
+            local log="${RUNNER_TEMP}/${label}.log"
+            if "$@" >"${log}" 2>&1; then
+              echo "${label}: passed"
+            else
+              tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
+              echo "${label}: failed ($(cargo_test_reason "${log}"); sanitized detail below)" >&2
+              cargo_test_detail "${log}"
+              exit 1
+            fi
+          }
+
+          # Every sub-step runs and is reported, as in the Linux concerns: the sub-steps
+          # are independent, so stopping at the first failure would hide results.
+          deferred_results=()
+          deferred_failed=0
+          run_deferred() {
+            local label="$1"; shift
+            local status
+            set +e
+            ( set -e; run_quiet "${label}" "$@" )
+            status=$?
+            set -e
+            if [[ "${status}" -eq 0 ]]; then
+              deferred_results+=("${label}|passed")
+            else
+              deferred_results+=("${label}|failed: $(cargo_test_reason "${RUNNER_TEMP}/${label}.log")")
+              deferred_failed=1
+            fi
+          }
+
+          finish_deferred() {
+            local entry
+            {
+              echo "## ${OS_LABEL} ${CONCERN} sub-steps"
+              echo
+              echo '| Sub-step | Result |'
+              echo '| --- | --- |'
+              for entry in "${deferred_results[@]}"; do
+                echo "| \`${entry%%|*}\` | ${entry#*|} |"
+              done
+              echo
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "${CONCERN} sub-step results:"
+            for entry in "${deferred_results[@]}"; do
+              echo "  ${entry%%|*}: ${entry#*|}"
+            done
+            df -h / 2>/dev/null || true
+            if [[ "${deferred_failed}" -ne 0 ]]; then
+              echo "${CONCERN}: failed (one or more sub-steps failed; each is listed above)" >&2
+              exit 1
+            fi
+          }
+
+          # Which workspace crates each Rust concern tests on this OS. Every member of the
+          # private workspace belongs to a concern, and `rust_coverage_check` (run by
+          # `rust-domain`) fails when a member is in none of them, so a crate added later
+          # cannot go untested by omission. The database family needs no list: `rust-db`
+          # selects it with cargo's own `taurine-db*` package glob.
+          rust_domain_packages=(
+            taurine-model taurine-atomic taurine-auth taurine-crypt taurine-store
+            taurine-repo taurine-replicate taurine-sync taurine-notes taurine-core
+            taurine-exec taurine-scripting taurine-mock taurine-git
+            taurine-transport-fs taurine-transport-git taurine-transport-wifi
+            taurine-cli
+          )
+
+          rust_net_packages=(taurine-peer-sys taurine-net taurine-ovpn-sys taurine-net-conformance)
+          rust_app_packages=(taurine-app taurine-desktop taurine-mobile)
+
+          rust_coverage_check() {
+            local members member missing=0
+            if ! members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort -u)" || [[ -z "${members}" ]]; then
+              echo 'error: failed to load the workspace member list' >&2
+              return 1
+            fi
+            while IFS= read -r member; do
+              case " ${rust_domain_packages[*]} ${rust_net_packages[*]} ${rust_app_packages[*]} " in
+                *" ${member} "*) continue ;;
+              esac
+              [[ "${member}" == taurine-db* ]] && continue
+              echo "error: workspace member ${member} is tested by no ${OS_LABEL} Rust concern" >&2
+              missing=1
+            done <<<"${members}"
+            return "${missing}"
+          }
+
+          # `--locked`: the committed Cargo.lock is what was reviewed and what the Linux
+          # contracts concern's advisory sweep audits. `--no-fail-fast`: every failing
+          # target is reported in one dispatch. No `--features`: each crate is tested as
+          # its manifest builds it, as on Linux. Env-gated live suites print SKIPPED and
+          # pass when their variable is unset; the live servers belong to live-proofs.yml.
+          case "${CONCERN}" in
+            rust-domain)
+              # The same crates as Linux, plus taurine-cli, whose exit codes and paths
+              # are the part a user on this OS can observe. taurine-crypt links the real
+              # macOS Keychain here (its default `keychain` feature, apple-native) against
+              # the throwaway keychain the toolchain step created, then is tested again
+              # without the feature, which is the build a machine with no keychain gets.
+              run_deferred rust-coverage rust_coverage_check
+              run_deferred rust-crypt-no-keychain-tests \
+                cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
+              run_deferred rust-domain-tests \
+                cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
+              ;;
+            rust-db)
+              # Every `taurine-db*` crate. Platform-neutral engines, but the family has
+              # `#[cfg(unix)]` socket paths (mongo, mysql, sidecar, engine) that Linux
+              # also takes and macOS-only linking of its bundled C (sqlite, duckdb,
+              # libsql), which only a macOS compile proves.
+              run_deferred rust-db-tests \
+                cargo test --locked --no-fail-fast --package 'taurine-db*'
+              ;;
+            rust-net)
+              # The dialer, the egress verifier and the vendored openvpn3 shim. On macOS
+              # openvpn3 compiles its own platform integration (MacDNSWatchdog,
+              # ReachabilityTracker, MacSleep) against CoreFoundation, SystemConfiguration,
+              # IOKit and Security, which no Linux run can compile. The OpenVPN lab tests
+              # are `#[ignore]`d: they need the local lab's servers.
+              run_deferred rust-net-tests \
+                cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
+              ;;
+            rust-app)
+              # The command tier both shells call and the two shells' own unit tests.
+              # Tauri's `test` feature drives the commands through its mock runtime, so
+              # no window or WebView process is started; AppKit and WKWebView are what
+              # the crates link.
+              run_deferred rust-app-tests \
+                cargo test --locked --no-fail-fast "${rust_app_packages[@]/#/--package=}"
+              ;;
+            *)
+              echo "Unsupported macOS Rust concern: ${CONCERN}" >&2
+              exit 2
+              ;;
+          esac
+          finish_deferred
 
       - name: Publish sanitized validation proof
         shell: bash
