@@ -2,6 +2,15 @@ name: macOS source validation (protected)
 
 # Manual, protected, source-bearing validation. Pull requests and pushes never
 # enter the source-read environment or receive a private-source token.
+#
+# Cadence. The Rust compile-and-test concerns are the slow part of this
+# workflow (a cold build of the whole closure on a three-core runner, up to 120
+# minutes), so they run only when the dispatch asks for them with `-f rust=true`.
+# Intended use: Linux validation on every dispatch (Rust always on there);
+# macOS and Windows Rust with `rust=true` for a plan tip before its develop PR,
+# for every develop/uat/main tip, and for any branch that touches native or
+# OS-specific Rust. A dispatch without it runs the TypeScript concerns exactly
+# as before and reports the Rust concerns as "not requested", never as passed.
 on:
   workflow_dispatch:
     inputs:
@@ -9,6 +18,11 @@ on:
         description: Exact 40-character commit SHA to validate from private Taurine
         required: true
         type: string
+      rust:
+        description: Run the Rust compile+test concerns
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -25,39 +39,62 @@ env:
   SOURCE_REPOSITORY_NAME: Taurine
 
 jobs:
+  # Builds the concern matrix from the `rust` input and reports the choice. It
+  # holds no source, token or environment: it only emits the list of concerns
+  # to schedule, so an unrequested Rust concern never gets a runner at all.
+  plan:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Plan macOS concerns
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Select the concerns and report the Rust cadence
+        id: plan
+        shell: bash
+        env:
+          RUST_REQUESTED: ${{ inputs.rust }}
+        run: |
+          set -euo pipefail
+          base='"desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"'
+          rust='"rust-domain","rust-db","rust-net","rust-app"'
+          {
+            echo '## macOS Rust concerns'
+            echo
+            if [[ "${RUST_REQUESTED}" == true ]]; then
+              echo "matrix={\"concern\":[${base},${rust}]}" >> "${GITHUB_OUTPUT}"
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net and rust-app are scheduled.'
+            else
+              echo "matrix={\"concern\":[${base}]}" >> "${GITHUB_OUTPUT}"
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net and rust-app were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   validate:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    needs: plan
     name: macOS ${{ matrix.concern }} validation
     environment: source-read
     runs-on: macos-14
     # The TypeScript concerns stay on the reviewed 45. The Rust concerns compile
-    # their closure cold on a three-core runner, because nothing is cached in
-    # this control plane: `rust-app` carries DuckDB's C++ amalgamation, Tauri and
+    # their closure cold on a three-core runner, because compiled output is never
+    # cached in this control plane (only third-party crate sources are): `rust-app` carries DuckDB's C++ amalgamation, Tauri and
     # over a hundred test binaries (about 40 minutes on the four-core Linux
     # runner), `rust-db` the same drivers' offline suites (about 10 there).
     timeout-minutes: ${{ matrix.concern == 'rust-app' && 120 || matrix.concern == 'rust-db' && 90 || startsWith(matrix.concern, 'rust-') && 60 || 45 }}
     strategy:
       fail-fast: false
-      matrix:
-        concern:
-          - desktop-shard-1
-          - desktop-shard-2
-          - desktop-quality
-          - mobile
-          - bundle-budget
-          - orchestrate-skill
-          # The Rust crate-test concerns, one runner each so a slow one cannot
-          # hold the others back. They are the macOS counterparts of the Linux
-          # rust-domain, rust-db, rust-net and rust-app concerns. rust-dbx is
-          # not repeated here: dbx-core's engine and protocol tests are
-          # platform-neutral and stay on Linux; its OS-keyring feature is
-          # opt-in (not built by `npm run test:dbx-core`), its Postgres tests
-          # need a Docker daemon that macOS hosted runners do not have, and its
-          # vendored OpenSSL is a from-source C build with no macOS-only code.
-          - rust-domain
-          - rust-db
-          - rust-net
-          - rust-app
+      # The concern list comes from the `plan` job: the TypeScript concerns always,
+      # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-app,
+      # one runner each so a slow one cannot hold the others back) only when the
+      # dispatch set rust=true. They are the macOS counterparts of the Linux
+      # rust-* concerns. rust-dbx is not repeated here: dbx-core's engine and
+      # protocol tests are platform-neutral and stay on Linux; its OS-keyring
+      # feature is opt-in (not built by `npm run test:dbx-core`), its Postgres
+      # tests need a Docker daemon that macOS hosted runners do not have, and its
+      # vendored OpenSSL is a from-source C build with no macOS-only code.
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -296,6 +333,90 @@ jobs:
             exit 1
           fi
           echo 'vendor-fetch: passed'
+
+      # Third-party crate sources only: cargo's registry index, the downloaded
+      # `.crate` archives and the git dependency databases. Never `target/`, never
+      # an extracted source tree, never anything under the checked-out private
+      # source, so no compiled or private code ever enters a cache. The key is the
+      # OS, the concern and a hash of the private Cargo.lock files, which reveals
+      # nothing about their contents.
+      - name: Locate Cargo home for the third-party source cache
+        id: cargo-home
+        if: ${{ startsWith(matrix.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${CARGO_HOME:-${HOME}/.cargo}"
+          if command -v cygpath >/dev/null 2>&1; then
+            dir="$(cygpath -m "${dir}")"
+          fi
+          echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore cached third-party crate sources
+        id: cargo-sources
+        if: ${{ startsWith(matrix.concern, 'rust-') }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/index
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+            ${{ steps.cargo-home.outputs.dir }}/git/db
+          key: cargo-sources-${{ runner.os }}-${{ matrix.concern }}-${{ hashFiles('Cargo.lock', 'taurine-backend/*/Cargo.lock', 'taurine-backend/vendor/*/Cargo.lock', 'vendor/*/Cargo.lock') }}
+          restore-keys: |
+            cargo-sources-${{ runner.os }}-${{ matrix.concern }}-
+
+      # Defence in depth: do not rely on cargo alone to notice a tampered archive.
+      # Every restored `.crate` must hash to the checksum recorded for it in a
+      # private Cargo.lock; anything that does not match, or is not in a lock at
+      # all, is deleted before cargo runs. Only counts are printed.
+      - name: Verify restored crate archives against Cargo.lock
+        if: ${{ startsWith(matrix.concern, 'rust-') }}
+        shell: bash
+        env:
+          CARGO_SOURCES_DIR: ${{ steps.cargo-home.outputs.dir }}
+          CACHE_HIT: ${{ steps.cargo-sources.outputs.cache-hit }}
+          OS_LABEL: macOS
+        run: |
+          set -euo pipefail
+          sha256_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
+          expected="${RUNNER_TEMP}/crate-checksums.txt"
+          : > "${expected}"
+          while IFS= read -r lock; do
+            tr -d '\r' < "${lock}" | awk '
+              /^\[\[package\]\]/ { n = ""; v = ""; next }
+              /^name = /     { gsub(/"/, "", $3); n = $3 }
+              /^version = /  { gsub(/"/, "", $3); v = $3 }
+              /^checksum = / { gsub(/"/, "", $3); if (n != "" && v != "") print n "-" v ".crate " $3 }
+            ' >> "${expected}"
+          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*')
+          kept=0
+          dropped=0
+          cache_dir="${CARGO_SOURCES_DIR}/registry/cache"
+          if [[ -d "${cache_dir}" ]]; then
+            find "${cache_dir}" -type f ! -name '*.crate' -delete
+            while IFS= read -r -d '' crate; do
+              want="$(awk -v f="$(basename "${crate}")" '$1 == f { print $2; exit }' "${expected}")"
+              if [[ -n "${want}" && "$(sha256_of "${crate}")" == "${want}" ]]; then
+                kept=$((kept + 1))
+              else
+                rm -f "${crate}"
+                dropped=$((dropped + 1))
+              fi
+            done < <(find "${cache_dir}" -type f -name '*.crate' -print0)
+          fi
+          case "${CACHE_HIT}" in
+            true) state='exact hit' ;;
+            false) state='restored from an earlier lockfile' ;;
+            *) state='miss' ;;
+          esac
+          echo "cargo-sources: ${state}; ${kept} archives verified, ${dropped} dropped"
+          echo "- ${OS_LABEL} Cargo source cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Run isolated macOS validation concern
         if: ${{ !startsWith(matrix.concern, 'rust-') }}
@@ -609,6 +730,19 @@ jobs:
               ;;
           esac
           finish_deferred
+
+      # Saved only from the protected main branch (every job here already refuses to
+      # run elsewhere; the condition repeats it so the write permission is explicit)
+      # and only on a miss, so a key is written once and never overwritten.
+      - name: Save verified third-party crate sources
+        if: ${{ always() && github.ref == 'refs/heads/main' && startsWith(matrix.concern, 'rust-') && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/index
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+            ${{ steps.cargo-home.outputs.dir }}/git/db
+          key: cargo-sources-${{ runner.os }}-${{ matrix.concern }}-${{ hashFiles('Cargo.lock', 'taurine-backend/*/Cargo.lock', 'taurine-backend/vendor/*/Cargo.lock', 'vendor/*/Cargo.lock') }}
 
       - name: Publish sanitized validation proof
         shell: bash

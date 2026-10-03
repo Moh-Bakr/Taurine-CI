@@ -8,6 +8,15 @@ name: Windows source validation (protected)
 # orchestrate skill and dashboard verification runs on the protected Ubuntu
 # workflow, with the macOS app lane retaining its cross-platform skill smoke
 # checks.
+#
+# Cadence. The Rust compile-and-test concerns are the slow part of this
+# workflow (a cold MSVC build of the whole closure, up to 150 minutes), so they
+# run only when the dispatch asks for them with -f rust=true. Intended use:
+# Linux validation on every dispatch (Rust always on there); Windows and macOS
+# Rust with `rust=true` for a plan tip before its develop PR, for every
+# develop/uat/main tip, and for any branch that touches native or OS-specific
+# Rust. A dispatch without it runs the TypeScript concerns exactly as before
+# and reports the Rust concerns as "not requested", never as passed.
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +24,11 @@ on:
         description: Exact 40-character commit SHA to validate from private Taurine
         required: true
         type: string
+      rust:
+        description: Run the Rust compile+test concerns
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -43,6 +57,22 @@ jobs:
             exit 1
           fi
 
+      - name: Report the Rust concern cadence
+        shell: bash
+        env:
+          RUST_REQUESTED: ${{ inputs.rust }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## Windows Rust concerns'
+            echo
+            if [[ "${RUST_REQUESTED}" == true ]]; then
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn and rust-app run in the validate-rust jobs.'
+            else
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn and rust-app were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   validate:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     needs: validate-input
@@ -56,15 +86,30 @@ jobs:
           - mobile
           - contracts
           - bundle-budget
-          # The Rust crate-test concerns, each its own reusable-workflow job so
-          # a slow one cannot hold the others back. rust-ovpn is split from
-          # rust-net because its vcpkg dependency build dominates the runtime.
-          # rust-dbx is not repeated here: dbx-core's engine and protocol tests
-          # are platform-neutral and stay on Linux; its OS-keyring feature is
-          # opt-in (not built by `npm run test:dbx-core`), its Postgres tests
-          # need a Linux container daemon that Windows hosted runners do not
-          # have, and its vendored OpenSSL is a from-source build that needs
-          # Perl and NASM on MSVC for code with no Windows-only paths.
+    uses: ./.github/workflows/windows-validation-concern.yml
+    secrets: inherit
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
+
+  # The Rust crate-test concerns, each its own reusable-workflow job so a slow
+  # one cannot hold the others back. Scheduled only when `rust=true`; a skipped
+  # job here means "not requested", as the cadence report above states.
+  # rust-ovpn is split from rust-net because its vcpkg dependency build
+  # dominates the runtime.
+  # rust-dbx is not repeated here: dbx-core's engine and protocol tests
+  # are platform-neutral and stay on Linux; its OS-keyring feature is
+  # opt-in (not built by `npm run test:dbx-core`), its Postgres tests
+  # need a Linux container daemon that Windows hosted runners do not
+  # have, and its vendored OpenSSL is a from-source build that needs
+  # Perl and NASM on MSVC for code with no Windows-only paths.
+  validate-rust:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust
+    needs: validate-input
+    strategy:
+      fail-fast: false
+      matrix:
+        concern:
           - rust-domain
           - rust-db
           - rust-net

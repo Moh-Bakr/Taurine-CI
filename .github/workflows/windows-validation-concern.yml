@@ -32,7 +32,8 @@ jobs:
     environment: source-read
     runs-on: windows-2022
     # The TypeScript concerns stay on the reviewed 60. The Rust concerns compile
-    # their closure cold, because nothing is cached in this control plane:
+    # their closure cold, because compiled output is never cached in this
+    # control plane (only third-party crate sources are):
     # `rust-app` carries DuckDB's C++ amalgamation, Tauri and over a hundred
     # test binaries (about 40 minutes on the Linux runner, and MSVC is slower),
     # `rust-db` the drivers' offline suites, and `rust-ovpn` builds OpenSSL,
@@ -272,6 +273,90 @@ jobs:
             exit 1
           fi
           echo 'vendor-fetch: passed'
+
+      # Third-party crate sources only: cargo's registry index, the downloaded
+      # `.crate` archives and the git dependency databases. Never `target/`, never
+      # an extracted source tree, never anything under the checked-out private
+      # source, so no compiled or private code ever enters a cache. The key is the
+      # OS, the concern and a hash of the private Cargo.lock files, which reveals
+      # nothing about their contents.
+      - name: Locate Cargo home for the third-party source cache
+        id: cargo-home
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${CARGO_HOME:-${HOME}/.cargo}"
+          if command -v cygpath >/dev/null 2>&1; then
+            dir="$(cygpath -m "${dir}")"
+          fi
+          echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore cached third-party crate sources
+        id: cargo-sources
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/index
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+            ${{ steps.cargo-home.outputs.dir }}/git/db
+          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('Cargo.lock', 'taurine-backend/*/Cargo.lock', 'taurine-backend/vendor/*/Cargo.lock', 'vendor/*/Cargo.lock') }}
+          restore-keys: |
+            cargo-sources-${{ runner.os }}-${{ inputs.concern }}-
+
+      # Defence in depth: do not rely on cargo alone to notice a tampered archive.
+      # Every restored `.crate` must hash to the checksum recorded for it in a
+      # private Cargo.lock; anything that does not match, or is not in a lock at
+      # all, is deleted before cargo runs. Only counts are printed.
+      - name: Verify restored crate archives against Cargo.lock
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        env:
+          CARGO_SOURCES_DIR: ${{ steps.cargo-home.outputs.dir }}
+          CACHE_HIT: ${{ steps.cargo-sources.outputs.cache-hit }}
+          OS_LABEL: Windows
+        run: |
+          set -euo pipefail
+          sha256_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
+          expected="${RUNNER_TEMP}/crate-checksums.txt"
+          : > "${expected}"
+          while IFS= read -r lock; do
+            tr -d '\r' < "${lock}" | awk '
+              /^\[\[package\]\]/ { n = ""; v = ""; next }
+              /^name = /     { gsub(/"/, "", $3); n = $3 }
+              /^version = /  { gsub(/"/, "", $3); v = $3 }
+              /^checksum = / { gsub(/"/, "", $3); if (n != "" && v != "") print n "-" v ".crate " $3 }
+            ' >> "${expected}"
+          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*')
+          kept=0
+          dropped=0
+          cache_dir="${CARGO_SOURCES_DIR}/registry/cache"
+          if [[ -d "${cache_dir}" ]]; then
+            find "${cache_dir}" -type f ! -name '*.crate' -delete
+            while IFS= read -r -d '' crate; do
+              want="$(awk -v f="$(basename "${crate}")" '$1 == f { print $2; exit }' "${expected}")"
+              if [[ -n "${want}" && "$(sha256_of "${crate}")" == "${want}" ]]; then
+                kept=$((kept + 1))
+              else
+                rm -f "${crate}"
+                dropped=$((dropped + 1))
+              fi
+            done < <(find "${cache_dir}" -type f -name '*.crate' -print0)
+          fi
+          case "${CACHE_HIT}" in
+            true) state='exact hit' ;;
+            false) state='restored from an earlier lockfile' ;;
+            *) state='miss' ;;
+          esac
+          echo "cargo-sources: ${state}; ${kept} archives verified, ${dropped} dropped"
+          echo "- ${OS_LABEL} Cargo source cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Run isolated validation concern
         if: ${{ !startsWith(inputs.concern, 'rust-') }}
@@ -626,6 +711,19 @@ jobs:
               ;;
           esac
           finish_deferred
+
+      # Saved only from the protected main branch (every job here already refuses to
+      # run elsewhere; the condition repeats it so the write permission is explicit)
+      # and only on a miss, so a key is written once and never overwritten.
+      - name: Save verified third-party crate sources
+        if: ${{ always() && github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/index
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+            ${{ steps.cargo-home.outputs.dir }}/git/db
+          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('Cargo.lock', 'taurine-backend/*/Cargo.lock', 'taurine-backend/vendor/*/Cargo.lock', 'vendor/*/Cargo.lock') }}
 
       - name: Publish sanitized validation proof
         shell: bash
