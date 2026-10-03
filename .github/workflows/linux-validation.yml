@@ -109,3 +109,55 @@ jobs:
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
+
+  # Tabulates every concern's duration and conclusion for this run and warns when a
+  # concern took more than 25% (and more than two minutes) longer than the committed
+  # baseline below, in minutes, taken from recent hosted runs. Warning only: it never
+  # fails the run, calls no service beyond this repository's own run API with the
+  # run's read-only token, and publishes no artifact. A concern with no baseline is
+  # listed without a comparison; update the table when a run is a new normal.
+  timings:
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    needs: [validate]
+    name: Concern timings
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Tabulate concern timings against the baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OS_LABEL: Linux
+          BASELINE_MINUTES: '{"rust-app":47,"rust-db":14,"rust-dbx":7,"rust-domain":3,"rust-net":2,"taurine-cli":3,"desktop-shard-1":10,"desktop-shard-2":11,"desktop-quality":2,"mobile-quality":2,"frontend-build-budget":2,"contracts":1,"e2e-critical":10,"e2e-a11y":5,"e2e-regression-1":10,"e2e-regression-2":10,"e2e-regression-3":11,"e2e-regression-4":15}'
+          NAME_PATTERN: '^validate \(.+\) / Linux (?<concern>.+)$'
+        run: |
+          set -euo pipefail
+          rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+            | jq -r --arg re "${NAME_PATTERN}" '.jobs[]
+              | select(.started_at != null and .completed_at != null)
+              | select(.name | test($re))
+              | [(.name | capture($re).concern), (.conclusion // "unknown"),
+                 (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)]
+              | @tsv' | sort)"
+          {
+            echo "## ${OS_LABEL} concern timings"
+            echo
+            echo '| Concern | Duration | Baseline | Conclusion |'
+            echo '| --- | --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          while IFS=$'\t' read -r concern conclusion seconds; do
+            [[ -n "${concern}" ]] || continue
+            base="$(jq -r --arg c "${concern}" '.[$c] // empty' <<<"${BASELINE_MINUTES}")"
+            shown='none'
+            if [[ -n "${base}" ]]; then
+              shown="${base}m"
+              limit=$(( base * 60 * 125 / 100 ))
+              if (( seconds > limit && seconds > base * 60 + 120 )); then
+                echo "::warning title=Slow concern::${OS_LABEL} ${concern} took $((seconds / 60))m$((seconds % 60))s against a baseline of ${base}m (more than 25% slower)"
+                shown="${base}m (SLOWER)"
+              fi
+            fi
+            printf '| %s | %dm%02ds | %s | %s |\n' "${concern}" $((seconds / 60)) $((seconds % 60)) "${shown}" "${conclusion}" >> "${GITHUB_STEP_SUMMARY}"
+          done <<<"${rows}"

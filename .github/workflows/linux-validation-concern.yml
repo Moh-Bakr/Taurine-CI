@@ -45,6 +45,10 @@ jobs:
     # crates.
     timeout-minutes: ${{ (inputs.concern == 'rust-app' || inputs.concern == 'rust-dbx') && 90 || (startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'rust-')) && 60 || (inputs.concern == 'taurine-cli' && 45 || 30) }}
     steps:
+      - name: Start the concern timer
+        shell: bash
+        run: echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1066,3 +1070,16 @@ jobs:
           fi
           cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
           cat "${section_file}"
+
+      # The concern's own wall-clock time from its first step, so the summary shows it
+      # next to the result. Queue time is not included. The dispatcher's timings job
+      # tabulates every concern and compares it with a committed baseline.
+      - name: Report concern duration
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          started="${CONCERN_STARTED_AT:-}"
+          [[ -n "${started}" ]] || exit 0
+          elapsed=$(( $(date +%s) - started ))
+          printf '### Concern duration\n\n%dm%02ds from the first step, excluding runner queue time.\n' \
+            $((elapsed / 60)) $((elapsed % 60)) >> "${GITHUB_STEP_SUMMARY}"
