@@ -56,6 +56,20 @@ jobs:
           - mobile
           - contracts
           - bundle-budget
+          # The Rust crate-test concerns, each its own reusable-workflow job so
+          # a slow one cannot hold the others back. rust-ovpn is split from
+          # rust-net because its vcpkg dependency build dominates the runtime.
+          # rust-dbx is not repeated here: dbx-core's engine and protocol tests
+          # are platform-neutral and stay on Linux; its OS-keyring feature is
+          # opt-in (not built by `npm run test:dbx-core`), its Postgres tests
+          # need a Linux container daemon that Windows hosted runners do not
+          # have, and its vendored OpenSSL is a from-source build that needs
+          # Perl and NASM on MSVC for code with no Windows-only paths.
+          - rust-domain
+          - rust-db
+          - rust-net
+          - rust-ovpn
+          - rust-app
     uses: ./.github/workflows/windows-validation-concern.yml
     secrets: inherit
     with:

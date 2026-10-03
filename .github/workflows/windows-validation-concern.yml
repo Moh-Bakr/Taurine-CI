@@ -31,7 +31,14 @@ jobs:
     name: Windows ${{ inputs.concern }}
     environment: source-read
     runs-on: windows-2022
-    timeout-minutes: 60
+    # The TypeScript concerns stay on the reviewed 60. The Rust concerns compile
+    # their closure cold, because nothing is cached in this control plane:
+    # `rust-app` carries DuckDB's C++ amalgamation, Tauri and over a hundred
+    # test binaries (about 40 minutes on the Linux runner, and MSVC is slower),
+    # `rust-db` the drivers' offline suites, and `rust-ovpn` builds OpenSSL,
+    # jsoncpp, lz4, fmt and xxhash from source through vcpkg before it compiles
+    # openvpn3 (the private notes record roughly 23 minutes for that alone).
+    timeout-minutes: ${{ inputs.concern == 'rust-app' && 150 || (inputs.concern == 'rust-db' || inputs.concern == 'rust-ovpn') && 120 || startsWith(inputs.concern, 'rust-') && 90 || 60 }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,12 +140,18 @@ jobs:
             '*.toml' '*.ts' '*.tsx' '*.txt' '*.vue' '*.yml' '*.yaml' |
             xargs -0 -r sed -i 's/\r$//'
 
+      # The Rust concerns need no node_modules, so they skip Node and the three
+      # `npm ci` runs, as the Linux ones do. They still need the vendor fetch
+      # (their own step below): the workspace root path-depends on
+      # vendor/boringtun, and no cargo command loads without it.
       - name: Set up the pinned Node.js release
+        if: ${{ !startsWith(inputs.concern, 'rust-') }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.14.0
 
       - name: Install locked JavaScript dependencies
+        if: ${{ !startsWith(inputs.concern, 'rust-') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -197,7 +210,71 @@ jobs:
           run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
           run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
 
+      - name: Set up the Rust toolchain and native dependencies
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+
+          # Everything here comes from the runner image or from one pinned fallback, and
+          # nothing is fetched from an unreviewed source.
+          #
+          # libclang: taurine-scripting's rquickjs `bindgen` feature needs libclang.dll at
+          # build-script runtime. The windows-2022 image ships LLVM; if a future image
+          # stops doing so, the pinned Chocolatey package is the fallback rather than a
+          # floating install.
+          llvm_bin='/c/Program Files/LLVM/bin'
+          if [[ ! -f "${llvm_bin}/libclang.dll" ]]; then
+            choco install llvm --version=18.1.8 --no-progress -y
+          fi
+          [[ -f "${llvm_bin}/libclang.dll" ]] || { echo 'libclang.dll is unavailable' >&2; exit 1; }
+
+          # Same settings as the Linux crate-test concerns, about the runner not the code:
+          # no incremental state, no debug info for tests and their dependencies, and
+          # `target/` off the workspace drive. The workspace sits on D:, the small
+          # scratch drive, and `rust-app`/`rust-db` compile closures that would fill it;
+          # C: has the room. A short path also keeps deep build-script output clear of
+          # the 260-character limit. It stays on this ephemeral runner like everything
+          # else here and is never uploaded.
+          mkdir -p /c/ct
+          {
+            printf '%s\n' 'LIBCLANG_PATH=C:\Program Files\LLVM\bin'
+            echo 'CARGO_INCREMENTAL=0'
+            echo 'CARGO_PROFILE_DEV_DEBUG=0'
+            echo 'CARGO_PROFILE_TEST_DEBUG=0'
+            printf '%s\n' 'CARGO_TARGET_DIR=C:\ct'
+            # vcpkg's own telemetry, off: Taurine is telemetry-free and so is its CI.
+            echo 'VCPKG_DISABLE_METRICS=1'
+          } >> "${GITHUB_ENV}"
+          df -h /c /d 2>/dev/null || df -h
+
+      - name: Fetch pinned vendored sources
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        env:
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+          GIT_CONFIG_KEY_1: core.longpaths
+          GIT_CONFIG_VALUE_1: 'true'
+        run: |
+          set -euo pipefail
+          # `fetch` verifies each download against the sha256 pinned in vendor.lock and
+          # applies the reviewed boringtun zeroize patch, so this is a supply-chain check
+          # as much as a prerequisite. The environment below keeps the vendored trees
+          # byte-identical to what upstream ships: Git for Windows would otherwise check
+          # openvpn3-core and tap-windows out with CRLF line endings, which no test and
+          # no pinned patch was written against.
+          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
+            echo 'vendor-fetch: failed (detailed output withheld)' >&2
+            exit 1
+          fi
+          echo 'vendor-fetch: passed'
+
       - name: Run isolated validation concern
+        if: ${{ !startsWith(inputs.concern, 'rust-') }}
         shell: bash
         env:
           CONCERN: ${{ inputs.concern }}
@@ -296,6 +373,259 @@ jobs:
               exit 2
               ;;
           esac
+
+      - name: Run isolated Windows Rust concern
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        env:
+          CONCERN: ${{ inputs.concern }}
+          OS_LABEL: Windows
+        run: |
+          set -euo pipefail
+
+          # The helpers below are the Linux `rust-*` concerns' own (see
+          # linux-validation-concern.yml, which is where the reasoning for each lives),
+          # with the changes a macOS or Windows runner needs and nothing else:
+          # - carriage returns are stripped before any pattern runs, because Windows
+          #   tools end lines with CRLF and the anchored patterns below would never match;
+          # - the path rules also cover a Windows drive path, the `\\?\` prefix and the
+          #   registry checkout of a dependency, so no absolute runner path is published;
+          # - the failure classes a Windows or macOS test binary can add (a missing entry
+          #   point or DLL, a stack overflow, a dynamic library that would not load) and a
+          #   vcpkg port build failure get their own fixed one-line classification.
+          # Everything else, including what is and is not published, is unchanged: only
+          # failing test names, `error[Ennnn]` headers with their location, and cargo's
+          # own fixed failure shapes leave this runner.
+          workspace_strip='s#^$##'
+          if [[ "${GITHUB_WORKSPACE}" != *\\* ]]; then
+            workspace_strip="s#${GITHUB_WORKSPACE}/##g"
+          fi
+
+          cargo_sanitize() {
+            tr -d '\r' <"$1" |
+              sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' |
+              sed -E 's#\\\\\?\\##g' |
+              sed -E 's#[^ ]*[\\/]registry[\\/]src[\\/][^\\/ ]+[\\/]#<registry>/#g' |
+              sed -E "${workspace_strip}" |
+              sed -E 's#[A-Za-z]:\\ct\\#<target>/#g; s#[A-Za-z]:\\[^ ]*#<private-path>#g' |
+              sed -E 's#/Users/[^ ]+#<private-path>#g; s#/private/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+              cut -c1-200
+          }
+
+          # A failed test's captured output (`---- name stdout ----` up to the next
+          # `failures:`) is dropped whole, compiler warnings are dropped, an
+          # `error[Ennnn]` header is published with its `-->` location, and an uncoded
+          # `error:` line only when it is followed by a `-->` location or is one of
+          # cargo's own fixed shapes. `error: building <port>:<triplet> failed` is
+          # vcpkg's own fixed line naming a public third-party port, never private code.
+          cargo_test_detail() {
+            cargo_sanitize "$1" | awk '
+              /^---- .* (stdout|stderr) ----$/ { in_output = 1; next }
+              /^failures:$/ { in_output = 0; next }
+              in_output { next }
+              /^warning: / { block = "warning"; pending = ""; next }
+              /^error\[E[0-9]+\]: / { block = "error"; pending = ""; print; next }
+              /^error: building [A-Za-z0-9_.+-]+:[A-Za-z0-9_-]+ failed/ { block = "vcpkg"; pending = ""; print; next }
+              /^error: / {
+                block = "error"; pending = ""
+                if ($0 ~ /^error: (could not compile|test failed, to rerun pass|[0-9]+ targets? failed:|failed to run custom build command for|workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
+                else pending = $0
+                next
+              }
+              /^[[:space:]]*--> / {
+                if (block == "error") { if (pending != "") print pending; pending = ""; print }
+                next
+              }
+              /^test .* FAILED$/ || /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }
+            ' | head -80 >&2 || true
+          }
+
+          cargo_test_reason() {
+            local log="$1"
+            if grep -qE '^error: workspace member ' "${log}"; then echo "a workspace member is assigned to no ${OS_LABEL} Rust test concern"
+            elif grep -qE 'needs to be updated but --locked was passed|lock file .* needs to be updated' "${log}"; then echo 'committed Cargo.lock is out of date (refused by --locked)'
+            elif grep -qE '^error: building .* failed|vcpkg install failed|error: vcpkg' "${log}"; then echo 'vcpkg dependency install failure'
+            elif grep -qE 'Unable to find libclang|libclang.*[Nn]o such file' "${log}"; then echo 'libclang or bindgen failure'
+            elif grep -qE 'failed to run custom build command' "${log}"; then echo 'dependency or crate build script failure'
+            elif grep -qE 'No space left on device|not enough space on the disk|os error 112' "${log}"; then echo 'runner disk exhaustion'
+            elif grep -qE '^error: linking with ' "${log}"; then echo 'link failure (missing system library or resource exhaustion)'
+            elif grep -qE 'signal: 9|SIGKILL' "${log}"; then echo 'a process was killed (likely memory exhaustion)'
+            elif grep -qE '0xc0000139|STATUS_ENTRYPOINT_NOT_FOUND|0xc0000135|STATUS_DLL_NOT_FOUND|Library not loaded' "${log}"; then echo 'a test binary could not start (missing entry point, DLL or dynamic library)'
+            elif grep -qE '0xc00000fd|STATUS_STACK_OVERFLOW|has overflowed its stack' "${log}"; then echo 'a test binary overflowed its stack'
+            elif grep -qE 'test result: FAILED|^error: test failed|^error: [0-9]+ targets? failed' "${log}"; then echo 'test failure'
+            elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
+            elif grep -qE 'failed to (download|select|get|load|parse|fetch)' "${log}"; then echo 'dependency download or resolution failure'
+            else echo 'command returned non-zero'
+            fi
+          }
+
+          run_quiet() {
+            local label="$1"; shift
+            local log="${RUNNER_TEMP}/${label}.log"
+            if "$@" >"${log}" 2>&1; then
+              echo "${label}: passed"
+            else
+              tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
+              echo "${label}: failed ($(cargo_test_reason "${log}"); sanitized detail below)" >&2
+              cargo_test_detail "${log}"
+              exit 1
+            fi
+          }
+
+          # Every sub-step runs and is reported, as in the Linux concerns: the sub-steps
+          # are independent, so stopping at the first failure would hide results.
+          deferred_results=()
+          deferred_failed=0
+          run_deferred() {
+            local label="$1"; shift
+            local status
+            set +e
+            ( set -e; run_quiet "${label}" "$@" )
+            status=$?
+            set -e
+            if [[ "${status}" -eq 0 ]]; then
+              deferred_results+=("${label}|passed")
+            else
+              deferred_results+=("${label}|failed: $(cargo_test_reason "${RUNNER_TEMP}/${label}.log")")
+              deferred_failed=1
+            fi
+          }
+
+          finish_deferred() {
+            local entry
+            {
+              echo "## ${OS_LABEL} ${CONCERN} sub-steps"
+              echo
+              echo '| Sub-step | Result |'
+              echo '| --- | --- |'
+              for entry in "${deferred_results[@]}"; do
+                echo "| \`${entry%%|*}\` | ${entry#*|} |"
+              done
+              echo
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "${CONCERN} sub-step results:"
+            for entry in "${deferred_results[@]}"; do
+              echo "  ${entry%%|*}: ${entry#*|}"
+            done
+            df -h / 2>/dev/null || true
+            if [[ "${deferred_failed}" -ne 0 ]]; then
+              echo "${CONCERN}: failed (one or more sub-steps failed; each is listed above)" >&2
+              exit 1
+            fi
+          }
+
+          # Which workspace crates each Rust concern tests on this OS. Every member of the
+          # private workspace belongs to a concern, and `rust_coverage_check` (run by
+          # `rust-domain`) fails when a member is in none of them, so a crate added later
+          # cannot go untested by omission. The database family needs no list: `rust-db`
+          # selects it with cargo's own `taurine-db*` package glob.
+          rust_domain_packages=(
+            taurine-model taurine-atomic taurine-auth taurine-crypt taurine-store
+            taurine-repo taurine-replicate taurine-sync taurine-notes taurine-core
+            taurine-exec taurine-scripting taurine-mock taurine-git
+            taurine-transport-fs taurine-transport-git taurine-transport-wifi
+            taurine-cli
+          )
+
+          rust_net_packages=(taurine-peer-sys taurine-net taurine-net-conformance)
+          rust_ovpn_packages=(taurine-ovpn-sys)
+          rust_app_packages=(taurine-app taurine-desktop taurine-mobile)
+
+          rust_coverage_check() {
+            local members member missing=0
+            if ! members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort -u)" || [[ -z "${members}" ]]; then
+              echo 'error: failed to load the workspace member list' >&2
+              return 1
+            fi
+            while IFS= read -r member; do
+              case " ${rust_domain_packages[*]} ${rust_net_packages[*]} ${rust_ovpn_packages[*]} ${rust_app_packages[*]} " in
+                *" ${member} "*) continue ;;
+              esac
+              [[ "${member}" == taurine-db* ]] && continue
+              echo "error: workspace member ${member} is tested by no ${OS_LABEL} Rust concern" >&2
+              missing=1
+            done <<<"${members}"
+            return "${missing}"
+          }
+
+          # vcpkg reads openvpn3's own `vcpkg.json`, which arrives with the pinned tree,
+          # so this runs after the vendor fetch. The static-md triplet is the one
+          # `taurine-ovpn-sys`'s build script prefers: a dynamic triplet would leave
+          # OpenSSL's and jsoncpp's DLLs in vcpkg's own `bin/`, which is on nobody's PATH,
+          # so every test binary would compile, link and then fail to start.
+          windows_ovpn_dependencies() {
+            local vcpkg_bin
+            if command -v vcpkg >/dev/null 2>&1; then
+              vcpkg_bin=vcpkg
+            elif [[ -x "${VCPKG_INSTALLATION_ROOT:-}/vcpkg.exe" ]]; then
+              vcpkg_bin="${VCPKG_INSTALLATION_ROOT}/vcpkg.exe"
+            else
+              echo 'error: vcpkg is not available on this runner image' >&2
+              return 1
+            fi
+            cd vendor/openvpn3-core
+            "${vcpkg_bin}" install --triplet x64-windows-static-md --disable-metrics
+          }
+
+          # `--locked`: the committed Cargo.lock is what was reviewed and what the Linux
+          # contracts concern's advisory sweep audits. `--no-fail-fast`: every failing
+          # target is reported in one dispatch. No `--features`: each crate is tested as
+          # its manifest builds it, as on Linux. Env-gated live suites print SKIPPED and
+          # pass when their variable is unset; the live servers belong to live-proofs.yml.
+          case "${CONCERN}" in
+            rust-domain)
+              # The same crates as Linux, plus taurine-cli, whose exit codes and paths
+              # are the part a user on this OS can observe. taurine-crypt links the real
+              # Windows Credential Manager here (its default `keychain` feature,
+              # windows-native), then is tested again without the feature, which is the
+              # build a machine with no keychain gets.
+              run_deferred rust-coverage rust_coverage_check
+              run_deferred rust-crypt-no-keychain-tests \
+                cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
+              run_deferred rust-domain-tests \
+                cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
+              ;;
+            rust-db)
+              # Every `taurine-db*` crate, which on Windows includes the `#[cfg(windows)]`
+              # integrated-authentication arm of taurine-db-mssql (tiberius' `winauth`
+              # feature) that no other platform compiles.
+              run_deferred rust-db-tests \
+                cargo test --locked --no-fail-fast --package 'taurine-db*'
+              ;;
+            rust-net)
+              # The dialer, the egress verifier, the userspace WireGuard conformance
+              # suites and taurine-peer-sys, whose Win32 half (GetExtendedTcpTable and
+              # the owning process's token) can only execute here. The openvpn3 shim is
+              # its own concern, `rust-ovpn`, because its vcpkg dependency build is by
+              # far the slowest step and must not hold these results back.
+              run_deferred rust-net-tests \
+                cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
+              ;;
+            rust-ovpn)
+              # The vendored openvpn3-core shim, compiled with MSVC against vcpkg's
+              # static-md ports. A build and its unit tests only: no tunnel has carried
+              # traffic on Windows, and this concern does not claim one has.
+              run_deferred rust-ovpn-vcpkg windows_ovpn_dependencies
+              if [[ "${deferred_failed}" -eq 0 ]]; then
+                run_deferred rust-ovpn-tests \
+                  cargo test --locked --no-fail-fast "${rust_ovpn_packages[@]/#/--package=}"
+              else
+                deferred_results+=("rust-ovpn-tests|failed: not run (the vcpkg dependency install failed)")
+              fi
+              ;;
+            rust-app)
+              # The command tier both shells call and the two shells' own unit tests.
+              # Tauri's `test` feature drives the commands through its mock runtime, so
+              # no window or WebView2 process is started.
+              run_deferred rust-app-tests \
+                cargo test --locked --no-fail-fast "${rust_app_packages[@]/#/--package=}"
+              ;;
+            *)
+              echo "Unsupported Windows Rust concern: ${CONCERN}" >&2
+              exit 2
+              ;;
+          esac
+          finish_deferred
 
       - name: Publish sanitized validation proof
         shell: bash
