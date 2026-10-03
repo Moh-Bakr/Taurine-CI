@@ -297,20 +297,20 @@ jobs:
               }
               # Keep diagnostics useful without publishing source snippets or full logs.
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
               # Preserve diagnostic headers and source locations without
               # publishing private source excerpts.
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                 strip_excerpts |
                 grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                 head -30 >&2 || true
               if [[ "${label}" == android-debug-build ]]; then
                 sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                   head -30 >&2 || true
@@ -385,7 +385,7 @@ jobs:
                         /^[[:space:]]*[|][[:space:]]*$/d'
               }
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
@@ -393,7 +393,7 @@ jobs:
                 # Preserve only test names and assertion metadata needed to
                 # diagnose hosted-only failures; never publish source lines.
                 sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
@@ -403,7 +403,7 @@ jobs:
                 # summary. Keep only error codes and locations so the public
                 # control plane never publishes private source excerpts.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                   head -30 >&2 || true

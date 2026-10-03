@@ -447,7 +447,7 @@ jobs:
           cargo_sanitize() {
             sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
               sed -E "s#${GITHUB_WORKSPACE}/##g" |
-              sed -E 's#/home/runner/work/[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g' |
+              sed -E 's#/home/runner/work/.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
               cut -c1-200
           }
 
@@ -543,7 +543,7 @@ jobs:
           # context, the advisory-db fetch log, local paths) stays withheld.
           cargo_audit_detail() {
             sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
-              sed -E 's#/home/runner/work/[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g' |
+              sed -E 's#/home/runner/work/.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
               grep -E '^error: |^warning: |^Crate: |^Version: |^ID: |^Warning: |^Severity: |^URL: |RUSTSEC-[0-9]{4}-[0-9]{4,}|CVE-[0-9]{4}-[0-9]+' |
               head -40 >&2 || true
           }
@@ -589,7 +589,7 @@ jobs:
                 # Keep hosted-only diagnostics useful without publishing
                 # private source paths or compiler/test output.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  sed -E 's#/Users/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|timed out|(^|[[:space:]])[0-9]+ (passed|failed|flaky|skipped)|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
