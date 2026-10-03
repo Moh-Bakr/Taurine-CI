@@ -1,0 +1,121 @@
+name: Weekly develop validation (scheduled)
+
+# Once a week, validate the private `develop` tip on every platform, so drift is
+# caught even when nobody has dispatched a run. This workflow runs no project
+# code and checks out nothing: it only (1) resolves the current develop tip SHA
+# with the same short-lived, read-only, contents-only source-reader token the
+# protected workflows use, revoking it before anything else happens, and (2)
+# dispatches the three protected validation workflows for that exact SHA with
+# the run's own token. The dispatched workflows do all the source-bearing work
+# under their own protections.
+on:
+  schedule:
+    # Monday 05:00 UTC.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+# Deny by default; each job below declares the one permission it needs.
+permissions: {}
+
+concurrency:
+  group: weekly-validation
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY_ID: '1330267721'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: Taurine
+
+jobs:
+  resolve:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Resolve the private develop tip
+    environment: source-read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Mint read-only private-source token
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SOURCE_READER_APP_ID }}
+          private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
+          permission-contents: read
+          skip-token-revoke: true
+
+      - name: Resolve the develop tip and revoke the source token
+        id: resolve
+        if: always()
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          set +x
+          failed=0
+          sha=''
+          if [[ -z "${SOURCE_TOKEN}" ]]; then
+            echo 'No source token was minted; refusing to continue' >&2
+            exit 1
+          fi
+          api() {
+            curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors \
+              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' "$@"
+          }
+          if ! identity="$(api "${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}")"; then
+            echo 'The configured source repository identity could not be resolved' >&2
+            failed=1
+          elif [[ "$(jq -r '.id' <<<"${identity}")" != "${SOURCE_REPOSITORY_ID}" || "$(jq -r '.owner.login' <<<"${identity}")" != "${SOURCE_REPOSITORY_OWNER}" || "$(jq -r '.name' <<<"${identity}")" != "${SOURCE_REPOSITORY_NAME}" ]]; then
+            echo 'The configured source repository identity did not match' >&2
+            failed=1
+          elif ! sha="$(api "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/develop" | jq -er '.sha | ascii_downcase')" \
+            || [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'The develop tip could not be resolved to a full commit SHA' >&2
+            failed=1
+          fi
+          if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then
+            echo 'Source token revocation failed' >&2
+            failed=1
+          fi
+          unset SOURCE_TOKEN
+          find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
+          (( failed == 0 ))
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "- Resolved private develop tip: \`${sha}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+  dispatch:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    needs: resolve
+    name: Dispatch the protected validations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch Linux, macOS and Windows validation for the resolved SHA
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'The resolved source SHA is not a full commit SHA' >&2
+            exit 1
+          fi
+          gh workflow run linux-validation.yml --ref main -f "source_sha=${SOURCE_SHA}"
+          gh workflow run macos-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+          gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+          {
+            echo '## Weekly develop validation'
+            echo
+            echo "- Source SHA: \`${SOURCE_SHA}\`"
+            echo '- Dispatched: linux-validation, macos-validation (rust=true), windows-validation (rust=true)'
+          } >> "${GITHUB_STEP_SUMMARY}"
