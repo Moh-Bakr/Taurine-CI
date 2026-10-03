@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq)
+        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris)
         required: true
         type: string
       source_sha:
@@ -72,8 +72,8 @@ jobs:
             exit 1
           fi
           case "${REQUESTED_ENGINE}" in
-            doris|starrocks|db2|informix|rocketmq) ;;
-            *) echo "engine must be one of: doris, starrocks, db2, informix, rocketmq" >&2; exit 1 ;;
+            doris|starrocks|db2|informix|rocketmq|iris) ;;
+            *) echo "engine must be one of: doris, starrocks, db2, informix, rocketmq, iris" >&2; exit 1 ;;
           esac
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
@@ -214,7 +214,7 @@ jobs:
               head -40 >&2 || true
           }
           case "${ENGINE}" in
-            doris|starrocks) target_args=(--test live_servers) ;;
+            doris|starrocks|iris) target_args=(--test live_servers) ;;
             db2)             target_args=(--test db2_live) ;;
             informix)        target_args=(--test informix_live) ;;
             rocketmq)        target_args=(--test rocketmq_live) ;;
@@ -516,6 +516,54 @@ jobs:
               } >> "${GITHUB_ENV}"
               ;;
 
+            iris)
+              # InterSystems IRIS Community from InterSystems' own registry
+              # (anonymous pull), pinned by the multi-arch index digest of
+              # tag 2025.3 (amd64 layers measured 1.15 GB compressed from the
+              # registry manifest, inside the 2 GB per-engine cap). The driver
+              # speaks Atelier REST (/api/atelier/v1) on the image's private
+              # web server, port 52773, plain HTTP; the superserver is not
+              # published because nothing here uses it. A fresh image forces a
+              # password change for its predefined accounts, so the lane hands
+              # the entrypoint a throwaway generated per run through its
+              # documented `--password-file` flag (the instance consumes the
+              # file at first start). The password is masked before it is
+              # written anywhere and reaches the suite only through the
+              # environment. Readiness is the endpoint the driver's connect
+              # probe uses — an authenticated namespace read answering 200 —
+              # not a fixed sleep, 10 minutes budget.
+              iris_pass="ci$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${iris_pass}"
+              printf '%s\n' "${iris_pass}" > "${RUNNER_TEMP}/iris-password.txt"
+              chmod 644 "${RUNNER_TEMP}/iris-password.txt"
+              docker run -d --name dbx-iris \
+                -p 127.0.0.1:52773:52773 \
+                -v "${RUNNER_TEMP}/iris-password.txt:/tmp/iris-password.txt" \
+                containers.intersystems.com/intersystems/iris-community@sha256:00a19ce756e96775c3f04514f8a6f0636122d25bdc22a53e01b57eef12dcaed9 \
+                --password-file /tmp/iris-password.txt
+              iris_code=000
+              for attempt in $(seq 1 60); do
+                iris_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+                  -u "SuperUser:${iris_pass}" http://127.0.0.1:52773/api/atelier/v1/USER 2>/dev/null || true)"
+                if [[ "${iris_code}" == "200" ]]; then
+                  ready=1
+                  break
+                fi
+                sleep 10
+              done
+              if (( ready == 0 )); then
+                echo "iris: Atelier namespace read never answered 200 in 10 minutes (last HTTP ${iris_code}); log tail below" >&2
+                docker logs dbx-iris 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              version="$(curl --silent --max-time 10 -u "SuperUser:${iris_pass}" http://127.0.0.1:52773/api/atelier/ 2>/dev/null | jq -r '.result.content.version // empty' 2>/dev/null || true)"
+              {
+                echo "TAURINE_TEST_IRIS=127.0.0.1:52773"
+                echo "TAURINE_TEST_IRIS_PASSWORD=${iris_pass}"
+                echo "PROOF_SERVER_VERSION=${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
             *)
               echo "Unsupported engine: ${ENGINE}" >&2
               exit 2
@@ -538,6 +586,7 @@ jobs:
           case "${ENGINE}" in
             doris)     target=live_servers;   filter=doris_passes_every_check ;;
             starrocks) target=live_servers;   filter=starrocks_passes_every_check ;;
+            iris)      target=live_servers;   filter=iris_passes_every_check ;;
             db2)       target=db2_live;       filter=db2_passes_every_check_against_a_live_server ;;
             informix)  target=informix_live;  filter=informix_passes_every_check_against_a_live_server ;;
             # Both tests in the file are the proof: the admin-surface run and
@@ -596,6 +645,7 @@ jobs:
               db2)       echo '- Image: icr.io/db2_community/db2:11.5.9.0 (privileged, amd64)' ;;
               informix)  echo '- Image: ibmcom/informix-developer-database:14.10.FC7W1DE (privileged, amd64)' ;;
               rocketmq)  echo '- Images: apache/rocketmq:5.3.2 (NameServer + broker, brokerIP1 pinned to 127.0.0.1)' ;;
+              iris)      echo '- Image: containers.intersystems.com/intersystems/iris-community:2025.3 (pinned by digest, amd64; Atelier REST on the private web server)' ;;
             esac
             echo "- Source token: revoked before any project command"
             echo "- Runner: $(nproc) vCPU, $(free -m | awk '/^Mem:/{print $2}') MB RAM, $(df -BG --output=avail / | tail -1 | tr -d ' ') GB disk free after the run"
