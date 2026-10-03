@@ -481,6 +481,64 @@ jobs:
               exit 1
             fi
           }
+
+          # The crate-test concerns' sub-steps are independent of each other:
+          # the coverage check reads only the member list, and each test step
+          # builds its own closure. Stopping at the first failure, as
+          # `run_quiet` does for every other concern, therefore hides results
+          # rather than saving work — a failed `rust-domain-tests` left
+          # `rust-coverage` unknown, not passing. So the `rust-*` concerns run
+          # each sub-step through `run_deferred`, which runs `run_quiet` in a
+          # subshell: the subshell's `exit 1` ends that sub-step only, and the
+          # pass line, failure reason and sanitized detail are `run_quiet`'s
+          # own, byte for byte — this adds no new publishing path.
+          # `finish_deferred` then lists every sub-step's result and fails the
+          # concern if any one failed. The list carries only workflow-defined
+          # labels and `cargo_test_reason`'s fixed classifications, so it is
+          # written to the step summary as well: a failed run's summary says
+          # which sub-steps failed without opening the log.
+          deferred_results=()
+          deferred_failed=0
+          run_deferred() {
+            local label="$1"; shift
+            local status
+            # Not `if ( ... )` or `( ... ) || status=$?`: either would run the
+            # subshell with errexit suspended, which is not how `run_quiet`
+            # runs anywhere else.
+            set +e
+            ( set -e; run_quiet "${label}" "$@" )
+            status=$?
+            set -e
+            if [[ "${status}" -eq 0 ]]; then
+              deferred_results+=("${label}|passed")
+            else
+              deferred_results+=("${label}|failed: $(cargo_test_reason "${RUNNER_TEMP}/${label}.log")")
+              deferred_failed=1
+            fi
+          }
+
+          finish_deferred() {
+            local entry
+            {
+              echo "## Linux ${CONCERN} sub-steps"
+              echo
+              echo '| Sub-step | Result |'
+              echo '| --- | --- |'
+              for entry in "${deferred_results[@]}"; do
+                echo "| \`${entry%%|*}\` | ${entry#*|} |"
+              done
+              echo
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "${CONCERN} sub-step results:"
+            for entry in "${deferred_results[@]}"; do
+              echo "  ${entry%%|*}: ${entry#*|}"
+            done
+            if [[ "${deferred_failed}" -ne 0 ]]; then
+              echo "${CONCERN}: failed (one or more sub-steps failed; each is listed above)" >&2
+              exit 1
+            fi
+          }
+
           # Which workspace crates each Rust concern tests. Every member of the
           # private workspace belongs to exactly one concern, and
           # `rust_coverage_check` (run by `rust-domain`) fails when a member is
@@ -745,11 +803,17 @@ jobs:
               # `keychain` feature: that is the build a machine with no OS
               # keychain gets, and the private CI plan lists it beside the
               # workspace run.
-              run_quiet rust-crypt-no-keychain-tests \
+              #
+              # The coverage check runs first: it compiles nothing (`cargo
+              # metadata --no-deps` lists members without resolving, so it
+              # cannot touch Cargo.lock ahead of the `--locked` runs), and a
+              # crate tested by no concern is the one failure no test result
+              # below can reveal.
+              run_deferred rust-coverage rust_coverage_check
+              run_deferred rust-crypt-no-keychain-tests \
                 cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
-              run_quiet rust-domain-tests \
+              run_deferred rust-domain-tests \
                 cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
-              run_quiet rust-coverage rust_coverage_check
               ;;
             rust-db)
               # Every `taurine-db*` crate: the model, the engine and its law
@@ -758,14 +822,14 @@ jobs:
               # suites (sqlite, duckdb, turso, the recorded fixtures, the
               # falsification and transfer runs). Only the conformance suite's
               # live targets need a server, and they skip without one.
-              run_quiet rust-db-tests \
+              run_deferred rust-db-tests \
                 cargo test --locked --no-fail-fast --package 'taurine-db*'
               ;;
             rust-net)
               # The dialer, the egress verifier and the vendored openvpn3 shim.
               # The OpenVPN lab tests are `#[ignore]`d: they need a TUN device
               # and the local lab's servers, which a hosted runner does not have.
-              run_quiet rust-net-tests \
+              run_deferred rust-net-tests \
                 cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
               ;;
             rust-app)
@@ -773,7 +837,7 @@ jobs:
               # tests. Tauri's `test` feature drives the commands through its
               # mock runtime, so no display or WebView process is started; the
               # webkit2gtk install above is only what the crates link.
-              run_quiet rust-app-tests \
+              run_deferred rust-app-tests \
                 cargo test --locked --no-fail-fast "${rust_app_packages[@]/#/--package=}"
               ;;
             rust-dbx)
@@ -789,9 +853,9 @@ jobs:
               # left out for the same reason (its lock is generated, not
               # fetched); the patched copy the product links is exercised by
               # taurine-net under the workspace lock.
-              run_quiet rust-dbx-core-tests \
+              run_deferred rust-dbx-core-tests \
                 npm run --silent test:dbx-core -- --locked --no-fail-fast
-              run_quiet rust-dbx-mongo-shell-tests \
+              run_deferred rust-dbx-mongo-shell-tests \
                 cargo test --locked --no-fail-fast --manifest-path taurine-backend/dbx-mongo-shell/Cargo.toml
               ;;
             mobile-quality)
@@ -806,6 +870,10 @@ jobs:
               exit 2
               ;;
           esac
+          # Every `rust-*` branch above ran its sub-steps through
+          # `run_deferred`; this is where their results are reported and the
+          # concern fails if any one of them did.
+          if [[ "${CONCERN}" == rust-* ]]; then finish_deferred; fi
 
       - name: Publish sanitized validation proof
         shell: bash
