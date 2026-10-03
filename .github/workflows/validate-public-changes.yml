@@ -79,9 +79,7 @@ jobs:
       #   `secrets-inherit` (the callee is this repository's own protected
       #   reusable workflow, and the policy below requires that form) and
       #   `self-repository` (the policy matches the `./` form). The keeldock-*
-      #   workflows are owned by the Keel Dock lane and are not linted here yet;
-      #   zizmor reports a template-injection finding in
-      #   keeldock-validation-concern.yml that lane must fix before it is added.
+      #   workflows are linted like every other workflow.
       - name: Lint workflows with pinned actionlint and zizmor
         shell: bash
         env:
@@ -109,7 +107,6 @@ jobs:
           "${tools}/actionlint" -ignore 'SC2016:' -ignore 'SC2129:'
           workflows=()
           while IFS= read -r -d '' file; do
-            case "${file}" in .github/workflows/keeldock-*) continue ;; esac
             workflows+=("${file}")
           done < <(find .github/workflows -type f -name '*.yml' -print0 | sort -z)
           "${tools}/zizmor" --format plain "${workflows[@]}"

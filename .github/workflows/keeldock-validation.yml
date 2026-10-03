@@ -33,8 +33,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: keeldock-validation-${{ github.workflow }}-${{ inputs.source_sha }}
@@ -44,6 +43,7 @@ concurrency:
 
 jobs:
   validate-input:
+    permissions: {}
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
@@ -61,6 +61,8 @@ jobs:
           fi
 
   validate:
+    permissions:
+      contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     needs: validate-input
     strategy:
@@ -86,8 +88,8 @@ jobs:
           # Only the Ubuntu runner has a Docker daemon, so the Testcontainers suites
           # (including the extraction-fitness gates) are Linux-only evidence.
           - { concern: db-containers, platform: linux }
-    uses: ./.github/workflows/keeldock-validation-concern.yml
-    secrets: inherit
+    uses: ./.github/workflows/keeldock-validation-concern.yml  # zizmor: ignore[self-repository]
+    secrets: inherit  # zizmor: ignore[secrets-inherit]
     with:
       source_sha: ${{ inputs.source_sha }}
       platform: ${{ matrix.platform }}

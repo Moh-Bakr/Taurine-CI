@@ -38,8 +38,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   # A different private source from the Taurine concerns. The numeric id is what
@@ -62,6 +61,8 @@ env:
 
 jobs:
   validate:
+    permissions:
+      contents: read
     name: KeelDock ${{ inputs.platform }} ${{ inputs.concern }}
     environment: source-read
     runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-24.04' || (inputs.platform == 'macos' && 'macos-15' || 'windows-2022') }}
@@ -122,7 +123,7 @@ jobs:
           # producing a confusing empty working directory later.
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Check out exact private source SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
