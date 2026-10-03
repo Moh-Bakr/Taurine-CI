@@ -11,8 +11,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: orchestrate-validation-${{ github.workflow }}-${{ inputs.source_sha }}
@@ -25,6 +24,8 @@ env:
 
 jobs:
   validate:
+    permissions:
+      contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Orchestrate ${{ matrix.concern }} validation
     environment: source-read
@@ -73,7 +74,8 @@ jobs:
           owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          # Deliberate: the token is revoked explicitly by the next verification step, before any project command, and that step fails closed; the action's own end-of-job revoke would leave it live while project code runs.
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Check out exact private source SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

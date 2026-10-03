@@ -24,8 +24,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 # One engine per group, so two engines can prove concurrently without
 # colliding, and a re-dispatch of the same engine queues behind the running
@@ -42,6 +41,8 @@ env:
 
 jobs:
   prove:
+    permissions:
+      contents: read
     # workflow_dispatch can be selected on another branch in the UI. Fail
     # closed unless this exact workflow came from the protected default branch.
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
@@ -96,7 +97,8 @@ jobs:
           owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          # Deliberate: the token is revoked explicitly by the next verification step, before any project command, and that step fails closed; the action's own end-of-job revoke would leave it live while project code runs.
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Check out exact private source SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -272,7 +274,7 @@ jobs:
                 --network dbx-doris-net --ip 172.20.80.3 \
                 -e FE_SERVERS=fe1:172.20.80.2:9010 -e BE_ADDR=172.20.80.3:9050 \
                 apache/doris:be-2.1.8
-              for attempt in $(seq 1 60); do
+              for _ in $(seq 1 60); do
                 if mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\G' 2>/dev/null | grep -q 'Alive: true'; then
                   ready=1
                   break
@@ -311,7 +313,7 @@ jobs:
               docker run -d --name dbx-starrocks --hostname dbx-sr \
                 -p 127.0.0.1:9030:9030 \
                 starrocks/allin1-ubuntu:3.2.3
-              for attempt in $(seq 1 80); do
+              for _ in $(seq 1 80); do
                 if mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\G' 2>/dev/null | grep -q 'Alive: true'; then
                   ready=1
                   break
@@ -344,7 +346,7 @@ jobs:
                 -p 127.0.0.1:50000:50000 \
                 -e LICENSE=accept -e DB2INST1_PASSWORD="${db2_pass}" -e DBNAME=taurine \
                 icr.io/db2_community/db2:11.5.9.0
-              for attempt in $(seq 1 90); do
+              for _ in $(seq 1 90); do
                 if docker logs dbx-db2 2>&1 | grep -q 'Setup has completed'; then
                   ready=1
                   break
@@ -356,7 +358,7 @@ jobs:
                 docker logs dbx-db2 2>&1 | tail -20 >&2 || true
                 exit 1
               fi
-              for attempt in $(seq 1 12); do
+              for _ in $(seq 1 12); do
                 if (exec 3<>/dev/tcp/127.0.0.1/50000) 2>/dev/null; then
                   ready=2
                   break
@@ -420,7 +422,7 @@ jobs:
               # the server came up, the database was created, and the step
               # died mid-assignment without a word.
               informix_online=""
-              for attempt in $(seq 1 90); do
+              for _ in $(seq 1 90); do
                 informix_online="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -E -- '-- On-?Line' || true)"
                 if [[ -n "${informix_online}" ]]; then
                   ready=1
@@ -498,7 +500,7 @@ jobs:
                 -v "${RUNNER_TEMP}/broker.conf:/home/rocketmq/conf/broker.conf" \
                 -e JAVA_OPT_EXT="-Xms512m -Xmx512m" \
                 apache/rocketmq:5.3.2 sh mqbroker -n namesrv:9876 -c /home/rocketmq/conf/broker.conf
-              for attempt in $(seq 1 30); do
+              for _ in $(seq 1 30); do
                 if docker exec dbx-rocketmq-broker sh mqadmin clusterList -n namesrv:9876 2>/dev/null | grep -q 'broker-a'; then
                   ready=1
                   break
@@ -548,7 +550,7 @@ jobs:
                 containers.intersystems.com/intersystems/iris-community@sha256:00a19ce756e96775c3f04514f8a6f0636122d25bdc22a53e01b57eef12dcaed9 \
                 --password-file /tmp/iris-password.txt
               iris_code=000
-              for attempt in $(seq 1 60); do
+              for _ in $(seq 1 60); do
                 iris_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
                   -u "SuperUser:${iris_pass}" http://127.0.0.1:52773/api/atelier/v1/USER 2>/dev/null || true)"
                 if [[ "${iris_code}" == "200" ]]; then

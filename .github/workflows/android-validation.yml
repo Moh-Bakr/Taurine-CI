@@ -16,8 +16,7 @@ on:
         default: false
         type: boolean
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: android-validation-${{ github.workflow }}-${{ inputs.source_sha }}
@@ -36,6 +35,7 @@ jobs:
   # opt-in, as the Rust concerns are on macOS and Windows: dispatch with
   # `-f rust=true` for plan tips, develop/uat/main tips and mobile-touching branches.
   plan:
+    permissions: {}
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Plan Android concerns
     runs-on: ubuntu-24.04
@@ -65,6 +65,8 @@ jobs:
 
   validate:
     needs: plan
+    permissions:
+      contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Android ${{ matrix.concern }} validation
     environment: source-read
@@ -115,7 +117,8 @@ jobs:
           owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          # Deliberate: the token is revoked explicitly by the next verification step, before any project command, and that step fails closed; the action's own end-of-job revoke would leave it live while project code runs.
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Check out exact private source SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -198,8 +201,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          : "${ANDROID_HOME:?GitHub's Android SDK is required}"
-          : "${JAVA_HOME_17_X64:?GitHub's JDK 17 installation is required}"
+          : "${ANDROID_HOME:?The hosted image Android SDK is required}"
+          : "${JAVA_HOME_17_X64:?The hosted image JDK 17 installation is required}"
           export JAVA_HOME="${JAVA_HOME_17_X64}"
           echo "JAVA_HOME=${JAVA_HOME}" >> "${GITHUB_ENV}"
           sdkmanager_bin="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
@@ -266,6 +269,8 @@ jobs:
 
       - name: Install locked JavaScript and Rust dependencies
         shell: bash
+        env:
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           run_quiet() {
@@ -313,24 +318,24 @@ jobs:
               exit 1
             fi
           }
-          if [[ "${{ matrix.concern }}" != 'android-rust' ]]; then
+          if [[ "${CONCERN}" != 'android-rust' ]]; then
             run_quiet npm-root npm ci --ignore-scripts
           fi
           # The mobile Vitest setup and package-contract runner import the
           # desktop workspace's jsdom/Vitest runtime even when no desktop
           # tests execute. Keep the native-only lane smaller, but provision
           # the shared desktop test runtime for mobile and skill concerns.
-          if [[ "${{ matrix.concern }}" != 'android-native' && "${{ matrix.concern }}" != 'android-rust' ]]; then
+          if [[ "${CONCERN}" != 'android-native' && "${CONCERN}" != 'android-rust' ]]; then
             run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
           fi
-          if [[ "${{ matrix.concern }}" != 'android-rust' ]]; then
+          if [[ "${CONCERN}" != 'android-rust' ]]; then
             run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
           fi
           # Cargo.toml patches boringtun to a pinned, locally fetched crate.
           # vendor/ is intentionally ignored and therefore absent from the
           # private checkout; materialize and verify the pinned dependencies on
           # this ephemeral runner before Cargo resolves the mobile workspace.
-          if [[ "${{ matrix.concern }}" == 'android-native' || "${{ matrix.concern }}" == 'android-rust' ]]; then
+          if [[ "${CONCERN}" == 'android-native' || "${CONCERN}" == 'android-rust' ]]; then
             run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
           fi
 
@@ -346,7 +351,10 @@ jobs:
           rm -f src-tauri/gen/android/tauri.settings.gradle
           run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
           run_quiet android-init npm run android:init -- --ci --skip-targets-install
-          grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle && { echo 'Android metadata contains a developer-local path' >&2; exit 1; } || true
+          if grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle; then
+            echo 'Android metadata contains a developer-local path' >&2
+            exit 1
+          fi
 
       - name: Run isolated Android validation concern
         shell: bash

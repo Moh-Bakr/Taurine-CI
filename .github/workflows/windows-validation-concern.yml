@@ -18,8 +18,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   SOURCE_REPOSITORY_ID: '1330267721'
@@ -28,6 +27,8 @@ env:
 
 jobs:
   validate:
+    permissions:
+      contents: read
     name: Windows ${{ inputs.concern }}
     environment: source-read
     runs-on: windows-2022
@@ -77,7 +78,8 @@ jobs:
           owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          # Deliberate: the token is revoked explicitly by the next verification step, before any project command, and that step fails closed; the action's own end-of-job revoke would leave it live while project code runs.
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Check out exact private source SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

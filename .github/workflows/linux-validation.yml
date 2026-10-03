@@ -11,8 +11,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: linux-validation-${{ github.workflow }}-${{ inputs.source_sha }}
@@ -27,6 +26,7 @@ env:
 
 jobs:
   validate-input:
+    permissions: {}
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
@@ -44,6 +44,8 @@ jobs:
           fi
 
   validate:
+    permissions:
+      contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     needs: validate-input
     strategy:
@@ -104,8 +106,10 @@ jobs:
           - e2e-regression-2
           - e2e-regression-3
           - e2e-regression-4
-    uses: ./.github/workflows/linux-validation-concern.yml
-    secrets: inherit
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]
+    # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected dispatchers.
+    secrets: inherit  # zizmor: ignore[secrets-inherit]
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}

@@ -10,8 +10,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: private-source-${{ github.workflow }}-${{ inputs.source_sha }}
@@ -27,6 +26,8 @@ env:
 
 jobs:
   source-read:
+    permissions:
+      contents: read
     # workflow_dispatch can be selected on another branch in the UI. Fail
     # closed unless this exact workflow came from the protected default branch.
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
@@ -69,7 +70,8 @@ jobs:
           owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          # Deliberate: the token is revoked explicitly by the next verification step, before any project command, and that step fails closed; the action's own end-of-job revoke would leave it live while project code runs.
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Resolve and check out the exact private SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
