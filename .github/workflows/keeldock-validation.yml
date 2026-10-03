@@ -63,17 +63,31 @@ jobs:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     needs: validate-input
     strategy:
-      # Each operating system is independent evidence. A Windows path-separator
-      # bug must not hide the Linux result, and vice versa — that is the whole
-      # point of running three.
+      # Each concern on each operating system is independent evidence. A Windows
+      # path-separator bug must not hide the Linux result, a slow database suite must
+      # not hold the build result hostage, and a failing concern says which gate
+      # failed without opening a log.
       fail-fast: false
       matrix:
-        platform:
-          - linux
-          - macos
-          - windows
+        include:
+          - { concern: build-format, platform: linux }
+          - { concern: build-format, platform: macos }
+          - { concern: build-format, platform: windows }
+          - { concern: structural, platform: linux }
+          - { concern: structural, platform: macos }
+          - { concern: structural, platform: windows }
+          - { concern: unit, platform: linux }
+          - { concern: unit, platform: macos }
+          - { concern: unit, platform: windows }
+          - { concern: contracts-publish-smoke, platform: linux }
+          - { concern: contracts-publish-smoke, platform: macos }
+          - { concern: contracts-publish-smoke, platform: windows }
+          # Only the Ubuntu runner has a Docker daemon, so the Testcontainers suites
+          # (including the extraction-fitness gates) are Linux-only evidence.
+          - { concern: db-containers, platform: linux }
     uses: ./.github/workflows/keeldock-validation-concern.yml
     secrets: inherit
     with:
       source_sha: ${{ inputs.source_sha }}
       platform: ${{ matrix.platform }}
+      concern: ${{ matrix.concern }}
