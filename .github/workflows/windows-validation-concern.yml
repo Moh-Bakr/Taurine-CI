@@ -41,9 +41,13 @@ jobs:
     # jsoncpp, lz4, fmt and xxhash from source through vcpkg before it compiles
     # openvpn3 (the private notes record roughly 23 minutes for that alone).
     timeout-minutes: ${{ inputs.concern == 'rust-app' && 150 || (inputs.concern == 'rust-db' || inputs.concern == 'rust-net' || inputs.concern == 'rust-ovpn') && 120 || startsWith(inputs.concern, 'rust-') && 90 || 60 }}
+    defaults:
+      run:
+        working-directory: src
     steps:
       - name: Start the concern timer
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
           echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
@@ -56,6 +60,7 @@ jobs:
 
       - name: Validate protected dispatch input
         shell: bash
+        working-directory: ${{ github.workspace }}
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -89,12 +94,14 @@ jobs:
           token: ${{ steps.source-token.outputs.token }}
           fetch-depth: 1
           persist-credentials: false
+          path: src
           submodules: false
           lfs: false
 
       - name: Verify identity, exact checkout, and revoke source token
         if: always()
         shell: bash
+        working-directory: ${{ github.workspace }}
         env:
           SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -114,7 +121,7 @@ jobs:
             echo 'The configured source repository identity did not match' >&2
             failed=1
           fi
-          if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
+          if ! checked_out_sha="$(git -C src rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
             echo 'The private source checkout did not complete' >&2
             failed=1
           elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
@@ -130,7 +137,7 @@ jobs:
             failed=1
           fi
           unset SOURCE_TOKEN
-          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git -C src config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all credential.helper 2>/dev/null || true
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
@@ -314,7 +321,7 @@ jobs:
               if curl -fsSL "$(awk -F' *= *' '/^boringtun_url/ {gsub(/"/,"",$2); print $2}' vendor.lock)" -o "${diag}/c.tgz" \
                 && mkdir "${diag}/src" && tar xzf "${diag}/c.tgz" -C "${diag}/src" --strip-components 1; then
                 echo "vendor-fetch: crate files with carriage returns: $(grep -rlI $'\r' "${diag}/src" | wc -l | tr -d ' ')" >&2
-                (cd "${diag}/src" && git apply --check -p1 "${GITHUB_WORKSPACE}/scripts/patches/boringtun-zeroize.patch" 2>&1 \
+                (cd "${diag}/src" && git apply --check -p1 "${GITHUB_WORKSPACE}/src/scripts/patches/boringtun-zeroize.patch" 2>&1 \
                   | grep -E '^error: (patch failed|[A-Za-z0-9_./-]+: (patch does not apply|No such file))' | head -n 5 >&2) || true
               fi
               rm -rf "${diag}"
@@ -351,7 +358,7 @@ jobs:
             ${{ steps.cargo-home.outputs.dir }}/registry/index
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
             ${{ steps.cargo-home.outputs.dir }}/git/db
-          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('Cargo.lock', 'taurine-backend/*/Cargo.lock', 'taurine-backend/vendor/*/Cargo.lock', 'vendor/*/Cargo.lock') }}
+          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
           restore-keys: |
             cargo-sources-${{ runner.os }}-${{ inputs.concern }}-
 
@@ -533,7 +540,7 @@ jobs:
           # own fixed failure shapes leave this runner.
           workspace_strip='s#^$##'
           if [[ "${GITHUB_WORKSPACE}" != *\\* ]]; then
-            workspace_strip="s#${GITHUB_WORKSPACE}/##g"
+            workspace_strip="s#${GITHUB_WORKSPACE}/src/##g"
           fi
 
           cargo_sanitize() {
@@ -780,7 +787,7 @@ jobs:
             ${{ steps.cargo-home.outputs.dir }}/registry/index
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
             ${{ steps.cargo-home.outputs.dir }}/git/db
-          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('Cargo.lock', 'taurine-backend/*/Cargo.lock', 'taurine-backend/vendor/*/Cargo.lock', 'vendor/*/Cargo.lock') }}
+          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
 
       - name: Publish sanitized validation proof
         shell: bash
@@ -836,7 +843,7 @@ jobs:
           # which identities were published to this run.
           section_file="${RUNNER_TEMP}/test-ids/summary-section.md"
           if ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
-            TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}" \
+            TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}/src" \
             taurine-desktop/node_modules/.bin/vite-node scripts/ci/collect-test-ids.ts \
             > "${section_file}"; then
             {
@@ -854,6 +861,7 @@ jobs:
       - name: Report concern duration
         if: ${{ always() }}
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           started="${CONCERN_STARTED_AT:-}"
           [[ -n "${started}" ]] || exit 0
