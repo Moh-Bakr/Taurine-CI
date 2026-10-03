@@ -2,28 +2,29 @@ name: KeelDock Cloud source validation (protected)
 
 # The second private source this control plane validates.
 #
-# `Moh-Bakr/keeldock-cloud` is a private repository, and GitHub currently refuses
-# to start Actions jobs on this account's private repositories at all — a billing
-# or spending-limit block, the same condition that stripped every automatic
-# trigger from the Taurine repository on 2026-08-19. Its own `.github/workflows/ci.yml`
-# has therefore never executed a single job.
+# `Moh-Bakr/keeldock-cloud` is a private repository, and GitHub refuses to start Actions
+# jobs on this account's private repositories (a billing or spending-limit block, the same
+# condition that stripped every automatic trigger from the Taurine repository on
+# 2026-08-19). The source repository's own `.github/workflows/ci.yml` therefore cannot run
+# there; this lane is where its gates actually execute, and the concerns below follow that
+# file's gate order (build, structural, database, publish) while discovering suites the way
+# `scripts/run-tests.sh` does rather than keeping a second suite list.
 #
-# Running the gates from here fixes that: this repository is public, so its
-# minutes are free, and the existing source-read pattern already knows how to
-# check out an exact private SHA and destroy the token before project code runs.
+# This repository is public, so its minutes are free, and the source-read pattern checks out
+# an exact private SHA and destroys the token before project code runs.
 #
-# It also closes a real gap rather than merely relocating one. KeelDock Cloud's
-# Phase 0 evidence records "clean-machine topology start on macOS, Windows and
-# Linux" as NOT MET, because the 104 passing tests had only ever run on one
-# contributor's macOS/arm64 laptop. Three operating systems, from a clean
-# checkout, is exactly the missing evidence.
+# It also supplies evidence the source repository could not produce alone: its Phase 0
+# record lists "clean-machine topology start on macOS, Windows and Linux" as not met because
+# its tests had only run on one contributor's macOS/arm64 laptop. A run here is a clean
+# checkout on all three operating systems.
 #
-# **Scope, stated honestly.** This proves the solution restores, builds and
-# passes its structural gates on all three operating systems, and that the
-# database-backed gates pass on Linux. It does *not* start the Aspire topology:
-# that needs a Linux Docker daemon, which only the Ubuntu runner has, and a full
-# cold AppHost start is a separate piece of work. The Phase 0 criterion is
-# therefore partly, not wholly, satisfied by a green run here.
+# **Scope, stated honestly.** One run is five concerns (build-format, structural, unit,
+# contracts-publish-smoke on all three operating systems; db-containers on Linux only,
+# because only the Ubuntu runner has a Docker daemon). Together they prove the solution
+# restores from its lock files, builds, passes its structural and unit gates everywhere, and
+# passes its database-backed gates and a real-PostgreSQL Migrator proof on Linux. They do
+# *not* start the Aspire topology: a full cold AppHost start is separate work, so the Phase 0
+# criterion is partly, not wholly, satisfied by a green run here.
 on:
   workflow_dispatch:
     inputs:
