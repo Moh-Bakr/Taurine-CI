@@ -1,8 +1,26 @@
 name: KeelDock Cloud validation concern (protected)
 
-# One operating system per call, on a clean ephemeral runner doing its own exact
-# private checkout. No source-bearing artifact, cache or output crosses a job
-# boundary, matching the rule the Taurine concerns already follow.
+# One concern on one operating system per call, on a clean ephemeral runner doing its
+# own exact private checkout. No source-bearing artifact or output crosses a job
+# boundary, matching the rule the Taurine concerns already follow, so every concern
+# restores and rebuilds what it needs.
+#
+# Concerns (all three operating systems unless stated):
+#   build-format            whole-solution Release build (warnings are errors, so every
+#                           analyzer gate) and `dotnet format --verify-no-changes`.
+#   structural              architecture, contract-compatibility and GraphQL composition /
+#                           SDL-snapshot suites, then the generated-contract diff.
+#   unit                    every other suite that needs no container runtime.
+#   db-containers           (Linux only) every suite that references Testcontainers; the
+#                           Docker daemon only the Ubuntu runner has.
+#   contracts-publish-smoke generated TypeScript contract check, publish of Api / Worker /
+#                           Migrator, and the Migrator smoke.
+#
+# Suites are assigned by the same rule scripts/run-tests.sh uses to classify them (a
+# Testcontainers package reference means a container runtime), so a new suite lands in a
+# concern the day it is written: container suites in db-containers, the three named
+# structural suites in structural, everything else in unit. None can be assigned to no
+# concern, and build-format fails if a named structural suite disappears.
 
 on:
   workflow_call:
@@ -15,9 +33,12 @@ on:
         description: linux, macos or windows
         required: true
         type: string
+      concern:
+        description: build-format, structural, unit, db-containers or contracts-publish-smoke
+        required: true
+        type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   # A different private source from the Taurine concerns. The numeric id is what
@@ -31,16 +52,28 @@ env:
   TESTINGPLATFORM_TELEMETRY_OPTOUT: 'true'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
   CI: 'true'
+  # Testcontainers' resource reaper, pinned by digest through the library's own setting rather
+  # than left to whichever default a Testcontainers upgrade brings. Kept enabled: the fixtures
+  # dispose their containers only on a clean shutdown, and Ryuk removes them when a test host is
+  # killed or times out. The same reference the source repository's own ci.yml pins (the index
+  # docker.io serves for 0.14.0), so hosted and local runs pull the identical image.
+  TESTCONTAINERS_RYUK_CONTAINER_IMAGE: testcontainers/ryuk:0.14.0@sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0
 
 jobs:
   validate:
-    name: KeelDock ${{ inputs.platform }}
+    permissions:
+      contents: read
+    name: KeelDock ${{ inputs.platform }} ${{ inputs.concern }}
     environment: source-read
     runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-24.04' || (inputs.platform == 'macos' && 'macos-15' || 'windows-2022') }}
-    # Linux additionally starts PostgreSQL containers for the persistence and
-    # messaging suites; the other two run the structural gates only.
-    timeout-minutes: ${{ inputs.platform == 'linux' && 45 || 40 }}
+    # db-containers pulls and starts PostgreSQL containers per suite; every other
+    # concern is a build plus a handful of in-process suites.
+    timeout-minutes: ${{ inputs.concern == 'db-containers' && 45 || 30 }}
     steps:
+      - name: Start the concern timer
+        shell: bash
+        run: echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,6 +85,7 @@ jobs:
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           REQUESTED_PLATFORM: ${{ inputs.platform }}
+          REQUESTED_CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
@@ -66,6 +100,16 @@ jobs:
             linux|macos|windows) ;;
             *) echo "Unsupported platform: ${REQUESTED_PLATFORM}" >&2; exit 1 ;;
           esac
+          case "${REQUESTED_CONCERN}" in
+            build-format|structural|unit|contracts-publish-smoke) ;;
+            db-containers)
+              if [[ "${REQUESTED_PLATFORM}" != linux ]]; then
+                echo 'db-containers needs a Linux container runtime' >&2
+                exit 1
+              fi
+              ;;
+            *) echo "Unsupported concern: ${REQUESTED_CONCERN}" >&2; exit 1 ;;
+          esac
 
       - name: Mint read-only private-source token
         id: source-token
@@ -79,7 +123,7 @@ jobs:
           # producing a confusing empty working directory later.
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Check out exact private source SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -87,10 +131,9 @@ jobs:
           repository: ${{ env.SOURCE_REPOSITORY_OWNER }}/${{ env.SOURCE_REPOSITORY_NAME }}
           ref: ${{ inputs.source_sha }}
           token: ${{ steps.source-token.outputs.token }}
-          # Full history, unlike the Taurine concerns: the SDL snapshot gate runs
-          # `git diff --exit-code`, which needs a working index against the
-          # checked-out commit. fetch-depth 1 still provides that, but the
-          # snapshot check also reports the commit, so the ref must be exact.
+          # A single-commit checkout, like the Taurine concerns. The generated-contract
+          # check runs `git diff` against the checked-out commit, which needs only a working
+          # tree and index, not history; the exact ref is what the identity step verifies.
           fetch-depth: 1
           persist-credentials: false
           submodules: false
@@ -140,6 +183,7 @@ jobs:
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
           (( failed == 0 ))
 
+
       - name: Set up .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
@@ -147,200 +191,646 @@ jobs:
           # toolchain is decided by the commit under test, not by this workflow.
           global-json-file: global.json
 
-      - name: Restore with the committed lock files
-        shell: bash
-        run: |
-          set -euo pipefail
-          # --locked-mode: a dependency the lock files do not describe is a
-          # failure, not something to resolve quietly. This is also the first
-          # real cross-platform signal — the lock files were generated on macOS,
-          # so a Linux or Windows mismatch surfaces here.
-          if ! dotnet restore KeelDock.Cloud.slnx --locked-mode >"${RUNNER_TEMP}/restore.log" 2>&1; then
-            echo 'restore: failed' >&2
-            # Restore failures name packages and versions, not source, so the
-            # tail is safe to surface and is the whole diagnostic.
-            tail -40 "${RUNNER_TEMP}/restore.log" >&2 || true
-            exit 1
-          fi
-          echo 'restore: passed'
-
       - name: Set up Node
+        if: inputs.concern == 'contracts-publish-smoke'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
 
-      - name: Install the generated-contract toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Installed before the suite because run-tests.sh checks the generated TypeScript only
-          # when node_modules is present and otherwise reports it skipped. Skipped is not passed,
-          # and the hosted run is the one that must always check.
-          if ! npm --prefix tools/graphql-codegen ci >"${RUNNER_TEMP}/npm-ci.log" 2>&1; then
-            echo 'typescript-install: failed' >&2
-            exit 1
-          fi
+      # NuGet's downloaded third-party packages only: `~/.nuget/packages`. Never `bin/`,
+      # `obj/`, publish output or anything under the checked-out private source, so no
+      # compiled or private code ever enters a cache. The key is the OS and a hash of the
+      # private lock files and Directory.Packages.props, which reveals nothing about their
+      # contents. One cache per operating system serves every concern: all of them do the
+      # same whole-solution locked restore.
+      - name: Restore cached NuGet packages
+        id: nuget-packages
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json', 'Directory.Packages.props') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
 
-      - name: Full suite
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Invokes the repository's own runner rather than repeating its suite list. The list
-          # used to live here as well, and two copies of "what the full suite is" drift the
-          # moment somebody adds a suite and updates one — silently, because a gate nobody runs
-          # looks exactly like a gate that passes. The script discovers suites from the
-          # filesystem, so a new one is covered on the day it is written.
-          #
-          # --sanitize strips absolute paths from failure output; assertion text and counts are
-          # what makes a hosted failure diagnosable, private checkout layout is not.
-          # --no-docker on macOS and Windows: those runners have no Linux container runtime, and
-          # the summary below states which platforms therefore proved less.
-          args=(--configuration Release --sanitize)
-          if [[ "${{ inputs.platform }}" != "linux" ]]; then
-            args+=(--no-docker)
-          fi
-
-          # Tee'd so the next step can publish per-suite totals. The log still carries
-          # everything; what it does not carry is a reader who will scroll ten thousand lines to
-          # find out whether a suite quietly stopped existing.
-          bash scripts/run-tests.sh "${args[@]}" 2>&1 | tee "${RUNNER_TEMP}/suite.log"
-
-          # PIPESTATUS, not $?: with a pipe, $? is tee's exit code, which is 0 even when the
-          # suite failed. This is the one line that decides whether the gate is a gate.
-          exit "${PIPESTATUS[0]}"
-
-      - name: Summarise per-suite totals
-        # Runs even when the suite failed, because a failing run is exactly when knowing which
-        # suite, and how many of its tests, is worth having on the summary rather than in a log.
-        if: always()
+      # Defence in depth, mirroring the Cargo cache: do not rely on the restore alone to
+      # notice a stale or substituted package. Every restored <id>/<version> folder must
+      # carry a .nupkg.metadata whose contentHash equals the hash the private
+      # packages.lock.json files record for exactly that id and version; anything else is
+      # deleted before restore runs. This is a record check, not a re-hash: NuGet's
+      # contentHash is not the SHA-512 of the stored .nupkg bytes, so the extracted files
+      # cannot be recomputed independently. The residual risk is bounded because the cache is
+      # written only from the protected main branch, from a package set the locked restore
+      # had already validated (NU1403 on a mismatch), and is re-verified on every restore.
+      - name: Verify restored NuGet packages against the lock files
+        id: nuget-verify
         shell: bash
         env:
-          # Through the environment, not interpolated into the script: a workflow input spliced
-          # into a shell body is a script-injection site, and this file already routes every
-          # other input this way.
+          CACHE_HIT: ${{ steps.nuget-packages.outputs.cache-hit }}
           PLATFORM: ${{ inputs.platform }}
         run: |
           set -euo pipefail
-
-          log="${RUNNER_TEMP}/suite.log"
-          if [[ ! -s "${log}" ]]; then
-            echo 'suite-totals: no suite output was captured' >&2
-            exit 1
+          pkgs="${HOME}/.nuget/packages"
+          if [[ ! -d "${pkgs}" ]]; then
+            echo 'nuget-packages: no cache restored; nothing to verify'
+            echo "- ${PLATFORM} NuGet package cache: miss" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
           fi
 
-          # Parsed rather than re-derived: the numbers published here are the ones the run
-          # actually printed. Re-running anything to produce a summary would let the summary and
-          # the gate disagree, which is worse than having no summary.
-          awk '
-            /^--- SKIP / { name = $3; printf "%s\tskipped\t-\t-\n", name; next }
-            /^--- /      { name = substr($0, 5); next }
-            /^  total:/     { total = $2 }
-            /^  failed:/    { failed = $2
-                              if (name != "") { printf "%s\t%s\t%s\t%s\n",
-                                                name, (failed == 0 ? "pass" : "FAIL"), total, failed
-                                                name = "" } }
-          ' "${log}" > "${RUNNER_TEMP}/suite-totals.tsv"
-
-          rows="$(wc -l < "${RUNNER_TEMP}/suite-totals.tsv" | tr -d ' ')"
-
-          # A summary that lists nothing reads exactly like a summary of a clean run. The whole
-          # point of publishing totals is to make a shrinking gate visible, so a parse that
-          # found no suites fails the job rather than printing an empty table.
-          if [[ "${rows}" -eq 0 ]]; then
-            echo 'suite-totals: parsed no suites from the run output' >&2
-            exit 1
+          # What the private lock files record: for every locked package, its id, resolved version and
+          # content hash (base64 SHA-512), lower-cased the way NuGet names its folders.
+          expected="${RUNNER_TEMP}/nuget-expected.tsv"
+          : > "${expected}"
+          while IFS= read -r -d '' lock; do
+            jq -r '.dependencies[]? | to_entries[] | select(.value.contentHash != null) | [(.key | ascii_downcase), (.value.resolved | ascii_downcase), .value.contentHash] | @tsv' "${lock}" >> "${expected}"
+          done < <(find . -name packages.lock.json -not -path '*/node_modules/*' -print0)
+          sort -u "${expected}" -o "${expected}"
+          if [[ ! -s "${expected}" ]]; then
+            # Nothing to verify against means nothing may be trusted: empty the cache and let
+            # the locked restore download everything fresh.
+            echo 'nuget-packages: the lock files list no package hashes; discarding the whole cache'
+            find "${pkgs}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+            exit 0
           fi
 
-          discovered="$(grep -E '^Discovered [0-9]+ suite\(s\); ran [0-9]+\.$' "${log}" || true)"
-          if [[ -z "${discovered}" ]]; then
-            echo 'suite-totals: the run did not report a discovery count' >&2
-            exit 1
-          fi
+          # What the cache says about itself: each <id>/<version> folder's .nupkg.metadata records the
+          # content hash NuGet validated when it installed the package.
+          meta="${RUNNER_TEMP}/nuget-cache-meta.tsv"
+          : > "${meta}"
+          cd "${pkgs}"
+          find . -mindepth 3 -maxdepth 3 -name '.nupkg.metadata' -print0 | xargs -0 -r jq -r '[input_filename, (.contentHash // "")] | @tsv' > "${meta}" || : > "${meta}"
 
+          # A version folder is kept only when its recorded hash equals the hash the lock files record
+          # for exactly that id and version. Anything else - unlisted, mismatching, with no metadata - is
+          # deleted so restore downloads it fresh. Only counts are printed.
+          awk -F'\t' '
+            FILENAME == ARGV[1] { want[$1 "\t" $2] = $3; next }
+            {
+              path = $1; sub(/^\.\//, "", path)
+              split(path, parts, "/")
+              w = want[tolower(parts[1]) "\t" tolower(parts[2])]
+              if (w != "" && $2 == w) print "./" parts[1] "/" parts[2]
+            }
+          ' "${expected}" "${meta}" | sort -u > "${RUNNER_TEMP}/nuget-keep.txt"
+
+          kept=0
+          dropped=0
+          while IFS= read -r -d '' dir; do
+            if grep -qxF "${dir}" "${RUNNER_TEMP}/nuget-keep.txt"; then
+              kept=$((kept + 1))
+            else
+              rm -rf "${dir}"
+              dropped=$((dropped + 1))
+            fi
+          done < <(find . -mindepth 2 -maxdepth 2 -type d -print0)
+          # Loose files at the top level, and id folders with no version left, are not packages.
+          find . -mindepth 1 -maxdepth 1 -type f -delete
+          find . -mindepth 1 -maxdepth 1 -type d -empty -delete
+
+          case "${CACHE_HIT}" in
+            true) state='exact hit' ;;
+            false) state='restored from an earlier lock-file set' ;;
+            *) state='miss' ;;
+          esac
+          echo "nuget-packages: ${state}; ${kept} packages verified, ${dropped} dropped"
+          echo "- ${PLATFORM} NuGet package cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
+
+      # The Migrator proof runs the published program against a real PostgreSQL: the same
+      # image, by the same digest, the repository's own Testcontainers fixtures use
+      # (postgres 17.6; about 160 MB compressed, far under the 2 GB image cap). Started with
+      # `docker run` rather than a job-level `services:` block, which cannot be conditional
+      # per concern, so only this one Linux concern pays for the pull. Bound to loopback, with
+      # a random one-run password that is masked and never written anywhere but this job's
+      # environment.
+      - name: Start the pinned PostgreSQL for the Migrator proof
+        if: inputs.platform == 'linux' && inputs.concern == 'contracts-publish-smoke'
+        shell: bash
+        run: |
+          set -euo pipefail
+          password="$(openssl rand -hex 16)"
+          echo "::add-mask::${password}"
+          echo "KD_PG_PASSWORD=${password}" >> "${GITHUB_ENV}"
+          docker run --detach --name kd-postgres \
+            --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_PASSWORD="${password}" --env POSTGRES_DB=keeldock \
+            'postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929' >/dev/null
+          echo 'postgres: started (pinned by digest)'
+
+      # One step, every sub-step reported. Each sub-step runs regardless of the others (one
+      # that structurally needs an earlier one is reported as skipped, never silently
+      # dropped), the full output of each is kept in files under RUNNER_TEMP that are never
+      # printed, and only three kinds of text are published: a fixed reason per sub-step,
+      # the per-suite totals the runner itself printed, and the names of failing tests.
+      # Assertion text, stack traces and source excerpts never leave the runner. The
+      # concern fails at the end, with the table.
+      - name: Validate every sub-step
+        shell: bash
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          CONCERN: ${{ inputs.concern }}
+          # Vulnerable-package gate. `none` (the default) is warn-only: findings are
+          # annotated and tabulated but never fail the concern. Change it, in a reviewed
+          # edit, to `high` to fail on High and Critical advisories, or `critical` to fail
+          # on Critical only. Warn-only first so the existing backlog is visible before it
+          # can block a run.
+          VULN_FAIL_ON: none
+        run: |
+          set -uo pipefail
+
+          results="${RUNNER_TEMP}/substeps.tsv"
+          suite_rows="${RUNNER_TEMP}/suite-totals.tsv"
+          failed_names="${RUNNER_TEMP}/failed-tests.tsv"
+          : > "${results}"; : > "${suite_rows}"; : > "${failed_names}"
+          any_failed=0
+
+          strip_ansi() { sed -E $'s/\033\\[[0-9;]*[[:alpha:]]//g'; }
+
+          # Compiler, NuGet and npm diagnostic identifiers (CS0103, NU1004, MSB3073,
+          # EINTEGRITY ...) are public catalogue codes: they name the class of failure and
+          # carry no source. The message after the code does, so it is never published.
+          diag_codes() {
+            {
+              strip_ansi < "$1" | grep -oE '(error|warning) [A-Z]{2,5}[0-9]{3,5}' | awk '{ print $2 }'
+              strip_ansi < "$1" | grep -oE '^npm (ERR!|error) code [A-Z0-9_]+' | awk '{ print $4 }'
+            } | sort | uniq -c | sort -rn | head -12 | awk '{ printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1 }'
+          }
+
+          record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${results}"; }
+          # Replaces any earlier row for the label, so a sub-step that passed and was then found
+          # wanting on a follow-up check is never listed (or claimed) as both.
+          override() {
+            awk -F'\t' -v l="$1" '$1 != l' "${results}" > "${results}.tmp" && mv "${results}.tmp" "${results}"
+            record "$1" "$2" "$3"
+          }
+          passed() { awk -F'\t' -v l="$1" '$1 == l && $2 == "pass" { f = 1 } END { exit !f }' "${results}"; }
+
+          # Runs one sub-step with its output captured to a file. Never fails the script:
+          # the outcome is recorded and the concern fails at the end.
+          sub_step() {
+            local label="$1" reason_fn="$2"; shift 2
+            local log="${RUNNER_TEMP}/${label}.log" reason
+            if "$@" >"${log}" 2>&1; then
+              echo "${label}: passed"
+              record "${label}" pass '-'
+            else
+              reason="$("${reason_fn}" "${log}")"
+              echo "${label}: failed (${reason}; output withheld)" >&2
+              record "${label}" FAIL "${reason}"
+              any_failed=1
+            fi
+          }
+          skip_step() {
+            echo "$1: skipped (${2})"
+            record "$1" skipped "$2"
+            any_failed=1
+          }
+
+          reason_restore() {
+            local codes; codes="$(diag_codes "$1")"
+            if grep -q 'NU1004' "$1"; then echo "lock file out of date with the projects (${codes})"
+            elif grep -q 'NU1403' "$1"; then echo "package content hash differs from the lock file (${codes})"
+            else echo "restore failed (diagnostic ids: ${codes:-none})"; fi
+          }
+          reason_text() { head -c 300 "$1" | tr '\n' ' '; }
+          reason_npm() { echo "npm ci diagnostic ids: $(diag_codes "$1" || true)"; }
+          reason_build() { echo "build diagnostic ids: $(diag_codes "$1" || true)"; }
+          reason_publish() { echo "publish diagnostic ids: $(diag_codes "$1" || true)"; }
+          reason_format() { echo 'formatting drift (run dotnet format) or the formatter could not run'; }
+          reason_typescript() { echo 'generated TypeScript contract differs from the committed files, or does not typecheck'; }
+          reason_smoke() { echo 'Migrator failed for an unexpected reason or reported success with no database'; }
+          reason_contracts() { echo "generated contracts differ from the commit ($(grep -c . "$1") area(s) changed; regenerate and commit)"; }
+
+          # ---- Suite assignment ----------------------------------------------------------
+          # The rule scripts/run-tests.sh uses: a suite needs a container runtime exactly
+          # when its project references Testcontainers. Matched on the package reference
+          # itself, not the bare word.
+          needs_docker() { grep -Eq '<PackageReference[^>]+Include="Testcontainers' "$1"; }
+          structural_suites=' KeelDock.Cloud.ArchitectureTests KeelDock.Cloud.CompatibilityTests KeelDock.Cloud.GraphQLCompositionTests '
+          suite_concern() {
+            local name; name="$(basename "$1" .csproj)"
+            if needs_docker "$1"; then echo db-containers
+            elif [[ "${structural_suites}" == *" ${name} "* ]]; then echo structural
+            else echo unit; fi
+          }
+          structural_present() {
+            local name p found=0
+            for name in ${structural_suites}; do
+              found=0
+              while IFS= read -r p; do
+                if [[ "$(basename "${p}" .csproj)" == "${name}" && "$(suite_concern "${p}")" == structural ]]; then found=1; fi
+              done < <(find tests -name '*.csproj')
+              if [[ "${found}" -eq 0 ]]; then echo "structural suite ${name} is missing or now needs a container runtime"; return 1; fi
+            done
+          }
+
+          sub_step restore reason_restore dotnet restore KeelDock.Cloud.slnx --locked-mode
+
+          case "${CONCERN}" in
+            build-format)
+              if passed restore; then
+                sub_step build reason_build dotnet build KeelDock.Cloud.slnx --no-restore --nologo -v quiet --configuration Release
+              else
+                skip_step build 'restore failed'
+              fi
+              if passed build; then
+                sub_step format reason_format dotnet format KeelDock.Cloud.slnx --verify-no-changes --no-restore
+              else
+                skip_step format 'build did not pass'
+              fi
+              sub_step suite-assignment reason_text structural_present
+
+              # Known-vulnerable packages, direct and transitive, from the NuGet advisory
+              # feed. One operating system is enough: the locked package set is the same on
+              # all three. Only the package id and the advisory severity are published (both
+              # are public registry facts); versions, advisory URLs and the project that
+              # references the package stay in the withheld log.
+              if [[ "${PLATFORM}" == linux ]]; then
+                if passed restore; then
+                  vuln_log="${RUNNER_TEMP}/vulnerable.log"
+                  vuln_rows="${RUNNER_TEMP}/vulnerable.tsv"
+                  if dotnet list KeelDock.Cloud.slnx package --vulnerable --include-transitive --no-restore >"${vuln_log}" 2>&1; then
+                    vuln_scan_ok=1
+                  else
+                    vuln_scan_ok=0
+                  fi
+                  strip_ansi < "${vuln_log}" | tr -d '\r' | awk '
+                    /^[[:space:]]*>/ { for (i = 2; i <= NF; i++) if ($i ~ /^(Low|Moderate|High|Critical)$/) { print $2 "\t" $i; break } }
+                  ' | sort -u > "${vuln_rows}"
+                  vuln_count="$(grep -c . "${vuln_rows}" || true)"
+                  if [[ "${vuln_scan_ok}" -eq 0 && "${vuln_count}" -eq 0 ]]; then
+                    echo '::warning title=Vulnerable-package scan::the scan did not complete (advisory feed unreachable or the command failed); no result is claimed'
+                    echo 'vulnerable-packages: warn (scan did not complete)'
+                    record vulnerable-packages warn 'scan did not complete; no result claimed'
+                  else
+                    awk -F'\t' '{ printf "::warning title=Vulnerable package::%s (%s)\n", $1, $2 }' "${vuln_rows}" | head -50
+                    vuln_gated="$(awk -F'\t' -v gate="${VULN_FAIL_ON}" '
+                      gate == "high" && ($2 == "High" || $2 == "Critical") { n++ }
+                      gate == "critical" && $2 == "Critical" { n++ }
+                      END { print n + 0 }' "${vuln_rows}")"
+                    if [[ "${vuln_gated}" -gt 0 ]]; then
+                      echo "vulnerable-packages: failed (${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate)" >&2
+                      record vulnerable-packages FAIL "${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate"
+                      any_failed=1
+                    elif [[ "${vuln_count}" -gt 0 ]]; then
+                      echo "vulnerable-packages: ${vuln_count} advisory(ies), warn-only"
+                      record vulnerable-packages warn "${vuln_count} package advisory(ies); warn-only (gate: ${VULN_FAIL_ON})"
+                    else
+                      echo 'vulnerable-packages: passed (none reported)'
+                      record vulnerable-packages pass 'none reported'
+                    fi
+                  fi
+                else
+                  echo 'vulnerable-packages: skipped (restore failed)'
+                  record vulnerable-packages skipped 'restore failed'
+                fi
+              fi
+              ;;
+
+            structural|unit|db-containers)
+              selected=()
+              while IFS= read -r project; do
+                if [[ "$(suite_concern "${project}")" == "${CONCERN}" ]]; then selected+=("${project}"); fi
+              done < <(find tests -name '*.csproj' | sort)
+              echo "${CONCERN}: ${#selected[@]} suite(s) assigned"
+              if [[ "${#selected[@]}" -eq 0 ]]; then
+                record suites FAIL 'no suite is assigned to this concern (discovery is broken)'
+                echo 'suites: failed (no suite is assigned to this concern; discovery is broken)' >&2
+                any_failed=1
+              else
+                if [[ "${CONCERN}" == structural ]]; then sub_step suite-assignment reason_text structural_present; fi
+
+                build_suites() {
+                  local project
+                  for project in "${selected[@]}"; do
+                    dotnet build "${project}" --no-restore --nologo -v quiet --configuration Release || return 1
+                  done
+                }
+                if passed restore; then
+                  sub_step build reason_build build_suites
+                else
+                  skip_step build 'restore failed'
+                fi
+
+                if passed build; then
+                  suites_total=0; suites_failed=0
+                  for project in "${selected[@]}"; do
+                    name="$(basename "${project}" .csproj)"
+                    log="${RUNNER_TEMP}/suite-${name}.log"
+                    clean="${log}.clean"
+                    dotnet run --project "${project}" --no-build --configuration Release >"${log}" 2>&1
+                    rc=$?
+                    strip_ansi < "${log}" | tr -d '\r' > "${clean}"
+                    # The last total / failed the runner printed. Colour escapes are stripped
+                    # first: the runner colours its summary on a hosted runner and not on a
+                    # redirected local stream, which made an anchored match environment-dependent.
+                    total="$(grep -oE '^[[:space:]]*total:[[:space:]]*[0-9]+' "${clean}" | tail -1 | grep -oE '[0-9]+$' || true)"
+                    failed="$(grep -oE '^[[:space:]]*failed:[[:space:]]*[0-9]+' "${clean}" | tail -1 | grep -oE '[0-9]+$' || true)"
+                    # A suite that ran no tests is not a suite that passed: a project whose
+                    # tests stopped being discovered reports total 0 and a zero exit code.
+                    if [[ -z "${total}" || -z "${failed}" ]]; then
+                      result=FAIL; reason='no test summary printed (crash, timeout or build output only)'; total='-'; failed='-'
+                    elif [[ "${total}" -eq 0 ]]; then
+                      result=FAIL; reason='0 tests discovered; an empty suite is not a passing suite'
+                    elif [[ "${failed}" -gt 0 ]]; then
+                      result=FAIL; reason="${failed} of ${total} tests failed"
+                    elif [[ "${rc}" -ne 0 ]]; then
+                      result=FAIL; reason="exit code ${rc} with no failing test"
+                    else
+                      result=pass; reason='-'
+                    fi
+                    # The runner's own `duration:` line ("1m 17s 566ms", "23s 372ms", "508ms"),
+                    # converted to seconds. Missing or unparseable is shown as "-", never as 0.
+                    dur="$(grep -oE '^[[:space:]]*duration:[[:space:]]*.*$' "${clean}" | tail -1 | sed -E 's/^[[:space:]]*duration:[[:space:]]*//' | awk '
+                      { t = 0; ok = 0
+                        for (i = 1; i <= NF; i++) {
+                          v = $i + 0
+                          if ($i ~ /^[0-9.]+ms$/) { t += v / 1000; ok = 1 }
+                          else if ($i ~ /^[0-9.]+s$/) { t += v; ok = 1 }
+                          else if ($i ~ /^[0-9.]+m$/) { t += v * 60; ok = 1 }
+                          else if ($i ~ /^[0-9.]+h$/) { t += v * 3600; ok = 1 }
+                        }
+                        if (ok) printf "%.1f", t }')"
+                    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${result}" "${total}" "${failed}" "${reason}" "${dur:--}" >> "${suite_rows}"
+                    # Failing test identities only: the fully qualified test name, with
+                    # theory arguments cut off and every character outside a conservative
+                    # identifier set replaced. The assertion text after each name is never read.
+                    awk -v suite="${name}" '
+                      /^failed / { line = $0; sub(/^failed /, "", line)
+                                   sub(/ \([0-9.]+ ?(ms|s|m|h)[^)]*\)$/, "", line)
+                                   sub(/\(.*$/, "", line)
+                                   gsub(/[^A-Za-z0-9_.+<>,-]/, "?", line)
+                                   print suite "\t" substr(line, 1, 200) }
+                    ' "${clean}" | head -20 >> "${failed_names}"
+                    suites_total=$((suites_total + 1))
+                    if [[ "${result}" == pass ]]; then
+                      echo "suite ${name}: passed (${total} tests)"
+                    else
+                      suites_failed=$((suites_failed + 1))
+                      echo "suite ${name}: failed (${reason})" >&2
+                    fi
+                    rm -f "${log}" "${clean}"
+                  done
+                  if [[ -s "${failed_names}" ]]; then
+                    echo 'failing tests (names only):' >&2
+                    head -60 "${failed_names}" | awk -F'\t' '{ print "  " $2 }' >&2
+                  fi
+                  if [[ "${suites_failed}" -eq 0 ]]; then
+                    record test-suites pass '-'
+                    echo "test-suites: passed (${suites_total} suites)"
+                  else
+                    record test-suites FAIL "${suites_failed} of ${suites_total} suites failed"
+                    any_failed=1
+                  fi
+                else
+                  skip_step test-suites 'build did not pass'
+                fi
+                # The snapshot and fixture tests write their baseline when it is missing and
+                # report skipped rather than passing, so a contributor who regenerated and
+                # forgot to commit would otherwise get a green build. Checked, never printed.
+                contracts_diff() {
+                  if git diff --quiet -- contracts/; then return 0; fi
+                  git diff --name-only -- contracts/ | awk -F/ '{ print $2 }' | sort | uniq -c
+                  return 1
+                }
+                sub_step contracts-committed reason_contracts contracts_diff
+              fi
+              ;;
+
+            contracts-publish-smoke)
+              # Installed before the check: the generated TypeScript is verified only when
+              # node_modules exists, and skipped is not passed.
+              sub_step typescript-install reason_npm npm --prefix tools/graphql-codegen ci
+              if passed typescript-install; then
+                sub_step typescript-contract reason_typescript npm --prefix tools/graphql-codegen run verify --silent
+              else
+                skip_step typescript-contract 'npm ci failed'
+              fi
+              # The publish runs --no-restore, so it needs the restore.
+              for host in Api Worker Migrator; do
+                if passed restore; then
+                  sub_step "publish-${host}" reason_publish dotnet publish "src/Hosts/KeelDock.Cloud.${host}" \
+                    --no-restore --configuration Release --output "${RUNNER_TEMP}/publish/${host}"
+                else
+                  skip_step "publish-${host}" 'restore failed'
+                fi
+              done
+              # With no connection string configured the Migrator must fail loudly and by
+              # name. It is the cheapest possible check that the published artifact is the
+              # program we think it is.
+              migrator_smoke() {
+                local output rc
+                output="$(dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll" 2>&1)"
+                rc=$?
+                if [[ "${rc}" -eq 0 ]]; then return 10; fi
+                grep -q 'owner connection string' <<<"${output}" || return 11
+              }
+              if passed publish-Migrator; then
+                sub_step migrator-smoke reason_smoke migrator_smoke
+              else
+                skip_step migrator-smoke 'Migrator publish did not pass'
+              fi
+
+              # ---- The Migrator against a real PostgreSQL (Linux only) --------------------
+              # Migrates every module from an empty database, then runs again: the second run
+              # must also succeed and report the same module count (idempotent). EF Core refuses
+              # to migrate past a pending model change, so the same run is the model-drift
+              # check: a migration that no longer matches its model fails the first run. The
+              # Migrator's own refusals can quote SQL, so its output stays in the withheld log;
+              # only the exit status, module counts and the ids of failing modules are published.
+              if [[ "${PLATFORM}" == linux ]]; then
+                wait_postgres() {
+                  local _
+                  for _ in $(seq 1 60); do
+                    if docker exec kd-postgres pg_isready --username postgres --dbname keeldock; then return 0; fi
+                    sleep 1
+                  done
+                  return 1
+                }
+                run_migrator() {
+                  # Development, because the local database serves no certificate: outside
+                  # Development the Migrator demands SslMode=VerifyFull on every owner connection.
+                  env DOTNET_ENVIRONMENT=Development \
+                    "ConnectionStrings__keeldock-owner=Host=127.0.0.1;Port=5432;Database=keeldock;Username=postgres;Password=${KD_PG_PASSWORD:-}" \
+                    dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll"
+                }
+                migrated_count() { grep -oE '^All [0-9]+ module migrations completed' "$1" | grep -oE '[0-9]+' | head -1; }
+                reason_migrate() {
+                  local ok failing
+                  ok="$(grep -c '^\[ok\]' "$1" || true)"
+                  failing="$(grep -oE '^\[FAIL\] [A-Za-z0-9_.-]+' "$1" | awk '{ print $2 }' | paste -sd, - || true)"
+                  echo "Migrator failed or reported no completion; ${ok} module(s) migrated; failing module ids: ${failing:-none}"
+                }
+                if ! passed publish-Migrator; then
+                  skip_step postgres-ready 'Migrator publish did not pass'
+                  skip_step migrator-migrate 'Migrator publish did not pass'
+                  skip_step migrator-idempotent 'Migrator publish did not pass'
+                else
+                  sub_step postgres-ready reason_text wait_postgres
+                  if passed postgres-ready; then
+                    sub_step migrator-migrate reason_migrate run_migrator
+                    first_count="$(migrated_count "${RUNNER_TEMP}/migrator-migrate.log" || true)"
+                    if passed migrator-migrate && [[ -n "${first_count}" ]]; then
+                      echo "migrator-migrate: ${first_count} module(s) migrated from empty and passed catalog invariants"
+                      sub_step migrator-idempotent reason_migrate run_migrator
+                      second_count="$(migrated_count "${RUNNER_TEMP}/migrator-idempotent.log" || true)"
+                      if passed migrator-idempotent && [[ "${second_count}" != "${first_count}" ]]; then
+                        echo "migrator-idempotent: failed (second run reported ${second_count:-no} modules, first ${first_count})" >&2
+                        override migrator-idempotent FAIL "second run reported ${second_count:-no} modules against ${first_count}"
+                        any_failed=1
+                      fi
+                    elif passed migrator-migrate; then
+                      echo 'migrator-migrate: failed (exit 0 without a completion line)' >&2
+                      override migrator-migrate FAIL 'exited 0 without the completion line'
+                      any_failed=1
+                      skip_step migrator-idempotent 'first run did not complete'
+                    else
+                      skip_step migrator-idempotent 'first run failed'
+                    fi
+                  else
+                    skip_step migrator-migrate 'PostgreSQL did not become ready'
+                    skip_step migrator-idempotent 'PostgreSQL did not become ready'
+                  fi
+                fi
+              fi
+              ;;
+          esac
+
+          # ---- Summary: sub-step table, per-suite totals, failing test names -------------
           {
-            echo "### Suites — ${PLATFORM}"
+            echo "### ${CONCERN} sub-steps — ${PLATFORM}"
             echo
-            echo '| Suite | Result | Tests | Failed |'
-            echo '|---|---|---:|---:|'
-            while IFS=$'\t' read -r name result total failed; do
-              echo "| \`${name}\` | ${result} | ${total} | ${failed} |"
-            done < "${RUNNER_TEMP}/suite-totals.tsv"
+            echo '| Sub-step | Result | Reason |'
+            echo '|---|---|---|'
+            while IFS=$'\t' read -r label result reason; do
+              echo "| \`${label}\` | ${result} | ${reason} |"
+            done < "${results}"
             echo
-            echo "${discovered}"
-            awk -F'\t' '$3 != "-" { t += $3; f += $4 } END { printf "\n**%d tests, %d failed.**\n", t, f }' \
-              "${RUNNER_TEMP}/suite-totals.tsv"
+            if [[ -s "${suite_rows}" ]]; then
+              echo "### Suites — ${CONCERN} on ${PLATFORM}"
+              echo
+              echo '| Suite | Result | Tests | Failed | Duration | Reason |'
+              echo '|---|---|---:|---:|---:|---|'
+              while IFS=$'\t' read -r name result total failed reason dur; do
+                if [[ "${dur}" == '-' ]]; then shown_dur='-'; else shown_dur="${dur}s"; fi
+                echo "| \`${name}\` | ${result} | ${total} | ${failed} | ${shown_dur} | ${reason} |"
+              done < "${suite_rows}"
+              awk -F'\t' '$3 != "-" { t += $3; f += $4 } END { printf "\n**%d tests, %d failed.**\n", t, f }' "${suite_rows}"
+              # The five slowest suites, so a suite that quietly became the long pole is visible.
+              if awk -F'\t' '$6 != "-" { f = 1 } END { exit !f }' "${suite_rows}"; then
+                echo
+                echo '**Slowest suites:**'
+                echo
+                awk -F'\t' '$6 != "-"' "${suite_rows}" | sort -t$'\t' -k6,6 -g -r | head -5 | while IFS=$'\t' read -r name result total failed reason dur; do
+                  echo "- \`${name}\`: ${dur}s"
+                done
+              fi
+            fi
+            if [[ -s "${RUNNER_TEMP}/vulnerable.tsv" ]]; then
+              echo
+              echo '### Vulnerable packages (id and severity only)'
+              echo
+              while IFS=$'\t' read -r vid vsev; do
+                echo "- \`${vid}\`: ${vsev}"
+              done < "${RUNNER_TEMP}/vulnerable.tsv"
+            fi
+            if [[ -s "${failed_names}" ]]; then
+              echo
+              echo '### Failing tests (names only)'
+              echo
+              while IFS=$'\t' read -r suite test; do
+                echo "- \`${suite}\`: \`${test}\`"
+              done < "${failed_names}"
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Confirm the generated artefacts are committed
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The snapshot and fixture tests write their baseline when it is missing and report
-          # skipped rather than passing, so a contributor who regenerated and forgot to commit
-          # would otherwise get a green build. Checked, never printed: these are private source.
-          if ! git diff --quiet -- contracts/; then
-            echo 'Generated contracts differ from what is committed. Regenerate and commit:' >&2
-            git diff --name-only -- contracts/ >&2
+          if [[ "${any_failed}" -ne 0 ]]; then
+            echo "${CONCERN}: failed (one or more sub-steps failed or were skipped; each is listed above)" >&2
             exit 1
           fi
-          echo 'contracts: committed and unchanged'
 
-      - name: Publish the hosts and smoke the Migrator
-        shell: bash
-        run: |
-          set -euo pipefail
-          for host in Api Worker Migrator; do
-            if ! dotnet publish "src/Hosts/KeelDock.Cloud.${host}" \
-              --no-restore --configuration Release \
-              --output "${RUNNER_TEMP}/publish/${host}" >"${RUNNER_TEMP}/publish-${host}.log" 2>&1; then
-              echo "publish-${host}: failed" >&2
-              exit 1
-            fi
-            echo "publish-${host}: passed"
-          done
+      # Saved only from the protected main branch (every job here already refuses to run
+      # elsewhere; the condition repeats it so the write permission is explicit), only on a
+      # miss so a key is written once and never overwritten, and only when the packages were
+      # verified before use.
+      - name: Save verified NuGet packages
+        if: ${{ always() && github.ref == 'refs/heads/main' && steps.nuget-packages.outputs.cache-hit != 'true' && steps.nuget-verify.outcome == 'success' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json', 'Directory.Packages.props') }}
 
-          # With no connection string configured the Migrator must fail loudly
-          # and by name. It is the cheapest possible check that the published
-          # artifact is the program we think it is, and it runs identically on
-          # all three operating systems.
-          set +e
-          output="$(dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll" 2>&1)"
-          migrator_rc=$?
-          set -e
-          if [[ "${migrator_rc}" -eq 0 ]]; then
-            echo 'migrator-smoke: failed (reported success with no database configured)' >&2
-            exit 1
-          fi
-          if ! grep -q 'owner connection string' <<<"${output}"; then
-            echo 'migrator-smoke: failed (exited for an unexpected reason)' >&2
-            exit 1
-          fi
-          echo 'migrator-smoke: passed'
+      # Cleanup is part of the proof: the container and its anonymous volume are removed even
+      # when an earlier step failed.
+      - name: Remove the PostgreSQL container
+        if: always() && inputs.platform == 'linux' && inputs.concern == 'contracts-publish-smoke'
+        shell: bash
+        run: docker rm --force --volumes kd-postgres >/dev/null 2>&1 || true
 
       - name: Publish sanitized validation proof
+        if: always()
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           PLATFORM: ${{ inputs.platform }}
+          CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
           requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
           [[ "${checked_out_sha}" == "${requested_sha}" ]]
+          results="${RUNNER_TEMP}/substeps.tsv"
+          # A claim is printed only when the sub-step that proves it passed; a run that
+          # failed or never started must not read like a clean one.
+          proved() { [[ -f "${results}" ]] && awk -F'\t' -v l="$1" '$1 == l && $2 == "pass" { f = 1 } END { exit !f }' "${results}"; }
           {
-            echo "## KeelDock Cloud — ${PLATFORM}"
+            echo "## KeelDock Cloud — ${CONCERN} — ${PLATFORM}"
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
             echo "- Runner: \`${RUNNER_OS}\` / \`${RUNNER_ARCH}\`"
-            echo '- Restore was locked, build was Release with warnings as errors.'
-            echo '- The full suite ran via scripts/run-tests.sh, which discovers suites from the repository.'
-            echo '- Generated contracts match what is committed.'
-            echo '- API, Worker and Migrator published; Migrator smoke passed.'
-            if [[ "${PLATFORM}" == 'linux' ]]; then
-              echo '- Container-backed suites ran against a real PostgreSQL instance.'
-            else
-              echo '- Container-backed suites were NOT run: no Linux container runtime on this platform.'
-            fi
+            proved restore && echo '- Restore was locked.'
+            case "${CONCERN}" in
+              build-format)
+                proved build && echo '- Whole-solution build was Release with warnings as errors.'
+                proved format && echo '- Formatting verified.'
+                proved suite-assignment && echo '- Every named structural suite exists and needs no container runtime.'
+                if [[ -f "${results}" ]] && grep -q $'^vulnerable-packages\t' "${results}"; then
+                  echo "- Vulnerable-package scan: $(awk -F'\t' '$1 == "vulnerable-packages" { print $2 ": " $3 }' "${results}")."
+                fi
+                ;;
+              structural|unit)
+                proved build && echo '- Suite projects built in Release.'
+                proved test-suites && echo "- Every ${CONCERN} suite passed."
+                proved contracts-committed && echo '- Generated contracts match what is committed.'
+                ;;
+              db-containers)
+                proved build && echo '- Suite projects built in Release.'
+                proved test-suites && echo '- Every container-backed suite passed against real PostgreSQL started through Testcontainers.'
+                proved contracts-committed && echo '- Generated contracts match what is committed.'
+                ;;
+              contracts-publish-smoke)
+                proved typescript-contract && echo '- Generated TypeScript contract is current and typechecks.'
+                if proved publish-Api && proved publish-Worker && proved publish-Migrator; then
+                  echo '- API, Worker and Migrator published.'
+                fi
+                proved migrator-smoke && echo '- Migrator smoke passed.'
+                proved migrator-migrate && echo '- The published Migrator migrated every module from an empty real PostgreSQL (digest-pinned image) and passed the catalog invariants; EF Core refuses a pending model change, so this is also the model-drift check.'
+                proved migrator-idempotent && echo '- A second Migrator run against the migrated database succeeded with the same module count.'
+                ;;
+            esac
             echo '- Source token: revoked before any project code executed.'
-            echo '- Outputs: no source files, logs, reports or artifacts published.'
+            echo '- Outputs: no source files, logs, reports or artifacts published; failing test names only.'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      # The concern's own wall-clock time from its first step, so the summary shows it next to
+      # the result. Queue time is not included. The dispatcher's timings job tabulates every
+      # concern and compares it with a committed baseline.
+      - name: Report concern duration
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          started="${CONCERN_STARTED_AT:-}"
+          [[ -n "${started}" ]] || exit 0
+          elapsed=$(( $(date +%s) - started ))
+          printf '### Concern duration\n\n%dm%02ds from the first step, excluding runner queue time.\n' \
+            $((elapsed / 60)) $((elapsed % 60)) >> "${GITHUB_STEP_SUMMARY}"

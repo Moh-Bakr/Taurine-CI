@@ -2,28 +2,29 @@ name: KeelDock Cloud source validation (protected)
 
 # The second private source this control plane validates.
 #
-# `Moh-Bakr/keeldock-cloud` is a private repository, and GitHub currently refuses
-# to start Actions jobs on this account's private repositories at all — a billing
-# or spending-limit block, the same condition that stripped every automatic
-# trigger from the Taurine repository on 2026-08-19. Its own `.github/workflows/ci.yml`
-# has therefore never executed a single job.
+# `Moh-Bakr/keeldock-cloud` is a private repository, and GitHub refuses to start Actions
+# jobs on this account's private repositories (a billing or spending-limit block, the same
+# condition that stripped every automatic trigger from the Taurine repository on
+# 2026-08-19). The source repository's own `.github/workflows/ci.yml` therefore cannot run
+# there; this lane is where its gates actually execute, and the concerns below follow that
+# file's gate order (build, structural, database, publish) while discovering suites the way
+# `scripts/run-tests.sh` does rather than keeping a second suite list.
 #
-# Running the gates from here fixes that: this repository is public, so its
-# minutes are free, and the existing source-read pattern already knows how to
-# check out an exact private SHA and destroy the token before project code runs.
+# This repository is public, so its minutes are free, and the source-read pattern checks out
+# an exact private SHA and destroys the token before project code runs.
 #
-# It also closes a real gap rather than merely relocating one. KeelDock Cloud's
-# Phase 0 evidence records "clean-machine topology start on macOS, Windows and
-# Linux" as NOT MET, because the 104 passing tests had only ever run on one
-# contributor's macOS/arm64 laptop. Three operating systems, from a clean
-# checkout, is exactly the missing evidence.
+# It also supplies evidence the source repository could not produce alone: its Phase 0
+# record lists "clean-machine topology start on macOS, Windows and Linux" as not met because
+# its tests had only run on one contributor's macOS/arm64 laptop. A run here is a clean
+# checkout on all three operating systems.
 #
-# **Scope, stated honestly.** This proves the solution restores, builds and
-# passes its structural gates on all three operating systems, and that the
-# database-backed gates pass on Linux. It does *not* start the Aspire topology:
-# that needs a Linux Docker daemon, which only the Ubuntu runner has, and a full
-# cold AppHost start is a separate piece of work. The Phase 0 criterion is
-# therefore partly, not wholly, satisfied by a green run here.
+# **Scope, stated honestly.** One run is five concerns (build-format, structural, unit,
+# contracts-publish-smoke on all three operating systems; db-containers on Linux only,
+# because only the Ubuntu runner has a Docker daemon). Together they prove the solution
+# restores from its lock files, builds, passes its structural and unit gates everywhere, and
+# passes its database-backed gates and a real-PostgreSQL Migrator proof on Linux. They do
+# *not* start the Aspire topology: a full cold AppHost start is separate work, so the Phase 0
+# criterion is partly, not wholly, satisfied by a green run here.
 on:
   workflow_dispatch:
     inputs:
@@ -32,8 +33,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: keeldock-validation-${{ github.workflow }}-${{ inputs.source_sha }}
@@ -43,6 +43,7 @@ concurrency:
 
 jobs:
   validate-input:
+    permissions: {}
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
@@ -60,20 +61,92 @@ jobs:
           fi
 
   validate:
+    permissions:
+      contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     needs: validate-input
     strategy:
-      # Each operating system is independent evidence. A Windows path-separator
-      # bug must not hide the Linux result, and vice versa — that is the whole
-      # point of running three.
+      # Each concern on each operating system is independent evidence. A Windows
+      # path-separator bug must not hide the Linux result, a slow database suite must
+      # not hold the build result hostage, and a failing concern says which gate
+      # failed without opening a log.
       fail-fast: false
       matrix:
-        platform:
-          - linux
-          - macos
-          - windows
-    uses: ./.github/workflows/keeldock-validation-concern.yml
-    secrets: inherit
+        include:
+          - { concern: build-format, platform: linux }
+          - { concern: build-format, platform: macos }
+          - { concern: build-format, platform: windows }
+          - { concern: structural, platform: linux }
+          - { concern: structural, platform: macos }
+          - { concern: structural, platform: windows }
+          - { concern: unit, platform: linux }
+          - { concern: unit, platform: macos }
+          - { concern: unit, platform: windows }
+          - { concern: contracts-publish-smoke, platform: linux }
+          - { concern: contracts-publish-smoke, platform: macos }
+          - { concern: contracts-publish-smoke, platform: windows }
+          # Only the Ubuntu runner has a Docker daemon, so the Testcontainers suites
+          # (including the extraction-fitness gates) are Linux-only evidence.
+          - { concern: db-containers, platform: linux }
+    uses: ./.github/workflows/keeldock-validation-concern.yml  # zizmor: ignore[self-repository]
+    secrets: inherit  # zizmor: ignore[secrets-inherit]
     with:
       source_sha: ${{ inputs.source_sha }}
       platform: ${{ matrix.platform }}
+      concern: ${{ matrix.concern }}
+
+  # Tabulates every concern's duration and conclusion for this run and warns when a concern
+  # took more than 25% (and more than two minutes) longer than the committed baseline below,
+  # in minutes. Warning only: it never fails the run, calls no service beyond this
+  # repository's own run API with the run's read-only token, and publishes no artifact. A
+  # concern with no baseline is listed without a comparison.
+  #
+  # The baseline is keyed `<os> <concern>`. The first values are ESTIMATES from the whole-run
+  # times of run 37152789275 (windows about 10 minutes, macos about 10, linux about 11, all
+  # concerns in one job) divided across the split; they are placeholders until the first
+  # hosted run of the split gives measured numbers, after which this table should be updated
+  # from that run.
+  timings:
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    needs: [validate]
+    name: Concern timings
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Tabulate concern timings against the baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_MINUTES: '{"linux build-format":7,"linux structural":6,"linux unit":6,"linux contracts-publish-smoke":7,"linux db-containers":11,"macos build-format":8,"macos structural":7,"macos unit":7,"macos contracts-publish-smoke":8,"windows build-format":10,"windows structural":10,"windows unit":9,"windows contracts-publish-smoke":10}'
+          NAME_PATTERN: '^validate \(.+\) / KeelDock (?<concern>(linux|macos|windows) .+)$'
+        run: |
+          set -euo pipefail
+          rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+            | jq -r --arg re "${NAME_PATTERN}" '.jobs[]
+              | select(.started_at != null and .completed_at != null)
+              | select(.name | test($re))
+              | [(.name | capture($re).concern), (.conclusion // "unknown"),
+                 (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)]
+              | @tsv' | sort)"
+          {
+            echo '## KeelDock concern timings'
+            echo
+            echo '| Concern | Duration | Baseline | Conclusion |'
+            echo '| --- | --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          while IFS=$'\t' read -r concern conclusion seconds; do
+            [[ -n "${concern}" ]] || continue
+            base="$(jq -r --arg c "${concern}" '.[$c] // empty' <<<"${BASELINE_MINUTES}")"
+            shown='none'
+            if [[ -n "${base}" ]]; then
+              shown="${base}m"
+              limit=$(( base * 60 * 125 / 100 ))
+              if (( seconds > limit && seconds > base * 60 + 120 )); then
+                echo "::warning title=Slow concern::${concern} took $((seconds / 60))m$((seconds % 60))s against a baseline of ${base}m (more than 25% slower)"
+                shown="${base}m (SLOWER)"
+              fi
+            fi
+            printf '| %s | %dm%02ds | %s | %s |\n' "${concern}" $((seconds / 60)) $((seconds % 60)) "${shown}" "${conclusion}" >> "${GITHUB_STEP_SUMMARY}"
+          done <<<"${rows}"
