@@ -227,13 +227,13 @@ jobs:
         shell: bash
         env:
           CACHE_HIT: ${{ steps.nuget-packages.outputs.cache-hit }}
-          PLATFORM: ${{ inputs.platform }}
+          KD_PLATFORM: ${{ inputs.platform }}
         run: |
           set -euo pipefail
           pkgs="${HOME}/.nuget/packages"
           if [[ ! -d "${pkgs}" ]]; then
             echo 'nuget-packages: no cache restored; nothing to verify'
-            echo "- ${PLATFORM} NuGet package cache: miss" >> "${GITHUB_STEP_SUMMARY}"
+            echo "- ${KD_PLATFORM} NuGet package cache: miss" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
 
@@ -293,7 +293,7 @@ jobs:
             *) state='miss' ;;
           esac
           echo "nuget-packages: ${state}; ${kept} packages verified, ${dropped} dropped"
-          echo "- ${PLATFORM} NuGet package cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- ${KD_PLATFORM} NuGet package cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
 
       # The Migrator proof runs the published program against a real PostgreSQL: the same
       # image, by the same digest, the repository's own Testcontainers fixtures use
@@ -326,8 +326,8 @@ jobs:
       - name: Validate every sub-step
         shell: bash
         env:
-          PLATFORM: ${{ inputs.platform }}
-          CONCERN: ${{ inputs.concern }}
+          KD_PLATFORM: ${{ inputs.platform }}
+          KD_CONCERN: ${{ inputs.concern }}
           # Vulnerable-package gate. `none` (the default) is warn-only: findings are
           # annotated and tabulated but never fail the concern. Change it, in a reviewed
           # edit, to `high` to fail on High and Critical advisories, or `critical` to fail
@@ -335,6 +335,10 @@ jobs:
           # can block a run.
           VULN_FAIL_ON: none
         run: |
+          # The inputs reach this script as KD_PLATFORM / KD_CONCERN, never PLATFORM: MSBuild
+          # turns every environment variable into a property, and a property named Platform
+          # with the value "linux" makes `dotnet restore` fail with MSB4126 (invalid solution
+          # configuration) in every child process this script starts.
           set -uo pipefail
 
           results="${RUNNER_TEMP}/substeps.tsv"
@@ -425,7 +429,7 @@ jobs:
 
           sub_step restore reason_restore dotnet restore KeelDock.Cloud.slnx --locked-mode
 
-          case "${CONCERN}" in
+          case "${KD_CONCERN}" in
             build-format)
               if passed restore; then
                 sub_step build reason_build dotnet build KeelDock.Cloud.slnx --no-restore --nologo -v quiet --configuration Release
@@ -444,7 +448,7 @@ jobs:
               # all three. Only the package id and the advisory severity are published (both
               # are public registry facts); versions, advisory URLs and the project that
               # references the package stay in the withheld log.
-              if [[ "${PLATFORM}" == linux ]]; then
+              if [[ "${KD_PLATFORM}" == linux ]]; then
                 if passed restore; then
                   vuln_log="${RUNNER_TEMP}/vulnerable.log"
                   vuln_rows="${RUNNER_TEMP}/vulnerable.tsv"
@@ -489,15 +493,15 @@ jobs:
             structural|unit|db-containers)
               selected=()
               while IFS= read -r project; do
-                if [[ "$(suite_concern "${project}")" == "${CONCERN}" ]]; then selected+=("${project}"); fi
+                if [[ "$(suite_concern "${project}")" == "${KD_CONCERN}" ]]; then selected+=("${project}"); fi
               done < <(find tests -name '*.csproj' | sort)
-              echo "${CONCERN}: ${#selected[@]} suite(s) assigned"
+              echo "${KD_CONCERN}: ${#selected[@]} suite(s) assigned"
               if [[ "${#selected[@]}" -eq 0 ]]; then
                 record suites FAIL 'no suite is assigned to this concern (discovery is broken)'
                 echo 'suites: failed (no suite is assigned to this concern; discovery is broken)' >&2
                 any_failed=1
               else
-                if [[ "${CONCERN}" == structural ]]; then sub_step suite-assignment reason_text structural_present; fi
+                if [[ "${KD_CONCERN}" == structural ]]; then sub_step suite-assignment reason_text structural_present; fi
 
                 build_suites() {
                   local project
@@ -637,7 +641,7 @@ jobs:
               # check: a migration that no longer matches its model fails the first run. The
               # Migrator's own refusals can quote SQL, so its output stays in the withheld log;
               # only the exit status, module counts and the ids of failing modules are published.
-              if [[ "${PLATFORM}" == linux ]]; then
+              if [[ "${KD_PLATFORM}" == linux ]]; then
                 wait_postgres() {
                   local _
                   for _ in $(seq 1 60); do
@@ -697,7 +701,7 @@ jobs:
 
           # ---- Summary: sub-step table, per-suite totals, failing test names -------------
           {
-            echo "### ${CONCERN} sub-steps — ${PLATFORM}"
+            echo "### ${KD_CONCERN} sub-steps — ${KD_PLATFORM}"
             echo
             echo '| Sub-step | Result | Reason |'
             echo '|---|---|---|'
@@ -706,7 +710,7 @@ jobs:
             done < "${results}"
             echo
             if [[ -s "${suite_rows}" ]]; then
-              echo "### Suites — ${CONCERN} on ${PLATFORM}"
+              echo "### Suites — ${KD_CONCERN} on ${KD_PLATFORM}"
               echo
               echo '| Suite | Result | Tests | Failed | Duration | Reason |'
               echo '|---|---|---:|---:|---:|---|'
@@ -744,7 +748,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
           if [[ "${any_failed}" -ne 0 ]]; then
-            echo "${CONCERN}: failed (one or more sub-steps failed or were skipped; each is listed above)" >&2
+            echo "${KD_CONCERN}: failed (one or more sub-steps failed or were skipped; each is listed above)" >&2
             exit 1
           fi
 
@@ -772,8 +776,8 @@ jobs:
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
-          PLATFORM: ${{ inputs.platform }}
-          CONCERN: ${{ inputs.concern }}
+          KD_PLATFORM: ${{ inputs.platform }}
+          KD_CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
@@ -784,12 +788,12 @@ jobs:
           # failed or never started must not read like a clean one.
           proved() { [[ -f "${results}" ]] && awk -F'\t' -v l="$1" '$1 == l && $2 == "pass" { f = 1 } END { exit !f }' "${results}"; }
           {
-            echo "## KeelDock Cloud — ${CONCERN} — ${PLATFORM}"
+            echo "## KeelDock Cloud — ${KD_CONCERN} — ${KD_PLATFORM}"
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
             echo "- Runner: \`${RUNNER_OS}\` / \`${RUNNER_ARCH}\`"
             proved restore && echo '- Restore was locked.'
-            case "${CONCERN}" in
+            case "${KD_CONCERN}" in
               build-format)
                 proved build && echo '- Whole-solution build was Release with warnings as errors.'
                 proved format && echo '- Formatting verified.'
@@ -800,7 +804,7 @@ jobs:
                 ;;
               structural|unit)
                 proved build && echo '- Suite projects built in Release.'
-                proved test-suites && echo "- Every ${CONCERN} suite passed."
+                proved test-suites && echo "- Every ${KD_CONCERN} suite passed."
                 proved contracts-committed && echo '- Generated contracts match what is committed.'
                 ;;
               db-containers)
