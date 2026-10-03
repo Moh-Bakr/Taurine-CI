@@ -90,6 +90,10 @@ jobs:
           repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
 
+      - name: Install the shared sanitizers
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
+
       - name: Set up Node.js
         if: inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-')
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -136,6 +140,7 @@ jobs:
           CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           # The runner's own rustup, not a third-party action: android-validation
           # and ios-validation already do it this way, and this control plane
           # adds no action it does not have to.
@@ -356,29 +361,8 @@ jobs:
           CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
 
-          # Why the Rust labels are sanitized rather than withheld outright.
-          #
-          # `cargo fmt --check` and `cargo clippy -- --deny warnings` are the
-          # first style and lint gates this crate has ever had, so the failures
-          # nobody can predict are exactly their first ones. A bare "failed"
-          # tells a reader outside the private repository nothing they can act
-          # on — not even whether the cause was a lint, a broken build script,
-          # a missing toolchain component or a crate that would not compile —
-          # and the private source is not readable from here to work it out.
-          #
-          # So the headline diagnostic, its file and line, and the note naming
-          # the lint are published. What cargo prints *around* those is not:
-          # the quoted source excerpt, the `help:` rewrite and rustfmt's diff
-          # body are the private source itself, and none of them pass the
-          # allow-list below. The same rule the e2e branch already follows —
-          # publish what names the failure, never what the failure was in.
-          cargo_sanitize() {
-            sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
-              sed -E "s#${GITHUB_WORKSPACE}/src/##g" |
-              sed -E 's#/home/runner/work/.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
-              cut -c1-200
-          }
 
           cargo_detail() {
             cargo_sanitize "$1" |
@@ -405,64 +389,7 @@ jobs:
             fi
           }
 
-          # The crate-test concerns publish under a narrower rule than the
-          # lint lane above, because a test run prints things a lint run does
-          # not: the captured output of every failed test, and the raw stderr of
-          # any subprocess a test starts (git, docker, a sidecar agent). Either
-          # can carry data values, and neither names the failure any better
-          # than the test's own name does. So:
-          # - a failed test's captured output (`---- name stdout ----` up to the
-          #   next `failures:`) is dropped whole, panic message included;
-          # - compiler *warnings* are dropped, so their locations cannot crowd
-          #   the failures out of the published head;
-          # - an `error[Ennnn]` header is published with its `-->` location,
-          #   and an uncoded `error:` line only when it is either followed by a
-          #   `-->` location (a rustc diagnostic) or is one of cargo's own fixed
-          #   shapes (which crate failed to compile or build, which test target
-          #   failed). Anything else that merely starts with `error:` — git's
-          #   stderr, a test's own `eprintln!` — is withheld;
-          # - `test <name> ... FAILED`, `test result: FAILED`, and the
-          #   `-p <crate> --test <target>` lines cargo lists at the end of a
-          #   `--no-fail-fast` run are published: they are the names.
-          cargo_test_detail() {
-            cargo_sanitize "$1" | sed -E 's#/mnt/cargo-target#<target>#g' | awk '
-              /^---- .* (stdout|stderr) ----$/ { in_output = 1; next }
-              /^failures:$/ { in_output = 0; next }
-              in_output { next }
-              /^warning: / { block = "warning"; pending = ""; next }
-              /^error\[E[0-9]+\]: / { block = "error"; pending = ""; print; next }
-              /^error: / {
-                block = "error"; pending = ""
-                if ($0 ~ /^error: (could not compile|test failed, to rerun pass|[0-9]+ targets? failed:|failed to run custom build command for|workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
-                else pending = $0
-                next
-              }
-              /^[[:space:]]*--> / {
-                if (block == "error") { if (pending != "") print pending; pending = ""; print }
-                next
-              }
-              /^test .* FAILED$/ || /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }
-            ' | head -80 >&2 || true
-          }
 
-          # The crate-test counterpart of `cargo_reason`, ordered for a test
-          # log: a failing test's quoted source can contain `clippy::`, which
-          # the lint lane's ordering would misread as a lint failure.
-          cargo_test_reason() {
-            local log="$1"
-            if grep -qE '^error: workspace member ' "${log}"; then echo 'a workspace member is assigned to no Linux Rust test concern'
-            elif grep -qE 'needs to be updated but --locked was passed|lock file .* needs to be updated' "${log}"; then echo 'committed Cargo.lock is out of date (refused by --locked)'
-            elif grep -qE 'Unable to find libclang|libclang.*[Nn]o such file' "${log}"; then echo 'libclang or bindgen failure'
-            elif grep -qE 'failed to run custom build command' "${log}"; then echo 'dependency or crate build script failure'
-            elif grep -qE 'No space left on device' "${log}"; then echo 'runner disk exhaustion'
-            elif grep -qE '^error: linking with ' "${log}"; then echo 'link failure (missing system library or resource exhaustion)'
-            elif grep -qE 'signal: 9|SIGKILL' "${log}"; then echo 'a process was killed (likely memory exhaustion)'
-            elif grep -qE 'test result: FAILED|^error: test failed|^error: [0-9]+ targets? failed' "${log}"; then echo 'test failure'
-            elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
-            elif grep -qE 'failed to (download|select|get|load|parse|fetch)' "${log}"; then echo 'dependency download or resolution failure'
-            else echo 'command returned non-zero'
-            fi
-          }
 
           # On failure the advisory findings are published: the RUSTSEC/CVE
           # id, the crate, and the locked version are public registry facts
@@ -471,8 +398,7 @@ jobs:
           # Everything cargo-audit prints around them (the dependency-graph
           # context, the advisory-db fetch log, local paths) stays withheld.
           cargo_audit_detail() {
-            sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
-              sed -E 's#/home/runner/work/.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
+            sanitize_stream <"$1" |
               grep -E '^error: |^warning: |^Crate: |^Version: |^ID: |^Warning: |^Severity: |^URL: |RUSTSEC-[0-9]{4}-[0-9]{4,}|CVE-[0-9]{4}-[0-9]+' |
               head -40 >&2 || true
           }
@@ -496,29 +422,9 @@ jobs:
                 echo "${label}: failed (detailed output withheld)" >&2
               fi
               if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
-                # The keyword grep below can match a vitest or Playwright
-                # code-frame line whose quoted source happens to contain a
-                # keyword (an assertion over an `expected`/`received` value),
-                # which would publish a private test-source line. The excerpt
-                # shapes are therefore dropped before the allow-list: a
-                # numbered source line (`12 | code`), the babel/vitest
-                # code-frame form whose failing line is marked with a `>`
-                # gutter (`> 12 | code`), a caret/underline annotation
-                # (`| ^^^^`, `| ___^`, `| |___`), and the bare separator (`|`).
-                # The assertion library's own expected/received VALUE lines
-                # and pass/fail headers are test expectations, not app
-                # source, so they are the publishable diagnostic and stay;
-                # only the adjacent raw source lines are removed. Location
-                # lines carry no source text and survive.
-                strip_excerpts() {
-                  sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
-                          /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
-                          /^[[:space:]]*[|][[:space:]]*$/d'
-                }
                 # Keep hosted-only diagnostics useful without publishing
                 # private source paths or compiler/test output.
-                sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
+                sanitize_stream <"${log}" |
                   strip_excerpts |
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|timed out|(^|[[:space:]])[0-9]+ (passed|failed|flaky|skipped)|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true

@@ -143,7 +143,7 @@ jobs:
           sanitizer_files=()
           while IFS= read -r -d '' file; do
             sanitizer_files+=("${file}")
-          done < <(find .github/workflows -name '*.yml' -not -name 'keeldock-*' -print0)
+          done < <(find .github/workflows .github/actions -name '*.yml' -not -name 'keeldock-*' -print0)
           backslash=$'\\'
           count=0
           while IFS= read -r expr; do
@@ -353,6 +353,7 @@ jobs:
                 # Local composite actions are reviewed in this repository; each one is added
                 # here deliberately and held to the composite rules below.
                 ./.github/actions/source-checkout) ;;
+                ./.github/actions/sanitize) ;;
                 ./.github/workflows/linux-validation-concern.yml) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;

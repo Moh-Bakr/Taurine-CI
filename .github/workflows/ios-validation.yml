@@ -127,6 +127,10 @@ jobs:
           repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
 
+      - name: Install the shared sanitizers
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
+
       - name: Set up the pinned Node.js release
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -280,6 +284,7 @@ jobs:
           CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           run_quiet() {
             local label="$1"; shift
             local log="${RUNNER_TEMP}/${label}.log"
@@ -287,35 +292,16 @@ jobs:
               echo "${label}: passed"
             else
               echo "${label}: failed" >&2
-              # The keyword greps below can match a rustc, clang, or vitest
-              # source-excerpt line whose code happens to contain a keyword
-              # (a variable named `target`, an assertion over `error`s) — the
-              # same leak class that published one Android excerpt line in
-              # round 3 — so drop the excerpt shapes before the allow-list:
-              # a numbered source line (`12 | code`, including the
-              # babel/vitest code-frame form whose failing line is marked
-              # with a `>` gutter), a caret/underline annotation (`| ^^^^`,
-              # `| ___^`, `| |___`), and the bare separator (`|`). This is a
-              # removal-only filter: `ld: symbol(s) not found` headers,
-              # diagnostic headers, note lines, and locations carry no source
-              # text and still pass.
-              strip_excerpts() {
-                sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
-                        /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
-                        /^[[:space:]]*[|][[:space:]]*$/d'
-              }
               # Keep hosted diagnostics actionable while redacting workspace
               # paths and excluding compiler/source output from the public log.
-              sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-              sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
+              sanitize_stream <"${log}" |
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|xcodebuild|cargo|clang|target)' |
                 tail -30 >&2 || true
               if [[ "${label}" == mobile-tests ]]; then
                 # Preserve only test names and assertion metadata needed to
                 # diagnose hosted-only failures; never publish source lines.
-                sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
+                sanitize_stream <"${log}" |
                   strip_excerpts |
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
@@ -323,8 +309,7 @@ jobs:
               if [[ "${label}" == bundle-budget ]]; then
                 # Keep only package names and budget arithmetic; the public
                 # log must not include generated/private file contents.
-                sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
+                sanitize_stream <"${log}" |
                   strip_excerpts |
                   grep -Ei '(budget|ceiling|exceeded|package|dist|bytes|allowed|actual)' |
                   tail -80 >&2 || true
