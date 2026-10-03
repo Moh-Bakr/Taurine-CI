@@ -24,8 +24,7 @@ on:
         default: false
         type: boolean
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: macos-validation-${{ github.workflow }}-${{ inputs.source_sha }}
@@ -43,6 +42,7 @@ jobs:
   # holds no source, token or environment: it only emits the list of concerns
   # to schedule, so an unrequested Rust concern never gets a runner at all.
   plan:
+    permissions: {}
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Plan macOS concerns
     runs-on: ubuntu-24.04
@@ -72,6 +72,8 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   validate:
+    permissions:
+      contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     needs: plan
     name: macOS ${{ matrix.concern }} validation
@@ -132,7 +134,8 @@ jobs:
           owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          # Deliberate: the token is revoked explicitly by the next verification step, before any project command, and that step fails closed; the action's own end-of-job revoke would leave it live while project code runs.
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Check out exact private source SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -15,8 +15,7 @@ on:
         default: false
         type: boolean
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ios-validation-${{ github.workflow }}-${{ inputs.source_sha }}
@@ -35,6 +34,7 @@ jobs:
   # opt-in, as the Rust concerns are on macOS and Windows: dispatch with
   # `-f rust=true` for plan tips, develop/uat/main tips and mobile-touching branches.
   plan:
+    permissions: {}
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Plan iOS concerns
     runs-on: ubuntu-24.04
@@ -64,6 +64,8 @@ jobs:
 
   validate:
     needs: plan
+    permissions:
+      contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: iOS ${{ matrix.concern }} validation
     environment: source-read
@@ -117,7 +119,8 @@ jobs:
           owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
           permission-contents: read
-          skip-token-revoke: true
+          # Deliberate: the token is revoked explicitly by the next verification step, before any project command, and that step fails closed; the action's own end-of-job revoke would leave it live while project code runs.
+          skip-token-revoke: true  # zizmor: ignore[github-app]
 
       - name: Check out exact private source SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,6 +184,8 @@ jobs:
 
       - name: Install locked JavaScript dependencies
         shell: bash
+        env:
+          CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           run_quiet() {
@@ -195,7 +200,7 @@ jobs:
               exit 1
             fi
           }
-          if [[ "${{ matrix.concern }}" != 'ios-rust' ]]; then
+          if [[ "${CONCERN}" != 'ios-rust' ]]; then
             run_quiet npm-root npm ci --ignore-scripts
             # The shared package test runner uses taurine-desktop's Vitest binary.
             run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
@@ -205,7 +210,7 @@ jobs:
           # vendor/ is intentionally ignored and therefore absent from the
           # private checkout; materialize and verify the pinned dependencies on
           # this ephemeral runner before Cargo resolves the mobile workspace.
-          if [[ "${{ matrix.concern }}" == 'ios-native' || "${{ matrix.concern }}" == 'ios-rust' ]]; then
+          if [[ "${CONCERN}" == 'ios-native' || "${CONCERN}" == 'ios-rust' ]]; then
             run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
           fi
 
