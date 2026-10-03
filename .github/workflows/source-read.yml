@@ -35,6 +35,9 @@ jobs:
     environment: source-read
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,6 +47,7 @@ jobs:
 
       - name: Validate protected dispatch input
         shell: bash
+        working-directory: ${{ github.workspace }}
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -81,12 +85,14 @@ jobs:
           token: ${{ steps.source-token.outputs.token }}
           fetch-depth: 1
           persist-credentials: false
+          path: src
           submodules: false
           lfs: false
 
       - name: Verify exact checkout and revoke source token
         if: always()
         shell: bash
+        working-directory: ${{ github.workspace }}
         env:
           SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -118,7 +124,7 @@ jobs:
             verification_failed=1
           fi
 
-          if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
+          if ! checked_out_sha="$(git -C src rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
             echo 'The private source checkout did not complete' >&2
             verification_failed=1
           elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
@@ -156,7 +162,7 @@ jobs:
           fi
 
           unset SOURCE_TOKEN
-          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git -C src config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all credential.helper 2>/dev/null || true
 

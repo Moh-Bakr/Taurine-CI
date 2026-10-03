@@ -45,9 +45,13 @@ jobs:
     # adopted `dbx-core` tree, whose own manifest records it as roughly 490
     # crates.
     timeout-minutes: ${{ (inputs.concern == 'rust-app' || inputs.concern == 'rust-dbx') && 90 || (startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'rust-')) && 60 || (inputs.concern == 'taurine-cli' && 45 || 30) }}
+    defaults:
+      run:
+        working-directory: src
     steps:
       - name: Start the concern timer
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
           echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
@@ -60,6 +64,7 @@ jobs:
 
       - name: Validate protected call input
         shell: bash
+        working-directory: ${{ github.workspace }}
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -93,6 +98,7 @@ jobs:
           token: ${{ steps.source-token.outputs.token }}
           fetch-depth: 1
           persist-credentials: false
+          path: src
           submodules: false
           lfs: false
 
@@ -100,6 +106,7 @@ jobs:
         id: verified-source
         if: always()
         shell: bash
+        working-directory: ${{ github.workspace }}
         env:
           SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -125,7 +132,7 @@ jobs:
             echo 'The configured source repository identity did not match' >&2
             failed=1
           fi
-          if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
+          if ! checked_out_sha="$(git -C src rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
             echo 'The private source checkout did not complete' >&2
             failed=1
           elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
@@ -151,7 +158,7 @@ jobs:
             failed=1
           fi
           unset SOURCE_TOKEN
-          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git -C src config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all credential.helper 2>/dev/null || true
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
@@ -347,7 +354,7 @@ jobs:
             ${{ steps.cargo-home.outputs.dir }}/registry/index
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
             ${{ steps.cargo-home.outputs.dir }}/git/db
-          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('Cargo.lock', 'taurine-backend/*/Cargo.lock', 'taurine-backend/vendor/*/Cargo.lock', 'vendor/*/Cargo.lock') }}
+          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
           restore-keys: |
             cargo-sources-${{ runner.os }}-${{ inputs.concern }}-
 
@@ -446,7 +453,7 @@ jobs:
           # publish what names the failure, never what the failure was in.
           cargo_sanitize() {
             sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
-              sed -E "s#${GITHUB_WORKSPACE}/##g" |
+              sed -E "s#${GITHUB_WORKSPACE}/src/##g" |
               sed -E 's#/home/runner/work/[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g' |
               cut -c1-200
           }
@@ -1002,7 +1009,7 @@ jobs:
             ${{ steps.cargo-home.outputs.dir }}/registry/index
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
             ${{ steps.cargo-home.outputs.dir }}/git/db
-          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('Cargo.lock', 'taurine-backend/*/Cargo.lock', 'taurine-backend/vendor/*/Cargo.lock', 'vendor/*/Cargo.lock') }}
+          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
 
       - name: Publish sanitized validation proof
         shell: bash
@@ -1063,7 +1070,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/test-ids"
           section_file="${RUNNER_TEMP}/test-ids/summary-section.md"
           if ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
-            TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}" \
+            TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}/src" \
             taurine-desktop/node_modules/.bin/vite-node scripts/ci/collect-test-ids.ts \
             > "${section_file}" 2> "${RUNNER_TEMP}/test-ids/collector-private.log"; then
             {
@@ -1081,6 +1088,7 @@ jobs:
       - name: Report concern duration
         if: ${{ always() }}
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           started="${CONCERN_STARTED_AT:-}"
           [[ -n "${started}" ]] || exit 0
