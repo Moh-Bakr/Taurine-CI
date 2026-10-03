@@ -274,9 +274,9 @@ jobs:
 
           # taurine-ovpn-sys compiles vendored openvpn3-core C++ against these; the list
           # is the private docs/architecture/vendored-openvpn3.md macOS install line.
-          # Only `rust-ovpn` builds that crate; it is its own concern, as on Windows, so
-          # a failure of this C++ build cannot hide the other network crates' results.
-          if [[ "${CONCERN}" == rust-ovpn ]]; then
+          # `rust-ovpn` builds that crate directly and `rust-net` builds it through
+          # taurine-net-conformance, which depends on it, so both concerns take this setup.
+          if [[ "${CONCERN}" == rust-ovpn || "${CONCERN}" == rust-net ]]; then
             brew install asio fmt jsoncpp lz4 xxhash
 
             # openvpn3-core is C++20 and the formulae above are current releases, so it
@@ -747,9 +747,9 @@ jobs:
                 cargo test --locked --no-fail-fast --package 'taurine-db*'
               ;;
             rust-net)
-              # The dialer and the egress verifier. The vendored openvpn3 shim is its own
-              # concern, `rust-ovpn`, because its C++ build has native dependencies of its
-              # own and must not hide these crates' results.
+              # The dialer, the egress verifier and the conformance suites. The latter
+              # depend on the vendored openvpn3 shim, so this concern gets the same C++
+              # setup as `rust-ovpn`, which tests the shim crate on its own.
               run_deferred rust-net-tests \
                 cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
               ;;

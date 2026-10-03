@@ -39,7 +39,7 @@ jobs:
     # `rust-db` the drivers' offline suites, and `rust-ovpn` builds OpenSSL,
     # jsoncpp, lz4, fmt and xxhash from source through vcpkg before it compiles
     # openvpn3 (the private notes record roughly 23 minutes for that alone).
-    timeout-minutes: ${{ inputs.concern == 'rust-app' && 150 || (inputs.concern == 'rust-db' || inputs.concern == 'rust-ovpn') && 120 || startsWith(inputs.concern, 'rust-') && 90 || 60 }}
+    timeout-minutes: ${{ inputs.concern == 'rust-app' && 150 || (inputs.concern == 'rust-db' || inputs.concern == 'rust-net' || inputs.concern == 'rust-ovpn') && 120 || startsWith(inputs.concern, 'rust-') && 90 || 60 }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -138,7 +138,7 @@ jobs:
           git ls-files -z -- \
             '*.c' '*.cc' '*.cpp' '*.css' '*.csv' '*.h' '*.html' '*.ini' \
             '*.java' '*.js' '*.json' '*.mjs' '*.md' '*.rs' '*.sh' '*.sql' \
-            '*.toml' '*.ts' '*.tsx' '*.txt' '*.vue' '*.yml' '*.yaml' |
+            '*.toml' '*.ts' '*.tsx' '*.txt' '*.vue' '*.yml' '*.yaml' '*.patch' |
             xargs -0 -r sed -i 's/\r$//'
 
       # The Rust concerns need no node_modules, so they skip Node and the three
@@ -255,11 +255,18 @@ jobs:
         if: ${{ startsWith(inputs.concern, 'rust-') }}
         shell: bash
         env:
-          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_COUNT: '3'
           GIT_CONFIG_KEY_0: core.autocrlf
           GIT_CONFIG_VALUE_0: 'false'
           GIT_CONFIG_KEY_1: core.longpaths
           GIT_CONFIG_VALUE_1: 'true'
+          # The vendor script applies the reviewed boringtun patch with `git apply`.
+          # Context lines are matched ignoring whitespace-at-line-end differences, so a
+          # CRLF/LF mismatch between the patch and the crate tree on Windows cannot make
+          # a reviewed patch "not apply". Only context matching is relaxed: the patch's
+          # own added lines are still what lands, and Linux applies it byte-exact.
+          GIT_CONFIG_KEY_2: apply.ignoreWhitespace
+          GIT_CONFIG_VALUE_2: change
         run: |
           set -euo pipefail
           # `fetch` verifies each download against the sha256 pinned in vendor.lock and
@@ -290,6 +297,19 @@ jobs:
             elif grep -qE 'crossbeam-epoch' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun lock refresh failed'
             elif grep -qE '^fatal:|^error: RPC|unable to access' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='git fetch of a pinned source failed'
             else reason='unclassified'
+            fi
+            if [[ "${reason}" == 'boringtun patch did not apply' ]]; then
+              # Counts and the crate-relative path of each rejected hunk only: the crate
+              # is public third-party source, and nothing from the private tree is printed.
+              echo "vendor-fetch: patch file carriage returns: $(grep -c $'\r' scripts/patches/boringtun-zeroize.patch || true)" >&2
+              diag="$(mktemp -d)"
+              if curl -fsSL "$(awk -F' *= *' '/^boringtun_url/ {gsub(/"/,"",$2); print $2}' vendor.lock)" -o "${diag}/c.tgz" \
+                && mkdir "${diag}/src" && tar xzf "${diag}/c.tgz" -C "${diag}/src" --strip-components 1; then
+                echo "vendor-fetch: crate files with carriage returns: $(grep -rlI $'\r' "${diag}/src" | wc -l | tr -d ' ')" >&2
+                (cd "${diag}/src" && git apply --check -p1 "${GITHUB_WORKSPACE}/scripts/patches/boringtun-zeroize.patch" 2>&1 \
+                  | grep -E '^error: (patch failed|[A-Za-z0-9_./-]+: (patch does not apply|No such file))' | head -n 5 >&2) || true
+              fi
+              rm -rf "${diag}"
             fi
             echo "vendor-fetch: failed after 3 attempts (${reason}; detailed output withheld)" >&2
             exit 1
@@ -703,10 +723,17 @@ jobs:
               # The dialer, the egress verifier, the userspace WireGuard conformance
               # suites and taurine-peer-sys, whose Win32 half (GetExtendedTcpTable and
               # the owning process's token) can only execute here. The openvpn3 shim is
-              # its own concern, `rust-ovpn`, because its vcpkg dependency build is by
-              # far the slowest step and must not hold these results back.
-              run_deferred rust-net-tests \
-                cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
+              # its own concern, `rust-ovpn`. taurine-net-conformance depends on
+              # taurine-ovpn-sys, so this concern compiles that C++ shim too and needs
+              # the same vcpkg ports before cargo runs; the install is repeated here
+              # rather than shared, because each concern has its own runner.
+              run_deferred rust-net-vcpkg windows_ovpn_dependencies
+              if [[ "${deferred_failed}" -eq 0 ]]; then
+                run_deferred rust-net-tests \
+                  cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
+              else
+                deferred_results+=("rust-net-tests|failed: not run (the vcpkg dependency install failed)")
+              fi
               ;;
             rust-ovpn)
               # The vendored openvpn3-core shim, compiled with MSVC against vcpkg's
