@@ -40,6 +40,15 @@ jobs:
             if [[ "$path" == .github/workflows/* ]]; then
               continue
             fi
+            # Local composite actions (action.yml only) and the one machine-readable
+            # concern table. Both are scanned by the checks below; nothing else may
+            # live under .github/actions, and no other JSON is allowed anywhere.
+            if [[ "$path" =~ ^\.github/actions/[a-z0-9-]+/action\.yml$ ]]; then
+              continue
+            fi
+            if [[ "$path" == .github/ci-matrix.json ]]; then
+              continue
+            fi
             if [[ "$path" == .gitignore ]]; then
               continue
             fi
@@ -47,7 +56,7 @@ jobs:
             exit 1
           done < <(git ls-files -z)
 
-          if git ls-files | grep -E "$forbidden_path_re|$forbidden_name_re"; then
+          if git ls-files | grep -vxF '.github/ci-matrix.json' | grep -E "$forbidden_path_re|$forbidden_name_re"; then
             echo "The public repository contains a forbidden source, credential, or starter-document path." >&2
             exit 1
           fi
@@ -111,8 +120,53 @@ jobs:
           while IFS= read -r -d '' file; do
             case "${file}" in .github/workflows/keeldock-*) continue ;; esac
             workflows+=("${file}")
-          done < <(find .github/workflows -type f -name '*.yml' -print0 | sort -z)
+          done < <(find .github/workflows .github/actions -type f -name '*.yml' -print0 2>/dev/null | sort -z)
           "${tools}/zizmor" --format plain "${workflows[@]}"
+
+      # The sanitizers that scrub private paths from published failure detail are
+      # inline sed programs in the protected workflows. This step extracts every one
+      # of them and runs it over fixtures: a path containing a space (the old
+      # `[^ ]+` rules published everything after the space), a Windows drive path, a
+      # macOS /private/var path and GitHub token shapes. A program may only claim a
+      # root it names; every root it names must be scrubbed completely. The
+      # keeldock-* workflows are owned by the Keel Dock lane and join this list when
+      # that lane has moved its sanitizers onto the same rules.
+      - name: Test the sanitizer expressions against path and token fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixtures="${RUNNER_TEMP}/sanitizer-fixtures"
+          mkdir -p "${fixtures}"
+          printf '%s\n' 'error: failed to read /Users/alice/Secret SPACEDIR/src/lib.rs:1:2 boom' > "${fixtures}/users.txt"
+          printf '%s\n' 'at /home/runner/work/x/x/My SPACEDIR/y.rs:3 in module' > "${fixtures}/home.txt"
+          printf '%s\n' 'C:\Users\Jo Bloggs\SPACEDIR\x.rs:3' > "${fixtures}/windows.txt"
+          printf '%s\n' '/private/var/folders/ab/SPACEDIR dir/T/x trailing' > "${fixtures}/private.txt"
+          printf '%s\n' 'ghp_abcdefghijklmnopqrstuvwxyz0123456789 ghs_Xyz123abc github_pat_11ABC_def456 Authorization: Bearer abc.DEF-123' > "${fixtures}/tokens.txt"
+          forbidden='SPACEDIR|alice|Jo Bloggs|Secret|ghp_abc|ghs_Xyz|github_pat_11|abc\.DEF'
+          sanitizer_files=()
+          while IFS= read -r -d '' file; do
+            sanitizer_files+=("${file}")
+          done < <(find .github/workflows -name '*.yml' -not -name 'keeldock-*' -print0)
+          backslash=$'\\'
+          count=0
+          while IFS= read -r expr; do
+            [[ -n "${expr}" ]] || continue
+            count=$((count + 1))
+            checks=()
+            [[ "${expr}" == */Users/* ]] && checks+=(users)
+            [[ "${expr}" == */home/runner/work/* ]] && checks+=(home)
+            [[ "${expr}" == *"${backslash}"* ]] && checks+=(windows)
+            [[ "${expr}" == *'s#/private/['* || "${expr}" == *'s#/private/.'* ]] && checks+=(private)
+            [[ "${expr}" == *redacted* ]] && checks+=(tokens)
+            for name in "${checks[@]}"; do
+              if sed -E "${expr}" "${fixtures}/${name}.txt" | grep -qE "${forbidden}"; then
+                echo "A sanitizer expression leaks the ${name} fixture: ${expr}" >&2
+                exit 1
+              fi
+            done
+          done < <(grep -hoE "sed -E 's#[^']*'" "${sanitizer_files[@]}" | cut -c9- | sed 's/.$//' | grep -E 'private-path|private/workspace' | sort -u)
+          [[ "${count}" -gt 0 ]] || { echo 'No sanitizer expressions were found to test' >&2; exit 1; }
+          echo "sanitizer fixtures: ${count} expressions checked"
 
       - name: Enforce immutable reviewed Actions and safe workflow features
         shell: bash
@@ -162,6 +216,40 @@ jobs:
                   failures << "job #{job_id}: step #{st['name'].inspect} runs a project command before the token is revoked: #{line.strip[0, 60]}"
                 end
               end
+            end
+          end
+          unless failures.empty?
+            warn failures.join("\n")
+            exit 1
+          end
+          RUBY
+          }
+
+          # Local composite actions. Held to the same rules as workflows where they
+          # apply (the Action allow-list and SHA pins run for every file below), plus:
+          # a composite may not use secrets or variables (it receives them as inputs),
+          # may not use OIDC, artifacts or any cache (until a reviewed composite needs
+          # the cache exception, which would extend this function), must be
+          # `runs.using: composite`, every run step must name its shell, and no run
+          # script may contain an inline GitHub expression (inputs reach scripts
+          # through env: only, so an input can never be interpreted as shell code).
+          check_composite_action() {
+            if grep -nE 'secrets\.|vars\.|id-token:|actions/(upload|download)-artifact|actions/cache' "$1"; then
+              echo "A composite action may not use secrets, variables, OIDC, artifacts or a cache: $1" >&2
+              return 1
+            fi
+            ruby - "$1" <<'RUBY'
+          require 'yaml'
+          file = ARGV[0]
+          doc = YAML.safe_load(File.read(file), aliases: false)
+          failures = []
+          runs = doc['runs'] || {}
+          failures << "#{file}: runs.using must be composite" unless runs['using'] == 'composite'
+          (runs['steps'] || []).each_with_index do |st, i|
+            label = st['name'] || "step #{i + 1}"
+            if st['run']
+              failures << "#{file}: #{label.inspect} has no shell" unless st['shell']
+              failures << "#{file}: #{label.inspect} interpolates an expression inside run (use env:)" if st['run'].include?('$' + '{{')
             end
           end
           unless failures.empty?
@@ -249,6 +337,11 @@ jobs:
                   ;;
               esac
             done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^#[:space:]]+).*/\1/p' "$workflow")
+
+            if [[ "$workflow" == .github/actions/*/action.yml ]]; then
+              check_composite_action "$workflow" || { echo "Composite action policy violated: $workflow" >&2; exit 1; }
+              continue
+            fi
 
             # Scheduled SHA resolver: a separate, narrower trust tier. It is the only
             # workflow allowed a `schedule` trigger together with the source-read
@@ -575,9 +668,9 @@ jobs:
                 exit 1
               fi
             fi
-          done < <(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
+          done < <(find .github/workflows .github/actions -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
 
-          if find . -type f -not -path './.git/*' -not -path './.github/workflows/*' -not -name '.gitignore' -print -quit | grep -q .; then
+          if find . -type f -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/ci-matrix.json' -not -name '.gitignore' -print -quit | grep -q .; then
             echo "Only workflow files (and an optional .gitignore) may be tracked at this bootstrap phase." >&2
             exit 1
           fi

@@ -214,7 +214,7 @@ jobs:
                           /^[[:space:]]*[|][[:space:]]*$/d'
                 }
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#([A-Za-z]:)?\\[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  sed -E 's#([A-Za-z]:)?\\.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -Ei '(FAIL|PASS|Test Files|Tests|Snapshots|Time|Assertion|Error:|expected|received|timed out|unhandled|ENOENT|EACCES|EPERM|not ok)' |
                   head -20 >&2 || true
@@ -458,7 +458,7 @@ jobs:
                           /^[[:space:]]*[|][[:space:]]*$/d'
                 }
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#([A-Za-z]:)?\\[^ ]+#<private-path>#g; s#/Users/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+                  sed -E 's#([A-Za-z]:)?\\.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -Ei '(FAIL|PASS|Test Files|Tests|Snapshots|Time|Assertion|Error:|expected|received|timed out|unhandled|ENOENT|EACCES|EPERM|not ok)' |
                   head -20 >&2 || true
@@ -549,8 +549,8 @@ jobs:
               sed -E 's#\\\\\?\\##g' |
               sed -E 's#[^ ]*[\\/]registry[\\/]src[\\/][^\\/ ]+[\\/]#<registry>/#g' |
               sed -E "${workspace_strip}" |
-              sed -E 's#[A-Za-z]:\\ct\\#<target>/#g; s#[A-Za-z]:\\[^ ]*#<private-path>#g' |
-              sed -E 's#/Users/[^ ]+#<private-path>#g; s#/private/[^ ]+#<private-path>#g; s#/home/runner/work/[^ ]+#<private-path>#g' |
+              sed -E 's#[A-Za-z]:\\ct\\#<target>/#g; s#[A-Za-z]:\\.*#<private-path>#g' |
+              sed -E 's#/Users/.*#<private-path>#g; s#/private/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
               cut -c1-200
           }
 

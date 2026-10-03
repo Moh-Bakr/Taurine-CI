@@ -220,7 +220,7 @@ jobs:
           cargo_sanitize() {
             sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
               sed -E "s#${GITHUB_WORKSPACE}/src/##g" |
-              sed -E 's#/home/runner/work/[^ ]+#<private-path>#g' |
+              sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
               cut -c1-200
           }
           cargo_detail() {
@@ -640,7 +640,7 @@ jobs:
           # step that proved nothing. Published beside the label: the content
           # is the suite's own synthetic constants and server error strings,
           # never credentials or captured data. Paths are redacted below.
-          outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  |^        ' "${log}" | sed -E 's/[[:space:]]+$//' | sed -E 's#/home/runner/work/[^ ]+#<private-path>#g' | cut -c1-200 || true)"
+          outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  |^        ' "${log}" | sed -E 's/[[:space:]]+$//' | sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' | cut -c1-200 || true)"
           result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
           test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 || true)"
           # The panic block carries the assertion that named the failure: the
@@ -648,7 +648,7 @@ jobs:
           # Paths are redacted and lines cut before anything is published; the
           # content is server error strings and the suite's own synthetic
           # constants, never credentials or captured data.
-          panicked="$(grep -B2 -A30 'panicked at' "${log}" | head -80 | sed -E 's#/home/runner/work/[^ ]+#<private-path>#g' | cut -c1-200 || true)"
+          panicked="$(grep -B2 -A30 'panicked at' "${log}" | head -80 | sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' | cut -c1-200 || true)"
           {
             echo "## Live proof — ${ENGINE}"
             echo
