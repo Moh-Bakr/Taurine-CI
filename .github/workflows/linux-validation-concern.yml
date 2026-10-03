@@ -47,7 +47,9 @@ jobs:
     steps:
       - name: Start the concern timer
         shell: bash
-        run: echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+        run: |
+          echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+          echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -991,7 +993,7 @@ jobs:
       # run elsewhere; the condition repeats it so the write permission is explicit)
       # and only on a miss, so a key is written once and never overwritten.
       - name: Save verified third-party crate sources
-        if: ${{ always() && github.ref == 'refs/heads/main' && inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ always() && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) && steps.cargo-sources.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |

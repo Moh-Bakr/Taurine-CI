@@ -76,7 +76,7 @@ jobs:
     needs: plan
     name: macOS ${{ matrix.concern }} validation
     environment: source-read
-    runs-on: macos-14
+    runs-on: macos-15
     # The TypeScript concerns stay on the reviewed 45. The Rust concerns compile
     # their closure cold on a three-core runner, because compiled output is never
     # cached in this control plane (only third-party crate sources are): `rust-app` carries DuckDB's C++ amalgamation, Tauri and
@@ -98,7 +98,9 @@ jobs:
     steps:
       - name: Start the concern timer
         shell: bash
-        run: echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+        run: |
+          echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+          echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

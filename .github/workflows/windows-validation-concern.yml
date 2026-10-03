@@ -43,7 +43,9 @@ jobs:
     steps:
       - name: Start the concern timer
         shell: bash
-        run: echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+        run: |
+          echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+          echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
