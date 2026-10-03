@@ -53,6 +53,12 @@ env:
   TESTINGPLATFORM_TELEMETRY_OPTOUT: 'true'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
   CI: 'true'
+  # Testcontainers' resource reaper, pinned by digest through the library's own setting rather
+  # than left to whichever default a Testcontainers upgrade brings. Kept enabled: the fixtures
+  # dispose their containers only on a clean shutdown, and Ryuk removes them when a test host is
+  # killed or times out. The same reference the source repository's own ci.yml pins (the index
+  # docker.io serves for 0.14.0), so hosted and local runs pull the identical image.
+  TESTCONTAINERS_RYUK_CONTAINER_IMAGE: testcontainers/ryuk:0.14.0@sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0
 
 jobs:
   validate:
@@ -285,6 +291,27 @@ jobs:
           echo "nuget-packages: ${state}; ${kept} packages verified, ${dropped} dropped"
           echo "- ${PLATFORM} NuGet package cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
 
+      # The Migrator proof runs the published program against a real PostgreSQL: the same
+      # image, by the same digest, the repository's own Testcontainers fixtures use
+      # (postgres 17.6; about 160 MB compressed, far under the 2 GB image cap). Started with
+      # `docker run` rather than a job-level `services:` block, which cannot be conditional
+      # per concern, so only this one Linux concern pays for the pull. Bound to loopback, with
+      # a random one-run password that is masked and never written anywhere but this job's
+      # environment.
+      - name: Start the pinned PostgreSQL for the Migrator proof
+        if: inputs.platform == 'linux' && inputs.concern == 'contracts-publish-smoke'
+        shell: bash
+        run: |
+          set -euo pipefail
+          password="$(openssl rand -hex 16)"
+          echo "::add-mask::${password}"
+          echo "KD_PG_PASSWORD=${password}" >> "${GITHUB_ENV}"
+          docker run --detach --name kd-postgres \
+            --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_PASSWORD="${password}" --env POSTGRES_DB=keeldock \
+            'postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929' >/dev/null
+          echo 'postgres: started (pinned by digest)'
+
       # One step, every sub-step reported. Each sub-step runs regardless of the others (one
       # that structurally needs an earlier one is reported as skipped, never silently
       # dropped), the full output of each is kept in files under RUNNER_TEMP that are never
@@ -325,6 +352,12 @@ jobs:
           }
 
           record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${results}"; }
+          # Replaces any earlier row for the label, so a sub-step that passed and was then found
+          # wanting on a follow-up check is never listed (or claimed) as both.
+          override() {
+            awk -F'\t' -v l="$1" '$1 != l' "${results}" > "${results}.tmp" && mv "${results}.tmp" "${results}"
+            record "$1" "$2" "$3"
+          }
           passed() { awk -F'\t' -v l="$1" '$1 == l && $2 == "pass" { f = 1 } END { exit !f }' "${results}"; }
 
           # Runs one sub-step with its output captured to a file. Never fails the script:
@@ -580,6 +613,69 @@ jobs:
               else
                 skip_step migrator-smoke 'Migrator publish did not pass'
               fi
+
+              # ---- The Migrator against a real PostgreSQL (Linux only) --------------------
+              # Migrates every module from an empty database, then runs again: the second run
+              # must also succeed and report the same module count (idempotent). EF Core refuses
+              # to migrate past a pending model change, so the same run is the model-drift
+              # check: a migration that no longer matches its model fails the first run. The
+              # Migrator's own refusals can quote SQL, so its output stays in the withheld log;
+              # only the exit status, module counts and the ids of failing modules are published.
+              if [[ "${PLATFORM}" == linux ]]; then
+                wait_postgres() {
+                  local _
+                  for _ in $(seq 1 60); do
+                    if docker exec kd-postgres pg_isready --username postgres --dbname keeldock; then return 0; fi
+                    sleep 1
+                  done
+                  return 1
+                }
+                run_migrator() {
+                  # Development, because the local database serves no certificate: outside
+                  # Development the Migrator demands SslMode=VerifyFull on every owner connection.
+                  env DOTNET_ENVIRONMENT=Development \
+                    "ConnectionStrings__keeldock-owner=Host=127.0.0.1;Port=5432;Database=keeldock;Username=postgres;Password=${KD_PG_PASSWORD:-}" \
+                    dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll"
+                }
+                migrated_count() { grep -oE '^All [0-9]+ module migrations completed' "$1" | grep -oE '[0-9]+' | head -1; }
+                reason_migrate() {
+                  local ok failing
+                  ok="$(grep -c '^\[ok\]' "$1" || true)"
+                  failing="$(grep -oE '^\[FAIL\] [A-Za-z0-9_.-]+' "$1" | awk '{ print $2 }' | paste -sd, - || true)"
+                  echo "Migrator failed or reported no completion; ${ok} module(s) migrated; failing module ids: ${failing:-none}"
+                }
+                if ! passed publish-Migrator; then
+                  skip_step postgres-ready 'Migrator publish did not pass'
+                  skip_step migrator-migrate 'Migrator publish did not pass'
+                  skip_step migrator-idempotent 'Migrator publish did not pass'
+                else
+                  sub_step postgres-ready reason_text wait_postgres
+                  if passed postgres-ready; then
+                    sub_step migrator-migrate reason_migrate run_migrator
+                    first_count="$(migrated_count "${RUNNER_TEMP}/migrator-migrate.log" || true)"
+                    if passed migrator-migrate && [[ -n "${first_count}" ]]; then
+                      echo "migrator-migrate: ${first_count} module(s) migrated from empty and passed catalog invariants"
+                      sub_step migrator-idempotent reason_migrate run_migrator
+                      second_count="$(migrated_count "${RUNNER_TEMP}/migrator-idempotent.log" || true)"
+                      if passed migrator-idempotent && [[ "${second_count}" != "${first_count}" ]]; then
+                        echo "migrator-idempotent: failed (second run reported ${second_count:-no} modules, first ${first_count})" >&2
+                        override migrator-idempotent FAIL "second run reported ${second_count:-no} modules against ${first_count}"
+                        any_failed=1
+                      fi
+                    elif passed migrator-migrate; then
+                      echo 'migrator-migrate: failed (exit 0 without a completion line)' >&2
+                      override migrator-migrate FAIL 'exited 0 without the completion line'
+                      any_failed=1
+                      skip_step migrator-idempotent 'first run did not complete'
+                    else
+                      skip_step migrator-idempotent 'first run failed'
+                    fi
+                  else
+                    skip_step migrator-migrate 'PostgreSQL did not become ready'
+                    skip_step migrator-idempotent 'PostgreSQL did not become ready'
+                  fi
+                fi
+              fi
               ;;
           esac
 
@@ -638,6 +734,13 @@ jobs:
             ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json', 'Directory.Packages.props') }}
 
+      # Cleanup is part of the proof: the container and its anonymous volume are removed even
+      # when an earlier step failed.
+      - name: Remove the PostgreSQL container
+        if: always() && inputs.platform == 'linux' && inputs.concern == 'contracts-publish-smoke'
+        shell: bash
+        run: docker rm --force --volumes kd-postgres >/dev/null 2>&1 || true
+
       - name: Publish sanitized validation proof
         if: always()
         shell: bash
@@ -685,6 +788,8 @@ jobs:
                   echo '- API, Worker and Migrator published.'
                 fi
                 proved migrator-smoke && echo '- Migrator smoke passed.'
+                proved migrator-migrate && echo '- The published Migrator migrated every module from an empty real PostgreSQL (digest-pinned image) and passed the catalog invariants; EF Core refuses a pending model change, so this is also the model-drift check.'
+                proved migrator-idempotent && echo '- A second Migrator run against the migrated database succeeded with the same module count.'
                 ;;
             esac
             echo '- Source token: revoked before any project code executed.'
