@@ -40,6 +40,12 @@ jobs:
           - mobile-quality
           - orchestrate-skill
     steps:
+      - name: Start the concern timer
+        shell: bash
+        run: |
+          echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+          echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -395,3 +401,65 @@ jobs:
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      # The job's own wall-clock time from its first step, shown next to its result;
+      # the timings job tabulates it against a committed baseline.
+      - name: Report concern duration
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          started="${CONCERN_STARTED_AT:-}"
+          [[ -n "${started}" ]] || exit 0
+          elapsed=$(( $(date +%s) - started ))
+          printf '### Concern duration\n\n%dm%02ds from the first step, excluding runner queue time.\n' \
+            $((elapsed / 60)) $((elapsed % 60)) >> "${GITHUB_STEP_SUMMARY}"
+
+  # Tabulates the duration and conclusion of every concern in this run and warns
+  # when one took more than 25% (and more than two minutes) longer than the committed
+  # baseline below, in seconds, from the most recent successful hosted run. Warning
+  # only: it never fails the run, uses only this run's own read-only API token, and
+  # publishes no artifact. An entry with no baseline is listed without a comparison.
+  timings:
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    needs: [validate]
+    name: Timings
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Tabulate timings against the baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABEL: Android
+          BASELINE_SECONDS: '{"android-native":552,"orchestrate-skill":213,"mobile-quality":122}'
+          NAME_PATTERN: '^Android (?<concern>.+) validation$'
+        run: |
+          set -euo pipefail
+          rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+            | jq -r --arg re "${NAME_PATTERN}" '.jobs[]
+              | select(.started_at != null and .completed_at != null)
+              | select(.name | test($re))
+              | [(.name | capture($re).concern), (.conclusion // "unknown"),
+                 (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)]
+              | @tsv' | sort)"
+          {
+            echo "## ${LABEL} timings"
+            echo
+            echo '| Concern | Duration | Baseline | Conclusion |'
+            echo '| --- | --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          while IFS=$'\t' read -r concern conclusion seconds; do
+            [[ -n "${concern}" ]] || continue
+            base="$(jq -r --arg c "${concern}" '.[$c] // empty' <<<"${BASELINE_SECONDS}")"
+            shown='none'
+            if [[ -n "${base}" ]]; then
+              shown="$((base / 60))m$(printf '%02d' $((base % 60)))s"
+              if (( seconds > base * 125 / 100 && seconds > base + 120 )); then
+                echo "::warning title=Slow job::${LABEL} ${concern} took $((seconds / 60))m$((seconds % 60))s against a baseline of ${shown} (more than 25% slower)"
+                shown="${shown} (SLOWER)"
+              fi
+            fi
+            printf '| %s | %dm%02ds | %s | %s |\n' "${concern}" $((seconds / 60)) $((seconds % 60)) "${shown}" "${conclusion}" >> "${GITHUB_STEP_SUMMARY}"
+          done <<<"${rows}"
