@@ -119,6 +119,58 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Token-revocation ordering, checked structurally from the parsed YAML. In every
+          # job that enters the source-read environment, a step that revokes the
+          # short-lived source token (it calls the installation/token endpoint) must
+          # exist, must run under `if: always()` (so a failed earlier step can never leave
+          # the token live), and every step before it may only check out, mint the token
+          # or run non-project shell: no package manager, compiler, build tool or project
+          # script may run while the token is still valid. Ruby is on the runner image
+          # and its YAML parser is in the standard library.
+          check_revocation_order() {
+            ruby - "$1" <<'RUBY'
+          require 'yaml'
+          workflow = ARGV[0]
+          doc = YAML.safe_load(File.read(workflow), aliases: false)
+          project_command = /^\s*(sudo\s+)?(npm|npx|pnpm|yarn|node|cargo|rustup|rustc|dotnet|nuget|xcodebuild|xcrun|gradle|gradlew|make|cmake|pip|pip3|python|python3|ruby|brew|docker|choco|vcpkg|bash\s+scripts\/|sh\s+scripts\/|\.\/scripts\/)(\s|$)/
+          allowed_before = [
+            /\Aactions\/checkout@/,
+            /\Aactions\/create-github-app-token@/
+          ]
+          failures = []
+          (doc['jobs'] || {}).each do |job_id, job|
+            env = job['environment']
+            env_name = env.is_a?(Hash) ? env['name'] : env
+            next unless env_name == 'source-read'
+            steps = job['steps'] || []
+            revoke_at = steps.index { |st| st['run'].to_s.include?('installation/token') }
+            if revoke_at.nil?
+              failures << "job #{job_id}: no step revokes the source token (installation/token)"
+              next
+            end
+            revoke = steps[revoke_at]
+            unless revoke['if'].to_s.include?('always()')
+              failures << "job #{job_id}: the revocation step #{revoke['name'].inspect} is not conditioned on always()"
+            end
+            steps[0...revoke_at].each do |st|
+              if st['uses'] && allowed_before.none? { |re| re.match?(st['uses']) }
+                failures << "job #{job_id}: step #{st['name'].inspect} uses #{st['uses']} before the token is revoked"
+              end
+              st['run'].to_s.each_line do |line|
+                next if line.strip.start_with?('#')
+                if project_command.match?(line)
+                  failures << "job #{job_id}: step #{st['name'].inspect} runs a project command before the token is revoked: #{line.strip[0, 60]}"
+                end
+              end
+            end
+          end
+          unless failures.empty?
+            warn failures.join("\n")
+            exit 1
+          end
+          RUBY
+          }
+
           # Keep workflow entrypoints directly under .github/workflows: GitHub
           # does not discover nested workflow files. The explicit trust-tier
           # lists separate the public policy gate from source-bearing jobs and
@@ -257,6 +309,7 @@ jobs:
                     ;;
                 esac
               done < <(grep -oE 'gh workflow run [^[:space:]]+' "$workflow" | awk '{print $4}')
+              check_revocation_order "$workflow" || { echo "Token revocation ordering violated: $workflow" >&2; exit 1; }
               continue
             fi
 
@@ -269,6 +322,7 @@ jobs:
             done
 
             if (( protected_source )); then
+              check_revocation_order "$workflow" || { echo "Token revocation ordering violated: $workflow" >&2; exit 1; }
               reusable_protected=0
               for reusable_workflow in "${reusable_protected_workflows[@]}"; do
                 if [[ "$workflow" == "$reusable_workflow" || "$workflow" == "./$reusable_workflow" ]]; then
