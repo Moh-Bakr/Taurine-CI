@@ -246,6 +246,19 @@ jobs:
                   echo "actions/cache/save must be guarded by the main branch and a cache miss: $workflow" >&2
                   exit 1
                 fi
+                # The save condition is a conjunction: main must be a top-level term. An
+                # `||` outside parentheses would let one alternative skip the main guard
+                # (the bug `A && B && C || D && E` had), so it is rejected outright.
+                while IFS= read -r save_if; do
+                  flat="$save_if"
+                  while [[ "$flat" =~ \([^()]*\) ]]; do
+                    flat="${flat//${BASH_REMATCH[0]}/}"
+                  done
+                  if [[ "$save_if" != *"github.ref == 'refs/heads/main'"* || "$flat" == *'||'* ]]; then
+                    echo "The cache save condition must require the main branch as a top-level term, with no unparenthesised ||: $save_if" >&2
+                    exit 1
+                  fi
+                done < <(awk '/^      - name:/ { cond = "" } /^[[:space:]]+if:/ { cond = $0 } /uses:[[:space:]]*actions\/cache\/save@/ { print cond }' "$workflow")
                 if ! grep -q 'Verify restored crate archives against Cargo.lock' "$workflow"; then
                   echo "A restored cache must be verified against Cargo.lock before use: $workflow" >&2
                   exit 1
