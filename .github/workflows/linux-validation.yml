@@ -58,8 +58,7 @@ jobs:
           - mobile-quality
           # The Rust headless runner. It is the artifact CI pipelines outside
           # Taurine actually execute, and until this concern existed nothing
-          # hosted compiled it: `cargo test --workspace` is not run anywhere in
-          # this control plane, and the CLI's 222 lines of report tests were
+          # hosted compiled it: the CLI's 222 lines of report tests were
           # reachable only from a contributor's laptop.
           #
           # It is its own concern rather than a step in `contracts` because it
@@ -67,6 +66,32 @@ jobs:
           # node_modules — and folding it in would make every contracts run pay
           # for a Rust toolchain it does not use.
           - taurine-cli
+          # The rest of the Rust crate tests. Until these existed `cargo test`
+          # ran hosted for `taurine-cli` alone; every other crate's unit and
+          # integration tests — taurine-core's included — ran only on a
+          # contributor's machine. `cargo test --workspace` is deliberately not
+          # one concern: its cold compile is the whole product plus DuckDB,
+          # openvpn3 and webkit2gtk, so one slow or broken corner would hold
+          # every other crate's result hostage. The split follows the
+          # workspace's own seams and its native dependencies, so each concern
+          # installs only what its crates link:
+          # - rust-domain: storage, sync, scripting, git and transport crates
+          #   (the core the command tier is built on);
+          # - rust-db: every `taurine-db*` crate, offline — the live conformance
+          #   targets skip without a server and stay with live-proofs.yml;
+          # - rust-net: the dialer, verifier and openvpn3 shim (C++);
+          # - rust-app: the Tauri command tier and both shells (webkit2gtk);
+          # - rust-dbx: the excluded `dbx-core`/`dbx-mongo-shell` trees, each on
+          #   its own lock.
+          # The concern workflow names, with the measured reason, the two test
+          # runs no concern makes (`dbx-sqlite-worker`, `vendor/boringtun`
+          # standalone), and fails `rust-domain` if a workspace member is added
+          # without being assigned to one of these.
+          - rust-domain
+          - rust-db
+          - rust-net
+          - rust-app
+          - rust-dbx
           # Browser tiers. Until these existed the Playwright suite ran only on
           # a contributor's laptop, so `verification.md`'s "hosted desktop
           # concern with pointer and keyboard coverage" had no runner behind it.
