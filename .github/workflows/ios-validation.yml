@@ -9,6 +9,11 @@ on:
         description: Exact 40-character commit SHA to validate from private Taurine
         required: true
         type: string
+      rust:
+        description: Run the mobile Rust test-target build
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -25,7 +30,40 @@ env:
   SOURCE_REPOSITORY_NAME: Taurine
 
 jobs:
+  # Builds the concern matrix from the `rust` input and reports the choice. It
+  # holds no source, token or environment. The mobile Rust test-target build is
+  # opt-in, as the Rust concerns are on macOS and Windows: dispatch with
+  # `-f rust=true` for plan tips, develop/uat/main tips and mobile-touching branches.
+  plan:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Plan iOS concerns
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Select the concerns and report the Rust cadence
+        id: plan
+        shell: bash
+        env:
+          RUST_REQUESTED: ${{ inputs.rust }}
+        run: |
+          set -euo pipefail
+          base='"ios-native","mobile-quality","bundle-budget","orchestrate-skill"'
+          {
+            echo '## iOS Rust concern'
+            echo
+            if [[ "${RUST_REQUESTED}" == true ]]; then
+              echo "matrix={\"concern\":[${base},\"ios-rust\"]}" >> "${GITHUB_OUTPUT}"
+              echo '- Requested (rust=true): ios-rust is scheduled.'
+            else
+              echo "matrix={\"concern\":[${base}]}" >> "${GITHUB_OUTPUT}"
+              echo '- **Not requested** (rust=false): ios-rust was not scheduled. It is neither passed nor failed on this run; dispatch with -f rust=true to run it.'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   validate:
+    needs: plan
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: iOS ${{ matrix.concern }} validation
     environment: source-read
@@ -36,12 +74,12 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        concern:
-          - ios-native
-          - mobile-quality
-          - bundle-budget
-          - orchestrate-skill
+      # ios-rust (the mobile crate's test targets, compile-only) is added by the
+      # `plan` job when rust=true. The iOS simulator target's test binaries are
+      # built and linked but not executed: running them needs a booted simulator
+      # and a test runner such as cargo-dinghy, which this control plane does not
+      # install.
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Start the concern timer
         shell: bash
@@ -157,15 +195,17 @@ jobs:
               exit 1
             fi
           }
-          run_quiet npm-root npm ci --ignore-scripts
-          # The shared package test runner uses taurine-desktop's Vitest binary.
-          run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
-          run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
+          if [[ "${{ matrix.concern }}" != 'ios-rust' ]]; then
+            run_quiet npm-root npm ci --ignore-scripts
+            # The shared package test runner uses taurine-desktop's Vitest binary.
+            run_quiet npm-desktop npm --prefix taurine-desktop ci --ignore-scripts
+            run_quiet npm-mobile npm --prefix taurine-mobile ci --ignore-scripts
+          fi
           # Cargo.toml patches boringtun to a pinned, locally fetched crate.
           # vendor/ is intentionally ignored and therefore absent from the
           # private checkout; materialize and verify the pinned dependencies on
           # this ephemeral runner before Cargo resolves the mobile workspace.
-          if [[ "${{ matrix.concern }}" == 'ios-native' ]]; then
+          if [[ "${{ matrix.concern }}" == 'ios-native' || "${{ matrix.concern }}" == 'ios-rust' ]]; then
             run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh
           fi
 
@@ -230,8 +270,26 @@ jobs:
           (cd taurine-mobile/src-tauri/gen/apple && xcodegen generate)
           test -f taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj/project.pbxproj
 
+      - name: Prepare the iOS simulator Rust target for the test-target build
+        if: matrix.concern == 'ios-rust'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The Rust half of the native concern's setup, without the Xcode project:
+          # the simulator target, libclang for rquickjs's bindgen, and the bindgen
+          # target override (the Cargo simulator triple is not a clang triple).
+          rustup target add aarch64-apple-ios-sim
+          brew list llvm >/dev/null 2>&1 || brew install llvm
+          llvm_prefix="$(brew --prefix llvm)"
+          [[ -f "${llvm_prefix}/lib/libclang.dylib" ]] || { echo 'libclang dylib is unavailable' >&2; exit 1; }
+          {
+            echo "LIBCLANG_PATH=${llvm_prefix}/lib"
+            echo 'BINDGEN_EXTRA_CLANG_ARGS=--target=aarch64-apple-ios'
+            echo 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim=--target=aarch64-apple-ios'
+          } >> "${GITHUB_ENV}"
+
       - name: Patch rquickjs simulator bindgen target on runner
-        if: matrix.concern == 'ios-native'
+        if: matrix.concern == 'ios-native' || matrix.concern == 'ios-rust'
         shell: bash
         run: |
           set -euo pipefail
@@ -335,6 +393,12 @@ jobs:
               run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
               run_quiet mobile-build npm --prefix taurine-mobile run build
               run_quiet bundle-budget npm run check:bundle
+              ;;
+            ios-rust)
+              # Compile-only: build and link every test target of the mobile crate for
+              # the iOS simulator triple, so the `cfg(target_os = "ios")` code and its
+              # tests are type-checked and linked on a hosted runner. Not executed.
+              run_quiet ios-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-apple-ios-sim
               ;;
             orchestrate-skill)
               run_quiet contracts npm run check:contracts
