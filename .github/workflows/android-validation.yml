@@ -351,7 +351,10 @@ jobs:
           rm -f src-tauri/gen/android/tauri.settings.gradle
           run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
           run_quiet android-init npm run android:init -- --ci --skip-targets-install
-          grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle && { echo 'Android metadata contains a developer-local path' >&2; exit 1; } || true
+          if grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle; then
+            echo 'Android metadata contains a developer-local path' >&2
+            exit 1
+          fi
 
       - name: Run isolated Android validation concern
         shell: bash
