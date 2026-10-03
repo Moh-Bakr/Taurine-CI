@@ -33,7 +33,17 @@ jobs:
     # caches anything, and `target/` could not be cached anyway because it holds
     # compiled private source — so every run compiles rquickjs, which builds C
     # and generates bindings through libclang, plus reqwest's TLS stack, cold.
-    timeout-minutes: ${{ startsWith(inputs.concern, 'e2e-') && 60 || (inputs.concern == 'taurine-cli' && 45 || 30) }}
+    #
+    # The `rust-*` crate-test concerns get the browser tiers' 60: each compiles
+    # its whole closure cold for the same reason. `rust-app` and `rust-dbx` get
+    # 90. `rust-app` links one test binary per file under `taurine-app/tests/`
+    # (over a hundred), each carrying the full command tier plus Tauri, DuckDB's
+    # C++ amalgamation and every driver; the private `docs/testing-baseline.md`
+    # measured `cargo test -p taurine-app` at 708 s cold on a ten-core
+    # workstation before the command tier doubled. `rust-dbx` compiles the
+    # adopted `dbx-core` tree, whose own manifest records it as roughly 490
+    # crates.
+    timeout-minutes: ${{ (inputs.concern == 'rust-app' || inputs.concern == 'rust-dbx') && 90 || (startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'rust-')) && 60 || (inputs.concern == 'taurine-cli' && 45 || 30) }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -138,20 +148,24 @@ jobs:
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
           (( failed == 0 ))
 
+      # The Rust concerns (`taurine-cli` and every `rust-*`) skip this and the
+      # dependency install below. `rust-dbx` does call `npm run`, but only to
+      # resolve a root `package.json` script to the cargo command it names;
+      # that needs no node_modules, and the runner image's own Node runs it.
       - name: Set up Node.js
-        if: inputs.concern != 'taurine-cli'
+        if: inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-')
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.14.0
 
-      # The Rust concern needs no node_modules, so it skips three `npm ci` runs.
-      # It still needs the vendor fetch below: `[patch.crates-io]` in the
+      # The Rust concerns need no node_modules, so they skip three `npm ci` runs.
+      # They still need the vendor fetch below: `[patch.crates-io]` in the
       # workspace root points at `vendor/boringtun` by path, and cargo refuses to
       # load a manifest that is not there — so *every* cargo command in this
       # repository fails on a fresh checkout until the script has run. That is
       # documented in `vendor.lock` and is not specific to this workflow.
       - name: Install locked JavaScript dependencies
-        if: inputs.concern != 'taurine-cli'
+        if: inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-')
         shell: bash
         run: |
           set -euo pipefail
@@ -178,8 +192,10 @@ jobs:
           run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
 
       - name: Set up the Rust toolchain
-        if: inputs.concern == 'taurine-cli'
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')
         shell: bash
+        env:
+          CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
           # The runner's own rustup, not a third-party action: android-validation
@@ -192,17 +208,73 @@ jobs:
           # ships clang but not reliably the shared library bindgen loads, and
           # the failure surfaces only as an unhelpful `No such file or directory`
           # from Cargo. android-validation carries the same block for the same
-          # reason.
+          # reason. The crate-test concerns take it too: rquickjs is in the
+          # domain and app closures and libsql's bindgen build in the db and app
+          # ones, and one shared install is simpler than a per-concern guess.
+          #
+          # The crate-test concerns reach system libraries `taurine-cli` does
+          # not, each named here with the crate that needs it, all from the
+          # image's own Ubuntu archive. Measured from the private lockfile and
+          # build scripts, not guessed:
+          # - libdbus-1-dev: taurine-crypt's default `keychain` feature takes
+          #   keyring's `sync-secret-service`, whose libdbus-sys has no vendored
+          #   build and finds dbus-1 through pkg-config (store, repo and app
+          #   reach it through crypt).
+          # - the openvpn3 set: taurine-ovpn-sys compiles vendored openvpn3-core
+          #   C++ against these; the list is copied from the private
+          #   `docs/architecture/vendored-openvpn3.md` and `ovpn-core.yml`, which
+          #   is where it was proven on ubuntu.
+          # - the Tauri set: taurine-app and the two shells link wry, i.e.
+          #   webkit2gtk-4.1 (which brings gtk3, libsoup3 and javascriptcore),
+          #   plus libxdo for muda's accelerators; the list is Tauri's own Linux
+          #   prerequisites less the tray indicator, which nothing enables.
+          # - fontconfig/freetype/openssl: dbx-core's default `system-fonts`
+          #   feature (font-kit) and its tokio-openssl transport.
+          extra_packages=()
+          case "${CONCERN}" in
+            rust-domain) extra_packages=(libdbus-1-dev pkg-config) ;;
+            rust-net) extra_packages=(libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev libssl-dev pkg-config) ;;
+            rust-app) extra_packages=(libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config) ;;
+            rust-dbx) extra_packages=(libfontconfig1-dev libfreetype-dev libssl-dev pkg-config) ;;
+          esac
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends clang libclang-dev
+          sudo apt-get install -y --no-install-recommends clang libclang-dev "${extra_packages[@]}"
           # Debian/Ubuntu commonly expose this as libclang-18.so.1 rather than an
           # unversioned libclang.so symlink.
           libclang_file="$(find /usr/lib -type f \( -name 'libclang.so*' -o -name 'libclang-*.so*' \) -print -quit)"
           [[ -n "${libclang_file}" ]] || { echo 'libclang shared library is unavailable' >&2; exit 1; }
           echo "LIBCLANG_PATH=$(dirname "${libclang_file}")" >> "${GITHUB_ENV}"
 
+          # The crate-test concerns only, so `taurine-cli` builds exactly as it
+          # did. Three settings, all about the runner rather than the code:
+          # - no incremental state: nothing is cached, so it is written and
+          #   never read again;
+          # - no debug info for tests and their dependencies: the repository's
+          #   profiles keep line tables for local backtraces, but this workflow
+          #   publishes no backtrace (see `cargo_test_detail` below), and
+          #   `rust-app` alone links over a hundred binaries that each carry the
+          #   whole command tier — that is the disk and link time it saves;
+          # - `target/` on the runner's second disk when it has one: hosted
+          #   Ubuntu runners mount a larger scratch disk at /mnt, and
+          #   `rust-app`/`rust-db` compile closures that crowd the root disk.
+          #   It stays on this ephemeral runner like everything else here — it
+          #   is never uploaded or cached — and the root disk is the fallback.
+          if [[ "${CONCERN}" == rust-* ]]; then
+            {
+              echo 'CARGO_INCREMENTAL=0'
+              echo 'CARGO_PROFILE_DEV_DEBUG=0'
+              echo 'CARGO_PROFILE_TEST_DEBUG=0'
+            } >> "${GITHUB_ENV}"
+            if mountpoint -q /mnt; then
+              sudo mkdir -p /mnt/cargo-target
+              sudo chown "$(id -u):$(id -g)" /mnt/cargo-target
+              echo 'CARGO_TARGET_DIR=/mnt/cargo-target' >> "${GITHUB_ENV}"
+            fi
+            df -h / /mnt 2>/dev/null || df -h /
+          fi
+
       - name: Fetch pinned vendored sources
-        if: inputs.concern == 'taurine-cli'
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')
         shell: bash
         run: |
           set -euo pipefail
@@ -286,6 +358,65 @@ jobs:
             fi
           }
 
+          # The crate-test concerns publish under a narrower rule than the
+          # lint lane above, because a test run prints things a lint run does
+          # not: the captured output of every failed test, and the raw stderr of
+          # any subprocess a test starts (git, docker, a sidecar agent). Either
+          # can carry data values, and neither names the failure any better
+          # than the test's own name does. So:
+          # - a failed test's captured output (`---- name stdout ----` up to the
+          #   next `failures:`) is dropped whole, panic message included;
+          # - compiler *warnings* are dropped, so their locations cannot crowd
+          #   the failures out of the published head;
+          # - an `error[Ennnn]` header is published with its `-->` location,
+          #   and an uncoded `error:` line only when it is either followed by a
+          #   `-->` location (a rustc diagnostic) or is one of cargo's own fixed
+          #   shapes (which crate failed to compile or build, which test target
+          #   failed). Anything else that merely starts with `error:` — git's
+          #   stderr, a test's own `eprintln!` — is withheld;
+          # - `test <name> ... FAILED`, `test result: FAILED`, and the
+          #   `-p <crate> --test <target>` lines cargo lists at the end of a
+          #   `--no-fail-fast` run are published: they are the names.
+          cargo_test_detail() {
+            cargo_sanitize "$1" | sed -E 's#/mnt/cargo-target#<target>#g' | awk '
+              /^---- .* (stdout|stderr) ----$/ { in_output = 1; next }
+              /^failures:$/ { in_output = 0; next }
+              in_output { next }
+              /^warning: / { block = "warning"; pending = ""; next }
+              /^error\[E[0-9]+\]: / { block = "error"; pending = ""; print; next }
+              /^error: / {
+                block = "error"; pending = ""
+                if ($0 ~ /^error: (could not compile|test failed, to rerun pass|[0-9]+ targets? failed:|failed to run custom build command for|workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
+                else pending = $0
+                next
+              }
+              /^[[:space:]]*--> / {
+                if (block == "error") { if (pending != "") print pending; pending = ""; print }
+                next
+              }
+              /^test .* FAILED$/ || /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }
+            ' | head -80 >&2 || true
+          }
+
+          # The crate-test counterpart of `cargo_reason`, ordered for a test
+          # log: a failing test's quoted source can contain `clippy::`, which
+          # the lint lane's ordering would misread as a lint failure.
+          cargo_test_reason() {
+            local log="$1"
+            if grep -qE '^error: workspace member ' "${log}"; then echo 'a workspace member is assigned to no Linux Rust test concern'
+            elif grep -qE 'needs to be updated but --locked was passed|lock file .* needs to be updated' "${log}"; then echo 'committed Cargo.lock is out of date (refused by --locked)'
+            elif grep -qE 'Unable to find libclang|libclang.*[Nn]o such file' "${log}"; then echo 'libclang or bindgen failure'
+            elif grep -qE 'failed to run custom build command' "${log}"; then echo 'dependency or crate build script failure'
+            elif grep -qE 'No space left on device' "${log}"; then echo 'runner disk exhaustion'
+            elif grep -qE '^error: linking with ' "${log}"; then echo 'link failure (missing system library or resource exhaustion)'
+            elif grep -qE 'signal: 9|SIGKILL' "${log}"; then echo 'a process was killed (likely memory exhaustion)'
+            elif grep -qE 'test result: FAILED|^error: test failed|^error: [0-9]+ targets? failed' "${log}"; then echo 'test failure'
+            elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
+            elif grep -qE 'failed to (download|select|get|load|parse|fetch)' "${log}"; then echo 'dependency download or resolution failure'
+            else echo 'command returned non-zero'
+            fi
+          }
+
           # On failure the advisory findings are published: the RUSTSEC/CVE
           # id, the crate, and the locked version are public registry facts
           # that name the finding — the same rule the Rust concern follows,
@@ -308,6 +439,9 @@ jobs:
               if [[ "${label}" == cli-* ]]; then
                 echo "${label}: failed ($(cargo_reason "${log}"); sanitized detail below)" >&2
                 cargo_detail "${log}"
+              elif [[ "${label}" == rust-* ]]; then
+                echo "${label}: failed ($(cargo_test_reason "${log}"); sanitized detail below)" >&2
+                cargo_test_detail "${log}"
               elif [[ "${label}" == cargo-audit ]]; then
                 echo "${label}: failed (advisory findings below; remaining output withheld)" >&2
                 cargo_audit_detail "${log}"
@@ -345,6 +479,39 @@ jobs:
               exit 1
             fi
           }
+          # Which workspace crates each Rust concern tests. Every member of the
+          # private workspace belongs to exactly one concern, and
+          # `rust_coverage_check` (run by `rust-domain`) fails when a member is
+          # in none of them — so a crate added later cannot go untested by
+          # omission. The database family needs no list: `rust-db` selects it
+          # with cargo's own `taurine-db*` package glob, so a new driver crate
+          # is in it the day it joins the workspace.
+          rust_domain_packages=(
+            taurine-model taurine-atomic taurine-auth taurine-crypt taurine-store
+            taurine-repo taurine-replicate taurine-sync taurine-notes taurine-core
+            taurine-exec taurine-scripting taurine-mock taurine-git
+            taurine-transport-fs taurine-transport-git taurine-transport-wifi
+          )
+          rust_net_packages=(taurine-peer-sys taurine-net taurine-ovpn-sys taurine-net-conformance)
+          rust_app_packages=(taurine-app taurine-desktop taurine-mobile)
+
+          rust_coverage_check() {
+            local members member missing=0
+            if ! members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)" || [[ -z "${members}" ]]; then
+              echo 'error: failed to load the workspace member list' >&2
+              return 1
+            fi
+            while IFS= read -r member; do
+              case " taurine-cli ${rust_domain_packages[*]} ${rust_net_packages[*]} ${rust_app_packages[*]} " in
+                *" ${member} "*) continue ;;
+              esac
+              [[ "${member}" == taurine-db* ]] && continue
+              echo "error: workspace member ${member} is tested by no Linux Rust concern" >&2
+              missing=1
+            done <<<"${members}"
+            return "${missing}"
+          }
+
           if [[ "${CONCERN}" == e2e-* ]]; then cd taurine-desktop; fi
           case "${CONCERN}" in
             contracts)
@@ -554,6 +721,76 @@ jobs:
                   exit 1
                 fi
               '
+              ;;
+            # The crate-test concerns. Shared by all four workspace ones:
+            # - `--locked`: the committed Cargo.lock is what was reviewed and
+            #   what the contracts concern's advisory sweep audits, so a test
+            #   run must not quietly resolve anything else;
+            # - `--no-fail-fast`: the `--keep-going` argument above, for tests.
+            #   Every failing target is reported in one dispatch; the exit
+            #   status is unchanged;
+            # - no `--features`/`--all-features`: each crate is tested as its
+            #   manifest builds it. That leaves `taurine-app`'s opt-in `openvpn`
+            #   and `dbx-breadth` code paths out, as `cargo test --workspace`
+            #   does.
+            # Env-gated live suites (`TAURINE_TEST_<ENGINE>=host:port`) print
+            # SKIPPED and pass when the variable is unset, and `#[ignore]`d lab
+            # tests stay ignored; the live servers belong to live-proofs.yml.
+            rust-domain)
+              # The application's storage, sync, scripting and git core — every
+              # crate below the command tier that is not a database or network
+              # crate. taurine-crypt is run a second time without its default
+              # `keychain` feature: that is the build a machine with no OS
+              # keychain gets, and the private CI plan lists it beside the
+              # workspace run.
+              run_quiet rust-crypt-no-keychain-tests \
+                cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
+              run_quiet rust-domain-tests \
+                cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
+              run_quiet rust-coverage rust_coverage_check
+              ;;
+            rust-db)
+              # Every `taurine-db*` crate: the model, the engine and its law
+              # tests, the HTTP and sidecar machinery, each driver's offline
+              # unit and mapping tests, and taurine-db-conformance's offline
+              # suites (sqlite, duckdb, turso, the recorded fixtures, the
+              # falsification and transfer runs). Only the conformance suite's
+              # live targets need a server, and they skip without one.
+              run_quiet rust-db-tests \
+                cargo test --locked --no-fail-fast --package 'taurine-db*'
+              ;;
+            rust-net)
+              # The dialer, the egress verifier and the vendored openvpn3 shim.
+              # The OpenVPN lab tests are `#[ignore]`d: they need a TUN device
+              # and the local lab's servers, which a hosted runner does not have.
+              run_quiet rust-net-tests \
+                cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
+              ;;
+            rust-app)
+              # The command tier both shells call, and the two shells' own unit
+              # tests. Tauri's `test` feature drives the commands through its
+              # mock runtime, so no display or WebView process is started; the
+              # webkit2gtk install above is only what the crates link.
+              run_quiet rust-app-tests \
+                cargo test --locked --no-fail-fast "${rust_app_packages[@]/#/--package=}"
+              ;;
+            rust-dbx)
+              # The trees the root manifest excludes from the workspace, each
+              # with its own committed Cargo.lock. `dbx-core` runs through the
+              # root `package.json` script so the stack size it needs is set in
+              # one place; its Postgres-backed tests start a disposable
+              # container when Docker answers, which it does on this runner.
+              # `dbx-sqlite-worker` is compiled here as dbx-core's path
+              # dependency, but its own tests are not run: it commits no
+              # Cargo.lock, so a standalone run would resolve dependency
+              # versions nobody reviewed. `vendor/boringtun`'s standalone run is
+              # left out for the same reason (its lock is generated, not
+              # fetched); the patched copy the product links is exercised by
+              # taurine-net under the workspace lock.
+              run_quiet rust-dbx-core-tests \
+                npm run --silent test:dbx-core -- --locked --no-fail-fast
+              run_quiet rust-dbx-mongo-shell-tests \
+                cargo test --locked --no-fail-fast --manifest-path taurine-backend/dbx-mongo-shell/Cargo.toml
               ;;
             mobile-quality)
               run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1 \
