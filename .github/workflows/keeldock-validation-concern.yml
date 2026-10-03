@@ -297,6 +297,12 @@ jobs:
         env:
           PLATFORM: ${{ inputs.platform }}
           CONCERN: ${{ inputs.concern }}
+          # Vulnerable-package gate. `none` (the default) is warn-only: findings are
+          # annotated and tabulated but never fail the concern. Change it, in a reviewed
+          # edit, to `high` to fail on High and Critical advisories, or `critical` to fail
+          # on Critical only. Warn-only first so the existing backlog is visible before it
+          # can block a run.
+          VULN_FAIL_ON: none
         run: |
           set -uo pipefail
 
@@ -395,6 +401,52 @@ jobs:
                 skip_step format 'build did not pass'
               fi
               sub_step suite-assignment reason_text structural_present
+
+              # Known-vulnerable packages, direct and transitive, from the NuGet advisory
+              # feed. One operating system is enough: the locked package set is the same on
+              # all three. Only the package id and the advisory severity are published (both
+              # are public registry facts); versions, advisory URLs and the project that
+              # references the package stay in the withheld log.
+              if [[ "${PLATFORM}" == linux ]]; then
+                if passed restore; then
+                  vuln_log="${RUNNER_TEMP}/vulnerable.log"
+                  vuln_rows="${RUNNER_TEMP}/vulnerable.tsv"
+                  if dotnet list KeelDock.Cloud.slnx package --vulnerable --include-transitive --no-restore >"${vuln_log}" 2>&1; then
+                    vuln_scan_ok=1
+                  else
+                    vuln_scan_ok=0
+                  fi
+                  strip_ansi < "${vuln_log}" | tr -d '\r' | awk '
+                    /^[[:space:]]*>/ { for (i = 2; i <= NF; i++) if ($i ~ /^(Low|Moderate|High|Critical)$/) { print $2 "\t" $i; break } }
+                  ' | sort -u > "${vuln_rows}"
+                  vuln_count="$(grep -c . "${vuln_rows}" || true)"
+                  if [[ "${vuln_scan_ok}" -eq 0 && "${vuln_count}" -eq 0 ]]; then
+                    echo '::warning title=Vulnerable-package scan::the scan did not complete (advisory feed unreachable or the command failed); no result is claimed'
+                    echo 'vulnerable-packages: warn (scan did not complete)'
+                    record vulnerable-packages warn 'scan did not complete; no result claimed'
+                  else
+                    awk -F'\t' '{ printf "::warning title=Vulnerable package::%s (%s)\n", $1, $2 }' "${vuln_rows}" | head -50
+                    vuln_gated="$(awk -F'\t' -v gate="${VULN_FAIL_ON}" '
+                      gate == "high" && ($2 == "High" || $2 == "Critical") { n++ }
+                      gate == "critical" && $2 == "Critical" { n++ }
+                      END { print n + 0 }' "${vuln_rows}")"
+                    if [[ "${vuln_gated}" -gt 0 ]]; then
+                      echo "vulnerable-packages: failed (${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate)" >&2
+                      record vulnerable-packages FAIL "${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate"
+                      any_failed=1
+                    elif [[ "${vuln_count}" -gt 0 ]]; then
+                      echo "vulnerable-packages: ${vuln_count} advisory(ies), warn-only"
+                      record vulnerable-packages warn "${vuln_count} package advisory(ies); warn-only (gate: ${VULN_FAIL_ON})"
+                    else
+                      echo 'vulnerable-packages: passed (none reported)'
+                      record vulnerable-packages pass 'none reported'
+                    fi
+                  fi
+                else
+                  echo 'vulnerable-packages: skipped (restore failed)'
+                  record vulnerable-packages skipped 'restore failed'
+                fi
+              fi
               ;;
 
             structural|unit|db-containers)
@@ -551,6 +603,14 @@ jobs:
               done < "${suite_rows}"
               awk -F'\t' '$3 != "-" { t += $3; f += $4 } END { printf "\n**%d tests, %d failed.**\n", t, f }' "${suite_rows}"
             fi
+            if [[ -s "${RUNNER_TEMP}/vulnerable.tsv" ]]; then
+              echo
+              echo '### Vulnerable packages (id and severity only)'
+              echo
+              while IFS=$'\t' read -r vid vsev; do
+                echo "- \`${vid}\`: ${vsev}"
+              done < "${RUNNER_TEMP}/vulnerable.tsv"
+            fi
             if [[ -s "${failed_names}" ]]; then
               echo
               echo '### Failing tests (names only)'
@@ -605,6 +665,9 @@ jobs:
                 proved build && echo '- Whole-solution build was Release with warnings as errors.'
                 proved format && echo '- Formatting verified.'
                 proved suite-assignment && echo '- Every named structural suite exists and needs no container runtime.'
+                if [[ -f "${results}" ]] && grep -q $'^vulnerable-packages\t' "${results}"; then
+                  echo "- Vulnerable-package scan: $(awk -F'\t' '$1 == "vulnerable-packages" { print $2 ": " $3 }' "${results}")."
+                fi
                 ;;
               structural|unit)
                 proved build && echo '- Suite projects built in Release.'
