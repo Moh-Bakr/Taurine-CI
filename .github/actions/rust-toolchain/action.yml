@@ -36,6 +36,56 @@ runs:
         rustc --version
         cargo --version
 
+    - name: Install the pinned cargo-nextest release
+      if: ${{ inputs.concern == 'rust-app' || inputs.concern == 'rust-db' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        CONCERN: ${{ inputs.concern }}
+      # The only value written to the path file is the directory the binary was extracted to.
+      run: |  # zizmor: ignore[github-env]
+        set -euo pipefail
+        # Only worth installing when the source carries a nextest profile; the tests fall back
+        # to cargo test otherwise. The binary is a pinned release asset verified against a
+        # committed SHA-256; nothing floats.
+        if [[ ! -f .config/nextest.toml ]]; then
+          echo 'nextest: no .config/nextest.toml in the source; tests run with cargo test'
+          exit 0
+        fi
+        version=0.9.146
+        case "${RUNNER_OS}" in
+          Linux)
+            asset="cargo-nextest-${version}-x86_64-unknown-linux-gnu.tar.gz"
+            sha=682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428 ;;
+          macOS)
+            asset="cargo-nextest-${version}-universal-apple-darwin.tar.gz"
+            sha=39785160b3c2f6ed9a765049cf4fa79f3b39aa02eb7598a5a0e2a1a0b9ffb9a8 ;;
+          Windows)
+            asset="cargo-nextest-${version}-x86_64-pc-windows-msvc.zip"
+            sha=0fa689815c8157e4633225b6b173184b3d546eb6ffb754c3d0e6ea5973284a20 ;;
+          *) echo "nextest: unsupported runner ${RUNNER_OS}" >&2; exit 1 ;;
+        esac
+        bin="${RUNNER_TEMP}/nextest-bin"
+        mkdir -p "${bin}"
+        curl --fail --silent --show-error --location --retry 3 -o "${bin}/${asset}" \
+          "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${version}/${asset}"
+        if command -v sha256sum >/dev/null 2>&1; then
+          got="$(sha256sum "${bin}/${asset}" | cut -d' ' -f1)"
+        else
+          got="$(shasum -a 256 "${bin}/${asset}" | cut -d' ' -f1)"
+        fi
+        if [[ "${got}" != "${sha}" ]]; then
+          echo 'nextest: checksum mismatch; refusing to install' >&2
+          exit 1
+        fi
+        if [[ "${RUNNER_OS}" == Windows ]]; then
+          powershell.exe -NoProfile -Command "Expand-Archive -Force -Path '$(cygpath -w "${bin}/${asset}")' -DestinationPath '$(cygpath -w "${bin}")'"
+        else
+          tar -xf "${bin}/${asset}" -C "${bin}"
+        fi
+        echo "${bin}" >> "${GITHUB_PATH}"
+        "${bin}/cargo-nextest" nextest --version | head -n 1
+
     - name: Set up the Linux Rust toolchain and native dependencies
       if: ${{ runner.os == 'Linux' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
       shell: bash
