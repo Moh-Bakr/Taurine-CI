@@ -183,6 +183,25 @@ jobs:
             warn "ci-matrix.json and the Linux result check disagree: only in the table #{table - expected}, only in the result check #{expected - table}"
             exit 1
           end
+          # Stale-concern lint: every concern has a timeout; the concern workflow handles it
+          # (by name, or by the scan-/e2e- prefix groups); every baseline key names a real
+          # concern. A concern added to one place and forgotten in another fails here.
+          full = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux']
+          concern_text = File.read('.github/workflows/linux-validation-concern.yml', encoding: 'UTF-8')
+          problems = []
+          full.each do |name, spec|
+            problems << "#{name}: no integer timeout in ci-matrix.json" unless spec['timeout'].is_a?(Integer)
+            handled = name.start_with?('scan-', 'e2e-') || concern_text.match?(/(?<![A-Za-z0-9-])#{Regexp.escape(name)}(?![A-Za-z0-9-])/)
+            problems << "#{name}: not handled by linux-validation-concern.yml" unless handled
+          end
+          timing = wf['jobs']['timings']['steps'].find { |st| st['uses'].to_s == './.github/actions/timings' }
+          JSON.parse(timing['with']['baseline-seconds']).each_key do |name|
+            problems << "baseline for #{name}: no such concern in ci-matrix.json" unless full.key?(name)
+          end
+          unless problems.empty?
+            warn problems.join("\n")
+            exit 1
+          end
           puts "concern table: #{table.length} Linux concerns match the result check"
           RUBY
 

@@ -111,6 +111,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      timeouts: ${{ steps.plan.outputs.timeouts }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,6 +134,8 @@ jobs:
             filter='.concerns.linux | keys_unsorted'
           fi
           echo "matrix=$(jq -c "{concern: (${filter})}" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+          # Per-concern timeouts (minutes) come from the same table.
+          echo "timeouts=$(jq -c '.concerns.linux | map_values(.timeout)' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
 
   # Only with a base_sha: a source-bearing job (partial clone, history only) decides which
   # concerns the change affects. Without one this job is skipped and the full list runs.
@@ -164,6 +167,7 @@ jobs:
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
+      timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeouts)[matrix.concern] }}
 
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed
