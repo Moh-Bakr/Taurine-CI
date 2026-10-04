@@ -243,13 +243,13 @@ jobs:
           }
           all="$(jq -r '.concerns.linux | keys_unsorted | join(",")' .github/ci-matrix.json)"
           sha="$(change docs/a.md)"
-          expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts'
+          expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-gitleaks'
           sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-          expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app'
+          expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app,scan-gitleaks'
           sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
-          expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db'
+          expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-gitleaks'
           sha="$(change taurine-desktop/src/a.ts)"
-          expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,frontend-build-budget,desktop-quality,desktop-shard-1,desktop-shard-2,e2e-critical,e2e-a11y,e2e-regression-1,e2e-regression-2,e2e-regression-3,e2e-regression-4'
+          expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,frontend-build-budget,desktop-quality,desktop-shard-1,desktop-shard-2,e2e-critical,e2e-a11y,e2e-regression-1,e2e-regression-2,e2e-regression-3,e2e-regression-4,scan-gitleaks'
           sha="$(change Cargo.lock)"
           expect lockfile "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
           sha="$(change mystery/a.txt)"
@@ -462,6 +462,7 @@ jobs:
                 ./.github/workflows/linux-validation-concern.yml) ;;
                 ./.github/workflows/select-concerns.yml) ;;
                 ./.github/actions/select-concerns) ;;
+                ./.github/actions/scan-concern) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;
                 *)

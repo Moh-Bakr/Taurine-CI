@@ -98,24 +98,24 @@ jobs:
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
       - name: Set up Node.js and install the locked JavaScript dependencies
-        if: inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-')
+        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-npm-audit'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
           root: true
           desktop: true
           mobile: true
-          vendor-fetch: true
+          vendor-fetch: ${{ inputs.concern != 'scan-npm-audit' }}
 
       - name: Set up the Rust toolchain
-        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-deny'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
 
       - name: Fetch pinned vendored sources
-        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-deny'
         shell: bash
         run: |
           set -euo pipefail
@@ -228,8 +228,16 @@ jobs:
           fi
           echo 'playwright-install: passed'
 
+      - name: Run the scanner
+        if: startsWith(inputs.concern, 'scan-')
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
+        with:
+          scanner: ${{ case(inputs.concern == 'scan-gitleaks', 'gitleaks', inputs.concern == 'scan-npm-audit', 'npm-audit', 'deny') }}
+
       - name: Run isolated Linux validation concern
         id: concern-validation
+        if: ${{ !startsWith(inputs.concern, 'scan-') }}
         shell: bash
         env:
           CONCERN: ${{ inputs.concern }}
