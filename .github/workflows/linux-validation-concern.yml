@@ -565,6 +565,17 @@ jobs:
               # mock runtime, so no display or WebView process is started; the
               # webkit2gtk install above is only what the crates link.
               rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              # The `openvpn` feature of taurine-app links the vendored openvpn3 C++ shim; no
+              # test build enables it. A library check compiles it (the C++ build runs, the
+              # system libraries above are the ones openvpn3 needs).
+              #
+              # Known unverified lane, recorded rather than hidden: taurine-app's
+              # `dbx-breadth` feature is NOT built anywhere. Its forked database clients and
+              # OpenSSL only resolve inside dbx-core's own workspace; enabling it from the
+              # root workspace is deliberately off, so a change that only breaks that feature
+              # is not caught by this CI.
+              run_deferred rust-app-openvpn-check \
+                cargo check --locked --lib --package taurine-app --features openvpn
               ;;
             rust-dbx)
               # The trees the root manifest excludes from the workspace, each
