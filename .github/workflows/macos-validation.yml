@@ -454,6 +454,11 @@ jobs:
                 cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
               run_deferred rust-domain-tests \
                 cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
+              # dbx-core's `os-keyring` feature takes the keyring crate's Apple backend on
+              # macOS; no hosted job compiles it (the dbx-core tests run on Linux without
+              # the feature). A non-test library check does, without running anything.
+              run_deferred rust-dbx-core-keyring-check \
+                cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --features os-keyring
               ;;
             rust-db)
               # Every `taurine-db*` crate. Platform-neutral engines, but the family has

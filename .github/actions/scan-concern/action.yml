@@ -93,6 +93,10 @@ runs:
           fi
         } >> "${GITHUB_STEP_SUMMARY}"
         if [[ "${total}" -gt 0 ]]; then
+          # Rule ids and counts only, in the step log as well as the summary, so a run's
+          # triage list can be read without opening the summary.
+          echo 'gitleaks per-rule counts:'
+          jq -r 'group_by(.RuleID) | map("  \(.[0].RuleID): \(length)") | .[]' "${report}"
           if [[ "${GITLEAKS_FAIL}" == true ]]; then
             echo "gitleaks: ${total} finding(s); rule ids and counts are in the run summary (values and paths withheld)" >&2
             exit 1
@@ -163,7 +167,11 @@ runs:
           out="${RUNNER_TEMP}/deny-$(echo "${manifest}" | tr '/' '_').jsonl"
           # cargo-deny writes its diagnostics as JSON lines on stderr. Only the advisory
           # id, the crate and its version (public registry facts) are published.
-          "${RUNNER_TEMP}/scan-bin/cargo-deny" --format json --manifest-path "${manifest}" check --config deny.toml advisories >/dev/null 2>"${out}" || true
+          deny_status=0
+          "${RUNNER_TEMP}/scan-bin/cargo-deny" --format json --manifest-path "${manifest}" check --config deny.toml advisories >/dev/null 2>"${out}" || deny_status=$?
+          # Total diagnostics and the exit status show the scan really ran (a zero advisory
+          # count with zero diagnostics and a failing status would mean it did not).
+          echo "cargo-deny ${manifest}: exit ${deny_status}, $(jq -s '[.[] | select(.type == "diagnostic")] | length' "${out}" 2>/dev/null || echo '?') diagnostics, $(jq -s 'length' "${out}" 2>/dev/null || echo '?') records"
           count="$(jq -s '[.[] | select(.type == "diagnostic") | select(.fields.advisory != null)] | length' "${out}" 2>/dev/null || echo 0)"
           total=$((total + count))
           if [[ "${count}" -gt 0 ]]; then
