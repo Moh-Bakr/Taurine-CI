@@ -157,6 +157,6 @@ jobs:
         with:
           mode: table
           label: Windows
-          baseline-seconds: '{"desktop-shard-1":1020,"desktop-shard-2":1140,"desktop-quality":300,"mobile":240,"contracts":120,"bundle-budget":120,"rust-ovpn":600}'
+          baseline-seconds: '{"desktop-shard-1":1055,"desktop-shard-2":1187,"desktop-quality":203,"mobile":293,"contracts":142,"bundle-budget":228,"rust-ovpn":506,"rust-net":697,"rust-domain":165,"rust-db":1235,"rust-app":847}'
           name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
           github-token: ${{ github.token }}

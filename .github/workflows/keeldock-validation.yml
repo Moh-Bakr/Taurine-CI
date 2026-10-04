@@ -101,11 +101,8 @@ jobs:
   # repository's own run API with the run's read-only token, and publishes no artifact. A
   # concern with no baseline is listed without a comparison.
   #
-  # The baseline is keyed `<os> <concern>`. The first values are ESTIMATES from the whole-run
-  # times of run 37152789275 (windows about 10 minutes, macos about 10, linux about 11, all
-  # concerns in one job) divided across the split; they are placeholders until the first
-  # hosted run of the split gives measured numbers, after which this table should be updated
-  # from that run.
+  # The baseline is keyed `<os> <concern>`, in whole minutes rounded up, measured from run
+  # 37161663699 (all 13 concerns green).
   timings:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
     needs: [validate]
@@ -119,7 +116,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          BASELINE_MINUTES: '{"linux build-format":7,"linux structural":6,"linux unit":6,"linux contracts-publish-smoke":7,"linux db-containers":11,"macos build-format":8,"macos structural":7,"macos unit":7,"macos contracts-publish-smoke":8,"windows build-format":10,"windows structural":10,"windows unit":9,"windows contracts-publish-smoke":10}'
+          BASELINE_MINUTES: '{"linux build-format":5,"linux structural":5,"linux unit":3,"linux contracts-publish-smoke":3,"linux db-containers":14,"macos build-format":6,"macos structural":5,"macos unit":3,"macos contracts-publish-smoke":3,"windows build-format":7,"windows structural":6,"windows unit":5,"windows contracts-publish-smoke":5}'
           NAME_PATTERN: '^validate \(.+\) / KeelDock (?<concern>(linux|macos|windows) .+)$'
         run: |
           set -euo pipefail
