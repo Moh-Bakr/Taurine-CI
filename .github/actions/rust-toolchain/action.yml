@@ -231,17 +231,33 @@ runs:
           echo 'CARGO_PROFILE_TEST_DEBUG=0'
         } >> "${GITHUB_ENV}"
 
-        # Disk. A hosted macOS runner is short of space for the heaviest closure, and
-        # the Android SDK is the largest thing on the image that no Rust concern reads.
-        # Removed only when free space is under 30 GiB, and only for rust-app. Free
-        # space is printed either way so a first run measures it.
+        # Disk. A hosted macOS runner has well under 100 GiB free, and the heavy concerns
+        # (rust-app above all: over a hundred test binaries, each linking the whole command
+        # tier) have run it down to under 1 GiB mid-link. So for those two concerns the
+        # space is reclaimed up front, always, from things no Rust concern reads: the
+        # Android SDK, every Xcode but the selected one, simulator devices and runtimes,
+        # and package-manager and user caches. Free space is printed before and after so
+        # the effect is measured on every run. Each removal is best effort: a path that is
+        # absent or busy never fails the setup.
+        free_gib() { df -g "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}'; }
+        echo "disk before reclaim: $(free_gib) GiB free"
         df -h "${GITHUB_WORKSPACE}"
-        if [[ "${CONCERN}" == rust-app ]]; then
-          avail_kib="$(df -k "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}')"
-          if [[ "${avail_kib}" -lt 31457280 && -d "${HOME}/Library/Android" ]]; then
-            rm -rf "${HOME}/Library/Android"
-            df -h "${GITHUB_WORKSPACE}"
+        if [[ "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ]]; then
+          rm -rf "${HOME}/Library/Android" 2>/dev/null || true
+          selected_xcode="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer.*##')"
+          for xcode in /Applications/Xcode*.app; do
+            [[ -d "${xcode}" && "${xcode}" != "${selected_xcode}" ]] || continue
+            sudo rm -rf "${xcode}" 2>/dev/null || true
+          done
+          xcrun simctl delete all >/dev/null 2>&1 || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
+          rm -rf "${HOME}/Library/Developer/CoreSimulator" "${HOME}/Library/Caches"/* 2>/dev/null || true
+          brew_cache="$(brew --cache 2>/dev/null || true)"
+          if [[ -n "${brew_cache}" && -d "${brew_cache}" ]]; then
+            rm -rf "${brew_cache}"/* 2>/dev/null || true
           fi
+          echo "disk after reclaim: $(free_gib) GiB free"
+          df -h "${GITHUB_WORKSPACE}"
         fi
 
         # taurine-crypt's `keychain` feature talks to the real macOS Keychain, and its
@@ -306,4 +322,15 @@ runs:
           # vcpkg's own telemetry, off: Taurine is telemetry-free and so is its CI.
           echo 'VCPKG_DISABLE_METRICS=1'
         } >> "${GITHUB_ENV}"
+        # Disk. C: holds the target directory. For the heavy concerns, reclaim the Android
+        # SDK and other large image content no Rust concern reads when C: is under 40 GiB
+        # free, and print the free space before and after.
+        free_gib() { df -BG /c | awk 'NR==2 {gsub("G", "", $4); print $4}'; }
+        echo "disk before reclaim: $(free_gib) GiB free on C:"
+        if [[ ( "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ) && "$(free_gib)" -lt 40 ]]; then
+          rm -rf /c/Android "/c/Program Files (x86)/Android" /c/Users/runneradmin/AppData/Local/Android 2>/dev/null || true
+          rm -rf /c/ProgramData/chocolatey/lib/ghc* /c/ProgramData/chocolatey/lib/mingw 2>/dev/null || true
+          rm -rf /c/hostedtoolcache/windows/Java_* /c/hostedtoolcache/windows/PyPy 2>/dev/null || true
+          echo "disk after reclaim: $(free_gib) GiB free on C:"
+        fi
         df -h /c /d 2>/dev/null || df -h
