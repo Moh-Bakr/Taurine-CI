@@ -1,0 +1,292 @@
+name: Rust toolchain and native dependencies
+description: >
+  Per-OS setup for the Rust concerns: the runner's own rustup components, the
+  libclang that bindgen needs, the system libraries each concern links (Ubuntu
+  archive, Homebrew bottles or the runner image's vcpkg and LLVM), the cargo
+  environment (no incremental state, no test debug info, target directory) and the
+  linker choice. Installs only from the runner image's own sources, the Ubuntu
+  archive, homebrew-core and one pinned Chocolatey fallback.
+
+inputs:
+  concern:
+    description: The concern being set up (taurine-cli, rust-domain, rust-db, rust-net, rust-ovpn, rust-app, rust-dbx)
+    required: true
+  path:
+    description: Directory, relative to the workspace, holding the private source
+    required: false
+    default: src
+
+runs:
+  using: composite
+  steps:
+    - name: Set up the Linux Rust toolchain and native dependencies
+      if: ${{ runner.os == 'Linux' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        CONCERN: ${{ inputs.concern }}
+        OS_LABEL: Linux
+      # Every value written to the environment file is a constant or a path the setup
+      # itself created or asked the package manager for; the only input, the concern
+      # name, is compared against fixed strings and never written.
+      run: |  # zizmor: ignore[github-env]
+        set -euo pipefail
+        # The runner's own rustup, not a third-party action: android-validation
+        # and ios-validation already do it this way, and this control plane
+        # adds no action it does not have to.
+        rustup component add rustfmt clippy
+
+        # taurine-scripting depends on rquickjs with the `bindgen` feature, so
+        # this concern needs libclang at build-script runtime. The hosted image
+        # ships clang but not reliably the shared library bindgen loads, and
+        # the failure surfaces only as an unhelpful `No such file or directory`
+        # from Cargo. android-validation carries the same block for the same
+        # reason. The crate-test concerns take it too: rquickjs is in the
+        # domain and app closures and libsql's bindgen build in the db and app
+        # ones, and one shared install is simpler than a per-concern guess.
+        #
+        # The crate-test concerns reach system libraries `taurine-cli` does
+        # not, each named here with the crate that needs it, all from the
+        # image's own Ubuntu archive. Measured from the private lockfile and
+        # build scripts, not guessed:
+        # - libdbus-1-dev: taurine-crypt's default `keychain` feature takes
+        #   keyring's `sync-secret-service`, whose libdbus-sys has no vendored
+        #   build and finds dbus-1 through pkg-config (store, repo and app
+        #   reach it through crypt).
+        # - the openvpn3 set: taurine-ovpn-sys compiles vendored openvpn3-core
+        #   C++ against these; the list is copied from the private
+        #   `docs/architecture/vendored-openvpn3.md` and `ovpn-core.yml`, which
+        #   is where it was proven on ubuntu.
+        # - the Tauri set: taurine-app and the two shells link wry, i.e.
+        #   webkit2gtk-4.1 (which brings gtk3, libsoup3 and javascriptcore),
+        #   plus libxdo for muda's accelerators; the list is Tauri's own Linux
+        #   prerequisites less the tray indicator, which nothing enables.
+        # - fontconfig/freetype/openssl: dbx-core's default `system-fonts`
+        #   feature (font-kit) and its tokio-openssl transport.
+        extra_packages=()
+        case "${CONCERN}" in
+          rust-domain) extra_packages=(libdbus-1-dev pkg-config) ;;
+          rust-net) extra_packages=(libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev libssl-dev pkg-config) ;;
+          rust-app) extra_packages=(libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config) ;;
+          rust-dbx) extra_packages=(libfontconfig1-dev libfreetype-dev libssl-dev pkg-config) ;;
+        esac
+        # lld, from the same Ubuntu archive, for the crate-test concerns only: they
+        # link over a hundred test binaries (rust-app alone), and the GNU linker is
+        # the slowest part of that. Selected below through RUSTFLAGS.
+        if [[ "${CONCERN}" == rust-* ]]; then
+          extra_packages+=(lld)
+        fi
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends clang libclang-dev "${extra_packages[@]}"
+        # Debian/Ubuntu commonly expose this as libclang-18.so.1 rather than an
+        # unversioned libclang.so symlink.
+        libclang_file="$(find /usr/lib -type f \( -name 'libclang.so*' -o -name 'libclang-*.so*' \) -print -quit)"
+        [[ -n "${libclang_file}" ]] || { echo 'libclang shared library is unavailable' >&2; exit 1; }
+        echo "LIBCLANG_PATH=$(dirname "${libclang_file}")" >> "${GITHUB_ENV}"
+
+        # The crate-test concerns only, so `taurine-cli` builds exactly as it
+        # did. Three settings, all about the runner rather than the code:
+        # - no incremental state: nothing is cached, so it is written and
+        #   never read again;
+        # - no debug info for tests and their dependencies: the repository's
+        #   profiles keep line tables for local backtraces, but this workflow
+        #   publishes no backtrace (see `cargo_test_detail` below), and
+        #   `rust-app` alone links over a hundred binaries that each carry the
+        #   whole command tier — that is the disk and link time it saves;
+        # - `target/` on the runner's second disk when it has one: hosted
+        #   Ubuntu runners mount a larger scratch disk at /mnt, and
+        #   `rust-app`/`rust-db` compile closures that crowd the root disk.
+        #   It stays on this ephemeral runner like everything else here — it
+        #   is never uploaded or cached — and the root disk is the fallback.
+        if [[ "${CONCERN}" == rust-* ]]; then
+          {
+            echo 'CARGO_INCREMENTAL=0'
+            echo 'CARGO_PROFILE_DEV_DEBUG=0'
+            echo 'CARGO_PROFILE_TEST_DEBUG=0'
+          } >> "${GITHUB_ENV}"
+          # Link with lld. RUSTFLAGS replaces, rather than merges with, any
+          # `build.rustflags` a cargo config in the checkout sets, so the flag is
+          # applied only when no checked-out cargo config sets rustflags of its own;
+          # otherwise the repository's flags win and the default linker is kept. The
+          # linker in use is printed so a run shows which path it took.
+          repo_rustflags=0
+          while IFS= read -r cargo_config; do
+            if [[ -n "${cargo_config}" ]] && grep -qiE 'rustflags' "${cargo_config}"; then
+              repo_rustflags=1
+            fi
+          done < <(find . -maxdepth 4 -type f \( -path '*/.cargo/config' -o -path '*/.cargo/config.toml' \) -not -path '*/node_modules/*' -not -path '*/target/*')
+          if [[ "${repo_rustflags}" == 1 || -n "${RUSTFLAGS:-}" ]]; then
+            echo 'linker: rustflags are already set; keeping the default linker'
+          else
+            echo 'RUSTFLAGS=-C link-arg=-fuse-ld=lld' >> "${GITHUB_ENV}"
+            ld.lld --version | head -n 1
+            echo 'linker: lld (RUSTFLAGS=-C link-arg=-fuse-ld=lld)'
+          fi
+          if mountpoint -q /mnt; then
+            sudo mkdir -p /mnt/cargo-target
+            sudo chown "$(id -u):$(id -g)" /mnt/cargo-target
+            echo 'CARGO_TARGET_DIR=/mnt/cargo-target' >> "${GITHUB_ENV}"
+          fi
+          df -h / /mnt 2>/dev/null || df -h /
+        fi
+
+    - name: Set up the macOS Rust toolchain and native dependencies
+      if: ${{ runner.os == 'macOS' && (startsWith(inputs.concern, 'rust-')) }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        CONCERN: ${{ inputs.concern }}
+        OS_LABEL: macOS
+      # Every value written to the environment file is a constant or a path the setup
+      # itself created or asked the package manager for; the only input, the concern
+      # name, is compared against fixed strings and never written.
+      run: |  # zizmor: ignore[github-env]
+        # Homebrew's own bottles, from homebrew-core only (as ios-validation already
+        # does for llvm). Homebrew cannot pin a formula version, so these float with
+        # the runner image's tap snapshot; each bottle is sha256-verified by brew.
+        # Analytics and the auto-update of the tap are off.
+        export HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1
+
+        rustc --version
+        cargo --version
+
+        # taurine-scripting's rquickjs `bindgen` feature needs the standalone libclang
+        # dylib at build-script runtime, the same reason ios-validation installs llvm.
+        brew list llvm >/dev/null 2>&1 || brew install llvm
+        llvm_prefix="$(brew --prefix llvm)"
+        [[ -f "${llvm_prefix}/lib/libclang.dylib" ]] || { echo 'libclang dylib is unavailable' >&2; exit 1; }
+        echo "LIBCLANG_PATH=${llvm_prefix}/lib" >> "${GITHUB_ENV}"
+
+        # openssl@3 and pkg-config: any crate that links the system OpenSSL finds it
+        # through pkg-config, and Homebrew's openssl@3 is keg-only (not on the default
+        # search path), so its pkgconfig directory is handed over explicitly.
+        brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+        brew list pkg-config >/dev/null 2>&1 || brew install pkg-config
+        echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "${GITHUB_ENV}"
+
+        # taurine-ovpn-sys compiles vendored openvpn3-core C++ against these; the list
+        # is the private docs/architecture/vendored-openvpn3.md macOS install line.
+        # `rust-ovpn` builds that crate directly and `rust-net` builds it through
+        # taurine-net-conformance, which depends on it, so both concerns take this setup.
+        if [[ "${CONCERN}" == rust-ovpn || "${CONCERN}" == rust-net ]]; then
+          brew install asio fmt jsoncpp lz4 xxhash
+
+          # openvpn3-core is C++20 and the formulae above are current releases, so it
+          # needs a current Apple libc++ too. The macos-14 image's default Xcode is
+          # older than the libc++ those headers have been built against, so select the
+          # newest *working* Xcode the image ships, for this concern only. On macos-15
+          # the newest install (a beta or a release for a newer macOS) aborted on
+          # `xcodebuild -version` (Abort trap: 6), so candidates are tried newest first,
+          # betas skipped, and the first whose `xcodebuild -version` runs is kept; when
+          # none does, the image default stays selected. The toolchain versions are
+          # printed (public tool and formula versions, nothing from the private source)
+          # so a failure here is attributable to a compiler or a formula version from
+          # the run summary alone.
+          default_developer_dir="$(xcode-select -p)"
+          selected_xcode=''
+          while IFS= read -r candidate; do
+            [[ -d "${candidate}" ]] || continue
+            case "${candidate}" in *[Bb]eta*) continue ;; esac
+            if DEVELOPER_DIR="${candidate}/Contents/Developer" xcodebuild -version >/dev/null 2>&1; then
+              selected_xcode="${candidate}"
+              break
+            fi
+            echo "Xcode candidate skipped (xcodebuild -version failed): ${candidate##*/}"
+          done < <(printf '%s\n' /Applications/Xcode_*.app | sort -rV)
+          if [[ -n "${selected_xcode}" ]]; then
+            sudo xcode-select -s "${selected_xcode}/Contents/Developer"
+          else
+            echo "No working Xcode_*.app candidate; keeping the image default (${default_developer_dir})"
+          fi
+          xcodebuild -version | head -n 1
+          xcrun clang++ --version | head -n 1
+          brew list --versions asio fmt jsoncpp lz4 xxhash openssl@3
+        fi
+
+        # Same settings as the Linux crate-test concerns, about the runner not the
+        # code: no incremental state (nothing is cached, so it would be written and
+        # never read) and no debug info for tests and their dependencies (this
+        # workflow publishes no backtrace, and `rust-app` links over a hundred
+        # binaries that each carry the whole command tier).
+        {
+          echo 'CARGO_INCREMENTAL=0'
+          echo 'CARGO_PROFILE_DEV_DEBUG=0'
+          echo 'CARGO_PROFILE_TEST_DEBUG=0'
+        } >> "${GITHUB_ENV}"
+
+        # Disk. A hosted macOS runner is short of space for the heaviest closure, and
+        # the Android SDK is the largest thing on the image that no Rust concern reads.
+        # Removed only when free space is under 30 GiB, and only for rust-app. Free
+        # space is printed either way so a first run measures it.
+        df -h "${GITHUB_WORKSPACE}"
+        if [[ "${CONCERN}" == rust-app ]]; then
+          avail_kib="$(df -k "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}')"
+          if [[ "${avail_kib}" -lt 31457280 && -d "${HOME}/Library/Android" ]]; then
+            rm -rf "${HOME}/Library/Android"
+            df -h "${GITHUB_WORKSPACE}"
+          fi
+        fi
+
+        # taurine-crypt's `keychain` feature talks to the real macOS Keychain, and its
+        # callers treat a locked or missing keychain as a miss, so a bare runner would
+        # pass with the keychain path never exercised. A throwaway, already unlocked
+        # keychain in RUNNER_TEMP becomes the user's only search keychain and default,
+        # so the real Keychain API is exercised without touching the runner's login
+        # keychain, no dialog can wait for an unlock, and nothing outlives the job.
+        # The passphrase is random, used on three commands and never printed.
+        keychain="${RUNNER_TEMP}/taurine-ci.keychain-db"
+        keychain_secret="$(uuidgen)"
+        security create-keychain -p "${keychain_secret}" "${keychain}"
+        security set-keychain-settings -lut 21600 "${keychain}"
+        security unlock-keychain -p "${keychain_secret}" "${keychain}"
+        unset keychain_secret
+        security list-keychains -d user -s "${keychain}"
+        security default-keychain -d user -s "${keychain}"
+        security show-keychain-info "${keychain}"
+
+    - name: Set up the Windows Rust toolchain and native dependencies
+      if: ${{ runner.os == 'Windows' && (startsWith(inputs.concern, 'rust-')) }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        CONCERN: ${{ inputs.concern }}
+        OS_LABEL: Windows
+      # Every value written to the environment file is a constant or a path the setup
+      # itself created or asked the package manager for; the only input, the concern
+      # name, is compared against fixed strings and never written.
+      run: |  # zizmor: ignore[github-env]
+        set -euo pipefail
+        rustc --version
+        cargo --version
+
+        # Everything here comes from the runner image or from one pinned fallback, and
+        # nothing is fetched from an unreviewed source.
+        #
+        # libclang: taurine-scripting's rquickjs `bindgen` feature needs libclang.dll at
+        # build-script runtime. The windows-2022 image ships LLVM; if a future image
+        # stops doing so, the pinned Chocolatey package is the fallback rather than a
+        # floating install.
+        llvm_bin='/c/Program Files/LLVM/bin'
+        if [[ ! -f "${llvm_bin}/libclang.dll" ]]; then
+          choco install llvm --version=18.1.8 --no-progress -y
+        fi
+        [[ -f "${llvm_bin}/libclang.dll" ]] || { echo 'libclang.dll is unavailable' >&2; exit 1; }
+
+        # Same settings as the Linux crate-test concerns, about the runner not the code:
+        # no incremental state, no debug info for tests and their dependencies, and
+        # `target/` off the workspace drive. The workspace sits on D:, the small
+        # scratch drive, and `rust-app`/`rust-db` compile closures that would fill it;
+        # C: has the room. A short path also keeps deep build-script output clear of
+        # the 260-character limit. It stays on this ephemeral runner like everything
+        # else here and is never uploaded.
+        mkdir -p /c/ct
+        {
+          printf '%s\n' 'LIBCLANG_PATH=C:\Program Files\LLVM\bin'
+          echo 'CARGO_INCREMENTAL=0'
+          echo 'CARGO_PROFILE_DEV_DEBUG=0'
+          echo 'CARGO_PROFILE_TEST_DEBUG=0'
+          printf '%s\n' 'CARGO_TARGET_DIR=C:\ct'
+          # vcpkg's own telemetry, off: Taurine is telemetry-free and so is its CI.
+          echo 'VCPKG_DISABLE_METRICS=1'
+        } >> "${GITHUB_ENV}"
+        df -h /c /d 2>/dev/null || df -h
