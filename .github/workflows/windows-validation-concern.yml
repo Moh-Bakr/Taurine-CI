@@ -160,43 +160,10 @@ jobs:
 
       - name: Set up the Rust toolchain and native dependencies
         if: ${{ startsWith(inputs.concern, 'rust-') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustc --version
-          cargo --version
-
-          # Everything here comes from the runner image or from one pinned fallback, and
-          # nothing is fetched from an unreviewed source.
-          #
-          # libclang: taurine-scripting's rquickjs `bindgen` feature needs libclang.dll at
-          # build-script runtime. The windows-2022 image ships LLVM; if a future image
-          # stops doing so, the pinned Chocolatey package is the fallback rather than a
-          # floating install.
-          llvm_bin='/c/Program Files/LLVM/bin'
-          if [[ ! -f "${llvm_bin}/libclang.dll" ]]; then
-            choco install llvm --version=18.1.8 --no-progress -y
-          fi
-          [[ -f "${llvm_bin}/libclang.dll" ]] || { echo 'libclang.dll is unavailable' >&2; exit 1; }
-
-          # Same settings as the Linux crate-test concerns, about the runner not the code:
-          # no incremental state, no debug info for tests and their dependencies, and
-          # `target/` off the workspace drive. The workspace sits on D:, the small
-          # scratch drive, and `rust-app`/`rust-db` compile closures that would fill it;
-          # C: has the room. A short path also keeps deep build-script output clear of
-          # the 260-character limit. It stays on this ephemeral runner like everything
-          # else here and is never uploaded.
-          mkdir -p /c/ct
-          {
-            printf '%s\n' 'LIBCLANG_PATH=C:\Program Files\LLVM\bin'
-            echo 'CARGO_INCREMENTAL=0'
-            echo 'CARGO_PROFILE_DEV_DEBUG=0'
-            echo 'CARGO_PROFILE_TEST_DEBUG=0'
-            printf '%s\n' 'CARGO_TARGET_DIR=C:\ct'
-            # vcpkg's own telemetry, off: Taurine is telemetry-free and so is its CI.
-            echo 'VCPKG_DISABLE_METRICS=1'
-          } >> "${GITHUB_ENV}"
-          df -h /c /d 2>/dev/null || df -h
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
 
       - name: Fetch pinned vendored sources
         if: ${{ startsWith(inputs.concern, 'rust-') }}
