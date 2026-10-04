@@ -566,6 +566,14 @@ jobs:
                 npm run --silent test:dbx-core -- --locked --no-fail-fast
               run_deferred rust-dbx-mongo-shell-tests \
                 cargo test --locked --no-fail-fast --manifest-path taurine-backend/dbx-mongo-shell/Cargo.toml
+              # The Linux Secret Service half of dbx-core's `os-keyring` feature
+              # (`all(feature = "os-keyring", target_os = "linux", not(test))`) is
+              # compiled by no other job: the tests above run without the feature and
+              # neither shell enables it. A non-test library check compiles it. The
+              # Secret Service client is pure Rust (zbus), so no system library is
+              # needed beyond what this concern already installs.
+              run_deferred rust-dbx-core-keyring-check \
+                cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --features os-keyring
               ;;
             mobile-quality)
               run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1 \
