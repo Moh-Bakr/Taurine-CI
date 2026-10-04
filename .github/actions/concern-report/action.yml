@@ -1,0 +1,153 @@
+name: Install the shared concern reporting
+description: >
+  Writes the shared concern-reporting library (failure classifiers, run_quiet,
+  run_deferred, finish_deferred) to the runner's temp directory. Requires the
+  sanitize action to have run first. Reads nothing from the private source and
+  publishes nothing itself.
+
+runs:
+  using: composite
+  steps:
+    - name: Write the concern reporting library
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${RUNNER_TEMP}/taurine-ci"
+        cat > "${RUNNER_TEMP}/taurine-ci/report.sh" <<'TCI_REPORT_LIBRARY'
+        # shellcheck shell=bash
+        # Shared concern reporting: the failure classifiers, run_quiet (one command, one
+        # published line plus sanitized detail), run_deferred (independent sub-steps, every
+        # result reported) and finish_deferred (the summary table and the concern verdict).
+        # Requires the sanitize library to be sourced first. The label prefix selects what
+        # may be published: cli-* and rust-* get classified, sanitized detail, cargo-audit
+        # its advisory ids, mobile-tests and e2e-* a keyword allow-list, anything else only
+        # "detailed output withheld".
+
+        cargo_detail() {
+          cargo_sanitize "$1" |
+            grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^[[:space:]]*= note: .*(lint level|-D |-W |deny\(|warn\()|^Diff in |^test .* FAILED$|^test result: |^failures:$|^smoke: ' |
+            head -40 >&2 || true
+        }
+
+        # One line saying which kind of failure it was, so the classification
+        # survives even when no diagnostic line clears the allow-list above.
+        cargo_reason() {
+          local log="$1"
+          if grep -qE '^smoke: ' "${log}"; then echo 'the built binary did not meet its documented contract'
+          elif grep -qE 'no such command|not installed for the toolchain|clippy-driver' "${log}"; then echo 'missing Rust toolchain component'
+          elif grep -qE '^Diff in ' "${log}"; then echo 'rustfmt formatting difference'
+          elif grep -qE 'clippy::[a-z_]+' "${log}"; then echo 'clippy lint promoted to an error by --deny warnings'
+          elif grep -qE 'implied by .-D warnings.|requested on the command line with .-D warnings.' "${log}"; then echo 'rustc warning promoted to an error by --deny warnings'
+          elif grep -qE 'Unable to find libclang|libclang.*[Nn]o such file' "${log}"; then echo 'libclang or bindgen failure'
+          elif grep -qE 'failed to run custom build command' "${log}"; then echo 'dependency build script failure'
+          elif grep -qE 'test result: FAILED|^failures:$' "${log}"; then echo 'test failure'
+          elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
+          elif grep -qE 'failed to (download|select|get|load|parse)' "${log}"; then echo 'dependency download or resolution failure'
+          elif grep -qE 'No space left on device' "${log}"; then echo 'runner disk exhaustion'
+          else echo 'command returned non-zero'
+          fi
+        }
+
+        # On failure the advisory findings are published: the RUSTSEC/CVE
+        # id, the crate, and the locked version are public registry facts
+        # that name the finding — the same rule the Rust concern follows,
+        # publish what names the failure, never what the failure was in.
+        # Everything cargo-audit prints around them (the dependency-graph
+        # context, the advisory-db fetch log, local paths) stays withheld.
+        cargo_audit_detail() {
+          sanitize_stream <"$1" |
+            grep -E '^error: |^warning: |^Crate: |^Version: |^ID: |^Warning: |^Severity: |^URL: |RUSTSEC-[0-9]{4}-[0-9]{4,}|CVE-[0-9]{4}-[0-9]+' |
+            head -40 >&2 || true
+        }
+
+        run_quiet() {
+          local label="$1"; shift
+          local log="${RUNNER_TEMP}/${label}.log"
+          if "$@" >"${log}" 2>&1; then
+            echo "${label}: passed"
+          else
+            # Windows tools end lines with CRLF, which would defeat every anchored
+            # pattern below; normalise before classifying.
+            tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
+            if [[ "${label}" == cli-* ]]; then
+              echo "${label}: failed ($(cargo_reason "${log}"); sanitized detail below)" >&2
+              cargo_detail "${log}"
+            elif [[ "${label}" == rust-* ]]; then
+              echo "${label}: failed ($(cargo_test_reason "${log}"); sanitized detail below)" >&2
+              cargo_test_detail "${log}"
+            elif [[ "${label}" == cargo-audit ]]; then
+              echo "${label}: failed (advisory findings below; remaining output withheld)" >&2
+              cargo_audit_detail "${log}"
+            else
+              echo "${label}: failed (detailed output withheld)" >&2
+            fi
+            if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
+              # Keep hosted-only diagnostics useful without publishing
+              # private source paths or compiler/test output.
+              sanitize_stream <"${log}" |
+                strip_excerpts |
+                grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|timed out|(^|[[:space:]])[0-9]+ (passed|failed|flaky|skipped)|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
+                tail -80 >&2 || true
+            fi
+            exit 1
+          fi
+        }
+
+        # The crate-test concerns' sub-steps are independent of each other:
+        # the coverage check reads only the member list, and each test step
+        # builds its own closure. Stopping at the first failure, as
+        # `run_quiet` does for every other concern, therefore hides results
+        # rather than saving work — a failed `rust-domain-tests` left
+        # `rust-coverage` unknown, not passing. So the `rust-*` concerns run
+        # each sub-step through `run_deferred`, which runs `run_quiet` in a
+        # subshell: the subshell's `exit 1` ends that sub-step only, and the
+        # pass line, failure reason and sanitized detail are `run_quiet`'s
+        # own, byte for byte — this adds no new publishing path.
+        # `finish_deferred` then lists every sub-step's result and fails the
+        # concern if any one failed. The list carries only workflow-defined
+        # labels and `cargo_test_reason`'s fixed classifications, so it is
+        # written to the step summary as well: a failed run's summary says
+        # which sub-steps failed without opening the log.
+        deferred_results=()
+        deferred_failed=0
+        run_deferred() {
+          local label="$1"; shift
+          local status
+          # Not `if ( ... )` or `( ... ) || status=$?`: either would run the
+          # subshell with errexit suspended, which is not how `run_quiet`
+          # runs anywhere else.
+          set +e
+          ( set -e; run_quiet "${label}" "$@" )
+          status=$?
+          set -e
+          if [[ "${status}" -eq 0 ]]; then
+            deferred_results+=("${label}|passed")
+          else
+            deferred_results+=("${label}|failed: $(cargo_test_reason "${RUNNER_TEMP}/${label}.log")")
+            deferred_failed=1
+          fi
+        }
+
+        finish_deferred() {
+          local entry
+          {
+            echo "## ${OS_LABEL:-${RUNNER_OS}} ${CONCERN} sub-steps"
+            echo
+            echo '| Sub-step | Result |'
+            echo '| --- | --- |'
+            for entry in "${deferred_results[@]}"; do
+              echo "| \`${entry%%|*}\` | ${entry#*|} |"
+            done
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "${CONCERN} sub-step results:"
+          for entry in "${deferred_results[@]}"; do
+            echo "  ${entry%%|*}: ${entry#*|}"
+          done
+          df -h / 2>/dev/null || true
+          if [[ "${deferred_failed}" -ne 0 ]]; then
+            echo "${CONCERN}: failed (one or more sub-steps failed; each is listed above)" >&2
+            exit 1
+          fi
+        }
+        TCI_REPORT_LIBRARY
