@@ -19,6 +19,23 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install the pinned Rust toolchain when the source pins one
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        # The private source may pin its channel and components in rust-toolchain.toml.
+        # When it does, install exactly that (rustup reads the file in this directory);
+        # otherwise the runner image's default toolchain is used unchanged.
+        if [[ -f rust-toolchain.toml || -f rust-toolchain ]]; then
+          echo 'rust-toolchain: installing the toolchain pinned by the source'
+          rustup toolchain install || rustup show >/dev/null
+        else
+          echo 'rust-toolchain: no pin in the source; using the runner default'
+        fi
+        rustc --version
+        cargo --version
+
     - name: Set up the Linux Rust toolchain and native dependencies
       if: ${{ runner.os == 'Linux' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
       shell: bash
