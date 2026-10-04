@@ -197,38 +197,6 @@
         "full_only": true,
         "timeout": 60
       },
-      "scan-gitleaks": {
-        "always": true,
-        "timeout": 30
-      },
-      "scan-npm-audit": {
-        "paths": [
-          "package.json",
-          "**/package.json"
-        ],
-        "timeout": 30
-      },
-      "scan-deny": {
-        "paths": [
-          "**/Cargo.toml"
-        ],
-        "timeout": 30
-      },
-      "scan-clippy": {
-        "paths": [
-          "**/*.rs"
-        ],
-        "full_only": true,
-        "timeout": 90
-      },
-      "scan-semgrep": {
-        "paths": [
-          "**/*.rs",
-          "**/*.ts",
-          "**/*.tsx"
-        ],
-        "timeout": 30
-      },
       "rust-packaging": {
         "paths": [
           "taurine-desktop/**",
@@ -244,6 +212,18 @@
         "timeout": 60,
         "excluded_trees": [
           "taurine-backend/taurine-tls-openssl"
+        ]
+      },
+      "scan-security": {
+        "always": true,
+        "full_only": true,
+        "timeout": 90,
+        "paths": [
+          "**/*.rs",
+          "**/*.ts",
+          "**/*.tsx",
+          "**/Cargo.toml",
+          "**/package.json"
         ]
       }
     }

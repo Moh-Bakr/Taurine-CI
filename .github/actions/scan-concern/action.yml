@@ -9,7 +9,7 @@ description: >
 
 inputs:
   scanner:
-    description: gitleaks, npm-audit, deny, clippy or semgrep
+    description: all (every scanner, each as its own step), or one of gitleaks, npm-audit, deny, clippy, semgrep
     required: true
   path:
     description: Directory, relative to the workspace, holding the private source
@@ -27,7 +27,8 @@ runs:
   using: composite
   steps:
     - name: Install the pinned gitleaks release
-      if: ${{ inputs.scanner == 'gitleaks' }}
+      continue-on-error: ${{ inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'gitleaks' || inputs.scanner == 'all' }}
       shell: bash
       working-directory: ${{ github.workspace }}
       run: |
@@ -41,7 +42,8 @@ runs:
         "${bin}/gitleaks" version
 
     - name: Install the pinned cargo-deny release
-      if: ${{ inputs.scanner == 'deny' }}
+      continue-on-error: ${{ inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'deny' || inputs.scanner == 'all' }}
       shell: bash
       working-directory: ${{ github.workspace }}
       run: |
@@ -55,13 +57,16 @@ runs:
         "${bin}/cargo-deny" --version
 
     - name: Scan for secrets with gitleaks
-      if: ${{ inputs.scanner == 'gitleaks' }}
+      id: scan-gitleaks
+      continue-on-error: ${{ inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'gitleaks' || inputs.scanner == 'all' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
       env:
         GITLEAKS_FAIL: ${{ inputs.gitleaks-fail }}
       run: |
         set -euo pipefail
+        trap 'echo "$?" > "${RUNNER_TEMP}/scan-gitleaks.exit"' EXIT
         report="${RUNNER_TEMP}/gitleaks.json"
         config=()
         if [[ -f .gitleaks.toml ]]; then
@@ -108,11 +113,14 @@ runs:
         echo 'gitleaks: no findings'
 
     - name: Check npm registry signatures and advisories
-      if: ${{ inputs.scanner == 'npm-audit' }}
+      id: scan-npm
+      continue-on-error: ${{ inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'npm-audit' || inputs.scanner == 'all' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
       run: |
         set -euo pipefail
+        trap 'echo "$?" > "${RUNNER_TEMP}/scan-npm.exit"' EXIT
         failed=0
         {
           echo '## npm audit'
@@ -145,12 +153,71 @@ runs:
         done
         [[ "${failed}" -eq 0 ]] || { echo 'npm audit signatures: a registry signature check failed (package names above)' >&2; exit 1; }
 
-    - name: Check Rust advisories with cargo-deny (advisory-only)
-      if: ${{ inputs.scanner == 'deny' }}
+    - name: Run Semgrep Community Edition offline (warning only)
+      id: scan-semgrep
+      continue-on-error: ${{ inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'semgrep' || inputs.scanner == 'all' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
       run: |
         set -euo pipefail
+        trap 'echo "$?" > "${RUNNER_TEMP}/scan-semgrep.exit"' EXIT
+        if [[ ! -d .semgrep/rules ]]; then
+          echo '- semgrep: no .semgrep/rules in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
+          exit 0
+        fi
+        # .semgrepignore is read from the scan root automatically; there is no flag for it.
+        report="${RUNNER_TEMP}/semgrep.json"
+        # The official image, pinned by digest (version 1.140.0), run with no network: the
+        # rules are the source's own, metrics and version checks are off, and nothing is
+        # uploaded. The raw report stays on the runner.
+        image='semgrep/semgrep@sha256:4372a1de903521f9f10f877b6caf15d150d17e1ca592582682c8d02b77cbd4f6'
+        docker pull --quiet "${image}" >/dev/null
+        set +e
+        docker run --rm --network none -v "${PWD}":/src:ro -v "${RUNNER_TEMP}":/out -w /src "${image}" \
+          semgrep scan --config .semgrep/rules --metrics=off --disable-version-check --json --output /out/semgrep.json --quiet . >"${RUNNER_TEMP}/semgrep.log" 2>&1
+        status=$?
+        set -e
+        if [[ ! -s "${report}" ]]; then
+          echo "semgrep: produced no report (exit ${status}; detailed output withheld)" >&2
+          exit 1
+        fi
+        total="$(jq '.results | length' "${report}")"
+        errors="$(jq '.errors | length' "${report}")"
+        if [[ "${errors}" -gt 0 ]]; then
+          # Rule or scan errors silently shrink the results (an unsupported rule language
+          # drops findings), so they are always surfaced: counts per error type only.
+          echo "::warning title=semgrep errors::${errors} rule or scan error(s); findings may be incomplete"
+          echo 'semgrep error types:'
+          jq -r '.errors | group_by(.type) | map("  \(.[0].type | if type == "array" then .[0] else . end): \(length)") | .[]' "${report}"
+        fi
+        {
+          echo '## Semgrep (offline, warning only)'
+          echo
+          echo "- Findings: ${total}; scan errors: ${errors}"
+          if [[ "${total}" -gt 0 ]]; then
+            echo
+            echo '| Rule | Findings |'
+            echo '| --- | --- |'
+            jq -r '.results | group_by(.check_id) | map("| \(.[0].check_id) | \(length) |") | .[]' "${report}"
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+        if [[ "${total}" -gt 0 ]]; then
+          echo "::warning title=semgrep::${total} finding(s), warning only"
+          echo 'semgrep per-rule counts:'
+          jq -r '.results | group_by(.check_id) | map("  \(.[0].check_id): \(length)") | .[]' "${report}"
+        else
+          echo 'semgrep: no findings'
+        fi
+    - name: Check Rust advisories with cargo-deny (advisory-only)
+      id: scan-deny
+      continue-on-error: ${{ inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'deny' || inputs.scanner == 'all' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        trap 'echo "$?" > "${RUNNER_TEMP}/scan-deny.exit"' EXIT
         if [[ ! -f deny.toml ]]; then
           echo '- cargo-deny: no deny.toml in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
           exit 0
@@ -192,11 +259,14 @@ runs:
         echo "cargo-deny: ${total} advisory finding(s) in total (advisory-only)"
 
     - name: Run the security lints with clippy (warning only)
-      if: ${{ inputs.scanner == 'clippy' }}
+      id: scan-clippy
+      continue-on-error: ${{ inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'clippy' || inputs.scanner == 'all' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
       run: |
         set -euo pipefail
+        trap 'echo "$?" > "${RUNNER_TEMP}/scan-clippy.exit"' EXIT
         # The lint list is the source's own [workspace.lints] table, read at run time and
         # passed on the command line as warnings, so no crate has to opt in and the list
         # stays in the private repository. Findings are warnings; only a failed build fails.
@@ -266,56 +336,36 @@ runs:
           echo 'clippy: no findings'
         fi
 
-    - name: Run Semgrep Community Edition offline (warning only)
-      if: ${{ inputs.scanner == 'semgrep' }}
+    - name: Report every scanner and fail if any failed
+      if: ${{ always() && inputs.scanner == 'all' }}
       shell: bash
-      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      working-directory: ${{ github.workspace }}
+      env:
+        GITLEAKS_OUTCOME: ${{ steps.scan-gitleaks.outcome }}
+        NPM_OUTCOME: ${{ steps.scan-npm.outcome }}
+        SEMGREP_OUTCOME: ${{ steps.scan-semgrep.outcome }}
+        DENY_OUTCOME: ${{ steps.scan-deny.outcome }}
+        CLIPPY_OUTCOME: ${{ steps.scan-clippy.outcome }}
       run: |
         set -euo pipefail
-        if [[ ! -d .semgrep/rules ]]; then
-          echo '- semgrep: no .semgrep/rules in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
-          exit 0
-        fi
-        # .semgrepignore is read from the scan root automatically; there is no flag for it.
-        report="${RUNNER_TEMP}/semgrep.json"
-        # The official image, pinned by digest (version 1.140.0), run with no network: the
-        # rules are the source's own, metrics and version checks are off, and nothing is
-        # uploaded. The raw report stays on the runner.
-        image='semgrep/semgrep@sha256:4372a1de903521f9f10f877b6caf15d150d17e1ca592582682c8d02b77cbd4f6'
-        docker pull --quiet "${image}" >/dev/null
-        set +e
-        docker run --rm --network none -v "${PWD}":/src:ro -v "${RUNNER_TEMP}":/out -w /src "${image}" \
-          semgrep scan --config .semgrep/rules --metrics=off --disable-version-check --json --output /out/semgrep.json --quiet . >"${RUNNER_TEMP}/semgrep.log" 2>&1
-        status=$?
-        set -e
-        if [[ ! -s "${report}" ]]; then
-          echo "semgrep: produced no report (exit ${status}; detailed output withheld)" >&2
-          exit 1
-        fi
-        total="$(jq '.results | length' "${report}")"
-        errors="$(jq '.errors | length' "${report}")"
-        if [[ "${errors}" -gt 0 ]]; then
-          # Rule or scan errors silently shrink the results (an unsupported rule language
-          # drops findings), so they are always surfaced: counts per error type only.
-          echo "::warning title=semgrep errors::${errors} rule or scan error(s); findings may be incomplete"
-          echo 'semgrep error types:'
-          jq -r '.errors | group_by(.type) | map("  \(.[0].type | if type == "array" then .[0] else . end): \(length)") | .[]' "${report}"
-        fi
+        # Each scanner ran as its own step with its own sanitised report; a failure of one
+        # did not stop the others. This step lists them with their exit codes and fails the
+        # job if any failed (a skipped scanner counts as not run, never as passed).
+        failed=0
         {
-          echo '## Semgrep (offline, warning only)'
+          echo '## Security scanners'
           echo
-          echo "- Findings: ${total}; scan errors: ${errors}"
-          if [[ "${total}" -gt 0 ]]; then
-            echo
-            echo '| Rule | Findings |'
-            echo '| --- | --- |'
-            jq -r '.results | group_by(.check_id) | map("| \(.[0].check_id) | \(length) |") | .[]' "${report}"
-          fi
+          echo '| Scanner | Outcome | Exit |'
+          echo '| --- | --- | --- |'
         } >> "${GITHUB_STEP_SUMMARY}"
-        if [[ "${total}" -gt 0 ]]; then
-          echo "::warning title=semgrep::${total} finding(s), warning only"
-          echo 'semgrep per-rule counts:'
-          jq -r '.results | group_by(.check_id) | map("  \(.[0].check_id): \(length)") | .[]' "${report}"
-        else
-          echo 'semgrep: no findings'
-        fi
+        for entry in "gitleaks|${GITLEAKS_OUTCOME}|gitleaks" "npm-audit|${NPM_OUTCOME}|npm" "semgrep|${SEMGREP_OUTCOME}|semgrep" "cargo-deny|${DENY_OUTCOME}|deny" "clippy|${CLIPPY_OUTCOME}|clippy"; do
+          name="${entry%%|*}"
+          rest="${entry#*|}"
+          outcome="${rest%%|*}"
+          tag="${rest#*|}"
+          code="$(cat "${RUNNER_TEMP}/scan-${tag}.exit" 2>/dev/null || echo '-')"
+          echo "scanner ${name}: ${outcome} (exit ${code})"
+          echo "| ${name} | ${outcome} | ${code} |" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${outcome}" != success ]]; then failed=1; fi
+        done
+        [[ "${failed}" -eq 0 ]]
