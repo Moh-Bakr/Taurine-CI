@@ -286,9 +286,12 @@ jobs:
           if [[ "${CONCERN}" == e2e-* ]]; then cd taurine-desktop; fi
           case "${CONCERN}" in
             contracts)
-              run_quiet contracts npm run check:contracts
-              run_quiet wire npm run check:wire
-              run_quiet packages-tests npm run test:packages -- \
+              # Every sub-step runs and is reported (the checks are independent: a failed
+              # contracts check must not hide the wire check, the package tests or the
+              # advisory sweep), through the same deferred reporting as the Rust concerns.
+              run_deferred contracts-check npm run check:contracts
+              run_deferred wire-check npm run check:wire
+              run_deferred packages-tests npm run test:packages -- \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"
 
@@ -307,7 +310,7 @@ jobs:
               # Unmaintained-crate warnings (rustls-pemfile, paste) are
               # recorded acceptances tracked in the private repository and do
               # not fail the concern; only vulnerabilities do.
-              run_quiet cargo-audit-install bash -c '
+              run_deferred cargo-audit-install bash -c '
                 set -euo pipefail
                 bin_dir="${RUNNER_TEMP}/cargo-audit-bin"
                 mkdir -p "${bin_dir}"
@@ -344,7 +347,12 @@ jobs:
               # single run names every failing lock, and on failure the
               # findings are published exactly as the single-lock sweep
               # published them.
-              run_quiet cargo-audit bash -c '
+              # The sweep needs the pinned scanner; if its install failed, say so instead of
+              # failing a second time on a missing binary.
+              if [[ "${deferred_results[*]}" == *"cargo-audit-install|failed"* ]]; then
+                run_deferred cargo-audit bash -c 'echo "cargo-audit not run: the pinned scanner did not install" >&2; exit 1'
+              else
+              run_deferred cargo-audit bash -c '
                 set -euo pipefail
                 audit_bin="${RUNNER_TEMP}/cargo-audit-bin/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit"
                 failed=0
@@ -361,9 +369,10 @@ jobs:
                 fi
                 exit "${failed}"
               '
+              fi
               ;;
             frontend-build-budget)
-              run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
+              # The desktop typecheck runs once, in desktop-quality; it is not repeated here.
               run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
               run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
               run_quiet mobile-build npm --prefix taurine-mobile run build
@@ -592,7 +601,7 @@ jobs:
           # Every `rust-*` branch above ran its sub-steps through
           # `run_deferred`; this is where their results are reported and the
           # concern fails if any one of them did.
-          if [[ "${CONCERN}" == rust-* ]]; then finish_deferred; fi
+          if [[ "${CONCERN}" == rust-* || "${CONCERN}" == contracts ]]; then finish_deferred; fi
 
       # Saved only from the protected main branch (every job here already refuses to
       # run elsewhere; the condition repeats it so the write permission is explicit)
