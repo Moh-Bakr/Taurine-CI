@@ -243,6 +243,8 @@ jobs:
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
+              # Tauri refuses mismatched npm/crate pairs; name them (package names and versions only).
+              tauri_version_mismatch "${log}" >&2 || true
               if [[ "${label}" == android-debug-build ]]; then
                 # Rust's primary error can be far above the final Cargo
                 # summary. Keep only error codes and locations so the public

@@ -94,6 +94,35 @@ runs:
             cut -c1-200 | awk '!seen[$0]++' | head -60 >&2 || true
         }
 
+        # The packaging smoke build (an unsigned Tauri build): which phase failed and a fixed
+        # class of the reason. Cargo's own error shapes follow from cargo_test_detail; nothing
+        # else from the output is published.
+        packaging_detail() {
+          local log="$1" phase reason
+          if grep -qE 'Running (beforeBuildCommand|before_build_command)|beforeBuildCommand' "${log}" && ! grep -qE '^[[:space:]]*Compiling ' "${log}"; then
+            phase='frontend build (beforeBuildCommand)'
+          elif grep -qiE 'Bundling|failed to bundle|bundler' "${log}" && grep -qE '^[[:space:]]*Finished ' "${log}"; then
+            phase='bundling'
+          elif grep -qE '^[[:space:]]*Compiling ' "${log}"; then
+            phase='Rust build'
+          else
+            phase='tauri CLI setup'
+          fi
+          if grep -qE 'error TS[0-9]+' "${log}"; then reason='TypeScript errors in the frontend build'
+          elif grep -qE 'failed to bundle project|Error failed to bundle' "${log}"; then reason='the bundler failed (see tool presence on the image)'
+          elif grep -qE 'error: linking with|linker .* not found' "${log}"; then reason='link failure'
+          elif grep -qE 'error(\[E[0-9]+\])?: could not compile|error\[E[0-9]+\]' "${log}"; then reason='Rust compilation failure'
+          elif grep -qiE 'frontendDist|dist.*(does not exist|not found)' "${log}"; then reason='frontend output directory missing'
+          elif grep -qiE 'tauri.conf|invalid configuration|unknown field' "${log}"; then reason='Tauri configuration error'
+          elif grep -qiE 'version mismatched|mismatch' "${log}"; then reason='Tauri package version mismatch'
+          elif grep -qE 'No space left on device' "${log}"; then reason='runner disk exhaustion'
+          else reason='unclassified (output withheld)'
+          fi
+          echo "packaging phase: ${phase}; reason: ${reason}" >&2
+          ts_diagnostics "${log}"
+          tauri_version_mismatch "${log}" >&2 || true
+        }
+
         run_quiet() {
           local label="$1"; shift
           local log="${RUNNER_TEMP}/${label}.log"
@@ -111,6 +140,8 @@ runs:
               flaky="$(tr -d '\r' <"${log}" | grep -c ' FLAKY ' || true)"
               if [[ "${flaky}" -gt 0 ]]; then
                 echo "::warning title=flaky tests::${label}: ${flaky} test(s) passed only on retry"
+                echo 'flaky tests (retries, test binary and name):'
+                nextest_failures "${log}" | grep -E '^FLAKY' | head -40 || true
               fi
               if [[ "${executed}" -lt 1 ]]; then
                 echo "${label}: failed (no tests were executed; a test run that runs nothing proves nothing)" >&2
@@ -131,6 +162,16 @@ runs:
             elif [[ "${label}" == rust-* ]]; then
               echo "${label}: failed ($(cargo_test_reason "${log}"); exit ${rc}; sanitized detail below)" >&2
               cargo_test_detail "${log}"
+              if [[ "${label}" == rust-packaging-smoke ]]; then
+                packaging_detail "${log}"
+              fi
+              # cargo-nextest: the failing tests, signals, timeouts and flaky retries by name.
+              nextest_lines="$(nextest_failures "${log}")"
+              if [[ -n "${nextest_lines}" ]]; then
+                echo 'nextest failures (status, test binary and name):' >&2
+                printf '%s\n' "${nextest_lines}" >&2
+                nextest_summary "${log}" >&2 || true
+              fi
               # The panicking tests with a fixed class of each panic and its file:line.
               panics="$(panic_summary "${log}")"
               if [[ -n "${panics}" ]]; then
@@ -158,6 +199,17 @@ runs:
             if [[ "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
               test_failures "${log}"
               sanitize_stream <"${log}" | strip_excerpts | grep -E '^(not ok|# (pass|fail|tests))' | head -20 >&2 || true
+            fi
+            if [[ "${label}" == e2e-* ]]; then
+              # The failing specs by name (list reporter lines and annotation titles).
+              pw="$(playwright_failures "${log}")"
+              if [[ -n "${pw}" ]]; then
+                echo 'failing specs (spec > title):' >&2
+                printf '%s\n' "${pw}" >&2
+              fi
+            fi
+            if [[ "${label}" == bundle-budget || "${label}" == check-bundle ]]; then
+              budget_report "${log}" >&2
             fi
             if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
               # Keep hosted-only diagnostics useful without publishing
@@ -243,7 +295,10 @@ runs:
         rust_tests() {
           local label="$1"; shift
           if command -v cargo-nextest >/dev/null 2>&1 && [[ -f .config/nextest.toml ]]; then
-            run_deferred "${label}" cargo nextest run --locked --profile ci --no-fail-fast ${NEXTEST_PARTITION:+--partition "${NEXTEST_PARTITION}"} "$@"
+            # Failing tests are named on their FAIL lines whatever the profile's own verbosity
+            # says: ask for them on the command line (status shown while running, repeated in
+            # the final list) so a failure is never reduced to counts.
+            run_deferred "${label}" cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail ${NEXTEST_PARTITION:+--partition "${NEXTEST_PARTITION}"} "$@"
             run_deferred "${label%-tests}-doctests" cargo test --locked --doc --no-fail-fast "$@"
           else
             run_deferred "${label}" cargo test --locked --no-fail-fast "$@"

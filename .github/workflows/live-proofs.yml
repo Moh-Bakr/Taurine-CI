@@ -899,6 +899,16 @@ jobs:
               if (( skips > 0 )); then verdict="FAIL(${skips} SKIPPED)"; overall=1; fi
               if (( code == 0 && passed == 0 )); then verdict='FAIL(no test passed)'; overall=1; fi
               echo "${verdict}: ${pkg} [${targets}] ${name:-} passed=${passed} skipped=${skips}" | tee -a "${RUNNER_TEMP}/suite-results.txt"
+              if (( code != 0 )); then
+                # Name the failure in the log right here, not only in the summary: the failed
+                # tests and one fixed-format line per panic (test, file:line, class; the
+                # assertion text and values are never published).
+                source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+                echo "FAILED in ${pkg} [${targets}] ${name:-}: failed tests:" >&2
+                failed_test_names "${suite_log}" | sed 's/^/  /' >&2 || true
+                echo "panics (test, file:line, class):" >&2
+                panic_summary "${suite_log}" >&2 || true
+              fi
               if (( skips > 0 )); then
                 echo "REFUSED: ${pkg} reported SKIPPED — an unrun test is not a pass; the lines were:" >&2
                 grep 'SKIPPED' "${suite_log}" | cut -c1-200 | head -10 >&2 || true
@@ -915,6 +925,13 @@ jobs:
           status=$?
           set -e
           echo "cargo test exited ${status}; sanitized report follows in the summary step"
+          if [[ "${status}" -ne 0 ]]; then
+            source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+            echo 'failed tests:' >&2
+            failed_test_names "${log}" | sed 's/^/  /' >&2 || true
+            echo 'panics (test, file:line, class):' >&2
+            panic_summary "${log}" >&2 || true
+          fi
           exit "${status}"
 
       - name: Publish sanitized live-proof summary

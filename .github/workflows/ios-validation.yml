@@ -279,6 +279,8 @@ jobs:
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|xcodebuild|cargo|clang|target)' |
                 tail -30 >&2 || true
+              # Tauri refuses mismatched npm/crate pairs; name them (package names and versions only).
+              tauri_version_mismatch "${log}" >&2 || true
               if [[ "${label}" == ios-build ]]; then
                 # A failed link names its undefined symbols, which can be private
                 # function names, so none are published. What is published is the
