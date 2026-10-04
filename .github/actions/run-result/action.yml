@@ -1,0 +1,100 @@
+name: Run result
+description: >
+  One verdict for a dispatch. Lists the run's concern jobs, compares them with the
+  full list of concerns the workflow can run, and writes a summary with the exact
+  source SHA, the optional base SHA, a table (concern, conclusion) and the verdict.
+  Concerns that did not run are listed as "not selected", never as passed. The
+  verdict is PASS (full) only when every possible concern ran and succeeded; if some
+  did not run it is PASS (partial), which does not admit a merge. Any concern that
+  did not succeed, or no concern running at all, fails this step.
+
+inputs:
+  label:
+    description: Platform label for the heading
+    required: true
+  expected-concerns:
+    description: JSON array of every concern the workflow can run
+    required: true
+  name-pattern:
+    description: Regular expression with a named group concern matching job names
+    required: true
+  source-sha:
+    description: The exact source SHA that was requested
+    required: true
+  base-sha:
+    description: The base SHA a partial selection was computed against, if any
+    required: false
+    default: ''
+  github-token:
+    description: Token with actions read, for listing the run's jobs
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Write the run verdict
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LABEL: ${{ inputs.label }}
+        EXPECTED: ${{ inputs.expected-concerns }}
+        NAME_PATTERN: ${{ inputs.name-pattern }}
+        REQUESTED_SOURCE_SHA: ${{ inputs.source-sha }}
+        BASE_SHA: ${{ inputs.base-sha }}
+      run: |
+        set -euo pipefail
+        ran="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+          | jq -r --arg re "${NAME_PATTERN}" '.jobs[]
+            | select(.name | test($re))
+            | [(.name | capture($re).concern), (if .conclusion == null then "running" else .conclusion end)]
+            | @tsv' | sort)"
+        not_selected=0
+        failed=0
+        ran_count=0
+        table=''
+        while IFS= read -r concern; do
+          [[ -n "${concern}" ]] || continue
+          conclusion="$(awk -F'\t' -v c="${concern}" '$1 == c { print $2; exit }' <<<"${ran}")"
+          if [[ -z "${conclusion}" ]]; then
+            conclusion='not selected'
+            not_selected=$((not_selected + 1))
+          elif [[ "${conclusion}" == skipped ]]; then
+            conclusion='not selected'
+            not_selected=$((not_selected + 1))
+          else
+            ran_count=$((ran_count + 1))
+            if [[ "${conclusion}" != success ]]; then
+              failed=$((failed + 1))
+            fi
+          fi
+          table="${table}| ${concern} | ${conclusion} |"$'\n'
+        done < <(jq -r '.[]' <<<"${EXPECTED}")
+        selection=full
+        if [[ "${not_selected}" -gt 0 ]]; then
+          selection=partial
+        fi
+        verdict="PASS (${selection})"
+        if [[ "${failed}" -gt 0 ]]; then
+          verdict="FAIL (${failed} concern(s) did not succeed)"
+        elif [[ "${ran_count}" -eq 0 ]]; then
+          verdict='FAIL (no concern ran)'
+        fi
+        {
+          echo "## ${LABEL} result: ${verdict}"
+          echo
+          echo "- Requested source SHA: \`${REQUESTED_SOURCE_SHA}\`"
+          if [[ -n "${BASE_SHA}" ]]; then
+            echo "- Base SHA: \`${BASE_SHA}\`"
+          fi
+          echo "- Selection: ${selection} (${ran_count} ran, ${not_selected} not selected)"
+          if [[ "${selection}" == partial ]]; then
+            echo '- A partial selection does not admit a merge; only a full run does.'
+          fi
+          echo
+          echo '| Concern | Result |'
+          echo '| --- | --- |'
+          printf '%s' "${table}"
+        } >> "${GITHUB_STEP_SUMMARY}"
+        echo "${LABEL}: ${verdict}"
+        [[ "${failed}" -eq 0 && "${ran_count}" -gt 0 ]]
