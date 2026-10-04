@@ -13,6 +13,11 @@ on:
         description: Independent Linux validation concern to execute
         required: true
         type: string
+      timeout_minutes:
+        description: Job timeout in minutes, from ci-matrix.json
+        required: false
+        default: 60
+        type: number
 
 permissions: {}
 
@@ -44,7 +49,7 @@ jobs:
     # workstation before the command tier doubled. `rust-dbx` compiles the
     # adopted `dbx-core` tree, whose own manifest records it as roughly 490
     # crates.
-    timeout-minutes: ${{ (inputs.concern == 'rust-app' || inputs.concern == 'rust-dbx' || inputs.concern == 'rust-packaging' || inputs.concern == 'scan-clippy') && 90 || (startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'rust-')) && 60 || (inputs.concern == 'taurine-cli' && 45 || 30) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
     defaults:
       run:
         working-directory: src

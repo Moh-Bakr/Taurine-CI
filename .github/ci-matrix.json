@@ -50,42 +50,49 @@
           "scripts/**",
           "skills/**",
           "package.json"
-        ]
+        ],
+        "timeout": 30
       },
       "frontend-build-budget": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
-        ]
+        ],
+        "timeout": 30
       },
       "desktop-quality": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
-        ]
+        ],
+        "timeout": 30
       },
       "desktop-shard-1": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
-        ]
+        ],
+        "timeout": 30
       },
       "desktop-shard-2": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
-        ]
+        ],
+        "timeout": 30
       },
       "mobile-quality": {
         "paths": [
           "taurine-mobile/**",
           "packages/**"
-        ]
+        ],
+        "timeout": 30
       },
       "taurine-cli": {
         "rust_packages": [
           "taurine-cli"
-        ]
+        ],
+        "timeout": 45
       },
       "rust-domain": {
         "rust_packages": [
@@ -106,11 +113,13 @@
           "taurine-transport-fs",
           "taurine-transport-git",
           "taurine-transport-wifi"
-        ]
+        ],
+        "timeout": 60
       },
       "rust-db": {
         "rust_package_glob": "taurine-db*",
-        "full_only": true
+        "full_only": true,
+        "timeout": 60
       },
       "rust-net": {
         "rust_packages": [
@@ -118,7 +127,8 @@
           "taurine-net",
           "taurine-ovpn-sys",
           "taurine-net-conformance"
-        ]
+        ],
+        "timeout": 60
       },
       "rust-app": {
         "rust_packages": [
@@ -126,82 +136,95 @@
           "taurine-desktop",
           "taurine-mobile"
         ],
-        "full_only": true
+        "full_only": true,
+        "timeout": 90
       },
       "rust-dbx": {
         "excluded_trees": [
           "taurine-backend/dbx-core",
           "taurine-backend/dbx-mongo-shell"
         ],
-        "full_only": true
+        "full_only": true,
+        "timeout": 90
       },
       "e2e-critical": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
-        ]
+        ],
+        "timeout": 60
       },
       "e2e-a11y": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
         ],
-        "full_only": true
+        "full_only": true,
+        "timeout": 60
       },
       "e2e-regression-1": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
         ],
-        "full_only": true
+        "full_only": true,
+        "timeout": 60
       },
       "e2e-regression-2": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
         ],
-        "full_only": true
+        "full_only": true,
+        "timeout": 60
       },
       "e2e-regression-3": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
         ],
-        "full_only": true
+        "full_only": true,
+        "timeout": 60
       },
       "e2e-regression-4": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
         ],
-        "full_only": true
+        "full_only": true,
+        "timeout": 60
       },
       "scan-gitleaks": {
-        "always": true
+        "always": true,
+        "timeout": 30
       },
       "scan-npm-audit": {
         "paths": [
           "package.json",
           "**/package.json"
-        ]
+        ],
+        "timeout": 30
       },
       "scan-deny": {
         "paths": [
           "**/Cargo.toml"
-        ]
+        ],
+        "timeout": 30
       },
       "scan-clippy": {
         "paths": [
           "**/*.rs"
         ],
-        "full_only": true
+        "full_only": true,
+        "timeout": 90
       },
       "scan-semgrep": {
         "paths": [
           "**/*.rs",
           "**/*.ts",
           "**/*.tsx"
-        ]
+        ],
+        "timeout": 30
       },
       "rust-packaging": {
         "paths": [
@@ -210,7 +233,8 @@
         ],
         "rust_packages": [
           "taurine-desktop"
-        ]
+        ],
+        "timeout": 90
       }
     }
   }
