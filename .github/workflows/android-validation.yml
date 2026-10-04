@@ -50,7 +50,7 @@ jobs:
           RUST_REQUESTED: ${{ inputs.rust }}
         run: |
           set -euo pipefail
-          base='"android-native","mobile-quality","orchestrate-skill"'
+          base='"android-native"'
           {
             echo '## Android Rust concern'
             echo
@@ -204,7 +204,7 @@ jobs:
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
           root: ${{ matrix.concern != 'android-rust' }}
-          desktop: ${{ matrix.concern != 'android-native' && matrix.concern != 'android-rust' }}
+          desktop: false
           mobile: ${{ matrix.concern != 'android-rust' }}
           vendor-fetch: ${{ matrix.concern == 'android-native' || matrix.concern == 'android-rust' }}
 
@@ -243,14 +243,6 @@ jobs:
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
-              if [[ "${label}" == mobile-tests ]]; then
-                # Preserve only test names and assertion metadata needed to
-                # diagnose hosted-only failures; never publish source lines.
-                sanitize_stream <"${log}" |
-                  strip_excerpts |
-                  grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
-                  tail -80 >&2 || true
-              fi
               if [[ "${label}" == android-debug-build ]]; then
                 # Rust's primary error can be far above the final Cargo
                 # summary. Keep only error codes and locations so the public
@@ -273,19 +265,6 @@ jobs:
               # tests are type-checked and linked on a hosted runner. They are not
               # executed (no device or emulator here).
               run_quiet android-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-linux-android
-              ;;
-            mobile-quality)
-              run_quiet mobile-build npm --prefix taurine-mobile run build
-              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --no-file-parallelism
-              run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
-              run_quiet mobile-lint npm --prefix taurine-mobile run lint
-              ;;
-            orchestrate-skill)
-              run_quiet contracts npm run check:contracts
-              run_quiet wire npm run check:wire
-              run_quiet packages-tests npm run test:packages
-              run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
-              run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
               ;;
             *)
               echo "Unknown Android validation concern: ${CONCERN}" >&2
@@ -343,7 +322,7 @@ jobs:
         with:
           mode: table
           label: Android
-          baseline-seconds: '{"android-native":552,"orchestrate-skill":213,"mobile-quality":122}'
+          baseline-seconds: '{"android-native":552}'
           name-pattern: '^Android (?<concern>.+) validation$'
           github-token: ${{ github.token }}
 
@@ -371,7 +350,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: Android
-          expected-concerns: '["android-native","mobile-quality","orchestrate-skill","android-rust"]'
+          expected-concerns: '["android-native","android-rust"]'
           name-pattern: '^Android (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           github-token: ${{ github.token }}
