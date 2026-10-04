@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           base='"desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"'
-          rust='"rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging"'
+          rust='"rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging","rust-tls-openssl"'
           {
             echo '## macOS Rust concerns'
             echo
@@ -500,6 +500,19 @@ jobs:
               run_deferred rust-packaging-smoke \
                 npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci
               ;;
+            rust-tls-openssl)
+              # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
+              # one). Present only on sources that carry it; otherwise a note and a pass,
+              # not a silent skip of a concern the source never had.
+              tls_manifest=taurine-backend/taurine-tls-openssl/Cargo.toml
+              if [[ -f "${tls_manifest}" ]]; then
+                run_deferred rust-tls-openssl-tests \
+                  cargo test --locked --manifest-path "${tls_manifest}"
+              else
+                echo "rust-tls-openssl: the source has no ${tls_manifest}; nothing to build"
+                run_deferred rust-tls-openssl-absent true
+              fi
+              ;;
             *)
               echo "Unsupported macOS Rust concern: ${CONCERN}" >&2
               exit 2
@@ -645,7 +658,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: macOS
-          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging"]'
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging","rust-tls-openssl"]'
           name-pattern: '^macOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           github-token: ${{ github.token }}

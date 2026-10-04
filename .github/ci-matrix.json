@@ -40,6 +40,9 @@
     "taurine-backend/dbx-mongo-shell": [
       "rust-dbx",
       "rust-app"
+    ],
+    "taurine-backend/taurine-tls-openssl": [
+      "rust-tls-openssl"
     ]
   },
   "concerns": {
@@ -235,6 +238,13 @@
           "taurine-desktop"
         ],
         "timeout": 90
+      },
+      "rust-tls-openssl": {
+        "full_only": true,
+        "timeout": 60,
+        "excluded_trees": [
+          "taurine-backend/taurine-tls-openssl"
+        ]
       }
     }
   }

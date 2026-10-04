@@ -122,6 +122,7 @@ jobs:
           - rust-ovpn
           - rust-app
           - rust-packaging
+          - rust-tls-openssl
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
     # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected dispatchers.
@@ -186,7 +187,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: Windows
-          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging"]'
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging","rust-tls-openssl"]'
           name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           github-token: ${{ github.token }}
