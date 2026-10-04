@@ -95,9 +95,16 @@ jobs:
           - { concern: db-containers, platform: linux }
           - { concern: apphost-cold-start, platform: linux }
     uses: ./.github/workflows/keeldock-validation-concern.yml  # zizmor: ignore[self-repository]
-    # No `secrets:` at all: the called job reads its credential from its own environment
-    # (named below), so no repository secret is passed to the called workflow.
+    # Exactly one secret is passed, by name: the App private key. It is a repository
+    # secret (the first attempt to read it from the environment alone failed: the key is
+    # not an environment secret), so it must be passed explicitly; nothing else is inherited.
+    # To move Keel Dock to its own GitHub App: create a repository secret
+    # KEELDOCK_SOURCE_READER_PRIVATE_KEY and a variable KEELDOCK_SOURCE_READER_APP_ID, then
+    # change the two references below (the policy allows exactly these names).
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
+      app_client_id: ${{ vars.SOURCE_READER_APP_ID }}
       # The one place the environment is named. To move Keel Dock to its own GitHub App,
       # create the environment `keeldock-source-read` (see the setup notes in the pull request
       # that introduced this) and change this one value to keeldock-source-read.
