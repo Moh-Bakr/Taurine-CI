@@ -276,7 +276,7 @@ jobs:
               ;;
             mobile-quality)
               run_quiet mobile-build npm --prefix taurine-mobile run build
-              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1
+              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --no-file-parallelism
               run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
               run_quiet mobile-lint npm --prefix taurine-mobile run lint
               ;;

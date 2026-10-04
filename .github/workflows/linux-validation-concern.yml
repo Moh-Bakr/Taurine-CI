@@ -370,12 +370,12 @@ jobs:
               run_quiet bundle-budget npm run check:bundle
               ;;
             desktop-shard-1)
-              run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --maxWorkers=1 --minWorkers=1 \
+              run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --no-file-parallelism \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-1.json"
               ;;
             desktop-shard-2)
-              run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --maxWorkers=1 --minWorkers=1 \
+              run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --no-file-parallelism \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-2.json"
               ;;
@@ -578,7 +578,7 @@ jobs:
                 cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --features os-keyring
               ;;
             mobile-quality)
-              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1 \
+              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --no-file-parallelism \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/mobile.json"
               run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck

@@ -311,18 +311,18 @@ jobs:
           }
           case "${CONCERN}" in
             desktop-shard-1)
-              run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --maxWorkers=1 --minWorkers=1 \
+              run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --no-file-parallelism \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-1.json"
               ;;
             desktop-shard-2)
-              run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --maxWorkers=1 --minWorkers=1 \
+              run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --no-file-parallelism \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-2.json"
               ;;
             mobile)
               run_quiet mobile-build npm --prefix taurine-mobile run build
-              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --maxWorkers=1 --minWorkers=1 \
+              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --no-file-parallelism \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/mobile.json"
               run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
