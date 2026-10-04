@@ -186,7 +186,10 @@ jobs:
           # through a cargo build-script flag that Xcode's libapp.a link
           # drops. Declare the framework in the generated project so the
           # app link keeps it, then regenerate the project.
-          if ! grep -q 'SystemConfiguration.framework' taurine-mobile/src-tauri/gen/apple/project.yml; then
+          # Newer sources declare the framework themselves (tauri.conf.json
+          # bundle.iOS.frameworks); only older ones need it inserted here.
+          if ! grep -q 'SystemConfiguration.framework' taurine-mobile/src-tauri/gen/apple/project.yml \
+            && ! grep -q 'SystemConfiguration' taurine-mobile/src-tauri/tauri.conf.json; then
           python3 - <<'PY'
           p = 'taurine-mobile/src-tauri/gen/apple/project.yml'
           s = open(p).read()
@@ -223,6 +226,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A source that carries its own fork of rquickjs-sys (vendor/rquickjs-sys) has the
+          # fix built in; the runner-side patch of the registry copy is only for older
+          # sources that still use the published crate.
+          if [[ -d vendor/rquickjs-sys ]]; then
+            echo 'rquickjs: the source carries its own rquickjs-sys; no runner patch needed'
+            exit 0
+          fi
           # rquickjs-sys 0.9.0 hard-codes TARGET into its bindgen flags. The
           # Cargo simulator target is valid to Rust but Apple clang rejects
           # its `-sim` suffix. Fetch the already-locked dependency and patch
