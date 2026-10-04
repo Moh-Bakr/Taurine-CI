@@ -257,7 +257,7 @@ jobs:
           }
           selected() {
             : > "${work}/out.txt"
-            python3 "${work}/concern_selector.py" .github/ci-matrix.json "${repo}" "$2" "$1" linux "${work}/out.txt" > /dev/null
+            python3 "${work}/concern_selector.py" .github/ci-matrix.json "${repo}" "$2" "$1" linux "${work}/out.txt" "${3:-[]}" > /dev/null
             echo "$(grep '^selection=' "${work}/out.txt" | cut -d= -f2) $(grep '^matrix=' "${work}/out.txt" | cut -d= -f2- | jq -r '.concern | join(",")')"
           }
           parent_of() { git -C "${repo}" rev-parse "$1~1"; }
@@ -282,6 +282,9 @@ jobs:
           sha="$(change mystery/a.txt)"
           expect unknown "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
           expect no-base "$(selected "" "${sha}")" "full ${all}"
+          # An explicitly requested opt-in concern joins a partial selection (docs only here).
+          docs_sha="$(change docs/b.md)"
+          expect opt-in "$(selected "$(parent_of "${docs_sha}")" "${docs_sha}" '["e2e-visual"]')" 'partial contracts,scan-security,e2e-visual'
           tree_ref='HEAD^{tree}'
           orphan="$(git -C "${repo}" commit-tree "$(git -C "${repo}" rev-parse "${tree_ref}")" -m orphan)"
           expect not-ancestor "$(selected "${orphan}" "${sha}")" "full ${all}"

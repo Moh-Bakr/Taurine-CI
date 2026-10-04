@@ -22,6 +22,11 @@ on:
         description: Platform key in ci-matrix.json
         required: true
         type: string
+      include_concerns:
+        description: JSON array of concerns that must run whatever the selection
+        required: false
+        default: '[]'
+        type: string
     outputs:
       matrix:
         description: JSON object with the selected concern list
@@ -81,3 +86,4 @@ jobs:
           platform: ${{ inputs.platform }}
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}
+          include-concerns: ${{ inputs.include_concerns }}

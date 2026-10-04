@@ -19,6 +19,10 @@ inputs:
     description: Base commit to diff against (empty means full)
     required: false
     default: ''
+  include-concerns:
+    description: JSON array of concerns that must run whatever the selection (explicitly requested opt-in concerns)
+    required: false
+    default: '[]'
   matrix-file:
     description: Path of ci-matrix.json in the public tree
     required: false
@@ -51,6 +55,7 @@ runs:
         SOURCE_SHA: ${{ inputs.source-sha }}
         BASE_SHA: ${{ inputs.base-sha }}
         MATRIX_FILE: ${{ inputs.matrix-file }}
+        INCLUDE_CONCERNS: ${{ inputs.include-concerns }}
         SOURCE_PATH: ${{ inputs.path }}
       run: |
         set -euo pipefail
@@ -186,6 +191,7 @@ runs:
 
         def main():
             matrix_file, src, source_sha, base_sha, platform, out = sys.argv[1:7]
+            include = json.loads(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else []
             cfg = json.load(open(matrix_file))
             allc = [c for c, sp in cfg['concerns'][platform].items() if not sp.get('opt_in')]
             result = (allc, 'full', 'no base SHA given')
@@ -202,6 +208,12 @@ runs:
                     by_dir, edges = discover_packages(src)
                     result = select(cfg, platform, changed, by_dir, edges)
             concerns, selection, reason = result
+            # A concern the dispatch explicitly asked for (an opt-in tier such as the visual
+            # one) runs whatever the selection says; it is appended in table order.
+            wanted = [c for c in cfg['concerns'][platform] if c in include and c not in concerns]
+            if wanted:
+                concerns = list(concerns) + wanted
+                reason = reason + '; explicitly requested: ' + ', '.join(wanted)
             with open(out, 'a') as f:
                 f.write('matrix=' + json.dumps({'concern': concerns}, separators=(',', ':')) + '\n')
                 f.write('selection=' + selection + '\n')
@@ -212,4 +224,4 @@ runs:
         if __name__ == '__main__':
             main()
         TCI_CONCERN_SELECTOR
-        python3 "${selector}" "${MATRIX_FILE}" "${SOURCE_PATH}" "${SOURCE_SHA}" "${BASE_SHA}" "${PLATFORM}" "${GITHUB_OUTPUT}" | tee -a "${GITHUB_STEP_SUMMARY}"
+        python3 "${selector}" "${MATRIX_FILE}" "${SOURCE_PATH}" "${SOURCE_SHA}" "${BASE_SHA}" "${PLATFORM}" "${GITHUB_OUTPUT}" "${INCLUDE_CONCERNS}" | tee -a "${GITHUB_STEP_SUMMARY}"
