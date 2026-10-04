@@ -93,6 +93,16 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
+      # Known gap, recorded on purpose: every Windows concern tests LF source. Git for
+      # Windows checks the tree out with core.autocrlf=true by default, which is what a
+      # developer on Windows has; this step forces LF so a test that compares file bytes,
+      # hashes a fixture or snapshots text sees the same bytes as on Linux and macOS (the
+      # pinned patches, the vendored trees and the golden files are all LF). So a defect
+      # that only appears with CRLF working files (a parser that mishandles \r\n, a
+      # fixture whose hash changes) is NOT caught by this CI. If such a defect is
+      # suspected, run the affected crate's tests locally on Windows with the default
+      # autocrlf; a hosted CRLF concern was considered and not added because it would
+      # duplicate a whole Rust concern for one class of bug.
       - name: Normalize private source line endings
         shell: bash
         run: |
