@@ -478,6 +478,14 @@ jobs:
               echo "keyring-check nasm: $(PATH="${keyring_path}" command -v nasm 2>/dev/null | sanitize_stream || echo none)"
               run_deferred rust-dbx-core-keyring-check \
                 env PATH="${keyring_path}" cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --no-default-features --features sqlite-bundled,os-keyring
+              # If the vendored OpenSSL build still fails, name the missing tool: the lines
+              # published are OpenSSL's own build-tool diagnostics (perl, nasm, nmake,
+              # Configure), after the shared path and token scrubbing, at most 15 of them.
+              if [[ -s "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" ]] && grep -q 'openssl-sys' "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" && grep -q 'error: failed to run custom build command' "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log"; then
+                echo 'keyring-check build-tool diagnostics:' >&2
+                sanitize_stream <"${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" |
+                  grep -iE "(nasm|perl|nmake|Configure|can't locate|is not recognized|not found|no such file)" | head -15 >&2 || true
+              fi
               ;;
             rust-db)
               # Every `taurine-db*` crate, which on Windows includes the `#[cfg(windows)]`
