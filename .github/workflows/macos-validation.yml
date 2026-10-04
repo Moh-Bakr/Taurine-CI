@@ -223,7 +223,7 @@ jobs:
       - name: Restore cached third-party crate sources
         id: cargo-sources
         if: ${{ startsWith(matrix.concern, 'rust-') }}
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ steps.cargo-home.outputs.dir }}/registry/index
@@ -494,7 +494,7 @@ jobs:
       # and only on a miss, so a key is written once and never overwritten.
       - name: Save verified third-party crate sources
         if: ${{ always() && github.ref == 'refs/heads/main' && startsWith(matrix.concern, 'rust-') && steps.cargo-sources.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ steps.cargo-home.outputs.dir }}/registry/index
