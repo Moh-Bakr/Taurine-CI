@@ -290,43 +290,12 @@ jobs:
         if: ${{ !startsWith(matrix.concern, 'rust-') }}
         shell: bash
         env:
+          OS_LABEL: macOS
           CONCERN: ${{ matrix.concern }}
         run: |
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          run_quiet() {
-            local label="$1"
-            shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              local reason='command returned non-zero'
-              if grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
-                reason='memory exhaustion'
-              elif grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
-                reason='missing command'
-              elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
-                reason='missing dependency or file'
-              elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then
-                reason='TypeScript compilation failure'
-              elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
-                reason='pinned vendor fetch or verification failure'
-              elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
-                reason='test failure'
-              fi
-              echo "${label}: failed (${reason}; detailed output withheld)" >&2
-              if [[ "${label}" == desktop-vite-build ]]; then
-                # Publish only a redacted tool/runtime diagnostic.  Restrict
-                # this to known error markers so source-bearing build output
-                # never enters the public log.
-                sanitize_stream <"${log}" |
-                  grep -Ei '(^|[[:space:]])(error|failed|cannot|could not|not found|enoent|rollup|vite|npm (err|error))([:[:space:]]|$)' |
-                  head -20 >&2 || true
-              fi
-              exit 1
-            fi
-          }
+          source "${RUNNER_TEMP}/taurine-ci/report.sh"
           case "${CONCERN}" in
             desktop-shard-1)
               run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --no-file-parallelism \

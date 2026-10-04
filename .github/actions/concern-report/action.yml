@@ -60,10 +60,46 @@ runs:
             head -40 >&2 || true
         }
 
+        # Fixed, source-free classification for the JavaScript and tool labels (the Rust ones
+        # have cargo_test_reason). The text of the output is never published.
+        js_reason() {
+          local log="$1"
+          if grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then echo 'memory exhaustion'
+          elif grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then echo 'missing command'
+          elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then echo 'missing dependency or file'
+          elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then echo 'pinned vendor fetch or verification failure'
+          elif grep -Eiq 'error TS[0-9]+' "${log}"; then echo 'TypeScript compilation failure'
+          elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest|^[[:space:]]*FAIL[[:space:]]' "${log}"; then echo 'test failure'
+          else echo 'command returned non-zero'
+          fi
+        }
+
+        # TypeScript diagnostics as code and repository-relative file:line only. The message
+        # text of a diagnostic quotes types and identifiers from the source, so it is never
+        # published. Backslashes are turned into slashes first so Windows paths survive the
+        # path scrubbing.
+        ts_diagnostics() {
+          tr '\\' '/' <"$1" | sanitize_stream |
+            grep -E '^[^ ()]+\([0-9]+,[0-9]+\): error TS[0-9]+' |
+            sed -E 's/^([^ ()]+)\(([0-9]+),[0-9]+\): error (TS[0-9]+).*/  \3 \1:\2/' |
+            head -40 >&2 || true
+        }
+
+        # Failing tests of a JavaScript runner: the `FAIL file > suite > test` lines (file path
+        # and test titles, the same identities the test inventory already publishes) plus the
+        # runner's own count lines. Assertion messages and received/expected values stay private.
+        test_failures() {
+          tr '\\' '/' <"$1" | sanitize_stream | strip_excerpts |
+            grep -E '^[[:space:]]*FAIL[[:space:]]|^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped)' |
+            cut -c1-200 | awk '!seen[$0]++' | head -60 >&2 || true
+        }
+
         run_quiet() {
           local label="$1"; shift
           local log="${RUNNER_TEMP}/${label}.log"
-          if "$@" >"${log}" 2>&1; then
+          local rc=0
+          "$@" >"${log}" 2>&1 || rc=$?
+          if [[ "${rc}" -eq 0 ]]; then
             if [[ "${label}" == rust-*-tests ]]; then
               # A cargo test run that executes nothing proves nothing (a mis-selected package,
               # a filter that matches no target, a crate whose tests are all ignored). Sum the
@@ -88,17 +124,40 @@ runs:
             # Windows tools end lines with CRLF, which would defeat every anchored
             # pattern below; normalise before classifying.
             tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
+            echo "${rc}" >"${log}.exit"
             if [[ "${label}" == cli-* ]]; then
-              echo "${label}: failed ($(cargo_reason "${log}"); sanitized detail below)" >&2
+              echo "${label}: failed ($(cargo_reason "${log}"); exit ${rc}; sanitized detail below)" >&2
               cargo_detail "${log}"
             elif [[ "${label}" == rust-* ]]; then
-              echo "${label}: failed ($(cargo_test_reason "${log}"); sanitized detail below)" >&2
+              echo "${label}: failed ($(cargo_test_reason "${log}"); exit ${rc}; sanitized detail below)" >&2
               cargo_test_detail "${log}"
+              # The panicking tests with a fixed class of each panic and its file:line.
+              panics="$(panic_summary "${log}")"
+              if [[ -n "${panics}" ]]; then
+                echo 'panics (test, file:line, class; messages withheld):' >&2
+                printf '%s\n' "${panics}" >&2
+              fi
             elif [[ "${label}" == cargo-audit ]]; then
-              echo "${label}: failed (advisory findings below; remaining output withheld)" >&2
+              echo "${label}: failed (advisory findings below; exit ${rc}; remaining output withheld)" >&2
               cargo_audit_detail "${log}"
             else
-              echo "${label}: failed (detailed output withheld)" >&2
+              echo "${label}: failed ($(js_reason "${log}"); exit ${rc}; detailed output withheld)" >&2
+            fi
+            if [[ "${label}" == *typecheck* ]]; then
+              ts_diagnostics "${log}"
+            fi
+            if [[ "${label}" == desktop-tests-* || "${label}" == mobile-tests ]]; then
+              test_failures "${log}"
+            fi
+            if [[ "${label}" == desktop-vite-build ]]; then
+              # Vite's top-level error lines are safe once paths are scrubbed.
+              sanitize_stream <"${log}" |
+                grep -Ei '(vite|rollup|tailwind|oxide|error|failed|could not|cannot|npm (err|error|warn)|node:internal|module_not_found|enoent|command not found|not cached)' |
+                head -20 >&2 || true
+            fi
+            if [[ "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
+              test_failures "${log}"
+              sanitize_stream <"${log}" | strip_excerpts | grep -E '^(not ok|# (pass|fail|tests))' | head -20 >&2 || true
             fi
             if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
               # Keep hosted-only diagnostics useful without publishing
@@ -142,7 +201,13 @@ runs:
           if [[ "${status}" -eq 0 ]]; then
             deferred_results+=("${label}|passed")
           else
-            deferred_results+=("${label}|failed: $(cargo_test_reason "${RUNNER_TEMP}/${label}.log")")
+            exit_code="$(cat "${RUNNER_TEMP}/${label}.log.exit" 2>/dev/null || echo '?')"
+            if [[ "${label}" == rust-* || "${label}" == cli-* ]]; then
+              reason="$(cargo_test_reason "${RUNNER_TEMP}/${label}.log")"
+            else
+              reason="$(js_reason "${RUNNER_TEMP}/${label}.log" 2>/dev/null || echo 'command returned non-zero')"
+            fi
+            deferred_results+=("${label}|failed: ${reason} (exit ${exit_code})")
             deferred_failed=1
           fi
         }
