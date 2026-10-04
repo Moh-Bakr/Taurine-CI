@@ -237,13 +237,29 @@ jobs:
             # openvpn3-core is C++20 and the formulae above are current releases, so it
             # needs a current Apple libc++ too. The macos-14 image's default Xcode is
             # older than the libc++ those headers have been built against, so select the
-            # newest Xcode the image ships (version sort over /Applications/Xcode_*.app),
-            # for this concern only. The toolchain versions are printed (public tool and
-            # formula versions, nothing from the private source) so a failure here is
-            # attributable to a compiler or a formula version from the run summary alone.
-            newest_xcode="$(printf '%s\n' /Applications/Xcode_*.app | sort -V | tail -n 1)"
-            if [[ -d "${newest_xcode}" ]]; then
-              sudo xcode-select -s "${newest_xcode}/Contents/Developer"
+            # newest *working* Xcode the image ships, for this concern only. On macos-15
+            # the newest install (a beta or a release for a newer macOS) aborted on
+            # `xcodebuild -version` (Abort trap: 6), so candidates are tried newest first,
+            # betas skipped, and the first whose `xcodebuild -version` runs is kept; when
+            # none does, the image default stays selected. The toolchain versions are
+            # printed (public tool and formula versions, nothing from the private source)
+            # so a failure here is attributable to a compiler or a formula version from
+            # the run summary alone.
+            default_developer_dir="$(xcode-select -p)"
+            selected_xcode=''
+            while IFS= read -r candidate; do
+              [[ -d "${candidate}" ]] || continue
+              case "${candidate}" in *[Bb]eta*) continue ;; esac
+              if DEVELOPER_DIR="${candidate}/Contents/Developer" xcodebuild -version >/dev/null 2>&1; then
+                selected_xcode="${candidate}"
+                break
+              fi
+              echo "Xcode candidate skipped (xcodebuild -version failed): ${candidate##*/}"
+            done < <(printf '%s\n' /Applications/Xcode_*.app | sort -rV)
+            if [[ -n "${selected_xcode}" ]]; then
+              sudo xcode-select -s "${selected_xcode}/Contents/Developer"
+            else
+              echo "No working Xcode_*.app candidate; keeping the image default (${default_developer_dir})"
             fi
             xcodebuild -version | head -n 1
             xcrun clang++ --version | head -n 1
