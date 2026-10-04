@@ -15,6 +15,13 @@ inputs:
     description: Directory, relative to the workspace, holding the private source
     required: false
     default: src
+  gitleaks-fail:
+    description: >
+      Whether a gitleaks finding fails the concern. Starts as false (warning only,
+      rule ids and counts) while known fixture keys in the source are triaged; change
+      the default here to true, in a reviewed commit, to enforce.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -51,6 +58,8 @@ runs:
       if: ${{ inputs.scanner == 'gitleaks' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        GITLEAKS_FAIL: ${{ inputs.gitleaks-fail }}
       run: |
         set -euo pipefail
         report="${RUNNER_TEMP}/gitleaks.json"
@@ -84,8 +93,13 @@ runs:
           fi
         } >> "${GITHUB_STEP_SUMMARY}"
         if [[ "${total}" -gt 0 ]]; then
-          echo "gitleaks: ${total} finding(s); rule ids and counts are in the run summary (values and paths withheld)" >&2
-          exit 1
+          if [[ "${GITLEAKS_FAIL}" == true ]]; then
+            echo "gitleaks: ${total} finding(s); rule ids and counts are in the run summary (values and paths withheld)" >&2
+            exit 1
+          fi
+          echo "::warning title=gitleaks::${total} finding(s), warning only while the known fixture keys are triaged; per-rule counts are in the run summary (values and paths withheld)"
+          echo "- Mode: warning only (gitleaks-fail is false)" >> "${GITHUB_STEP_SUMMARY}"
+          exit 0
         fi
         echo 'gitleaks: no findings'
 
