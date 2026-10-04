@@ -220,7 +220,6 @@ jobs:
           echo a > "${repo}/Cargo.lock"
           git -C "${repo}" add -A
           git -C "${repo}" commit -q -m base
-          base="$(git -C "${repo}" rev-parse HEAD)"
           change() {
             local file="$1"
             mkdir -p "$(dirname "${repo}/${file}")"
