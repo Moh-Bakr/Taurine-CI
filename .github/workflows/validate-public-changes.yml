@@ -308,7 +308,9 @@ jobs:
           (doc['jobs'] || {}).each do |job_id, job|
             env = job['environment']
             env_name = env.is_a?(Hash) ? env['name'] : env
-            next unless env_name == 'source-read'
+            # The KeelDock concern takes its environment as an input (a reviewed set,
+            # enforced on its dispatcher), so that expression counts as the source-read tier.
+            next unless env_name == 'source-read' || env_name.to_s == '$' + '{{ inputs.environment }}'
             steps = job['steps'] || []
             revoke_at = steps.index { |st| st['run'].to_s.include?('installation/token') }
             # The source-checkout composite performs mint, checkout, verification and
@@ -615,7 +617,9 @@ jobs:
                   exit 1
                 fi
               fi
-              if ! grep -qE '^    environment:[[:space:]]+source-read[[:space:]]*$' "$workflow"; then
+              # The KeelDock concern takes its environment as an input so a dedicated environment
+              # is a one-line change in its dispatcher; the dispatcher's value is checked below.
+              if ! grep -qE '^    environment:[[:space:]]+(source-read|\$\{\{ inputs\.environment \}\})[[:space:]]*$' "$workflow"; then
                 echo "The protected source workflow must use the protected source-read environment: $workflow" >&2
                 exit 1
               fi
@@ -773,8 +777,8 @@ jobs:
                     exit 1
                   fi
                 done
-                if ! grep -qE '^    environment:[[:space:]]+source-read[[:space:]]*$' "$workflow"; then
-                  echo "The KeelDock concern must run in the protected source-read environment: $workflow" >&2
+                if ! grep -qE '^    environment:[[:space:]]+\$\{\{ inputs\.environment \}\}[[:space:]]*$' "$workflow"; then
+                  echo "The KeelDock concern must take its environment from the environment input: $workflow" >&2
                   exit 1
                 fi
                 if grep -nE 'upload-artifact|download-artifact|actions/cache@' "$workflow"; then
@@ -853,7 +857,20 @@ jobs:
                 echo "The protected dispatcher must require a full source SHA: $workflow" >&2
                 exit 1
               fi
-              if ! grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit[[:space:]]*(#.*)?$' "$workflow"; then
+              if [[ "$workflow" == ".github/workflows/keeldock-validation.yml" ]]; then
+                # KeelDock's dispatcher passes NO secrets: the concern job reads its credential
+                # from its own environment, so no repository secret reaches the called workflow.
+                # It names the environment in exactly one place, from a reviewed set; switching
+                # to the dedicated environment is a change of that one value.
+                if grep -qE '^[[:space:]]+secrets:' "$workflow"; then
+                  echo "The KeelDock dispatcher must not pass or inherit secrets: $workflow" >&2
+                  exit 1
+                fi
+                if [[ "$(grep -cE '^[[:space:]]+environment:[[:space:]]+(source-read|keeldock-source-read)[[:space:]]*(#.*)?$' "$workflow")" != 1 ]]; then
+                  echo "The KeelDock dispatcher must name its environment once, as source-read or keeldock-source-read: $workflow" >&2
+                  exit 1
+                fi
+              elif ! grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit[[:space:]]*(#.*)?$' "$workflow"; then
                 echo "The protected dispatcher must explicitly pass reviewed secrets to the concern workflow: $workflow" >&2
                 exit 1
               fi
