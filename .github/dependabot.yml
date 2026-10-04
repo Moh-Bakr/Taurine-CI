@@ -1,0 +1,19 @@
+# Keeps the pinned Actions current. Updates arrive as pull requests that change a full
+# commit SHA; they fail the public policy until the new SHA is added to its allow-list,
+# which is the point: a person reviews the upgrade and the allow-list change together.
+# The cooldown delays a release for a week, so a compromised or yanked release has time
+# to be noticed before a pull request offers it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "Update pinned Action"
