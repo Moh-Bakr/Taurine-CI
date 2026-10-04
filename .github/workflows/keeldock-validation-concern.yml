@@ -34,9 +34,14 @@ on:
         required: true
         type: string
       concern:
-        description: build-format, structural, unit, db-containers or contracts-publish-smoke
+        description: build-format, structural, unit, db-containers, apphost-cold-start or contracts-publish-smoke
         required: true
         type: string
+      apphost:
+        description: Whether the experimental apphost-cold-start concern may run (it is skipped otherwise)
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -63,12 +68,15 @@ jobs:
   validate:
     permissions:
       contents: read
+    # The AppHost cold start is experimental: it runs only when the dispatch asks for it, and
+    # a skipped job is "not requested", never a pass.
+    if: ${{ inputs.concern != 'apphost-cold-start' || inputs.apphost }}
     name: KeelDock ${{ inputs.platform }} ${{ inputs.concern }}
     environment: source-read
     runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-24.04' || (inputs.platform == 'macos' && 'macos-15' || 'windows-2022') }}
     # db-containers pulls and starts PostgreSQL containers per suite; every other
     # concern is a build plus a handful of in-process suites.
-    timeout-minutes: ${{ inputs.concern == 'db-containers' && 45 || 30 }}
+    timeout-minutes: ${{ (inputs.concern == 'db-containers' || inputs.concern == 'apphost-cold-start') && 45 || 30 }}
     steps:
       - name: Start the concern timer
         shell: bash
@@ -102,9 +110,9 @@ jobs:
           esac
           case "${REQUESTED_CONCERN}" in
             build-format|structural|unit|contracts-publish-smoke) ;;
-            db-containers)
+            db-containers|apphost-cold-start)
               if [[ "${REQUESTED_PLATFORM}" != linux ]]; then
-                echo 'db-containers needs a Linux container runtime' >&2
+                echo "${REQUESTED_CONCERN} needs a Linux container runtime" >&2
                 exit 1
               fi
               ;;
@@ -600,6 +608,65 @@ jobs:
               fi
               ;;
 
+            apphost-cold-start)
+              # A cold start of the Aspire topology, bounded: build the AppHost, start it
+              # headless in the background and wait up to ten minutes for it to say the
+              # distributed application started or for its dashboard to answer HTTP, then
+              # require at least one container to be running, and stop it. Nothing of the
+              # AppHost's own output is published: only the fixed results below.
+              apphost="$(find src -name '*AppHost*.csproj' -not -path '*/obj/*' | sort | head -n 1)"
+              if [[ -z "${apphost}" ]]; then
+                echo 'apphost-discovery: failed (no AppHost project found under src)' >&2
+                record apphost-discovery FAIL 'no AppHost project found under src'
+                any_failed=1
+              else
+                record apphost-discovery pass '-'
+                if passed restore; then
+                  sub_step apphost-build reason_build dotnet build "${apphost}" --no-restore --nologo -v quiet --configuration Release
+                else
+                  skip_step apphost-build 'restore failed'
+                fi
+                if passed apphost-build; then
+                  apphost_log="${RUNNER_TEMP}/apphost.log"
+                  export ASPNETCORE_ENVIRONMENT=Development ASPIRE_ALLOW_UNSECURED_TRANSPORT=true
+                  export ASPNETCORE_URLS=http://127.0.0.1:15888 ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL=http://127.0.0.1:16037
+                  export ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS=true
+                  dotnet run --project "${apphost}" --no-build --configuration Release >"${apphost_log}" 2>&1 &
+                  apphost_pid=$!
+                  started=0
+                  for _ in $(seq 1 120); do
+                    if ! kill -0 "${apphost_pid}" 2>/dev/null; then break; fi
+                    if grep -q 'Distributed application started' "${apphost_log}" 2>/dev/null; then started=1; break; fi
+                    code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 3 http://127.0.0.1:15888/ 2>/dev/null || true)"
+                    if [[ "${code}" == 200 || "${code}" == 302 ]]; then started=1; break; fi
+                    sleep 5
+                  done
+                  containers=0
+                  if [[ "${started}" -eq 1 ]]; then
+                    sleep 15
+                    containers="$(docker ps -q | wc -l | tr -d ' ')"
+                  fi
+                  kill "${apphost_pid}" 2>/dev/null || true
+                  wait "${apphost_pid}" 2>/dev/null || true
+                  docker ps -q | xargs -r docker rm -f >/dev/null 2>&1 || true
+                  if [[ "${started}" -eq 1 && "${containers}" -ge 1 ]]; then
+                    echo "apphost-start: passed (started; ${containers} container(s) running)"
+                    record apphost-start pass "${containers} container(s) running"
+                  elif [[ "${started}" -eq 1 ]]; then
+                    echo 'apphost-start: failed (started but no container was running)' >&2
+                    record apphost-start FAIL 'started but no container was running'
+                    any_failed=1
+                  else
+                    echo 'apphost-start: failed (did not start within ten minutes, or exited early; output withheld)' >&2
+                    record apphost-start FAIL 'did not start within ten minutes, or exited early'
+                    any_failed=1
+                  fi
+                else
+                  skip_step apphost-start 'build did not pass'
+                fi
+              fi
+              ;;
+
             contracts-publish-smoke)
               # Installed before the check: the generated TypeScript is verified only when
               # node_modules exists, and skipped is not passed.
@@ -811,6 +878,10 @@ jobs:
                 proved build && echo '- Suite projects built in Release.'
                 proved test-suites && echo '- Every container-backed suite passed against real PostgreSQL started through Testcontainers.'
                 proved contracts-committed && echo '- Generated contracts match what is committed.'
+                ;;
+              apphost-cold-start)
+                proved apphost-build && echo '- AppHost built in Release.'
+                proved apphost-start && echo '- AppHost cold start: the Aspire topology started headless and at least one container was running (bounded at ten minutes).'
                 ;;
               contracts-publish-smoke)
                 proved typescript-contract && echo '- Generated TypeScript contract is current and typechecks.'
