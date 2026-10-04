@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris)
+        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris | postgres | mysql | mssql | pgtls | bastion)
         required: true
         type: string
       source_sha:
@@ -83,8 +83,8 @@ jobs:
             exit 1
           fi
           case "${REQUESTED_ENGINE}" in
-            doris|starrocks|db2|informix|rocketmq|iris) ;;
-            *) echo "engine must be one of: doris, starrocks, db2, informix, rocketmq, iris" >&2; exit 1 ;;
+            doris|starrocks|db2|informix|rocketmq|iris|postgres|mysql|mssql|pgtls|bastion) ;;
+            *) echo "engine must be one of: doris, starrocks, db2, informix, rocketmq, iris, postgres, mysql, mssql, pgtls, bastion" >&2; exit 1 ;;
           esac
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
@@ -132,6 +132,19 @@ jobs:
           fi
           echo 'vendor-fetch: passed'
 
+      - name: Install native build packages (bastion proof only)
+        if: ${{ inputs.engine == 'bastion' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The bastion proof is a `taurine-app` integration test, and that
+          # crate links Tauri: the same Ubuntu archive packages the hosted
+          # rust-app concern installs (.github/actions/rust-toolchain).
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang libclang-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config >/dev/null
+          echo 'native-packages: installed'
+
       - name: Build the engine's proof test binary
         shell: bash
         env:
@@ -149,14 +162,51 @@ jobs:
               grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^test result: |^failures:$' |
               head -40 >&2 || true
           }
+          # The main-engine arms (postgres, mysql, mssql, pgtls, bastion) run
+          # several cargo suites each, the ones scripts/check-db.sh in the
+          # private repository lists for that engine. One line per suite:
+          #   <package> <test targets, comma separated> [test-name filter]
+          # The run step reads the same file, so build and run cannot drift.
+          suites="${RUNNER_TEMP}/suites.txt"
+          : > "${suites}"
           case "${ENGINE}" in
             doris|starrocks|iris) target_args=(--test live_servers) ;;
             db2)             target_args=(--test db2_live) ;;
             informix)        target_args=(--test informix_live) ;;
             rocketmq)        target_args=(--test rocketmq_live) ;;
+            postgres)
+              printf '%s\n' \
+                'taurine-db-conformance live_servers postgres_passes_every_check' \
+                'taurine-db-postgres live_catalog,live_blob,live_ddl,live_depth,live_explain,live_notices,cancel' \
+                'taurine-db-engine live_postgres' > "${suites}" ;;
+            mysql)
+              printf '%s\n' \
+                'taurine-db-conformance live_servers mysql_passes_every_check' \
+                'taurine-db-mysql live_blob,live_cancel,live_depth,live_explain,live_notices,live_param_types,live_reset' \
+                'taurine-db-engine live_mysql_tls' > "${suites}" ;;
+            mssql)
+              printf '%s\n' \
+                'taurine-db-conformance live_servers sql_server_passes_every_check' \
+                'taurine-db-mssql live_blob,live_ddl,live_depth,live_explain,live_notices,live_reset,cancel,udt' > "${suites}" ;;
+            pgtls)
+              printf '%s\n' 'taurine-db-postgres live_tls' > "${suites}" ;;
+            bastion)
+              printf '%s\n' 'taurine-app dbx_connect_live' > "${suites}" ;;
             *) echo "Unsupported engine: ${ENGINE}" >&2; exit 2 ;;
           esac
-          if ! cargo test -p taurine-db-conformance "${target_args[@]}" --no-run \
+          if [[ -s "${suites}" ]]; then
+            while read -r pkg targets _; do
+              build_args=()
+              IFS=, read -ra tl <<< "${targets}"
+              for t in "${tl[@]}"; do build_args+=(--test "${t}"); done
+              if ! cargo test -p "${pkg}" "${build_args[@]}" --no-run \
+                </dev/null >>"${RUNNER_TEMP}/build.log" 2>&1; then
+                echo "proof-build: failed for ${pkg}; sanitized detail below" >&2
+                cargo_detail "${RUNNER_TEMP}/build.log"
+                exit 1
+              fi
+            done < "${suites}"
+          elif ! cargo test -p taurine-db-conformance "${target_args[@]}" --no-run \
             >"${RUNNER_TEMP}/build.log" 2>&1; then
             echo 'proof-build: failed; sanitized detail below' >&2
             cargo_detail "${RUNNER_TEMP}/build.log"
@@ -511,6 +561,271 @@ jobs:
               } >> "${GITHUB_ENV}"
               ;;
 
+            postgres)
+              # PostgreSQL 17 (tools/db-lab's `postgres` service), pinned by
+              # index digest (tag 17-alpine, resolved 2026-10-04; amd64
+              # compressed 0.12 GB). User and database names are the ones the
+              # suites hard-code (`taurine` / `payments`); the password is a
+              # throwaway generated per run and masked before any use. The
+              # lab's seed SQL is mounted from the checked-out source so the
+              # fixtures cannot drift from the tests that read them. Ready =
+              # a real query over TCP as the real user (the init phase's
+              # temporary server listens on the socket only, so a TCP answer
+              # means the final server is up).
+              [[ -s "${GITHUB_WORKSPACE}/src/tools/db-lab/postgres/init/01-payments.sql" ]] || { echo 'postgres: the lab seed is missing from the source checkout' >&2; exit 1; }
+              pg_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${pg_pass}"
+              docker run -d --name dbx-postgres \
+                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
+                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
+                -p 127.0.0.1:15432:5432 \
+                -v "${GITHUB_WORKSPACE}/src/tools/db-lab/postgres/init:/docker-entrypoint-initdb.d:ro" \
+                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+              for _ in $(seq 1 60); do
+                if docker exec dbx-postgres psql -h 127.0.0.1 -U taurine -d payments -c 'select 1' >/dev/null 2>&1; then
+                  ready=1
+                  break
+                fi
+                sleep 3
+              done
+              if (( ready == 0 )); then
+                echo 'postgres: no authenticated TCP answer after 3 minutes; log tail below' >&2
+                docker logs dbx-postgres 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              version="$(docker exec dbx-postgres psql -h 127.0.0.1 -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
+              {
+                echo "TAURINE_TEST_PG=127.0.0.1:15432"
+                echo "TAURINE_TEST_PG_PASSWORD=${pg_pass}"
+                echo "PROOF_SERVER_VERSION=PostgreSQL ${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            mysql)
+              # MySQL 8.4 (the lab's `mysql` service), pinned by index digest
+              # (tag 8.4, resolved 2026-10-04; amd64 compressed 0.24 GB). The
+              # server generates its own TLS material at first start, which is
+              # exactly what the TLS regression history here needs: the
+              # engine's `live_mysql_tls` dials with TLS on. The root password
+              # is exported too, because MySQL refuses CREATE TRIGGER to an
+              # ordinary user while binary logging is on (two suites need it).
+              # Both passwords are per-run throwaways, masked first.
+              [[ -s "${GITHUB_WORKSPACE}/src/tools/db-lab/mysql/init/01-payments.sql" ]] || { echo 'mysql: the lab seed is missing from the source checkout' >&2; exit 1; }
+              my_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              my_root="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${my_pass}"
+              echo "::add-mask::${my_root}"
+              docker run -d --name dbx-mysql \
+                -e MYSQL_ROOT_PASSWORD="${my_root}" -e MYSQL_USER=taurine \
+                -e MYSQL_PASSWORD="${my_pass}" -e MYSQL_DATABASE=payments \
+                -p 127.0.0.1:13306:3306 \
+                -v "${GITHUB_WORKSPACE}/src/tools/db-lab/mysql/init:/docker-entrypoint-initdb.d:ro" \
+                mysql@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
+              for _ in $(seq 1 90); do
+                if docker exec -e MYSQL_PWD="${my_pass}" dbx-mysql mysql -h127.0.0.1 -P3306 -utaurine -Dpayments -e 'select 1' >/dev/null 2>&1; then
+                  ready=1
+                  break
+                fi
+                sleep 3
+              done
+              if (( ready == 0 )); then
+                echo 'mysql: no authenticated TCP answer after 4.5 minutes; log tail below' >&2
+                docker logs dbx-mysql 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              version="$(docker exec -e MYSQL_PWD="${my_pass}" dbx-mysql mysql -h127.0.0.1 -P3306 -utaurine -N -e 'select version()' 2>/dev/null | head -1)"
+              {
+                echo "TAURINE_TEST_MYSQL=127.0.0.1:13306"
+                echo "TAURINE_TEST_MYSQL_PASSWORD=${my_pass}"
+                echo "TAURINE_TEST_MYSQL_ROOT_PASSWORD=${my_root}"
+                echo "PROOF_SERVER_VERSION=MySQL ${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            mssql)
+              # SQL Server as the lab runs it: azure-sql-edge 1.0.7, pinned by
+              # index digest (resolved 2026-10-04; amd64 compressed 0.37 GB).
+              # Measured alternative, not used: mssql/server:2022-latest is
+              # 0.63 GB compressed, also under the cap; the lab's image is kept
+              # so this proof matches what the suites were written against.
+              # The image has no client, so the lab's own `mssql-init` sidecar
+              # (mssql-tools, pinned by digest, 0.10 GB) is the readiness gate:
+              # it logs in, creates `payments` and seeds it from the checked-out
+              # source, exiting 0 only once all of that happened. The SA
+              # password is a per-run throwaway that meets SQL Server's
+              # complexity rules (upper, lower, digit, symbol), masked first.
+              [[ -s "${GITHUB_WORKSPACE}/src/tools/db-lab/mssql/init.sh" ]] || { echo 'mssql: the lab init script is missing from the source checkout' >&2; exit 1; }
+              ms_pass="Aa1!$(head -c 14 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${ms_pass}"
+              export MSSQL_SA_PASSWORD="${ms_pass}"
+              docker run -d --name dbx-mssql \
+                -e ACCEPT_EULA=1 -e MSSQL_PID=Developer -e MSSQL_SA_PASSWORD \
+                -p 127.0.0.1:11433:1433 \
+                mcr.microsoft.com/azure-sql-edge@sha256:1dcc88d2d9e555d0addb0636648d0da033206978d7c5c4da044c904a0f06f58b
+              if docker run --rm --network host --platform linux/amd64 \
+                -e MSSQL_HOST='127.0.0.1,11433' -e MSSQL_SA_PASSWORD -e MSSQL_DATABASE=payments \
+                -v "${GITHUB_WORKSPACE}/src/tools/db-lab/mssql:/init:ro" \
+                --entrypoint /bin/bash \
+                mcr.microsoft.com/mssql-tools@sha256:62556500522072535cb3df2bb5965333dded9be47000473e9e0f84118e248642 \
+                /init/init.sh; then
+                ready=1
+              fi
+              if (( ready == 0 )); then
+                echo 'mssql: the init sidecar never got a login and a seeded database; log tail below' >&2
+                docker logs dbx-mssql 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              version="$(docker run --rm --network host --platform linux/amd64 -e MSSQL_SA_PASSWORD --entrypoint /bin/bash \
+                mcr.microsoft.com/mssql-tools@sha256:62556500522072535cb3df2bb5965333dded9be47000473e9e0f84118e248642 \
+                -c '/opt/mssql-tools/bin/sqlcmd -S 127.0.0.1,11433 -U sa -P "$MSSQL_SA_PASSWORD" -h -1 -W -Q "SET NOCOUNT ON; SELECT @@VERSION"' 2>/dev/null | head -1 | cut -c1-100 || true)"
+              {
+                echo "TAURINE_TEST_MSSQL=127.0.0.1:11433"
+                echo "TAURINE_TEST_MSSQL_PASSWORD=${ms_pass}"
+                echo "PROOF_SERVER_VERSION=${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            pgtls)
+              # The two PostgreSQL servers `taurine-db-postgres/tests/live_tls.rs`
+              # needs at once (the lab's `postgres-tls` and `postgres-plain`):
+              # one presenting a certificate for pg.taurine.test, one with
+              # ssl=off. Both from the same pinned image (postgres 17-alpine,
+              # index digest, 0.12 GB compressed). The certificate material
+              # (CA, leaf, a rogue CA) is minted per run by the source's own
+              # tools/db-lab/pgtls/generate.sh into the runner's checkout —
+              # git-ignored there, never committed, gone with the runner — and
+              # that script verifies the leaf chains to the CA, carries the
+              # SAN and EKU, and does not chain to the rogue CA. The lab's
+              # entrypoint copies the key into the container with the right
+              # ownership. Ready = a TLS session proven by pg_stat_ssl, and a
+              # plaintext session proven by `show ssl`.
+              lab="${GITHUB_WORKSPACE}/src/tools/db-lab/pgtls"
+              [[ -s "${lab}/generate.sh" && -s "${lab}/entrypoint.sh" ]] || { echo 'pgtls: the lab scripts are missing from the source checkout' >&2; exit 1; }
+              bash "${lab}/generate.sh" >/dev/null
+              for f in ca.crt rogue-ca.crt server.crt server.key; do
+                [[ -s "${lab}/${f}" ]] || { echo "pgtls: generate.sh did not produce ${f}" >&2; exit 1; }
+              done
+              pg_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${pg_pass}"
+              docker run -d --name dbx-pgtls \
+                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
+                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
+                -p 127.0.0.1:15433:5432 \
+                -v "${lab}:/pgtls-src:ro" \
+                --entrypoint /bin/sh \
+                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 \
+                /pgtls-src/entrypoint.sh -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
+              docker run -d --name dbx-pgplain \
+                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
+                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
+                -p 127.0.0.1:15434:5432 \
+                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 \
+                -c ssl=off
+              tls_ok=0
+              plain_ok=0
+              for _ in $(seq 1 60); do
+                if (( tls_ok == 0 )) && docker exec dbx-pgtls psql 'host=127.0.0.1 port=5432 user=taurine dbname=payments sslmode=require' -tAc 'select ssl from pg_stat_ssl where pid = pg_backend_pid()' 2>/dev/null | grep -qx t; then
+                  tls_ok=1
+                fi
+                if (( plain_ok == 0 )) && docker exec dbx-pgplain psql -h 127.0.0.1 -U taurine -d payments -tAc 'show ssl' 2>/dev/null | grep -qx off; then
+                  plain_ok=1
+                fi
+                if (( tls_ok == 1 && plain_ok == 1 )); then
+                  ready=1
+                  break
+                fi
+                sleep 3
+              done
+              if (( ready == 0 )); then
+                echo "pgtls: not ready after 3 minutes (tls=${tls_ok} plain=${plain_ok}); log tails below" >&2
+                docker logs dbx-pgtls 2>&1 | tail -20 >&2 || true
+                docker logs dbx-pgplain 2>&1 | tail -20 >&2 || true
+                exit 1
+              fi
+              version="$(docker exec dbx-pgtls psql -h 127.0.0.1 -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
+              {
+                echo "TAURINE_TEST_PG_TLS=127.0.0.1:15433"
+                echo "TAURINE_TEST_PG_PLAIN=127.0.0.1:15434"
+                echo "TAURINE_TEST_PG_TLS_CA=${lab}/ca.crt"
+                echo "TAURINE_TEST_PG_TLS_ROGUE_CA=${lab}/rogue-ca.crt"
+                echo "TAURINE_TEST_PG_PASSWORD=${pg_pass}"
+                echo "PROOF_SERVER_VERSION=PostgreSQL ${version} (tls + plain)"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            bastion)
+              # The SSH-tunnel proof: `taurine-app/tests/dbx_connect_live.rs`
+              # dials a PostgreSQL through the lab's key-only bastion. Three
+              # fixed facts the test hard-codes, reproduced here: the bastion
+              # listens on 127.0.0.1:14222, the database is the container named
+              # `taurine-db-lab-postgres-1` (its IP on the shared network is the
+              # tunnel target — unroutable from the host, so an answer proves
+              # the dial went through the bastion), and the client key and host
+              # public key are exported to tools/db-lab/bastion-keys/ in the
+              # checkout (git-ignored; minted per run by the lab's own init.sh,
+              # never committed). The bastion image is the lab's Dockerfile
+              # with its base pinned by digest (alpine 3.20, index digest,
+              # 3.6 MB compressed) and the lab's init.sh taken from the
+              # checked-out source; `apk add openssh-server` comes from Alpine's
+              # own package repository, the one unpinned input — recorded, not
+              # hidden. PostgreSQL is the same pinned image as the postgres arm.
+              lab="${GITHUB_WORKSPACE}/src/tools/db-lab"
+              [[ -s "${lab}/bastion/init.sh" ]] || { echo 'bastion: the lab init script is missing from the source checkout' >&2; exit 1; }
+              pg_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${pg_pass}"
+              docker network create dbx-lab-net
+              docker run -d --name taurine-db-lab-postgres-1 --network dbx-lab-net \
+                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
+                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
+                -p 127.0.0.1:15432:5432 \
+                -v "${lab}/postgres/init:/docker-entrypoint-initdb.d:ro" \
+                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+              ctx="${RUNNER_TEMP}/bastion-ctx"
+              mkdir -p "${ctx}"
+              cp "${lab}/bastion/Dockerfile" "${lab}/bastion/init.sh" "${ctx}/"
+              # The lab's own Dockerfile, with only its base image swapped for
+              # the digest-pinned one; fail if the base line was not the one
+              # expected, so the pin cannot silently stop applying.
+              sed -E -i 's#^FROM alpine:3\.20$#FROM alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc#' "${ctx}/Dockerfile"
+              grep -q '^FROM alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc$' "${ctx}/Dockerfile" \
+                || { echo 'bastion: the lab Dockerfile base is no longer alpine:3.20; re-resolve and re-pin it' >&2; exit 1; }
+              docker build -q -t dbx-lab-bastion "${ctx}"
+              docker volume create dbx-lab-bastion-keys >/dev/null
+              docker run -d --name dbx-lab-bastion --network dbx-lab-net \
+                -p 127.0.0.1:14222:22 \
+                -v dbx-lab-bastion-keys:/keys \
+                dbx-lab-bastion
+              for _ in $(seq 1 60); do
+                if docker exec dbx-lab-bastion sh -c 'test -s /keys/client_ed25519 && test -s /keys/bastion_host_ed25519.pub' 2>/dev/null \
+                  && docker exec taurine-db-lab-postgres-1 psql -h 127.0.0.1 -U taurine -d payments -c 'select 1' >/dev/null 2>&1 \
+                  && docker exec dbx-lab-bastion sh -c 'nc -z 127.0.0.1 22' 2>/dev/null; then
+                  ready=1
+                  break
+                fi
+                sleep 3
+              done
+              if (( ready == 0 )); then
+                echo 'bastion: keys, sshd and the database were not all ready after 3 minutes; log tails below' >&2
+                docker logs dbx-lab-bastion 2>&1 | tail -20 >&2 || true
+                docker logs taurine-db-lab-postgres-1 2>&1 | tail -20 >&2 || true
+                exit 1
+              fi
+              # Export the key material where the test reads it, owned by the
+              # runner user (the key is generated as root inside the container).
+              mkdir -p "${lab}/bastion-keys"
+              docker cp dbx-lab-bastion:/keys/client_ed25519 "${lab}/bastion-keys/client_ed25519"
+              docker cp dbx-lab-bastion:/keys/client_ed25519.pub "${lab}/bastion-keys/client_ed25519.pub"
+              docker cp dbx-lab-bastion:/keys/bastion_host_ed25519.pub "${lab}/bastion-keys/bastion_host_ed25519.pub"
+              sudo chown -R "$(id -u):$(id -g)" "${lab}/bastion-keys"
+              chmod 600 "${lab}/bastion-keys/client_ed25519"
+              version="$(docker exec taurine-db-lab-postgres-1 psql -h 127.0.0.1 -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
+              {
+                echo "TAURINE_TEST_PG=127.0.0.1:15432"
+                echo "TAURINE_TEST_PG_PASSWORD=${pg_pass}"
+                echo "PROOF_SERVER_VERSION=PostgreSQL ${version} behind an OpenSSH bastion (key-only)"
+              } >> "${GITHUB_ENV}"
+              ;;
+
             *)
               echo "Unsupported engine: ${ENGINE}" >&2
               exit 2
@@ -546,13 +861,54 @@ jobs:
             # Both tests in the file are the proof: the admin-surface run and
             # the refusal run, so no filter — the whole file runs.
             rocketmq)  target=rocketmq_live;  filter="" ;;
+            postgres|mysql|mssql|pgtls|bastion) target=""; filter="" ;;
             *) echo "Unsupported engine: ${ENGINE}" >&2; exit 2 ;;
           esac
+          log="${RUNNER_TEMP}/live-proof.log"
+          if [[ -z "${target}" ]]; then
+            # Main-engine arms: every suite in suites.txt, all of them run even
+            # after a failure so one report shows the whole picture. Two ways
+            # to fail, both final: a non-zero cargo exit, and — the rule
+            # scripts/check-db.sh exists for — any SKIPPED line. A gated
+            # driver test returns early and cargo counts it as passed, so a
+            # skip is an unrun test, not a proof.
+            : > "${log}"
+            : > "${RUNNER_TEMP}/suite-results.txt"
+            overall=0
+            while read -r pkg targets name; do
+              args=()
+              IFS=, read -ra tl <<< "${targets}"
+              for t in "${tl[@]}"; do args+=(--test "${t}"); done
+              [[ -n "${name:-}" ]] && args+=("${name}")
+              suite_log="${RUNNER_TEMP}/suite.log"
+              set +e
+              cargo test -p "${pkg}" "${args[@]}" -- --nocapture --test-threads=1 </dev/null >"${suite_log}" 2>&1
+              code=$?
+              set -e
+              {
+                echo "== ${pkg} ${targets} ${name:-}"
+                cat "${suite_log}"
+              } >> "${log}"
+              skips="$(grep -c 'SKIPPED' "${suite_log}" || true)"
+              passed="$(grep -E '^test result: ok\. [0-9]+ passed' "${suite_log}" | awk '{s+=$4} END{print s+0}')"
+              verdict=pass
+              if (( code != 0 )); then verdict="FAIL(exit ${code})"; overall=1; fi
+              if (( skips > 0 )); then verdict="FAIL(${skips} SKIPPED)"; overall=1; fi
+              if (( code == 0 && passed == 0 )); then verdict='FAIL(no test passed)'; overall=1; fi
+              echo "${verdict}: ${pkg} [${targets}] ${name:-} passed=${passed} skipped=${skips}" | tee -a "${RUNNER_TEMP}/suite-results.txt"
+              if (( skips > 0 )); then
+                echo "REFUSED: ${pkg} reported SKIPPED — an unrun test is not a pass; the lines were:" >&2
+                grep 'SKIPPED' "${suite_log}" | cut -c1-200 | head -10 >&2 || true
+              fi
+            done < "${RUNNER_TEMP}/suites.txt"
+            echo "${overall}" > "${RUNNER_TEMP}/lab-overall.txt"
+            exit "${overall}"
+          fi
           set +e
           filter_args=()
           [[ -n "${filter}" ]] && filter_args=("${filter}")
           cargo test -p taurine-db-conformance --test "${target}" "${filter_args[@]}" -- --nocapture \
-            >"${RUNNER_TEMP}/live-proof.log" 2>&1
+            >"${log}" 2>&1
           status=$?
           set -e
           echo "cargo test exited ${status}; sanitized report follows in the summary step"
@@ -600,18 +956,27 @@ jobs:
               informix)  echo '- Image: ibmcom/informix-developer-database:14.10.FC7W1DE (privileged, amd64)' ;;
               rocketmq)  echo '- Images: apache/rocketmq:5.3.2 (NameServer + broker, brokerIP1 pinned to 127.0.0.1)' ;;
               iris)      echo '- Image: containers.intersystems.com/intersystems/iris-community:2025.3 (pinned by digest, amd64; Atelier REST on the private web server)' ;;
+              postgres)  echo '- Image: postgres 17-alpine (pinned by digest); suites: conformance + taurine-db-postgres live + engine live_postgres' ;;
+              mysql)     echo '- Image: mysql 8.4 (pinned by digest); suites: conformance + taurine-db-mysql live + engine live_mysql_tls' ;;
+              mssql)     echo '- Image: azure-sql-edge 1.0.7 (pinned by digest, as the lab runs it); suites: conformance + taurine-db-mssql live' ;;
+              pgtls)     echo '- Images: postgres 17-alpine x2 (pinned by digest): ssl=on with a per-run certificate, and ssl=off' ;;
+              bastion)   echo '- Images: postgres 17-alpine and the lab bastion (alpine 3.20 base pinned by digest; apk openssh-server unpinned); suite: taurine-app dbx_connect_live' ;;
             esac
             echo "- Source token: revoked before any project command"
+            if [[ -s "${RUNNER_TEMP}/suite-results.txt" ]]; then
+              echo '- Suites (a SKIPPED line fails the arm):'
+              sed 's/^/  - /' "${RUNNER_TEMP}/suite-results.txt"
+            fi
             if [[ -s "${RUNNER_TEMP}/proof-images.txt" ]]; then
               echo '- Resolved images (container, digest-pinned reference):'
               sed 's/^/  - /' "${RUNNER_TEMP}/proof-images.txt"
             fi
             echo "- Runner: $(nproc) vCPU, $(free -m | awk '/^Mem:/{print $2}') MB RAM, $(df -BG --output=avail / | tail -1 | tr -d ' ') GB disk free after the run"
             echo
-            if [[ -z "${header}" ]]; then
+            if [[ -z "${header}" && "${ENGINE}" != "pgtls" && "${ENGINE}" != "bastion" ]]; then
               echo '**The suite produced no report** — the proof is not evidence either way.'
               echo
-            else
+            elif [[ -n "${header}" ]]; then
               echo "Suite report (sanitized — check titles only, never data values):"
               echo
               echo '```'
@@ -644,7 +1009,22 @@ jobs:
           } || true
           # Fail closed: a log without a report line proves nothing, exactly
           # like a report of nothing but skips.
-          [[ -n "${header}" && "${header}" == *", 0 failed, "* && "${header}" == *", 0 invalid"* ]]
+          case "${ENGINE}" in
+            pgtls|bastion)
+              # No conformance report here: the arm is the cargo suites
+              # themselves, judged by the run step's per-suite verdicts.
+              [[ "$(cat "${RUNNER_TEMP}/lab-overall.txt" 2>/dev/null || echo 1)" == "0" ]]
+              ;;
+            postgres|mysql|mssql)
+              # The conformance report must exist and be clean, and every
+              # suite must have passed with nothing skipped.
+              [[ -n "${header}" && "${header}" == *", 0 failed, "* && "${header}" == *", 0 invalid"* ]] \
+                && [[ "$(cat "${RUNNER_TEMP}/lab-overall.txt" 2>/dev/null || echo 1)" == "0" ]]
+              ;;
+            *)
+              [[ -n "${header}" && "${header}" == *", 0 failed, "* && "${header}" == *", 0 invalid"* ]]
+              ;;
+          esac
 
       # The job's own wall-clock time, shown next to its result; the timings job
       # tabulates it against a committed baseline.
