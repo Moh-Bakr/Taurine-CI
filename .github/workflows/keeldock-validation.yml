@@ -88,6 +88,7 @@ jobs:
           # Only the Ubuntu runner has a Docker daemon, so the Testcontainers suites
           # (including the extraction-fitness gates) are Linux-only evidence.
           - { concern: db-containers, platform: linux }
+          - { concern: apphost-cold-start, platform: linux }
     uses: ./.github/workflows/keeldock-validation-concern.yml  # zizmor: ignore[self-repository]
     secrets: inherit  # zizmor: ignore[secrets-inherit]
     with:
