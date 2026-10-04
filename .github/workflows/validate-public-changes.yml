@@ -187,7 +187,7 @@ jobs:
           # (by name, or by the scan-/e2e- prefix groups); every baseline key names a real
           # concern. A concern added to one place and forgotten in another fails here.
           full = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux']
-          concern_text = File.read('.github/workflows/linux-validation-concern.yml')
+          concern_text = File.read('.github/workflows/linux-validation-concern.yml', encoding: 'UTF-8')
           problems = []
           full.each do |name, spec|
             problems << "#{name}: no integer timeout in ci-matrix.json" unless spec['timeout'].is_a?(Integer)
