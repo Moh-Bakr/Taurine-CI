@@ -10,6 +10,11 @@ on:
         description: Exact 40-character commit SHA to validate from private Taurine
         required: true
         type: string
+      base_sha:
+        description: Optional base commit; when set, only the concerns the diff to source_sha affects run (a partial selection, which does not admit a merge)
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -36,77 +41,106 @@ jobs:
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          REQUESTED_BASE_SHA: ${{ inputs.base_sha }}
         run: |
           set -euo pipefail
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
             exit 1
           fi
+          if [[ -n "${REQUESTED_BASE_SHA}" && ! "${REQUESTED_BASE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'base_sha must be empty or a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
 
-  validate:
+  # The concern list lives in .github/ci-matrix.json (one table for the selector, this
+  # dispatcher and the result check). The reasons the concerns are split the way they are,
+  # kept from the old inline list:
+  # The Rust headless runner. It is the artifact CI pipelines outside
+  # Taurine actually execute, and until this concern existed nothing
+  # hosted compiled it: the CLI's 222 lines of report tests were
+  # reachable only from a contributor's laptop.
+  #
+  # It is its own concern rather than a step in `contracts` because it
+  # shares nothing with the JavaScript lanes — no npm install, no
+  # node_modules — and folding it in would make every contracts run pay
+  # for a Rust toolchain it does not use.
+  # The rest of the Rust crate tests. Until these existed `cargo test`
+  # ran hosted for `taurine-cli` alone; every other crate's unit and
+  # integration tests — taurine-core's included — ran only on a
+  # contributor's machine. `cargo test --workspace` is deliberately not
+  # one concern: its cold compile is the whole product plus DuckDB,
+  # openvpn3 and webkit2gtk, so one slow or broken corner would hold
+  # every other crate's result hostage. The split follows the
+  # workspace's own seams and its native dependencies, so each concern
+  # installs only what its crates link:
+  # - rust-domain: storage, sync, scripting, git and transport crates
+  #   (the core the command tier is built on);
+  # - rust-db: every `taurine-db*` crate, offline — the live conformance
+  #   targets skip without a server and stay with live-proofs.yml;
+  # - rust-net: the dialer, verifier and openvpn3 shim (C++);
+  # - rust-app: the Tauri command tier and both shells (webkit2gtk);
+  # - rust-dbx: the excluded `dbx-core`/`dbx-mongo-shell` trees, each on
+  #   its own lock.
+  # The concern workflow names, with the measured reason, the two test
+  # runs no concern makes (`dbx-sqlite-worker`, `vendor/boringtun`
+  # standalone), and fails `rust-domain` if a workspace member is added
+  # without being assigned to one of these.
+  # Browser tiers. Until these existed the Playwright suite ran only on
+  # a contributor's laptop, so `verification.md`'s "hosted desktop
+  # concern with pointer and keyboard coverage" had no runner behind it.
+  # The `visual` project is deliberately absent: its five baselines are
+  # darwin-only, so a Linux runner would write new ones and fail for a
+  # reason that is not a regression.
+  # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+  plan:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     needs: validate-input
+    name: Plan the full concern list
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read the full concern list
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "matrix=$(jq -c '{concern: (.concerns.linux | keys_unsorted)}' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+
+  # Only with a base_sha: a source-bearing job (partial clone, history only) decides which
+  # concerns the change affects. Without one this job is skipped and the full list runs.
+  select:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.base_sha != ''
+    needs: validate-input
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.
+    uses: ./.github/workflows/select-concerns.yml  # zizmor: ignore[self-repository]
+    # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected callers.
+    secrets: inherit  # zizmor: ignore[secrets-inherit]
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      base_sha: ${{ inputs.base_sha }}
+      platform: linux
+
+  validate:
+    permissions:
+      contents: read
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}
+    needs: [validate-input, plan, select]
     strategy:
       fail-fast: false
-      matrix:
-        concern:
-          - contracts
-          - frontend-build-budget
-          - desktop-shard-1
-          - desktop-shard-2
-          - desktop-quality
-          - mobile-quality
-          # The Rust headless runner. It is the artifact CI pipelines outside
-          # Taurine actually execute, and until this concern existed nothing
-          # hosted compiled it: the CLI's 222 lines of report tests were
-          # reachable only from a contributor's laptop.
-          #
-          # It is its own concern rather than a step in `contracts` because it
-          # shares nothing with the JavaScript lanes — no npm install, no
-          # node_modules — and folding it in would make every contracts run pay
-          # for a Rust toolchain it does not use.
-          - taurine-cli
-          # The rest of the Rust crate tests. Until these existed `cargo test`
-          # ran hosted for `taurine-cli` alone; every other crate's unit and
-          # integration tests — taurine-core's included — ran only on a
-          # contributor's machine. `cargo test --workspace` is deliberately not
-          # one concern: its cold compile is the whole product plus DuckDB,
-          # openvpn3 and webkit2gtk, so one slow or broken corner would hold
-          # every other crate's result hostage. The split follows the
-          # workspace's own seams and its native dependencies, so each concern
-          # installs only what its crates link:
-          # - rust-domain: storage, sync, scripting, git and transport crates
-          #   (the core the command tier is built on);
-          # - rust-db: every `taurine-db*` crate, offline — the live conformance
-          #   targets skip without a server and stay with live-proofs.yml;
-          # - rust-net: the dialer, verifier and openvpn3 shim (C++);
-          # - rust-app: the Tauri command tier and both shells (webkit2gtk);
-          # - rust-dbx: the excluded `dbx-core`/`dbx-mongo-shell` trees, each on
-          #   its own lock.
-          # The concern workflow names, with the measured reason, the two test
-          # runs no concern makes (`dbx-sqlite-worker`, `vendor/boringtun`
-          # standalone), and fails `rust-domain` if a workspace member is added
-          # without being assigned to one of these.
-          - rust-domain
-          - rust-db
-          - rust-net
-          - rust-app
-          - rust-dbx
-          # Browser tiers. Until these existed the Playwright suite ran only on
-          # a contributor's laptop, so `verification.md`'s "hosted desktop
-          # concern with pointer and keyboard coverage" had no runner behind it.
-          # The `visual` project is deliberately absent: its five baselines are
-          # darwin-only, so a Linux runner would write new ones and fail for a
-          # reason that is not a regression.
-          - e2e-critical
-          - e2e-a11y
-          - e2e-regression-1
-          - e2e-regression-2
-          - e2e-regression-3
-          - e2e-regression-4
-    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+      matrix: ${{ fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix) }}
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]
     # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected dispatchers.
     secrets: inherit  # zizmor: ignore[secrets-inherit]

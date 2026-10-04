@@ -1,0 +1,215 @@
+name: Select concerns
+description: >
+  Decides which concerns a dispatch needs. Run after the private source has been
+  checked out (with history) and its token revoked: it reads only the checkout's
+  git history and Cargo manifests, never the network. With no base SHA, or when
+  anything build-wide changed, or a changed path matches no rule, the selection is
+  full. Otherwise it is the concerns whose paths, or whose crates (through a reverse
+  walk of path dependencies), are affected, plus the always-on ones. Documentation
+  only selects the always-on concerns. A partial selection never admits a merge.
+
+inputs:
+  platform:
+    description: Platform key in ci-matrix.json
+    required: true
+  source-sha:
+    description: The exact source SHA that was checked out
+    required: true
+  base-sha:
+    description: Base commit to diff against (empty means full)
+    required: false
+    default: ''
+  matrix-file:
+    description: Path of ci-matrix.json in the public tree
+    required: false
+    default: .github/ci-matrix.json
+  path:
+    description: Directory, relative to the workspace, holding the private source
+    required: false
+    default: src
+
+outputs:
+  matrix:
+    description: JSON object with the selected concern list
+    value: ${{ steps.select.outputs.matrix }}
+  selection:
+    description: full or partial
+    value: ${{ steps.select.outputs.selection }}
+  reason:
+    description: Why this selection was made
+    value: ${{ steps.select.outputs.reason }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the selection
+      id: select
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        PLATFORM: ${{ inputs.platform }}
+        SOURCE_SHA: ${{ inputs.source-sha }}
+        BASE_SHA: ${{ inputs.base-sha }}
+        MATRIX_FILE: ${{ inputs.matrix-file }}
+        SOURCE_PATH: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        selector="${RUNNER_TEMP}/concern_selector.py"
+        cat > "${selector}" <<'TCI_CONCERN_SELECTOR'
+        import fnmatch, json, os, re, subprocess, sys, tomllib
+
+        def glob_to_re(pattern):
+            out, i = '', 0
+            while i < len(pattern):
+                c = pattern[i]
+                if pattern.startswith('**/', i):
+                    out += '(?:.*/)?'; i += 3
+                elif pattern.startswith('**', i):
+                    out += '.*'; i += 2
+                elif c == '*':
+                    out += '[^/]*'; i += 1
+                elif c == '?':
+                    out += '[^/]'; i += 1
+                else:
+                    out += re.escape(c); i += 1
+            return re.compile('^' + out + '$')
+
+        def matches(path, patterns):
+            return any(glob_to_re(p).match(path) for p in patterns)
+
+        def git(src, *args):
+            return subprocess.run(['git', '-C', src, *args], check=True, capture_output=True, text=True).stdout
+
+        def discover_packages(src):
+            """name -> dir (relative, posix); path-dependency edges as dir -> set(dir)."""
+            manifests = [p for p in git(src, 'ls-files', '--', '*Cargo.toml').split('\n') if p.endswith('Cargo.toml')]
+            by_dir, edges = {}, {}
+            parsed = {}
+            for m in manifests:
+                try:
+                    with open(os.path.join(src, m), 'rb') as f:
+                        parsed[m] = tomllib.load(f)
+                except (OSError, tomllib.TOMLDecodeError):
+                    continue
+                d = os.path.dirname(m)
+                pkg = parsed[m].get('package', {}).get('name')
+                if pkg:
+                    by_dir[d] = pkg
+            def dep_tables(doc):
+                for key in ('dependencies', 'dev-dependencies', 'build-dependencies'):
+                    yield doc.get(key, {})
+                for tgt in doc.get('target', {}).values():
+                    for key in ('dependencies', 'dev-dependencies', 'build-dependencies'):
+                        yield tgt.get(key, {})
+            for m, doc in parsed.items():
+                d = os.path.dirname(m)
+                if d not in by_dir:
+                    continue
+                for table in dep_tables(doc):
+                    for spec in table.values():
+                        if isinstance(spec, dict) and 'path' in spec:
+                            target = os.path.normpath(os.path.join(d, spec['path'])).replace(os.sep, '/')
+                            if target == '.':
+                                target = ''
+                            if target in by_dir:
+                                edges.setdefault(d, set()).add(target)
+            return by_dir, edges
+
+        def owning_dir(path, by_dir):
+            best = None
+            for d in by_dir:
+                if (d == '' or path == d or path.startswith(d + '/')) and (best is None or len(d) > len(best)):
+                    best = d
+            return best
+
+        def select(cfg, platform, changed, by_dir, edges):
+            concerns = cfg['concerns'][platform]
+            allc = list(concerns)
+            rules = cfg['rules']
+            always = [c for c, s in concerns.items() if s.get('always')]
+            def full(reason): return allc, 'full', reason
+            if len(changed) > rules['max_changed_files_before_full']:
+                return full(f"{len(changed)} changed files exceed {rules['max_changed_files_before_full']}")
+            for p in changed:
+                if matches(p, rules['full_if_any_changed']):
+                    return full('a build-wide input changed')
+            if all(matches(p, rules['docs_only']) for p in changed):
+                return always, 'partial', 'documentation only'
+            selected = set(always)
+            changed_dirs, unknown = set(), []
+            excluded = cfg.get('excluded_trees', {})
+            for p in changed:
+                if matches(p, rules['docs_only']):
+                    continue
+                hit = False
+                for c, spec in concerns.items():
+                    if matches(p, spec.get('paths', [])):
+                        selected.add(c); hit = True
+                for tree, targets in excluded.items():
+                    if p == tree or p.startswith(tree + '/'):
+                        selected.update(t for t in targets if t in concerns); hit = True
+                d = owning_dir(p, by_dir)
+                if d is not None and d != '':
+                    changed_dirs.add(d); hit = True
+                if not hit:
+                    unknown.append(p)
+            if unknown:
+                return full('a changed path matches no rule')
+            # reverse closure over path dependencies
+            reverse = {}
+            for src_dir, targets in edges.items():
+                for t in targets:
+                    reverse.setdefault(t, set()).add(src_dir)
+            affected, stack = set(changed_dirs), list(changed_dirs)
+            while stack:
+                cur = stack.pop()
+                for dep in reverse.get(cur, ()):
+                    if dep not in affected:
+                        affected.add(dep); stack.append(dep)
+            for d in affected:
+                name = by_dir[d]
+                owners = set()
+                for c, spec in concerns.items():
+                    if name in spec.get('rust_packages', []):
+                        owners.add(c)
+                    glob = spec.get('rust_package_glob')
+                    if glob and fnmatch.fnmatch(name, glob):
+                        owners.add(c)
+                    for tree in spec.get('excluded_trees', []):
+                        if d == tree or d.startswith(tree + '/'):
+                            owners.add(c)
+                if not owners:
+                    return full('a crate belongs to no concern')
+                selected |= owners
+            ordered = [c for c in allc if c in selected]
+            return ordered, 'partial', f"{len(changed)} changed file(s)"
+
+        def main():
+            matrix_file, src, source_sha, base_sha, platform, out = sys.argv[1:7]
+            cfg = json.load(open(matrix_file))
+            allc = list(cfg['concerns'][platform])
+            result = (allc, 'full', 'no base SHA given')
+            if base_sha:
+                try:
+                    subprocess.run(['git', '-C', src, 'merge-base', '--is-ancestor', base_sha, source_sha], check=True)
+                    ancestor = True
+                except subprocess.CalledProcessError:
+                    ancestor = False
+                if not ancestor:
+                    result = (allc, 'full', 'base SHA is not an ancestor of the source SHA')
+                else:
+                    changed = [p for p in git(src, 'diff', '--no-renames', '--name-only', base_sha, source_sha).split('\n') if p]
+                    by_dir, edges = discover_packages(src)
+                    result = select(cfg, platform, changed, by_dir, edges)
+            concerns, selection, reason = result
+            with open(out, 'a') as f:
+                f.write('matrix=' + json.dumps({'concern': concerns}, separators=(',', ':')) + '\n')
+                f.write('selection=' + selection + '\n')
+                f.write('reason=' + reason + '\n')
+            print(f'selection: {selection} ({reason}); {len(concerns)} of {len(allc)} concerns')
+            print('selected: ' + ', '.join(concerns))
+
+        if __name__ == '__main__':
+            main()
+        TCI_CONCERN_SELECTOR
+        python3 "${selector}" "${MATRIX_FILE}" "${SOURCE_PATH}" "${SOURCE_SHA}" "${BASE_SHA}" "${PLATFORM}" "${GITHUB_OUTPUT}" | tee -a "${GITHUB_STEP_SUMMARY}"

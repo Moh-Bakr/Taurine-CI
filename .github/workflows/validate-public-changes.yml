@@ -165,6 +165,27 @@ jobs:
           [[ "${count}" -gt 0 ]] || { echo 'No sanitizer expressions were found to test' >&2; exit 1; }
           echo "sanitizer fixtures: ${count} expressions checked"
 
+      # The concern table (.github/ci-matrix.json) drives the Linux dispatcher's matrix and
+      # the selector; the result check lists the concerns it expects. They must be the same
+      # set, so a concern added to one cannot be silently missing from the verdict.
+      - name: Check the concern table against the dispatcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby <<'RUBY'
+          require 'json'
+          require 'yaml'
+          table = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux'].keys.sort
+          wf = YAML.safe_load(File.read('.github/workflows/linux-validation.yml'), aliases: false)
+          step = wf['jobs']['result']['steps'].find { |st| st['uses'].to_s == './.github/actions/run-result' }
+          expected = JSON.parse(step['with']['expected-concerns']).sort
+          if table != expected
+            warn "ci-matrix.json and the Linux result check disagree: only in the table #{table - expected}, only in the result check #{expected - table}"
+            exit 1
+          end
+          puts "concern table: #{table.length} Linux concerns match the result check"
+          RUBY
+
       - name: Enforce immutable reviewed Actions and safe workflow features
         shell: bash
         run: |
@@ -291,6 +312,8 @@ jobs:
           protected_source_workflows=(
             ".github/workflows/source-read.yml"
             ".github/workflows/linux-validation-concern.yml"
+            # Reusable and source-bearing: selects concerns from the private diff.
+            ".github/workflows/select-concerns.yml"
             ".github/workflows/macos-validation.yml"
             ".github/workflows/windows-validation-concern.yml"
             ".github/workflows/android-validation.yml"
@@ -307,6 +330,7 @@ jobs:
           reusable_protected_workflows=(
             ".github/workflows/windows-validation-concern.yml"
             ".github/workflows/linux-validation-concern.yml"
+            ".github/workflows/select-concerns.yml"
             ".github/workflows/keeldock-validation-concern.yml"
           )
           protected_dispatch_workflows=(
@@ -362,6 +386,8 @@ jobs:
                 ./.github/actions/node-setup) ;;
                 ./.github/actions/run-result) ;;
                 ./.github/workflows/linux-validation-concern.yml) ;;
+                ./.github/workflows/select-concerns.yml) ;;
+                ./.github/actions/select-concerns) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;
                 *)

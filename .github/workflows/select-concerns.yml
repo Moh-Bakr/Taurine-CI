@@ -1,0 +1,83 @@
+name: Select concerns (protected, reusable)
+
+# Decides which concerns a dispatch needs, from the diff between a base commit and the
+# exact source commit. Source-bearing, so it follows the same rules as every protected
+# job: the private source is checked out with a partial clone (history and trees, no
+# file contents beyond the working tree), the token is revoked before anything else runs,
+# and nothing but concern names, a selection word and a reason leaves the job. The
+# selector itself is a public script that reads only the checkout's git history and
+# Cargo manifests.
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to validate from private Taurine
+        required: true
+        type: string
+      base_sha:
+        description: Base commit to diff against
+        required: true
+        type: string
+      platform:
+        description: Platform key in ci-matrix.json
+        required: true
+        type: string
+    outputs:
+      matrix:
+        description: JSON object with the selected concern list
+        value: ${{ jobs.select.outputs.matrix }}
+      selection:
+        description: full or partial
+        value: ${{ jobs.select.outputs.selection }}
+      reason:
+        description: Why this selection was made
+        value: ${{ jobs.select.outputs.reason }}
+
+permissions: {}
+
+env:
+  SOURCE_REPOSITORY_ID: '1330267721'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: Taurine
+
+jobs:
+  select:
+    permissions:
+      contents: read
+    name: Select concerns
+    environment: source-read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.selection.outputs.matrix }}
+      selection: ${{ steps.selection.outputs.selection }}
+      reason: ${{ steps.selection.outputs.reason }}
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the exact private source SHA with its history
+        id: verified-source
+        # Kept as ./ : the policy matches this exact form for the private-source action.
+        uses: ./.github/actions/source-checkout  # zizmor: ignore[self-repository]
+        with:
+          source-sha: ${{ inputs.source_sha }}
+          app-client-id: ${{ vars.SOURCE_READER_APP_ID }}
+          app-private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          repository-id: ${{ env.SOURCE_REPOSITORY_ID }}
+          repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
+          fetch-depth: '0'
+          filter: blob:none
+
+      - name: Compute the selection
+        id: selection
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/select-concerns  # zizmor: ignore[self-repository]
+        with:
+          platform: ${{ inputs.platform }}
+          source-sha: ${{ inputs.source_sha }}
+          base-sha: ${{ inputs.base_sha }}
