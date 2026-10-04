@@ -546,8 +546,11 @@ jobs:
               # suites (sqlite, duckdb, turso, the recorded fixtures, the
               # falsification and transfer runs). Only the conformance suite's
               # live targets need a server, and they skip without one.
-              run_deferred rust-db-tests \
-                cargo test --locked --no-fail-fast --package 'taurine-db*'
+              db_packages=()
+              while IFS= read -r db_package; do
+                db_packages+=("--package=${db_package}")
+              done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
+              rust_tests rust-db-tests "${db_packages[@]}"
               ;;
             rust-net)
               # The dialer, the egress verifier and the vendored openvpn3 shim.
@@ -561,8 +564,7 @@ jobs:
               # tests. Tauri's `test` feature drives the commands through its
               # mock runtime, so no display or WebView process is started; the
               # webkit2gtk install above is only what the crates link.
-              run_deferred rust-app-tests \
-                cargo test --locked --no-fail-fast "${rust_app_packages[@]/#/--package=}"
+              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
               ;;
             rust-dbx)
               # The trees the root manifest excludes from the workspace, each

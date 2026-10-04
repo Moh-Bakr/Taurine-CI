@@ -62,6 +62,13 @@ runs:
           cargo_sanitize "$1" | awk '
             /^---- .* (stdout|stderr) ----$/ { in_output = 1; next }
             /^failures:$/ { in_output = 0; next }
+            # cargo-nextest: a failing test is named on its FAIL line (published); its
+            # captured output between the STDOUT/STDERR markers is dropped whole, until the
+            # next result line, separator or the summary (published: counts only).
+            /^[[:space:]]+(FAIL|SIGABRT|SIGSEGV|TIMEOUT|LEAK) \[/ { in_output = 0; print; next }
+            /^--- (STDOUT|STDERR):/ { in_output = 1; next }
+            /^[[:space:]]*Summary \[/ { in_output = 0; print; next }
+            /^-{10,}$/ { in_output = 0; next }
             in_output { next }
             /^warning: / { block = "warning"; pending = ""; next }
             /^error\[E[0-9]+\]: / { block = "error"; pending = ""; print; next }
@@ -92,7 +99,7 @@ runs:
           elif grep -qE 'signal: 9|SIGKILL' "${log}"; then echo 'a process was killed (likely memory exhaustion)'
           elif grep -qE '0xc0000139|STATUS_ENTRYPOINT_NOT_FOUND|0xc0000135|STATUS_DLL_NOT_FOUND|Library not loaded' "${log}"; then echo 'a test binary could not start (missing entry point, DLL or dynamic library)'
           elif grep -qE '0xc00000fd|STATUS_STACK_OVERFLOW|has overflowed its stack' "${log}"; then echo 'a test binary overflowed its stack'
-          elif grep -qE 'test result: FAILED|^error: test failed|^error: [0-9]+ targets? failed' "${log}"; then echo 'test failure'
+          elif grep -qE 'test result: FAILED|^error: test failed|^error: [0-9]+ targets? failed|^[[:space:]]+(FAIL|SIGABRT|SIGSEGV|TIMEOUT) \[|error: test run failed' "${log}"; then echo 'test failure'
           elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
           elif grep -qE 'failed to (download|select|get|load|parse|fetch)' "${log}"; then echo 'dependency download or resolution failure'
           else echo 'command returned non-zero'

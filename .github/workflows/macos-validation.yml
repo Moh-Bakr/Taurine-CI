@@ -464,8 +464,11 @@ jobs:
               # `#[cfg(unix)]` socket paths (mongo, mysql, sidecar, engine) that Linux
               # also takes and macOS-only linking of its bundled C (sqlite, duckdb,
               # libsql), which only a macOS compile proves.
-              run_deferred rust-db-tests \
-                cargo test --locked --no-fail-fast --package 'taurine-db*'
+              db_packages=()
+              while IFS= read -r db_package; do
+                db_packages+=("--package=${db_package}")
+              done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
+              rust_tests rust-db-tests "${db_packages[@]}"
               ;;
             rust-net)
               # The dialer, the egress verifier and the conformance suites. The latter
@@ -488,8 +491,7 @@ jobs:
               # Tauri's `test` feature drives the commands through its mock runtime, so
               # no window or WebView process is started; AppKit and WKWebView are what
               # the crates link.
-              run_deferred rust-app-tests \
-                cargo test --locked --no-fail-fast "${rust_app_packages[@]/#/--package=}"
+              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
               ;;
             *)
               echo "Unsupported macOS Rust concern: ${CONCERN}" >&2

@@ -69,7 +69,13 @@ runs:
               # a filter that matches no target, a crate whose tests are all ignored). Sum the
               # executed tests over every `test result:` line (passed + failed); fewer than one
               # fails the sub-step. The count is a number, so it is safe to publish.
-              executed="$(tr -d '\r' <"${log}" | awk '/^test result: / { for (i = 1; i <= NF; i++) { if ($i == "passed;" || $i == "failed;") n += $(i - 1) } } END { print n + 0 }')"
+              # `cargo test` prints `test result: ok. N passed; M failed; ...` per target;
+              # cargo-nextest prints one `Summary [..] N tests run: ...` line.
+              executed="$(tr -d '\r' <"${log}" | awk '/^test result: / { for (i = 1; i <= NF; i++) { if ($i == "passed;" || $i == "failed;") n += $(i - 1) } } /Summary \[/ { for (i = 1; i < NF; i++) { if ($i == "tests" && $(i + 1) == "run:") n += $(i - 1) } } END { print n + 0 }')"
+              flaky="$(tr -d '\r' <"${log}" | grep -c ' FLAKY ' || true)"
+              if [[ "${flaky}" -gt 0 ]]; then
+                echo "::warning title=flaky tests::${label}: ${flaky} test(s) passed only on retry"
+              fi
               if [[ "${executed}" -lt 1 ]]; then
                 echo "${label}: failed (no tests were executed; a test run that runs nothing proves nothing)" >&2
                 exit 1
@@ -161,6 +167,21 @@ runs:
           if [[ "${deferred_failed}" -ne 0 ]]; then
             echo "${CONCERN}: failed (one or more sub-steps failed; each is listed above)" >&2
             exit 1
+          fi
+        }
+
+        # One place that decides how a crate-test sub-step runs. With cargo-nextest installed
+        # and the source carrying a nextest profile named `ci`, the tests run under nextest
+        # (retries and a flaky report come from that profile) and the doctests, which nextest
+        # does not run, follow as a separate cargo test --doc sub-step. Otherwise it is plain
+        # cargo test, exactly as before. Usage: rust_tests <label> <cargo package args...>
+        rust_tests() {
+          local label="$1"; shift
+          if command -v cargo-nextest >/dev/null 2>&1 && [[ -f .config/nextest.toml ]]; then
+            run_deferred "${label}" cargo nextest run --locked --profile ci --no-fail-fast ${NEXTEST_PARTITION:+--partition "${NEXTEST_PARTITION}"} "$@"
+            run_deferred "${label%-tests}-doctests" cargo test --locked --doc --no-fail-fast "$@"
+          else
+            run_deferred "${label}" cargo test --locked --no-fail-fast "$@"
           fi
         }
         TCI_REPORT_LIBRARY

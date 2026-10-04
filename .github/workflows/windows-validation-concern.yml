@@ -491,8 +491,11 @@ jobs:
               # Every `taurine-db*` crate, which on Windows includes the `#[cfg(windows)]`
               # integrated-authentication arm of taurine-db-mssql (tiberius' `winauth`
               # feature) that no other platform compiles.
-              run_deferred rust-db-tests \
-                cargo test --locked --no-fail-fast --package 'taurine-db*'
+              db_packages=()
+              while IFS= read -r db_package; do
+                db_packages+=("--package=${db_package}")
+              done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
+              rust_tests rust-db-tests "${db_packages[@]}"
               ;;
             rust-net)
               # The dialer, the egress verifier, the userspace WireGuard conformance
@@ -526,8 +529,7 @@ jobs:
               # The command tier both shells call and the two shells' own unit tests.
               # Tauri's `test` feature drives the commands through its mock runtime, so
               # no window or WebView2 process is started.
-              run_deferred rust-app-tests \
-                cargo test --locked --no-fail-fast "${rust_app_packages[@]/#/--package=}"
+              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
               ;;
             *)
               echo "Unsupported Windows Rust concern: ${CONCERN}" >&2
