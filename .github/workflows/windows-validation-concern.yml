@@ -110,53 +110,15 @@ jobs:
       # `npm ci` runs, as the Linux ones do. They still need the vendor fetch
       # (their own step below): the workspace root path-depends on
       # vendor/boringtun, and no cargo command loads without it.
-      - name: Set up the pinned Node.js release
+      - name: Set up Node.js and install the locked JavaScript dependencies
         if: ${{ !startsWith(inputs.concern, 'rust-') }}
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
-          node-version: 22.14.0
-
-      - name: Install locked JavaScript dependencies
-        if: ${{ !startsWith(inputs.concern, 'rust-') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          run_quiet() {
-            local label="$1"
-            shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              local reason='command returned non-zero'
-              if grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
-                reason='missing command'
-              elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
-                reason='missing dependency or file'
-              elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then
-                reason='TypeScript compilation failure'
-              elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
-                reason='memory exhaustion'
-              elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
-                reason='pinned vendor fetch or verification failure'
-              elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
-                reason='test failure'
-              fi
-              echo "${label}: failed (${reason}; detailed output withheld)" >&2
-              if [[ "${label}" == desktop-tests-* || "${label}" == mobile-tests || "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
-                sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#([A-Za-z]:)?\\.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
-                  strip_excerpts |
-                  grep -Ei '(FAIL|PASS|Test Files|Tests|Snapshots|Time|Assertion|Error:|expected|received|timed out|unhandled|ENOENT|EACCES|EPERM|not ok)' |
-                  head -20 >&2 || true
-              fi
-              exit 1
-            fi
-          }
-          run_quiet npm-root npm ci --include=optional --ignore-scripts
-          run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
-          run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
+          root: true
+          desktop: true
+          mobile: true
+          vendor-fetch: false
 
       - name: Set up the Rust toolchain and native dependencies
         if: ${{ startsWith(inputs.concern, 'rust-') }}

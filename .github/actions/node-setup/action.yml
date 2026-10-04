@@ -1,0 +1,91 @@
+name: Node.js and locked JavaScript dependencies
+description: >
+  Sets up the pinned Node.js release and installs the locked JavaScript
+  dependencies of the private source (root, desktop and mobile workspaces, each
+  optional) and, when asked, fetches the pinned vendored sources. Install scripts
+  never run (--ignore-scripts); optional dependencies are included so the platform
+  binaries of the build tools are present. A failure publishes only a fixed
+  one-line reason; the install output stays on the runner.
+
+inputs:
+  node-version:
+    description: Exact Node.js release
+    required: false
+    default: 22.14.0
+  root:
+    description: Install the root workspace (true or false)
+    required: false
+    default: 'true'
+  desktop:
+    description: Install taurine-desktop (true or false)
+    required: false
+    default: 'true'
+  mobile:
+    description: Install taurine-mobile (true or false)
+    required: false
+    default: 'true'
+  vendor-fetch:
+    description: Fetch and verify the pinned vendored sources (true or false)
+    required: false
+    default: 'false'
+  path:
+    description: Directory, relative to the workspace, holding the private source
+    required: false
+    default: src
+
+runs:
+  using: composite
+  steps:
+    - name: Set up the pinned Node.js release
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install locked JavaScript dependencies
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        INSTALL_ROOT: ${{ inputs.root }}
+        INSTALL_DESKTOP: ${{ inputs.desktop }}
+        INSTALL_MOBILE: ${{ inputs.mobile }}
+        FETCH_VENDOR: ${{ inputs.vendor-fetch }}
+      run: |
+        set -euo pipefail
+        run_quiet() {
+          local label="$1"; shift
+          local log="${RUNNER_TEMP}/${label}.log"
+          if "$@" >"${log}" 2>&1; then
+            echo "${label}: passed"
+          else
+            local reason='command returned non-zero'
+            if grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
+              reason='memory exhaustion'
+            elif grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
+              reason='missing command'
+            elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
+              reason='missing dependency or file'
+            elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
+              reason='pinned vendor fetch or verification failure'
+            elif grep -Eiq 'ETIMEDOUT|ECONNRESET|EAI_AGAIN|network' "${log}"; then
+              reason='network failure while installing'
+            fi
+            echo "${label}: failed (${reason}; detailed output withheld)" >&2
+            exit 1
+          fi
+        }
+        if [[ "${INSTALL_ROOT}" == true ]]; then
+          run_quiet npm-root npm ci --include=optional --ignore-scripts
+        fi
+        if [[ "${INSTALL_DESKTOP}" == true ]]; then
+          run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
+        fi
+        if [[ "${INSTALL_MOBILE}" == true ]]; then
+          run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
+        fi
+        # The private workspace's Cargo.toml patches boringtun to a locally fetched,
+        # reviewed tree. vendor/ is intentionally ignored, so every hosted checkout must
+        # materialise it before Cargo can load the workspace metadata. `fetch` verifies
+        # each download against the pinned checksums.
+        if [[ "${FETCH_VENDOR}" == true ]]; then
+          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
+        fi
