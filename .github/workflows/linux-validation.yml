@@ -18,6 +18,11 @@ on:
         options:
           - full
           - quick
+      visual:
+        description: Also run the Playwright visual tier (e2e-visual). Off by default; turn on once the Linux baselines are committed in the source
+        required: false
+        default: false
+        type: boolean
       base_sha:
         description: Optional base commit; when set, only the concerns the diff to source_sha affects run (a partial selection, which does not admit a merge)
         required: false
@@ -112,6 +117,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       timeouts: ${{ steps.plan.outputs.timeouts }}
+      expected: ${{ steps.plan.outputs.expected }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,16 +130,29 @@ jobs:
         shell: bash
         env:
           PROFILE: ${{ inputs.profile }}
+          VISUAL: ${{ inputs.visual }}
         run: |
           set -euo pipefail
           # profile=quick drops the concerns the table marks full_only (the slowest ones);
           # the result job then lists them as not selected and the verdict is partial.
           if [[ "${PROFILE}" == quick ]]; then
-            filter='.concerns.linux | to_entries | map(select(.value.full_only != true)) | map(.key)'
+            filter='.concerns.linux | to_entries | map(select(.value.full_only != true)) | map(select(.value.opt_in == null))'
           else
-            filter='.concerns.linux | keys_unsorted'
+            filter='.concerns.linux | to_entries | map(select(.value.opt_in == null))'
           fi
-          echo "matrix=$(jq -c "{concern: (${filter})}" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+          # An opt-in concern (the visual tier) joins the list only when its input is true.
+          if [[ "${VISUAL}" == true ]]; then
+            filter="(${filter}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"visual\")))"
+          fi
+          echo "matrix=$(jq -c "{concern: ((${filter}) | map(.key))}" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+          # The Result job expects every non-opt-in concern, plus the opt-in ones enabled above,
+          # so an enabled visual tier that fails (or is skipped) shows in the verdict while a
+          # disabled one is not counted.
+          expected='.concerns.linux | to_entries | map(select(.value.opt_in == null))'
+          if [[ "${VISUAL}" == true ]]; then
+            expected="(${expected}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"visual\")))"
+          fi
+          echo "expected=$(jq -c "(${expected}) | map(.key)" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
           # Per-concern timeouts (minutes) come from the same table.
           echo "timeouts=$(jq -c '.concerns.linux | map_values(.timeout)' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
 
@@ -206,7 +225,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
-    needs: [validate, select]
+    needs: [plan, validate, select]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -225,7 +244,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: Linux
-          expected-concerns: '["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality","taurine-cli","rust-domain","rust-db","rust-net","rust-app","rust-dbx","e2e-critical","e2e-a11y","e2e-regression-1","e2e-regression-2","e2e-regression-3","e2e-regression-4","rust-packaging","rust-tls-openssl","scan-security"]'
+          expected-concerns: ${{ needs.plan.outputs.expected }}
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}

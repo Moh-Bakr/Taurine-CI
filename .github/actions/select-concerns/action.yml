@@ -123,7 +123,7 @@ runs:
             return best
 
         def select(cfg, platform, changed, by_dir, edges):
-            concerns = cfg['concerns'][platform]
+            concerns = {c: sp for c, sp in cfg['concerns'][platform].items() if not sp.get('opt_in')}
             allc = list(concerns)
             rules = cfg['rules']
             always = [c for c, s in concerns.items() if s.get('always')]
@@ -187,7 +187,7 @@ runs:
         def main():
             matrix_file, src, source_sha, base_sha, platform, out = sys.argv[1:7]
             cfg = json.load(open(matrix_file))
-            allc = list(cfg['concerns'][platform])
+            allc = [c for c, sp in cfg['concerns'][platform].items() if not sp.get('opt_in')]
             result = (allc, 'full', 'no base SHA given')
             if base_sha:
                 try:
