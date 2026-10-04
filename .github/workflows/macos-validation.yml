@@ -58,16 +58,16 @@ jobs:
         run: |
           set -euo pipefail
           base='"desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"'
-          rust='"rust-domain","rust-db","rust-net","rust-ovpn","rust-app"'
+          rust='"rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging"'
           {
             echo '## macOS Rust concerns'
             echo
             if [[ "${RUST_REQUESTED}" == true ]]; then
               echo "matrix={\"concern\":[${base},${rust}]}" >> "${GITHUB_OUTPUT}"
-              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn and rust-app are scheduled.'
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app and rust-packaging are scheduled.'
             else
               echo "matrix={\"concern\":[${base}]}" >> "${GITHUB_OUTPUT}"
-              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn and rust-app were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
@@ -84,7 +84,7 @@ jobs:
     # cached in this control plane (only third-party crate sources are): `rust-app` carries DuckDB's C++ amalgamation, Tauri and
     # over a hundred test binaries (about 40 minutes on the four-core Linux
     # runner), `rust-db` the same drivers' offline suites (about 10 there).
-    timeout-minutes: ${{ matrix.concern == 'rust-app' && 120 || matrix.concern == 'rust-db' && 90 || startsWith(matrix.concern, 'rust-') && 60 || 45 }}
+    timeout-minutes: ${{ (matrix.concern == 'rust-app' || matrix.concern == 'rust-packaging') && 120 || matrix.concern == 'rust-db' && 90 || startsWith(matrix.concern, 'rust-') && 60 || 45 }}
     strategy:
       fail-fast: false
       # The concern list comes from the `plan` job: the TypeScript concerns always,
@@ -150,14 +150,14 @@ jobs:
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
       - name: Set up Node.js and install the locked JavaScript dependencies
-        if: ${{ !startsWith(matrix.concern, 'rust-') }}
+        if: ${{ !startsWith(matrix.concern, 'rust-') || matrix.concern == 'rust-packaging' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
           root: true
           desktop: true
           mobile: true
-          vendor-fetch: true
+          vendor-fetch: ${{ matrix.concern != 'rust-packaging' }}
 
       - name: Set up the Rust toolchain and native dependencies
         if: ${{ startsWith(matrix.concern, 'rust-') }}
@@ -493,6 +493,13 @@ jobs:
               # the crates link.
               rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
               ;;
+            rust-packaging)
+              # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
+              # CLI, to prove the app still bundles on this OS. Nothing is signed, notarised
+              # or uploaded; the output stays on the runner.
+              run_deferred rust-packaging-smoke \
+                npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci
+              ;;
             *)
               echo "Unsupported macOS Rust concern: ${CONCERN}" >&2
               exit 2
@@ -638,7 +645,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: macOS
-          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app"]'
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging"]'
           name-pattern: '^macOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           github-token: ${{ github.token }}
