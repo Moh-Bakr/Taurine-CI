@@ -40,6 +40,15 @@ jobs:
             if [[ "$path" == .github/workflows/* ]]; then
               continue
             fi
+            # Local composite actions (action.yml only) and the one machine-readable
+            # concern table. Both are scanned by the checks below; nothing else may
+            # live under .github/actions, and no other JSON is allowed anywhere.
+            if [[ "$path" =~ ^\.github/actions/[a-z0-9-]+/action\.yml$ ]]; then
+              continue
+            fi
+            if [[ "$path" == .github/ci-matrix.json ]]; then
+              continue
+            fi
             if [[ "$path" == .gitignore ]]; then
               continue
             fi
@@ -47,7 +56,7 @@ jobs:
             exit 1
           done < <(git ls-files -z)
 
-          if git ls-files | grep -E "$forbidden_path_re|$forbidden_name_re"; then
+          if git ls-files | grep -vxF '.github/ci-matrix.json' | grep -E "$forbidden_path_re|$forbidden_name_re"; then
             echo "The public repository contains a forbidden source, credential, or starter-document path." >&2
             exit 1
           fi
@@ -108,8 +117,53 @@ jobs:
           workflows=()
           while IFS= read -r -d '' file; do
             workflows+=("${file}")
-          done < <(find .github/workflows -type f -name '*.yml' -print0 | sort -z)
+          done < <(find .github/workflows .github/actions -type f -name '*.yml' -print0 2>/dev/null | sort -z)
           "${tools}/zizmor" --format plain "${workflows[@]}"
+
+      # The sanitizers that scrub private paths from published failure detail are
+      # inline sed programs in the protected workflows. This step extracts every one
+      # of them and runs it over fixtures: a path containing a space (the old
+      # `[^ ]+` rules published everything after the space), a Windows drive path, a
+      # macOS /private/var path and GitHub token shapes. A program may only claim a
+      # root it names; every root it names must be scrubbed completely. The
+      # keeldock-* workflows are owned by the Keel Dock lane and join this list when
+      # that lane has moved its sanitizers onto the same rules.
+      - name: Test the sanitizer expressions against path and token fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixtures="${RUNNER_TEMP}/sanitizer-fixtures"
+          mkdir -p "${fixtures}"
+          printf '%s\n' 'error: failed to read /Users/alice/Secret SPACEDIR/src/lib.rs:1:2 boom' > "${fixtures}/users.txt"
+          printf '%s\n' 'at /home/runner/work/x/x/My SPACEDIR/y.rs:3 in module' > "${fixtures}/home.txt"
+          printf '%s\n' 'C:\Users\Jo Bloggs\SPACEDIR\x.rs:3' > "${fixtures}/windows.txt"
+          printf '%s\n' '/private/var/folders/ab/SPACEDIR dir/T/x trailing' > "${fixtures}/private.txt"
+          printf '%s\n' 'ghp_abcdefghijklmnopqrstuvwxyz0123456789 ghs_Xyz123abc github_pat_11ABC_def456 Authorization: Bearer abc.DEF-123' > "${fixtures}/tokens.txt"
+          forbidden='SPACEDIR|alice|Jo Bloggs|Secret|ghp_abc|ghs_Xyz|github_pat_11|abc\.DEF'
+          sanitizer_files=()
+          while IFS= read -r -d '' file; do
+            sanitizer_files+=("${file}")
+          done < <(find .github/workflows -name '*.yml' -not -name 'keeldock-*' -print0)
+          backslash=$'\\'
+          count=0
+          while IFS= read -r expr; do
+            [[ -n "${expr}" ]] || continue
+            count=$((count + 1))
+            checks=()
+            [[ "${expr}" == */Users/* ]] && checks+=(users)
+            [[ "${expr}" == */home/runner/work/* ]] && checks+=(home)
+            [[ "${expr}" == *"${backslash}"* ]] && checks+=(windows)
+            [[ "${expr}" == *'s#/private/['* || "${expr}" == *'s#/private/.'* ]] && checks+=(private)
+            [[ "${expr}" == *redacted* ]] && checks+=(tokens)
+            for name in "${checks[@]}"; do
+              if sed -E "${expr}" "${fixtures}/${name}.txt" | grep -qE "${forbidden}"; then
+                echo "A sanitizer expression leaks the ${name} fixture: ${expr}" >&2
+                exit 1
+              fi
+            done
+          done < <(grep -hoE "sed -E 's#[^']*'" "${sanitizer_files[@]}" | cut -c9- | sed 's/.$//' | grep -E 'private-path|private/workspace' | sort -u)
+          [[ "${count}" -gt 0 ]] || { echo 'No sanitizer expressions were found to test' >&2; exit 1; }
+          echo "sanitizer fixtures: ${count} expressions checked"
 
       - name: Enforce immutable reviewed Actions and safe workflow features
         shell: bash
@@ -141,12 +195,15 @@ jobs:
             next unless env_name == 'source-read'
             steps = job['steps'] || []
             revoke_at = steps.index { |st| st['run'].to_s.include?('installation/token') }
+            # The source-checkout composite performs mint, checkout, verification and
+            # revocation as one step; its own structure is enforced separately.
+            revoke_at ||= steps.index { |st| st['uses'].to_s == './.github/actions/source-checkout' }
             if revoke_at.nil?
               failures << "job #{job_id}: no step revokes the source token (installation/token)"
               next
             end
             revoke = steps[revoke_at]
-            unless revoke['if'].to_s.include?('always()')
+            unless revoke['uses'].to_s == './.github/actions/source-checkout' || revoke['if'].to_s.include?('always()')
               failures << "job #{job_id}: the revocation step #{revoke['name'].inspect} is not conditioned on always()"
             end
             steps[0...revoke_at].each do |st|
@@ -159,6 +216,62 @@ jobs:
                   failures << "job #{job_id}: step #{st['name'].inspect} runs a project command before the token is revoked: #{line.strip[0, 60]}"
                 end
               end
+            end
+          end
+          unless failures.empty?
+            warn failures.join("\n")
+            exit 1
+          end
+          RUBY
+          }
+
+          # Local composite actions. Held to the same rules as workflows where they
+          # apply (the Action allow-list and SHA pins run for every file below), plus:
+          # a composite may not use secrets or variables (it receives them as inputs),
+          # may not use OIDC, artifacts or any cache (until a reviewed composite needs
+          # the cache exception, which would extend this function), must be
+          # `runs.using: composite`, every run step must name its shell, and no run
+          # script may contain an inline GitHub expression (inputs reach scripts
+          # through env: only, so an input can never be interpreted as shell code).
+          check_composite_action() {
+            if grep -nE 'secrets\.|vars\.|id-token:|actions/(upload|download)-artifact|actions/cache' "$1"; then
+              echo "A composite action may not use secrets, variables, OIDC, artifacts or a cache: $1" >&2
+              return 1
+            fi
+            ruby - "$1" <<'RUBY'
+          require 'yaml'
+          file = ARGV[0]
+          doc = YAML.safe_load(File.read(file), aliases: false)
+          failures = []
+          if file == '.github/actions/source-checkout/action.yml'
+            # The private-source action: mint, then check out, then verify and revoke
+            # under always(), no project command anywhere in it, skip-token-revoke on
+            # the mint (the explicit step owns revocation) and no outputs at all, so
+            # the token can never leave the action.
+            steps = (doc['runs'] || {})['steps'] || []
+            mint = steps.index { |st| st['uses'].to_s.start_with?('actions/create-github-app-token@') }
+            checkout = steps.index { |st| st['uses'].to_s.start_with?('actions/checkout@') }
+            revoke = steps.index { |st| st['run'].to_s.include?('installation/token') }
+            if mint.nil? || checkout.nil? || revoke.nil? || !(mint < checkout && checkout < revoke)
+              failures << "#{file}: steps must be mint, then checkout, then the revoking step"
+            else
+              failures << "#{file}: the revoking step must run under always()" unless steps[revoke]['if'].to_s.include?('always()')
+              failures << "#{file}: the mint step must set skip-token-revoke: true" unless steps[mint].dig('with', 'skip-token-revoke') == true
+            end
+            failures << "#{file}: must not declare outputs" if doc.key?('outputs')
+            steps.each do |st|
+              st['run'].to_s.each_line do |line|
+                failures << "#{file}: project command in the source-checkout action: #{line.strip[0, 50]}" if line =~ /^\s*(npm|npx|cargo|dotnet|xcodebuild|gradle|make|pip|brew|bash\s+scripts\/)(\s|$)/
+              end
+            end
+          end
+          runs = doc['runs'] || {}
+          failures << "#{file}: runs.using must be composite" unless runs['using'] == 'composite'
+          (runs['steps'] || []).each_with_index do |st, i|
+            label = st['name'] || "step #{i + 1}"
+            if st['run']
+              failures << "#{file}: #{label.inspect} has no shell" unless st['shell']
+              failures << "#{file}: #{label.inspect} interpolates an expression inside run (use env:)" if st['run'].include?('$' + '{{')
             end
           end
           unless failures.empty?
@@ -237,6 +350,9 @@ jobs:
                 actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020) ;;
                 actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68) ;;
                 ./.github/workflows/windows-validation-concern.yml) ;;
+                # Local composite actions are reviewed in this repository; each one is added
+                # here deliberately and held to the composite rules below.
+                ./.github/actions/source-checkout) ;;
                 ./.github/workflows/linux-validation-concern.yml) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;
@@ -246,6 +362,11 @@ jobs:
                   ;;
               esac
             done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^#[:space:]]+).*/\1/p' "$workflow")
+
+            if [[ "$workflow" == .github/actions/*/action.yml ]]; then
+              check_composite_action "$workflow" || { echo "Composite action policy violated: $workflow" >&2; exit 1; }
+              continue
+            fi
 
             # Scheduled SHA resolver: a separate, narrower trust tier. It is the only
             # workflow allowed a `schedule` trigger together with the source-read
@@ -354,7 +475,16 @@ jobs:
                 echo "The source-read workflow must pin a numeric source repository ID: $workflow" >&2
                 exit 1
               fi
-              if ! grep -qE '^[[:space:]]+source_sha:' "$workflow" || ! grep -qE '\^\[0-9a-fA-F\]\{40\}' "$workflow"; then
+              # A job that uses the source-checkout composite gets the SHA validation, the
+              # identity check and the revocation from it (and the composite's own
+              # structure is enforced in check_composite_action); only a workflow with
+              # its own inline checkout must show them in its own text.
+              uses_source_checkout=0
+              if grep -qE '^[[:space:]]+uses:[[:space:]]+\./\.github/actions/source-checkout([[:space:]]|$)' "$workflow"; then
+                uses_source_checkout=1
+              fi
+              if ! grep -qE '^[[:space:]]+source_sha:' "$workflow" \
+                || { (( ! uses_source_checkout )) && ! grep -qE '\^\[0-9a-fA-F\]\{40\}' "$workflow"; }; then
                 echo "The source-read workflow must require and validate a full source SHA: $workflow" >&2
                 exit 1
               fi
@@ -475,7 +605,7 @@ jobs:
                     ;;
                 esac
               done < <(grep -oE 'vars\.[A-Za-z0-9_]+' "$workflow" | sort -u)
-              if ! grep -qE 'skip-token-revoke:[[:space:]]*true' "$workflow" || ! grep -qE 'installation/token' "$workflow"; then
+              if (( ! uses_source_checkout )) && { ! grep -qE 'skip-token-revoke:[[:space:]]*true' "$workflow" || ! grep -qE 'installation/token' "$workflow"; }; then
                 echo "The source-read workflow must explicitly revoke its token before project code: $workflow" >&2
                 exit 1
               fi
@@ -592,9 +722,9 @@ jobs:
                 exit 1
               fi
             fi
-          done < <(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
+          done < <(find .github/workflows .github/actions -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
 
-          if find . -type f -not -path './.git/*' -not -path './.github/workflows/*' -not -name '.gitignore' -print -quit | grep -q .; then
+          if find . -type f -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/ci-matrix.json' -not -name '.gitignore' -print -quit | grep -q .; then
             echo "Only workflow files (and an optional .gitignore) may be tracked at this bootstrap phase." >&2
             exit 1
           fi

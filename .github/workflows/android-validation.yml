@@ -113,90 +113,17 @@ jobs:
             exit 1
           fi
 
-      - name: Mint read-only private-source token
-        id: source-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Check out the exact private source SHA
+        id: verified-source
+        # Kept as ./ : the policy matches this exact form for the private-source action.
+        uses: ./.github/actions/source-checkout  # zizmor: ignore[self-repository]
         with:
-          client-id: ${{ vars.SOURCE_READER_APP_ID }}
-          private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
-          owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
-          repositories: ${{ env.SOURCE_REPOSITORY_NAME }}
-          permission-contents: read
-          # Deliberate: the token is revoked explicitly by the next verification step, before any project command, and that step fails closed; the action's own end-of-job revoke would leave it live while project code runs.
-          skip-token-revoke: true  # zizmor: ignore[github-app]
-
-      - name: Check out exact private source SHA
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ env.SOURCE_REPOSITORY_OWNER }}/${{ env.SOURCE_REPOSITORY_NAME }}
-          ref: ${{ inputs.source_sha }}
-          token: ${{ steps.source-token.outputs.token }}
-          fetch-depth: 1
-          persist-credentials: false
-          path: src
-          submodules: false
-          lfs: false
-
-      - name: Verify identity, exact checkout, and revoke source token
-        if: always()
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
-          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          set -euo pipefail
-          set +x
-          failed=0
-          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
-          if [[ -z "${SOURCE_TOKEN}" ]]; then
-            echo 'No source token was minted; refusing to continue' >&2
-            exit 1
-          fi
-          if ! identity="$(curl --fail --silent --show-error \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}")"; then
-            echo 'The configured source repository identity could not be resolved' >&2
-            failed=1
-          elif [[ "$(jq -r '.id' <<<"${identity}")" != "${SOURCE_REPOSITORY_ID}" || \
-            "$(jq -r '.owner.login' <<<"${identity}")" != "${SOURCE_REPOSITORY_OWNER}" || \
-            "$(jq -r '.name' <<<"${identity}")" != "${SOURCE_REPOSITORY_NAME}" ]]; then
-            echo 'The configured source repository identity did not match' >&2
-            failed=1
-          fi
-          if ! checked_out_sha="$(git -C src rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
-            echo 'The private source checkout did not complete' >&2
-            failed=1
-          elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
-            echo 'The checked-out commit does not match source_sha' >&2
-            failed=1
-          fi
-          if ! api_sha="$(curl --fail --silent --show-error \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/${requested_sha}" | \
-            jq -er '.sha | ascii_downcase')" || [[ "${api_sha}" != "${requested_sha}" ]]; then
-            echo 'The requested source SHA was not resolved from the configured repository' >&2
-            failed=1
-          fi
-          if ! curl --fail --silent --show-error --retry 2 \
-            -X DELETE \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "${GITHUB_API_URL}/installation/token"; then
-            echo 'Source token revocation failed; refusing to execute project code' >&2
-            failed=1
-          fi
-          unset SOURCE_TOKEN
-          git -C src config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
-          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
-          git config --global --unset-all credential.helper 2>/dev/null || true
-          find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
-          (( failed == 0 ))
+          source-sha: ${{ inputs.source_sha }}
+          app-client-id: ${{ vars.SOURCE_READER_APP_ID }}
+          app-private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          repository-id: ${{ env.SOURCE_REPOSITORY_ID }}
+          repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
 
       - name: Set up the pinned Node.js release
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -304,20 +231,20 @@ jobs:
               }
               # Keep diagnostics useful without publishing source snippets or full logs.
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
               # Preserve diagnostic headers and source locations without
               # publishing private source excerpts.
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                 strip_excerpts |
                 grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                 head -30 >&2 || true
               if [[ "${label}" == android-debug-build ]]; then
                 sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                   head -30 >&2 || true
@@ -392,7 +319,7 @@ jobs:
                         /^[[:space:]]*[|][[:space:]]*$/d'
               }
               sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
                 tail -40 >&2 || true
@@ -400,7 +327,7 @@ jobs:
                 # Preserve only test names and assertion metadata needed to
                 # diagnose hosted-only failures; never publish source lines.
                 sed -E $'s/\\033\\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
@@ -410,7 +337,7 @@ jobs:
                 # summary. Keep only error codes and locations so the public
                 # control plane never publishes private source excerpts.
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
-                  sed -E 's#/Users/[^ ]+#/private/workspace#g; s#/home/runner/work/[^ ]+#/workspace#g' |
+                  sed -E 's#/Users/.*#/private/workspace#g; s#/home/runner/work/.*#/workspace#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
                   grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
                   head -30 >&2 || true
