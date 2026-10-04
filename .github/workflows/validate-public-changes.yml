@@ -651,10 +651,7 @@ jobs:
                 echo "The source-read workflow must require and validate a full source SHA: $workflow" >&2
                 exit 1
               fi
-              # The KeelDock concern receives the App id as an input from its dispatcher (whose
-              # reference is checked there); every other workflow names the variable itself.
-              if ! grep -qE 'SOURCE_READER_PRIVATE_KEY' "$workflow" \
-                || { ! grep -qE 'SOURCE_READER_APP_ID' "$workflow" && ! { [[ "$workflow" == .github/workflows/keeldock-validation-concern.yml ]] && grep -qE 'client-id:[[:space:]]+\$\{\{ inputs\.app_client_id \}\}' "$workflow"; }; }; then
+              if ! grep -qE 'SOURCE_READER_PRIVATE_KEY' "$workflow" || ! grep -qE 'SOURCE_READER_APP_ID' "$workflow"; then
                 echo "The protected source workflow must use only the reviewed source-reader settings: $workflow" >&2
                 exit 1
               fi
@@ -881,9 +878,8 @@ jobs:
                   exit 1
                 fi
                 if [[ "$(grep -cE '^      [A-Z_]+:[[:space:]]+\$\{\{ secrets\.' "$workflow")" != 1 ]] \
-                  || ! grep -qE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.(SOURCE_READER_PRIVATE_KEY|KEELDOCK_SOURCE_READER_PRIVATE_KEY) \}\}[[:space:]]*$' "$workflow" \
-                  || ! grep -qE '^      app_client_id:[[:space:]]+\$\{\{ vars\.(SOURCE_READER_APP_ID|KEELDOCK_SOURCE_READER_APP_ID) \}\}[[:space:]]*$' "$workflow"; then
-                  echo "The KeelDock dispatcher must pass exactly the App private key and id, by reviewed names: $workflow" >&2
+                  || ! grep -qE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.(SOURCE_READER_PRIVATE_KEY|KEELDOCK_SOURCE_READER_PRIVATE_KEY) \}\}[[:space:]]*$' "$workflow"; then
+                  echo "The KeelDock dispatcher must pass exactly the App private key, by a reviewed name: $workflow" >&2
                   exit 1
                 fi
                 if [[ "$(grep -cE '^[[:space:]]+environment:[[:space:]]+(source-read|keeldock-source-read)[[:space:]]*(#.*)?$' "$workflow")" != 1 ]]; then
