@@ -104,6 +104,10 @@ jobs:
           repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
 
+      - name: Install the shared sanitizers
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
+
       - name: Free disk for the server image
         shell: bash
         run: |
@@ -921,6 +925,7 @@ jobs:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           log="${RUNNER_TEMP}/live-proof.log"
           checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"
           echo "engine=${ENGINE} log_exists=$(test -f "${log}" && echo yes || echo no) sha=${checked_out_sha}"
@@ -942,7 +947,10 @@ jobs:
           # Paths are redacted and lines cut before anything is published; the
           # content is server error strings and the suite's own synthetic
           # constants, never credentials or captured data.
-          panicked="$(grep -B2 -A30 'panicked at' "${log}" | head -80 | sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' | cut -c1-200 || true)"
+          # Superseded: the failure detail is now the fixed-format panic summary and the failed
+          # test names below, which publish no assertion text and no values.
+          failed_names="$(failed_test_names "${log}" || true)"
+          panic_lines="$(panic_summary "${log}" || true)"
           {
             echo "## Live proof — ${ENGINE}"
             echo
@@ -990,11 +998,18 @@ jobs:
               echo "${result}"
               echo '```'
             fi
-            if [[ -n "${panicked}" ]]; then
-              echo 'Failure block (paths redacted, truncated):'
+            if [[ -n "${failed_names}" ]]; then
+              echo 'Failed tests:'
               echo
               echo '```'
-              printf '%s\n' "${panicked}"
+              printf '%s\n' "${failed_names}"
+              echo '```'
+            fi
+            if [[ -n "${panic_lines}" ]]; then
+              echo 'Panics (test, file:line, class; the message text is never published):'
+              echo
+              echo '```'
+              printf '%s\n' "${panic_lines}"
               echo '```'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -1005,6 +1020,14 @@ jobs:
             echo "${outcomes}"
             echo "live-proof ${test_line}"
             echo "live-proof ${result}"
+            if [[ -n "${failed_names}" ]]; then
+              echo 'live-proof failed tests:'
+              printf '%s\n' "${failed_names}" | sed 's/^/  /'
+            fi
+            if [[ -n "${panic_lines}" ]]; then
+              echo 'live-proof panics (test, file:line, class):'
+              printf '%s\n' "${panic_lines}"
+            fi
           } || true
           # Fail closed: a log without a report line proves nothing, exactly
           # like a report of nothing but skips.

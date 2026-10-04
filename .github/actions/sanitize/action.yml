@@ -105,4 +105,46 @@ runs:
           else echo 'command returned non-zero'
           fi
         }
+
+        # One line per panicking test: its name (a function identifier), the repository-relative
+        # file:line of the panic and a FIXED class of the message. The message itself is never
+        # published, because assertion messages quote values and expressions from the source:
+        # `assertion left == right failed` becomes the class, its left/right values are dropped.
+        panic_summary() {
+          tr -d '\r' <"$1" | sanitize_stream | awk '
+            function classify(m) {
+              if (m ~ /^assertion `left (==|!=) right` failed/) return "assertion (left/right comparison) failed";
+              if (m ~ /^assertion failed:/) return "assertion failed (expression withheld)";
+              if (m ~ /Result::unwrap\(\)` on an `Err` value/) return "unwrap on an Err (value withheld)";
+              if (m ~ /Option::unwrap\(\)` on a `None` value/) return "unwrap on a None";
+              if (m ~ /^explicit panic/) return "explicit panic";
+              if (m ~ /index out of bounds/) return "index out of bounds";
+              if (m ~ /^attempt to /) return "arithmetic overflow or invalid operation";
+              return "panic (message withheld)";
+            }
+            function emit(name, loc,    n, a, where) {
+              n = split(loc, a, ":");
+              where = a[1] ":" a[2];
+              printf "  %s  %s  %s\n", name, where, classify(msg);
+            }
+            /^thread \047/ {
+              name = $0; sub(/^thread \047/, "", name); sub(/\047.*$/, "", name);
+              rest = $0; sub(/^.* panicked at /, "", rest);
+              if (rest ~ /^\047/) {
+                msg = rest; sub(/^\047/, "", msg);
+                loc = rest; sub(/^.*\047, /, "", loc);
+                emit(name, loc);
+              } else {
+                loc = rest; sub(/:$/, "", loc); pname = name; ploc = loc; pending = 1;
+              }
+              next
+            }
+            pending { msg = $0; emit(pname, ploc); pending = 0 }
+          ' | awk '!seen[$0]++' | head -60
+        }
+
+        # Names of the tests a cargo test run reports as FAILED (function identifiers).
+        failed_test_names() {
+          tr -d '\r' <"$1" | grep -E '^test [A-Za-z0-9_:]+ \.\.\. FAILED$' | sed -E 's/^test //; s/ \.\.\. FAILED$//' | sort -u | head -60
+        }
         TCI_SANITIZE_LIBRARY
