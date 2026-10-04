@@ -359,6 +359,7 @@ jobs:
                 ./.github/actions/concern-report) ;;
                 ./.github/actions/timings) ;;
                 ./.github/actions/rust-toolchain) ;;
+                ./.github/actions/node-setup) ;;
                 ./.github/workflows/linux-validation-concern.yml) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;

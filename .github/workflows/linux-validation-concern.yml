@@ -97,44 +97,15 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
-      - name: Set up Node.js
+      - name: Set up Node.js and install the locked JavaScript dependencies
         if: inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-')
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
-          node-version: 22.14.0
-
-      # The Rust concerns need no node_modules, so they skip three `npm ci` runs.
-      # They still need the vendor fetch below: `[patch.crates-io]` in the
-      # workspace root points at `vendor/boringtun` by path, and cargo refuses to
-      # load a manifest that is not there — so *every* cargo command in this
-      # repository fails on a fresh checkout until the script has run. That is
-      # documented in `vendor.lock` and is not specific to this workflow.
-      - name: Install locked JavaScript dependencies
-        if: inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-')
-        shell: bash
-        run: |
-          set -euo pipefail
-          run_quiet() {
-            local label="$1"; shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              local reason='command returned non-zero'
-              if grep -Eiq 'command not found|is not recognized' "${log}"; then reason='missing command';
-              elif grep -Eiq 'cannot find module|module not found|no such file or directory' "${log}"; then reason='missing dependency or file';
-              elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then reason='TypeScript compilation failure';
-              elif grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then reason='memory exhaustion';
-              elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then reason='pinned vendor fetch or verification failure';
-              elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then reason='test failure'; fi
-              echo "${label}: failed (${reason}; detailed output withheld)" >&2
-              exit 1
-            fi
-          }
-          run_quiet npm-root npm ci --include=optional --ignore-scripts
-          run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
-          run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
-          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
+          root: true
+          desktop: true
+          mobile: true
+          vendor-fetch: true
 
       - name: Set up the Rust toolchain
         if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')

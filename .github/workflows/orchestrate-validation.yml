@@ -82,9 +82,13 @@ jobs:
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
 
       - name: Set up the pinned Node.js release
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
-          node-version: 22.14.0
+          root: 'false'
+          desktop: 'false'
+          mobile: 'false'
+          vendor-fetch: 'false'
 
       - name: Run dashboard contract tests
         if: matrix.concern == 'dashboard'

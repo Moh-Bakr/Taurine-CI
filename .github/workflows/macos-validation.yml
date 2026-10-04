@@ -149,61 +149,15 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
-      - name: Set up the pinned Node.js release
+      - name: Set up Node.js and install the locked JavaScript dependencies
         if: ${{ !startsWith(matrix.concern, 'rust-') }}
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
-          node-version: 22.14.0
-
-      - name: Install locked JavaScript dependencies
-        if: ${{ !startsWith(matrix.concern, 'rust-') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          run_quiet() {
-            local label="$1"
-            shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              # Keep source-bearing logs private while leaving an actionable,
-              # non-sensitive failure class in the public run summary.
-              local reason='command returned non-zero'
-              if grep -Eiq 'out of memory|heap out of memory|JavaScript heap' "${log}"; then
-                reason='memory exhaustion'
-              elif grep -Eiq '(^|[^[:alnum:]])(command not found|is not recognized)' "${log}"; then
-                reason='missing command'
-              elif grep -Eiq '(^|[^[:alnum:]])(cannot find module|module not found|no such file or directory)' "${log}"; then
-                reason='missing dependency or file'
-              elif grep -Eiq 'typescript|ts[0-9]{4}|type error' "${log}"; then
-                reason='TypeScript compilation failure'
-              elif grep -Eiq 'vendor-openvpn3:|fatal:|sha256|does not apply|could not download' "${log}"; then
-                reason='pinned vendor fetch or verification failure'
-              elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then
-                reason='test failure'
-              fi
-              echo "${label}: failed (${reason}; detailed output withheld)" >&2
-              if [[ "${label}" == desktop-vite-build ]]; then
-                # Vite's top-level error line is safe to publish after absolute
-                # workspace paths are removed; source excerpts and full logs
-                # remain private on the ephemeral runner.
-                sanitize_stream <"${log}" |
-                  grep -Ei '(vite|rollup|tailwind|oxide|error|failed|could not|cannot|npm (err|error|warn)|node:internal|module_not_found|enoent|command not found|not cached)' |
-                  head -20 >&2 || true
-              fi
-              exit 1
-            fi
-          }
-          run_quiet npm-root npm ci --include=optional --ignore-scripts
-          run_quiet npm-desktop npm --prefix taurine-desktop ci --include=optional --ignore-scripts
-          run_quiet npm-mobile npm --prefix taurine-mobile ci --include=optional --ignore-scripts
-          # The private workspace's Cargo.toml patches boringtun to a verified
-          # local tree. The vendor directory is intentionally ignored, so every
-          # hosted source checkout must materialize it before any Rust-aware
-          # package build or test can load Cargo metadata.
-          run_quiet vendor-fetch bash scripts/vendor-openvpn3.sh fetch
+          root: true
+          desktop: true
+          mobile: true
+          vendor-fetch: true
 
       - name: Set up the Rust toolchain and native dependencies
         if: ${{ startsWith(matrix.concern, 'rust-') }}
