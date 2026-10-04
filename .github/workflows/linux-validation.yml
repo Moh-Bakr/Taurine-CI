@@ -10,6 +10,14 @@ on:
         description: Exact 40-character commit SHA to validate from private Taurine
         required: true
         type: string
+      profile:
+        description: quick runs the fast concerns only (no rust-app, rust-db, rust-dbx, scan-clippy, a11y or regression e2e tiers) and gives a PASS (partial) verdict; full runs everything
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - quick
       base_sha:
         description: Optional base commit; when set, only the concerns the diff to source_sha affects run (a partial selection, which does not admit a merge)
         required: false
@@ -110,12 +118,21 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Read the full concern list
+      - name: Read the concern list for the profile
         id: plan
         shell: bash
+        env:
+          PROFILE: ${{ inputs.profile }}
         run: |
           set -euo pipefail
-          echo "matrix=$(jq -c '{concern: (.concerns.linux | keys_unsorted)}' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+          # profile=quick drops the concerns the table marks full_only (the slowest ones);
+          # the result job then lists them as not selected and the verdict is partial.
+          if [[ "${PROFILE}" == quick ]]; then
+            filter='.concerns.linux | to_entries | map(select(.value.full_only != true)) | map(.key)'
+          else
+            filter='.concerns.linux | keys_unsorted'
+          fi
+          echo "matrix=$(jq -c "{concern: (${filter})}" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
 
   # Only with a base_sha: a source-bearing job (partial clone, history only) decides which
   # concerns the change affects. Without one this job is skipped and the full list runs.
