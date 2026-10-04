@@ -14,7 +14,7 @@ permissions: {}
 
 concurrency:
   group: private-source-${{ github.workflow }}-${{ inputs.source_sha }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # These identifiers are configuration, not credentials. The repository ID is
 # used as an additional guard so the source repository cannot be substituted by
