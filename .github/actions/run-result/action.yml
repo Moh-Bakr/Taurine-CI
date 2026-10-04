@@ -15,6 +15,10 @@ inputs:
   expected-concerns:
     description: JSON array of every concern the workflow can run
     required: true
+  required-concerns:
+    description: JSON array of concerns that must have run; one that is missing or skipped fails the verdict instead of counting as not selected
+    required: false
+    default: '[]'
   name-pattern:
     description: Regular expression with a named group concern matching job names
     required: true
@@ -39,6 +43,7 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         LABEL: ${{ inputs.label }}
         EXPECTED: ${{ inputs.expected-concerns }}
+        REQUIRED: ${{ inputs.required-concerns }}
         NAME_PATTERN: ${{ inputs.name-pattern }}
         REQUESTED_SOURCE_SHA: ${{ inputs.source-sha }}
         BASE_SHA: ${{ inputs.base-sha }}
@@ -56,12 +61,15 @@ runs:
         while IFS= read -r concern; do
           [[ -n "${concern}" ]] || continue
           conclusion="$(awk -F'\t' -v c="${concern}" '$1 == c { print $2; exit }' <<<"${ran}")"
-          if [[ -z "${conclusion}" ]]; then
-            conclusion='not selected'
-            not_selected=$((not_selected + 1))
-          elif [[ "${conclusion}" == skipped ]]; then
-            conclusion='not selected'
-            not_selected=$((not_selected + 1))
+          if [[ -z "${conclusion}" || "${conclusion}" == skipped ]]; then
+            if jq -e --arg c "${concern}" 'index($c) != null' <<<"${REQUIRED}" >/dev/null 2>&1; then
+              # Explicitly requested, so its absence is a failure, never a quiet "not selected".
+              conclusion='REQUIRED BUT DID NOT RUN'
+              failed=$((failed + 1))
+            else
+              conclusion='not selected'
+              not_selected=$((not_selected + 1))
+            fi
           else
             ran_count=$((ran_count + 1))
             if [[ "${conclusion}" != success ]]; then

@@ -118,6 +118,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       timeouts: ${{ steps.plan.outputs.timeouts }}
       expected: ${{ steps.plan.outputs.expected }}
+      optin: ${{ steps.plan.outputs.optin }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -153,6 +154,13 @@ jobs:
             expected="(${expected}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"visual\")))"
           fi
           echo "expected=$(jq -c "(${expected}) | map(.key)" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+          # The opt-in concerns this dispatch asked for: they must run (the selector appends
+          # them) and the Result fails if one is missing.
+          if [[ "${VISUAL}" == true ]]; then
+            echo "optin=$(jq -c '[.concerns.linux | to_entries[] | select(.value.opt_in == "visual") | .key]' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+          else
+            echo 'optin=[]' >> "${GITHUB_OUTPUT}"
+          fi
           # Per-concern timeouts (minutes) come from the same table.
           echo "timeouts=$(jq -c '.concerns.linux | map_values(.timeout)' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
 
@@ -162,7 +170,7 @@ jobs:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.base_sha != ''
-    needs: validate-input
+    needs: [validate-input, plan]
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/select-concerns.yml  # zizmor: ignore[self-repository]
     # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected callers.
@@ -171,6 +179,7 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       base_sha: ${{ inputs.base_sha }}
       platform: linux
+      include_concerns: ${{ needs.plan.outputs.optin }}
 
   validate:
     permissions:
@@ -245,6 +254,7 @@ jobs:
         with:
           label: Linux
           expected-concerns: ${{ needs.plan.outputs.expected }}
+          required-concerns: ${{ needs.plan.outputs.optin }}
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}
