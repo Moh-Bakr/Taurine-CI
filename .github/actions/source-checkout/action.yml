@@ -28,6 +28,14 @@ inputs:
     description: Directory, relative to the workspace, to check the source out into
     required: false
     default: src
+  fetch-depth:
+    description: History depth to fetch (1 for the commit only, 0 for all history)
+    required: false
+    default: '1'
+  filter:
+    description: Partial-clone filter (for example blob:none) to keep deep history cheap
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -66,7 +74,8 @@ runs:
         repository: ${{ inputs.repository-owner }}/${{ inputs.repository-name }}
         ref: ${{ inputs.source-sha }}
         token: ${{ steps.mint.outputs.token }}
-        fetch-depth: 1
+        fetch-depth: ${{ inputs.fetch-depth }}
+        filter: ${{ inputs.filter }}
         persist-credentials: false
         path: ${{ inputs.path }}
         submodules: false
