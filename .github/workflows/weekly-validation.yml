@@ -38,6 +38,7 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       base: ${{ steps.resolve.outputs.base }}
+      openssl_locked: ${{ steps.resolve.outputs.openssl_locked }}
     steps:
       - name: Mint read-only private-source token
         id: source-token
@@ -63,6 +64,7 @@ jobs:
           failed=0
           sha=''
           base=''
+          openssl_locked=''
           if [[ -z "${SOURCE_TOKEN}" ]]; then
             echo 'No source token was minted; refusing to continue' >&2
             exit 1
@@ -89,6 +91,15 @@ jobs:
             since="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
             base="$(api "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits?sha=develop&until=${since}&per_page=1" | jq -r '.[0].sha // empty' || true)"
             [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || base=''
+          # The openssl-src versions the private locks pin, for the freshness check below.
+          # Version strings only (public registry facts); nothing else from the files is kept.
+            for lock in Cargo.lock taurine-backend/dbx-core/Cargo.lock taurine-backend/dbx-mongo-shell/Cargo.lock; do
+              found="$(api -H 'Accept: application/vnd.github.raw+json' "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/contents/${lock}?ref=${sha}" 2>/dev/null \
+                | awk '/^name = "openssl-src"$/ { getline; gsub(/version = "|"/, ""); print }' | head -n 1 || true)"
+              if [[ -n "${found}" ]]; then
+                openssl_locked="${openssl_locked}${openssl_locked:+,}${found}"
+              fi
+            done
           fi
           if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then
             echo 'Source token revocation failed' >&2
@@ -99,6 +110,7 @@ jobs:
           (( failed == 0 ))
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "base=${base}" >> "${GITHUB_OUTPUT}"
+          echo "openssl_locked=${openssl_locked}" >> "${GITHUB_OUTPUT}"
           echo "- Resolved private develop tip: \`${sha}\`" >> "${GITHUB_STEP_SUMMARY}"
 
   dispatch:
@@ -116,6 +128,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
           BASE_SHA: ${{ needs.resolve.outputs.base }}
+          OPENSSL_LOCKED: ${{ needs.resolve.outputs.openssl_locked }}
         run: |
           set -euo pipefail
           if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -131,10 +144,35 @@ jobs:
           fi
           gh workflow run macos-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
           gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+          # openssl-src freshness: warn when a private lock is behind the newest 300.5.x
+          # release on crates.io (the OpenSSL 3.5 line the production plan targets). The
+          # check only reads the lock versions resolved above and one public registry page.
+          if [[ -n "${OPENSSL_LOCKED}" ]]; then
+            latest="$(curl --fail --silent --show-error --retry 3 -H 'User-Agent: Taurine-CI openssl-src freshness (github.com/Moh-Bakr/Taurine-CI)' \
+              https://crates.io/api/v1/crates/openssl-src/versions \
+              | jq -r '[.versions[] | select(.yanked == false) | .num | select(startswith("300.5."))] | sort_by(split("+")[0] | split(".") | map(tonumber)) | last // empty' || true)"
+            if [[ -n "${latest}" ]]; then
+              behind=0
+              IFS=',' read -r -a locked_versions <<<"${OPENSSL_LOCKED}"
+              for locked in "${locked_versions[@]}"; do
+                lowest="$(printf '%s\n%s\n' "${locked%%+*}" "${latest%%+*}" | sort -V | head -n 1)"
+                if [[ "${locked%%+*}" != "${latest%%+*}" && "${lowest}" == "${locked%%+*}" ]]; then
+                  echo "::warning title=openssl-src behind::a private lock pins openssl-src ${locked}; the newest 300.5.x release is ${latest}"
+                  behind=1
+                fi
+              done
+              OPENSSL_NOTE="openssl-src: locks pin ${OPENSSL_LOCKED}; newest 300.5.x is ${latest}$([[ "${behind}" == 1 ]] && echo ' (BEHIND)')"
+            else
+              OPENSSL_NOTE="openssl-src: locks pin ${OPENSSL_LOCKED}; the crates.io lookup returned no 300.5.x release"
+            fi
+          else
+            OPENSSL_NOTE='openssl-src: no lock in the source pins it'
+          fi
           {
             echo '## Weekly develop validation'
             echo
             echo "- Source SHA: \`${SOURCE_SHA}\`"
+            echo "- ${OPENSSL_NOTE}"
             echo '- Dispatched: linux-validation (full), macos-validation (rust=true), windows-validation (rust=true)'
             if [[ -n "${BASE_SHA}" ]]; then
               echo "- Drift check: linux-validation with base_sha \`${BASE_SHA}\` (the week's selective run); compare its Result with the full run's"
