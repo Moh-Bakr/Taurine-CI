@@ -9,7 +9,7 @@ description: >
 
 inputs:
   scanner:
-    description: gitleaks, npm-audit or deny
+    description: gitleaks, npm-audit, deny, clippy or semgrep
     required: true
   path:
     description: Directory, relative to the workspace, holding the private source
@@ -181,3 +181,120 @@ runs:
           echo "| ${manifest} | ${count} |" >> "${GITHUB_STEP_SUMMARY}"
         done
         echo "cargo-deny: ${total} advisory finding(s) in total (advisory-only)"
+
+    - name: Run the security lints with clippy (warning only)
+      if: ${{ inputs.scanner == 'clippy' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        # The lint list is the source's own [workspace.lints] table, read at run time and
+        # passed on the command line as warnings, so no crate has to opt in and the list
+        # stays in the private repository. Findings are warnings; only a failed build fails.
+        flags="$(python3 - <<'PY'
+        import tomllib
+        with open('Cargo.toml', 'rb') as f:
+            lints = tomllib.load(f).get('workspace', {}).get('lints', {})
+        out = []
+        for name in lints.get('rust', {}):
+            out.append('-W ' + name)
+        for name in lints.get('clippy', {}):
+            out.append('-W clippy::' + name)
+        print(' '.join(out))
+        PY
+        )"
+        if [[ -z "${flags}" ]]; then
+          echo '- clippy: no [workspace.lints] table in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
+          exit 0
+        fi
+        raw="${RUNNER_TEMP}/clippy.jsonl"
+        # shellcheck disable=SC2086
+        cargo clippy --locked --workspace --exclude taurine-ovpn-sys --exclude taurine-net-conformance \
+          --message-format=json -- ${flags} >"${raw}" 2>"${RUNNER_TEMP}/clippy.err" || true
+        if jq -e 'select(.reason == "build-finished") | select(.success == false)' "${raw}" >/dev/null 2>&1; then
+          echo 'clippy: the build failed (detailed output withheld)' >&2
+          exit 1
+        fi
+        if ! jq -e 'select(.reason == "build-finished")' "${raw}" >/dev/null 2>&1; then
+          echo 'clippy: produced no build result (detailed output withheld)' >&2
+          exit 1
+        fi
+        # Only code, level, repository-relative path and line leave the runner: never the
+        # rendered message, the source excerpt or the suggestion.
+        findings="${RUNNER_TEMP}/clippy-findings.jsonl"
+        jq -c 'select(.reason == "compiler-message") | .message | select(.code != null)
+          | select(.spans | length > 0)
+          | {code: .code.code, level: .level, path: (.spans[0].file_name | sub("^/.*/work/[^/]+/[^/]+/src/"; "")), line: .spans[0].line_start}' "${raw}" \
+          | jq -c --argjson want "$(printf '%s\n' ${flags} | grep -v '^-W$' | sed 's/^/"/; s/$/"/' | paste -sd, - | sed 's/^/[/; s/$/]/')" 'select(.code as $c | $want | index($c))' >"${findings}" || true
+        total="$(wc -l <"${findings}" | tr -d ' ')"
+        {
+          echo '## Security lints (clippy, warning only)'
+          echo
+          echo "- Findings: ${total}"
+          if [[ "${total}" -gt 0 ]]; then
+            echo
+            echo '| Lint | Findings |'
+            echo '| --- | --- |'
+            jq -rs 'group_by(.code) | map("| \(.[0].code) | \(length) |") | .[]' "${findings}"
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+        if [[ "${total}" -gt 0 ]]; then
+          echo "::warning title=clippy security lints::${total} finding(s), warning only"
+          echo 'clippy per-lint counts:'
+          jq -rs 'group_by(.code) | map("  \(.[0].code): \(length)") | .[]' "${findings}"
+          echo 'clippy findings (code level path:line), first 40:'
+          jq -r '"  \(.code) \(.level) \(.path):\(.line)"' "${findings}" | head -40
+        else
+          echo 'clippy: no findings'
+        fi
+
+    - name: Run Semgrep Community Edition offline (warning only)
+      if: ${{ inputs.scanner == 'semgrep' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        if [[ ! -d .semgrep/rules ]]; then
+          echo '- semgrep: no .semgrep/rules in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
+          exit 0
+        fi
+        ignore=()
+        if [[ -f .semgrepignore ]]; then
+          ignore=(--exclude-from-file /src/.semgrepignore)
+        fi
+        report="${RUNNER_TEMP}/semgrep.json"
+        # The official image, pinned by digest (version 1.140.0), run with no network: the
+        # rules are the source's own, metrics and version checks are off, and nothing is
+        # uploaded. The raw report stays on the runner.
+        image='semgrep/semgrep@sha256:4372a1de903521f9f10f877b6caf15d150d17e1ca592582682c8d02b77cbd4f6'
+        docker pull --quiet "${image}" >/dev/null
+        set +e
+        docker run --rm --network none -v "${PWD}":/src:ro -v "${RUNNER_TEMP}":/out -w /src "${image}" \
+          semgrep scan --config .semgrep/rules --metrics=off --disable-version-check --json --output /out/semgrep.json --quiet \
+          ${ignore[@]+"${ignore[@]}"} . >"${RUNNER_TEMP}/semgrep.log" 2>&1
+        status=$?
+        set -e
+        if [[ ! -s "${report}" ]]; then
+          echo "semgrep: produced no report (exit ${status}; detailed output withheld)" >&2
+          exit 1
+        fi
+        total="$(jq '.results | length' "${report}")"
+        errors="$(jq '.errors | length' "${report}")"
+        {
+          echo '## Semgrep (offline, warning only)'
+          echo
+          echo "- Findings: ${total}; scan errors: ${errors}"
+          if [[ "${total}" -gt 0 ]]; then
+            echo
+            echo '| Rule | Findings |'
+            echo '| --- | --- |'
+            jq -r '.results | group_by(.check_id) | map("| \(.[0].check_id) | \(length) |") | .[]' "${report}"
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+        if [[ "${total}" -gt 0 ]]; then
+          echo "::warning title=semgrep::${total} finding(s), warning only"
+          echo 'semgrep per-rule counts:'
+          jq -r '.results | group_by(.check_id) | map("  \(.[0].check_id): \(length)") | .[]' "${report}"
+        else
+          echo 'semgrep: no findings'
+        fi
