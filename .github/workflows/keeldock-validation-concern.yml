@@ -33,6 +33,10 @@ on:
         description: linux, macos or windows
         required: true
         type: string
+      environment:
+        description: GitHub environment holding the source-reader App credential (source-read now; keeldock-source-read after the dedicated App exists)
+        required: true
+        type: string
       concern:
         description: build-format, structural, unit, db-containers, apphost-cold-start or contracts-publish-smoke
         required: true
@@ -72,7 +76,7 @@ jobs:
     # a skipped job is "not requested", never a pass.
     if: ${{ inputs.concern != 'apphost-cold-start' || inputs.apphost }}
     name: KeelDock ${{ inputs.platform }} ${{ inputs.concern }}
-    environment: source-read
+    environment: ${{ inputs.environment }}
     runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-24.04' || (inputs.platform == 'macos' && 'macos-15' || 'windows-2022') }}
     # db-containers pulls and starts PostgreSQL containers per suite; every other
     # concern is a build plus a handful of in-process suites.
