@@ -643,13 +643,12 @@ jobs:
               ;;
 
             mssql)
-              # SQL Server as the lab runs it: azure-sql-edge 1.0.7, pinned by
-              # index digest (resolved 2026-10-04; amd64 compressed 0.37 GB).
-              # Measured alternative, not used: mssql/server:2022-latest is
-              # 0.63 GB compressed, also under the cap; the lab's image is kept
-              # so this proof matches what the suites were written against.
-              # The image has no client, so the lab's own `mssql-init` sidecar
-              # (mssql-tools, pinned by digest, 0.10 GB) is the readiness gate:
+              # SQL Server 2022, the engine users actually run: mssql/server
+              # 2022-latest pinned by digest (amd64, about 0.63 GB compressed,
+              # under the per-engine image cap). It replaces azure-sql-edge,
+              # which the lab used but which is not SQL Server proper. The
+              # lab's own `mssql-init` sidecar (mssql-tools, pinned by digest,
+              # 0.10 GB) stays the readiness gate:
               # it logs in, creates `payments` and seeds it from the checked-out
               # source, exiting 0 only once all of that happened. The SA
               # password is a per-run throwaway that meets SQL Server's
@@ -661,7 +660,7 @@ jobs:
               docker run -d --name dbx-mssql \
                 -e ACCEPT_EULA=1 -e MSSQL_PID=Developer -e MSSQL_SA_PASSWORD \
                 -p 127.0.0.1:11433:1433 \
-                mcr.microsoft.com/azure-sql-edge@sha256:1dcc88d2d9e555d0addb0636648d0da033206978d7c5c4da044c904a0f06f58b
+                mcr.microsoft.com/mssql/server:2022-latest@sha256:4402d880dd4c34bfa7d8705e56a86cd6c88da80a1f6bbbe741f999e76264a090
               if docker run --rm --network host --platform linux/amd64 \
                 -e MSSQL_HOST='127.0.0.1,11433' -e MSSQL_SA_PASSWORD -e MSSQL_DATABASE=payments \
                 -v "${GITHUB_WORKSPACE}/src/tools/db-lab/mssql:/init:ro" \
@@ -958,7 +957,7 @@ jobs:
               iris)      echo '- Image: containers.intersystems.com/intersystems/iris-community:2025.3 (pinned by digest, amd64; Atelier REST on the private web server)' ;;
               postgres)  echo '- Image: postgres 17-alpine (pinned by digest); suites: conformance + taurine-db-postgres live + engine live_postgres' ;;
               mysql)     echo '- Image: mysql 8.4 (pinned by digest); suites: conformance + taurine-db-mysql live + engine live_mysql_tls' ;;
-              mssql)     echo '- Image: azure-sql-edge 1.0.7 (pinned by digest, as the lab runs it); suites: conformance + taurine-db-mssql live' ;;
+              mssql)     echo '- Image: mssql/server 2022-latest (pinned by digest); suites: conformance + taurine-db-mssql live' ;;
               pgtls)     echo '- Images: postgres 17-alpine x2 (pinned by digest): ssl=on with a per-run certificate, and ssl=off' ;;
               bastion)   echo '- Images: postgres 17-alpine and the lab bastion (alpine 3.20 base pinned by digest; apk openssh-server unpinned); suite: taurine-app dbx_connect_live' ;;
             esac
