@@ -40,7 +40,7 @@ jobs:
     # `rust-db` the drivers' offline suites, and `rust-ovpn` builds OpenSSL,
     # jsoncpp, lz4, fmt and xxhash from source through vcpkg before it compiles
     # openvpn3 (the private notes record roughly 23 minutes for that alone).
-    timeout-minutes: ${{ inputs.concern == 'rust-app' && 150 || (inputs.concern == 'rust-db' || inputs.concern == 'rust-net' || inputs.concern == 'rust-ovpn') && 120 || startsWith(inputs.concern, 'rust-') && 90 || 60 }}
+    timeout-minutes: ${{ (inputs.concern == 'rust-app' || inputs.concern == 'rust-packaging') && 150 || (inputs.concern == 'rust-db' || inputs.concern == 'rust-net' || inputs.concern == 'rust-ovpn') && 120 || startsWith(inputs.concern, 'rust-') && 90 || 60 }}
     defaults:
       run:
         working-directory: src
@@ -111,7 +111,7 @@ jobs:
       # (their own step below): the workspace root path-depends on
       # vendor/boringtun, and no cargo command loads without it.
       - name: Set up Node.js and install the locked JavaScript dependencies
-        if: ${{ !startsWith(inputs.concern, 'rust-') }}
+        if: ${{ !startsWith(inputs.concern, 'rust-') || inputs.concern == 'rust-packaging' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
@@ -530,6 +530,14 @@ jobs:
               # Tauri's `test` feature drives the commands through its mock runtime, so
               # no window or WebView2 process is started.
               rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              ;;
+            rust-packaging)
+              # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
+              # CLI (no installer: NSIS and WiX download their own tools, which this control
+              # plane does not fetch), to prove the app still builds as a Tauri binary on
+              # Windows. Nothing is signed or uploaded; the output stays on the runner.
+              run_deferred rust-packaging-smoke \
+                npm --prefix taurine-desktop run tauri -- build --debug --no-bundle --ci
               ;;
             *)
               echo "Unsupported Windows Rust concern: ${CONCERN}" >&2

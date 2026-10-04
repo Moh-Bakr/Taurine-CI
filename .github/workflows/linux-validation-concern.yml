@@ -44,7 +44,7 @@ jobs:
     # workstation before the command tier doubled. `rust-dbx` compiles the
     # adopted `dbx-core` tree, whose own manifest records it as roughly 490
     # crates.
-    timeout-minutes: ${{ (inputs.concern == 'rust-app' || inputs.concern == 'rust-dbx' || inputs.concern == 'scan-clippy') && 90 || (startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'rust-')) && 60 || (inputs.concern == 'taurine-cli' && 45 || 30) }}
+    timeout-minutes: ${{ (inputs.concern == 'rust-app' || inputs.concern == 'rust-dbx' || inputs.concern == 'rust-packaging' || inputs.concern == 'scan-clippy') && 90 || (startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'rust-')) && 60 || (inputs.concern == 'taurine-cli' && 45 || 30) }}
     defaults:
       run:
         working-directory: src
@@ -98,14 +98,14 @@ jobs:
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
       - name: Set up Node.js and install the locked JavaScript dependencies
-        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-npm-audit'
+        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-npm-audit' || inputs.concern == 'rust-packaging'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
           root: true
           desktop: true
           mobile: true
-          vendor-fetch: ${{ inputs.concern != 'scan-npm-audit' }}
+          vendor-fetch: ${{ inputs.concern != 'scan-npm-audit' && inputs.concern != 'rust-packaging' }}
 
       - name: Set up the Rust toolchain
         if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-deny' || inputs.concern == 'scan-clippy'
@@ -565,6 +565,13 @@ jobs:
               # mock runtime, so no display or WebView process is started; the
               # webkit2gtk install above is only what the crates link.
               rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              ;;
+            rust-packaging)
+              # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
+              # CLI, to prove the app still bundles on this OS. Nothing is signed, notarised
+              # or uploaded; the output stays on the runner.
+              run_deferred rust-packaging-smoke \
+                npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci
               ;;
             rust-dbx)
               # The trees the root manifest excludes from the workspace, each
