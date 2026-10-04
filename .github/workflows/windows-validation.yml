@@ -160,3 +160,32 @@ jobs:
           baseline-seconds: '{"desktop-shard-1":1055,"desktop-shard-2":1187,"desktop-quality":203,"mobile":293,"contracts":142,"bundle-budget":228,"rust-ovpn":506,"rust-net":697,"rust-domain":165,"rust-db":1235,"rust-app":847}'
           name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
           github-token: ${{ github.token }}
+
+  # One verdict for the dispatch: every possible concern is listed, those that did not
+  # run as "not selected" (never as passed), and the run fails if any concern that ran
+  # did not succeed. PASS (full) is the only verdict that admits a merge.
+  result:
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    needs: [validate, validate-rust]
+    name: Result
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Write the run verdict
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
+        with:
+          label: Windows
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app"]'
+          name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
+          source-sha: ${{ inputs.source_sha }}
+          github-token: ${{ github.token }}
