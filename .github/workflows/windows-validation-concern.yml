@@ -467,8 +467,25 @@ jobs:
               # builds OpenSSL from source with the runner image's Perl and NASM; if the image
               # lacks either the sub-step fails with a build-script classification and the rest
               # of the concern is unaffected.
+              # The first hosted run failed in openssl-sys's build script, which is where the
+              # vendored OpenSSL is built from source. That build needs a Perl with the
+              # Win32 modules (Strawberry Perl, not Git's msys perl) and NASM on PATH; both
+              # are installed on the image but not on the bash step's PATH. Put them first for
+              # this one command, and print which perl and nasm it will find (public paths of
+              # image tools, scrubbed like any path) so a further failure is attributable.
+              keyring_path="/c/Strawberry/perl/bin:/c/Program Files/NASM:${PATH}"
+              echo "keyring-check perl: $(PATH="${keyring_path}" command -v perl 2>/dev/null | sanitize_stream || echo none)"
+              echo "keyring-check nasm: $(PATH="${keyring_path}" command -v nasm 2>/dev/null | sanitize_stream || echo none)"
               run_deferred rust-dbx-core-keyring-check \
-                cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --no-default-features --features sqlite-bundled,os-keyring
+                env PATH="${keyring_path}" cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --no-default-features --features sqlite-bundled,os-keyring
+              # If the vendored OpenSSL build still fails, name the missing tool: the lines
+              # published are OpenSSL's own build-tool diagnostics (perl, nasm, nmake,
+              # Configure), after the shared path and token scrubbing, at most 15 of them.
+              if [[ -s "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" ]] && grep -q 'openssl-sys' "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" && grep -q 'error: failed to run custom build command' "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log"; then
+                echo 'keyring-check build-tool diagnostics:' >&2
+                sanitize_stream <"${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" |
+                  grep -iE "(nasm|perl|nmake|Configure|can't locate|is not recognized|not found|no such file)" | head -15 >&2 || true
+              fi
               ;;
             rust-db)
               # Every `taurine-db*` crate, which on Windows includes the `#[cfg(windows)]`
