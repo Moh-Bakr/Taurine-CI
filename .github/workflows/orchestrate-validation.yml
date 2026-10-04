@@ -15,7 +15,7 @@ permissions: {}
 
 concurrency:
   group: orchestrate-validation-${{ github.workflow }}-${{ inputs.source_sha }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   SOURCE_REPOSITORY_ID: '1330267721'
