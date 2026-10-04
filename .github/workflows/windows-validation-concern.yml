@@ -549,6 +549,22 @@ jobs:
               run_deferred rust-packaging-smoke \
                 npm --prefix taurine-desktop run tauri -- build --debug --no-bundle --ci
               ;;
+            rust-tls-openssl)
+              # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
+              # one). Present only on sources that carry it; otherwise a note and a pass,
+              # not a silent skip of a concern the source never had.
+              tls_manifest=taurine-backend/taurine-tls-openssl/Cargo.toml
+              if [[ -f "${tls_manifest}" ]]; then
+                # The OpenSSL build here is vendored: Strawberry Perl and NASM must come
+                # before Git's own perl on PATH (both ship on the image).
+                tls_path="/c/Strawberry/perl/bin:/c/Program Files/NASM:${PATH}"
+                run_deferred rust-tls-openssl-tests \
+                  env PATH="${tls_path}" cargo test --locked --manifest-path "${tls_manifest}"
+              else
+                echo "rust-tls-openssl: the source has no ${tls_manifest}; nothing to build"
+                run_deferred rust-tls-openssl-absent true
+              fi
+              ;;
             *)
               echo "Unsupported Windows Rust concern: ${CONCERN}" >&2
               exit 2

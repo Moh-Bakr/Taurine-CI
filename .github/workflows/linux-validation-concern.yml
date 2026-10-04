@@ -589,6 +589,19 @@ jobs:
               run_deferred rust-packaging-smoke \
                 npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci
               ;;
+            rust-tls-openssl)
+              # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
+              # one). Present only on sources that carry it; otherwise a note and a pass,
+              # not a silent skip of a concern the source never had.
+              tls_manifest=taurine-backend/taurine-tls-openssl/Cargo.toml
+              if [[ -f "${tls_manifest}" ]]; then
+                run_deferred rust-tls-openssl-tests \
+                  cargo test --locked --manifest-path "${tls_manifest}"
+              else
+                echo "rust-tls-openssl: the source has no ${tls_manifest}; nothing to build"
+                run_deferred rust-tls-openssl-absent true
+              fi
+              ;;
             rust-dbx)
               # The trees the root manifest excludes from the workspace, each
               # with its own committed Cargo.lock. `dbx-core` runs through the

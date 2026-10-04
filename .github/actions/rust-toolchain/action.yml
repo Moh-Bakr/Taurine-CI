@@ -136,6 +136,7 @@ runs:
           rust-net) extra_packages=(libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev libssl-dev pkg-config) ;;
           rust-app) extra_packages=(libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
           rust-dbx) extra_packages=(libfontconfig1-dev libfreetype-dev libssl-dev pkg-config) ;;
+          rust-tls-openssl) extra_packages=(libssl-dev pkg-config) ;;
         esac
         # lld, from the same Ubuntu archive, for the crate-test concerns only: they
         # link over a hundred test binaries (rust-app alone), and the GNU linker is

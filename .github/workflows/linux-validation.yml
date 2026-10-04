@@ -225,7 +225,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: Linux
-          expected-concerns: '["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality","taurine-cli","rust-domain","rust-db","rust-net","rust-app","rust-dbx","e2e-critical","e2e-a11y","e2e-regression-1","e2e-regression-2","e2e-regression-3","e2e-regression-4","scan-gitleaks","scan-npm-audit","scan-deny","scan-clippy","scan-semgrep","rust-packaging"]'
+          expected-concerns: '["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality","taurine-cli","rust-domain","rust-db","rust-net","rust-app","rust-dbx","e2e-critical","e2e-a11y","e2e-regression-1","e2e-regression-2","e2e-regression-3","e2e-regression-4","scan-gitleaks","scan-npm-audit","scan-deny","scan-clippy","scan-semgrep","rust-packaging","rust-tls-openssl"]'
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}
