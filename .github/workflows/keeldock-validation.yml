@@ -32,6 +32,11 @@ on:
         description: Exact 40-character commit SHA to validate from private keeldock-cloud
         required: true
         type: string
+      apphost:
+        description: Also run the Aspire AppHost cold-start concern (experimental, Linux; off by default)
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -95,6 +100,7 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       platform: ${{ matrix.platform }}
       concern: ${{ matrix.concern }}
+      apphost: ${{ inputs.apphost }}
 
   # Tabulates every concern's duration and conclusion for this run and warns when a concern
   # took more than 25% (and more than two minutes) longer than the committed baseline below,

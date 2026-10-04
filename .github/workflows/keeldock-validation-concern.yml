@@ -34,9 +34,14 @@ on:
         required: true
         type: string
       concern:
-        description: build-format, structural, unit, db-containers or contracts-publish-smoke
+        description: build-format, structural, unit, db-containers, apphost-cold-start or contracts-publish-smoke
         required: true
         type: string
+      apphost:
+        description: Whether the experimental apphost-cold-start concern may run (it is skipped otherwise)
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -63,6 +68,9 @@ jobs:
   validate:
     permissions:
       contents: read
+    # The AppHost cold start is experimental: it runs only when the dispatch asks for it, and
+    # a skipped job is "not requested", never a pass.
+    if: ${{ inputs.concern != 'apphost-cold-start' || inputs.apphost }}
     name: KeelDock ${{ inputs.platform }} ${{ inputs.concern }}
     environment: source-read
     runs-on: ${{ inputs.platform == 'linux' && 'ubuntu-24.04' || (inputs.platform == 'macos' && 'macos-15' || 'windows-2022') }}
