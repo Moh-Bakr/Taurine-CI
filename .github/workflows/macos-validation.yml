@@ -650,6 +650,6 @@ jobs:
         with:
           mode: table
           label: macOS
-          baseline-seconds: '{"rust-app":1860,"rust-db":900,"rust-domain":300,"rust-ovpn":120,"desktop-shard-1":540,"desktop-shard-2":600,"desktop-quality":300,"mobile":180,"bundle-budget":120,"orchestrate-skill":180}'
+          baseline-seconds: '{"rust-app":2494,"rust-db":660,"rust-domain":384,"rust-ovpn":118,"rust-net":115,"desktop-shard-1":500,"desktop-shard-2":821,"desktop-quality":273,"mobile":170,"bundle-budget":153,"orchestrate-skill":197}'
           name-pattern: '^macOS (?<concern>.+) validation$'
           github-token: ${{ github.token }}
