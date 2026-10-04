@@ -164,7 +164,9 @@ jobs:
                   behind=1
                 fi
               done
-              OPENSSL_NOTE="openssl-src: locks pin ${OPENSSL_LOCKED}; newest 300.5.x is ${latest}$([[ "${behind}" == 1 ]] && echo ' (BEHIND)')"
+              suffix=''
+              if [[ "${behind}" == 1 ]]; then suffix=' (BEHIND)'; fi
+              OPENSSL_NOTE="openssl-src: locks pin ${OPENSSL_LOCKED}; newest 300.5.x is ${latest}${suffix}"
             else
               OPENSSL_NOTE="openssl-src: locks pin ${OPENSSL_LOCKED}; the crates.io lookup returned no 300.5.x release"
             fi
