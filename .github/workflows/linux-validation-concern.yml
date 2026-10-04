@@ -420,6 +420,16 @@ jobs:
                 --reporter=github --reporter=json \
                 --project=smoke --project=critical --project=shell-browser
               ;;
+            e2e-visual)
+              # The visual tier: screenshot comparison against baselines committed in the source
+              # (Linux ones, `-linux` suffixed). Opt-in: it runs only when the dispatch sets
+              # visual=true, after the baselines exist. Comparison images and diffs stay on the
+              # runner; only the runner's pass/fail lines are published.
+              export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/e2e-visual.json"
+              run_quiet e2e-visual npx --no-install playwright test \
+                --reporter=github --reporter=json \
+                --project=visual
+              ;;
             e2e-a11y)
               # Serial by the project's own config: axe walks the whole tree, and
               # two of them racing on one dev server produced a timeout rather

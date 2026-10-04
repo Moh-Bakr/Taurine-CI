@@ -225,6 +225,14 @@
           "**/Cargo.toml",
           "**/package.json"
         ]
+      },
+      "e2e-visual": {
+        "opt_in": "visual",
+        "timeout": 60,
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ]
       }
     }
   }

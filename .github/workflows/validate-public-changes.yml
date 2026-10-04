@@ -178,10 +178,18 @@ jobs:
           table = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux'].keys.sort
           wf = YAML.safe_load(File.read('.github/workflows/linux-validation.yml'), aliases: false)
           step = wf['jobs']['result']['steps'].find { |st| st['uses'].to_s == './.github/actions/run-result' }
-          expected = JSON.parse(step['with']['expected-concerns']).sort
-          if table != expected
-            warn "ci-matrix.json and the Linux result check disagree: only in the table #{table - expected}, only in the result check #{expected - table}"
+          # The Result job expects exactly what the plan job computed from the table (every
+          # non-opt-in concern, plus an opt-in one when its input is true), never a second,
+          # hand-kept list that could drift from the table.
+          unless step['with']['expected-concerns'].to_s == '$' + '{{ needs.plan.outputs.expected }}' && wf['jobs']['result']['needs'].include?('plan')
+            warn 'The Linux Result job must take its expected concerns from the plan job output'
             exit 1
+          end
+          opt_in = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux'].select { |_, sp| sp.key?('opt_in') }
+          opt_in.each do |name, sp|
+            known = (wf['on'] || wf[true])['workflow_dispatch']['inputs'].key?(sp['opt_in'])
+            warn "#{name}: opt_in names an input (#{sp['opt_in']}) the Linux dispatcher does not declare" unless known
+            exit 1 unless known
           end
           # Stale-concern lint: every concern has a timeout; the concern workflow handles it
           # (by name, or by the scan-/e2e- prefix groups); every baseline key names a real
@@ -202,7 +210,7 @@ jobs:
             warn problems.join("\n")
             exit 1
           end
-          puts "concern table: #{table.length} Linux concerns match the result check"
+          puts "concern table: #{table.length} Linux concerns (#{opt_in.length} opt-in) match the plan and the result check"
           RUBY
 
       # The selector (embedded in the select-concerns action) is exercised on a synthetic
@@ -260,7 +268,7 @@ jobs:
               exit 1
             fi
           }
-          all="$(jq -r '.concerns.linux | keys_unsorted | join(",")' .github/ci-matrix.json)"
+          all="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null) | .key] | join(",")' .github/ci-matrix.json)"
           sha="$(change docs/a.md)"
           expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-security'
           sha="$(change taurine-backend/taurine-model/src/lib.rs)"
