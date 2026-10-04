@@ -245,11 +245,11 @@ jobs:
           sha="$(change docs/a.md)"
           expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-gitleaks'
           sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-          expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app,scan-gitleaks'
+          expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app,scan-gitleaks,scan-clippy,scan-semgrep'
           sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
-          expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-gitleaks'
+          expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-gitleaks,scan-clippy,scan-semgrep'
           sha="$(change taurine-desktop/src/a.ts)"
-          expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,frontend-build-budget,desktop-quality,desktop-shard-1,desktop-shard-2,e2e-critical,e2e-a11y,e2e-regression-1,e2e-regression-2,e2e-regression-3,e2e-regression-4,scan-gitleaks'
+          expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,frontend-build-budget,desktop-quality,desktop-shard-1,desktop-shard-2,e2e-critical,e2e-a11y,e2e-regression-1,e2e-regression-2,e2e-regression-3,e2e-regression-4,scan-gitleaks,scan-semgrep'
           sha="$(change Cargo.lock)"
           expect lockfile "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
           sha="$(change mystery/a.txt)"
