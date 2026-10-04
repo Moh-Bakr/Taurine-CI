@@ -37,6 +37,7 @@ jobs:
       contents: read
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
+      base: ${{ steps.resolve.outputs.base }}
     steps:
       - name: Mint read-only private-source token
         id: source-token
@@ -61,6 +62,7 @@ jobs:
           set +x
           failed=0
           sha=''
+          base=''
           if [[ -z "${SOURCE_TOKEN}" ]]; then
             echo 'No source token was minted; refusing to continue' >&2
             exit 1
@@ -81,6 +83,13 @@ jobs:
             echo 'The develop tip could not be resolved to a full commit SHA' >&2
             failed=1
           fi
+          # The develop tip from seven days ago, for the drift check below: the selective run
+          # of the week's diff. Best effort; an empty base just skips that run.
+          if [[ "${failed}" -eq 0 ]]; then
+            since="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+            base="$(api "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits?sha=develop&until=${since}&per_page=1" | jq -r '.[0].sha // empty' || true)"
+            [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || base=''
+          fi
           if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then
             echo 'Source token revocation failed' >&2
             failed=1
@@ -89,6 +98,7 @@ jobs:
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
           (( failed == 0 ))
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "base=${base}" >> "${GITHUB_OUTPUT}"
           echo "- Resolved private develop tip: \`${sha}\`" >> "${GITHUB_STEP_SUMMARY}"
 
   dispatch:
@@ -105,6 +115,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
+          BASE_SHA: ${{ needs.resolve.outputs.base }}
         run: |
           set -euo pipefail
           if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -112,11 +123,20 @@ jobs:
             exit 1
           fi
           gh workflow run linux-validation.yml --ref main -f "source_sha=${SOURCE_SHA}"
+          # Drift check: the same week's change also runs through the selector. Compare this
+          # run's Result with the full run's: a concern that fails in the full run but was
+          # "not selected" here is a gap in ci-matrix.json's rules.
+          if [[ -n "${BASE_SHA}" ]]; then
+            gh workflow run linux-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f "base_sha=${BASE_SHA}"
+          fi
           gh workflow run macos-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
           gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
           {
             echo '## Weekly develop validation'
             echo
             echo "- Source SHA: \`${SOURCE_SHA}\`"
-            echo '- Dispatched: linux-validation, macos-validation (rust=true), windows-validation (rust=true)'
+            echo '- Dispatched: linux-validation (full), macos-validation (rust=true), windows-validation (rust=true)'
+            if [[ -n "${BASE_SHA}" ]]; then
+              echo "- Drift check: linux-validation with base_sha \`${BASE_SHA}\` (the week's selective run); compare its Result with the full run's"
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
