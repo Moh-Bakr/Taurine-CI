@@ -1,0 +1,56 @@
+name: OpenSSF Scorecard (public repository only)
+
+# Weekly security posture score of this PUBLIC repository (pinned Actions, token
+# permissions, branch protection and so on). It scores only this repository: no private
+# source, no secret, no artifact and no upload to any service. The scorecard CLI is the
+# project's own release binary, verified against a committed SHA-256; the results are
+# written to the run summary only.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: scorecard
+  cancel-in-progress: false
+
+jobs:
+  scorecard:
+    if: github.repository == 'Moh-Bakr/Taurine-CI'
+    name: Score this repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Run the pinned scorecard release against this repository
+        shell: bash
+        env:
+          GITHUB_AUTH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/scorecard"
+          mkdir -p "${tools}"
+          curl --fail --silent --show-error --location --retry 3 -o "${tools}/scorecard.tar.gz" \
+            https://github.com/ossf/scorecard/releases/download/v5.5.0/scorecard_5.5.0_linux_amd64.tar.gz
+          echo '83b90a05c1540ef1390db1cd5711e5fd04be9c1d8537fb84d39d02092d6a8dff  '"${tools}/scorecard.tar.gz" | sha256sum --check --status
+          tar xzf "${tools}/scorecard.tar.gz" -C "${tools}" scorecard
+          "${tools}/scorecard" --repo="github.com/${GITHUB_REPOSITORY}" --format json > "${tools}/result.json" 2>"${tools}/stderr.log" || {
+            echo 'scorecard did not complete (detailed output withheld)' >&2
+            exit 1
+          }
+          {
+            echo '## OpenSSF Scorecard'
+            echo
+            echo "- Overall score: $(jq -r '.score' "${tools}/result.json")"
+            echo
+            echo '| Check | Score | Reason |'
+            echo '| --- | --- | --- |'
+            jq -r '.checks[] | "| \(.name) | \(.score) | \(.reason | gsub("\\|"; "/")) |"' "${tools}/result.json"
+          } >> "${GITHUB_STEP_SUMMARY}"

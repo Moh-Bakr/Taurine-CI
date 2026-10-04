@@ -46,7 +46,7 @@ jobs:
             if [[ "$path" =~ ^\.github/actions/[a-z0-9-]+/action\.yml$ ]]; then
               continue
             fi
-            if [[ "$path" == .github/ci-matrix.json ]]; then
+            if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml ]]; then
               continue
             fi
             if [[ "$path" == .gitignore ]]; then
@@ -56,7 +56,7 @@ jobs:
             exit 1
           done < <(git ls-files -z)
 
-          if git ls-files | grep -vxF '.github/ci-matrix.json' | grep -E "$forbidden_path_re|$forbidden_name_re"; then
+          if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' | grep -E "$forbidden_path_re|$forbidden_name_re"; then
             echo "The public repository contains a forbidden source, credential, or starter-document path." >&2
             exit 1
           fi
@@ -872,7 +872,7 @@ jobs:
             fi
           done < <(find .github/workflows .github/actions -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
 
-          if find . -type f -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/ci-matrix.json' -not -name '.gitignore' -print -quit | grep -q .; then
+          if find . -type f -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/ci-matrix.json' -not -path './.github/dependabot.yml' -not -name '.gitignore' -print -quit | grep -q .; then
             echo "Only workflow files (and an optional .gitignore) may be tracked at this bootstrap phase." >&2
             exit 1
           fi
