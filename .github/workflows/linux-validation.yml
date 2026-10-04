@@ -185,7 +185,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
-    needs: [validate]
+    needs: [validate, select]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -207,4 +207,5 @@ jobs:
           expected-concerns: '["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality","taurine-cli","rust-domain","rust-db","rust-net","rust-app","rust-dbx","e2e-critical","e2e-a11y","e2e-regression-1","e2e-regression-2","e2e-regression-3","e2e-regression-4"]'
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
+          base-sha: ${{ inputs.base_sha }}
           github-token: ${{ github.token }}
