@@ -262,13 +262,13 @@ jobs:
           }
           all="$(jq -r '.concerns.linux | keys_unsorted | join(",")' .github/ci-matrix.json)"
           sha="$(change docs/a.md)"
-          expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-gitleaks'
+          expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-security'
           sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-          expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app,scan-gitleaks,scan-clippy,scan-semgrep'
+          expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app,scan-security'
           sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
-          expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-gitleaks,scan-clippy,scan-semgrep'
+          expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-security'
           sha="$(change taurine-desktop/src/a.ts)"
-          expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,frontend-build-budget,desktop-quality,desktop-shard-1,desktop-shard-2,e2e-critical,e2e-a11y,e2e-regression-1,e2e-regression-2,e2e-regression-3,e2e-regression-4,scan-gitleaks,scan-semgrep,rust-packaging'
+          expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,frontend-build-budget,desktop-quality,desktop-shard-1,desktop-shard-2,e2e-critical,e2e-a11y,e2e-regression-1,e2e-regression-2,e2e-regression-3,e2e-regression-4,rust-packaging,scan-security'
           sha="$(change Cargo.lock)"
           expect lockfile "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
           sha="$(change mystery/a.txt)"

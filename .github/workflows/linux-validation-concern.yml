@@ -103,26 +103,26 @@ jobs:
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
       - name: Set up Node.js and install the locked JavaScript dependencies
-        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-npm-audit' || inputs.concern == 'rust-packaging'
+        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-security' || inputs.concern == 'rust-packaging'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
           root: true
           desktop: true
           mobile: true
-          vendor-fetch: ${{ inputs.concern != 'scan-npm-audit' && inputs.concern != 'rust-packaging' }}
+          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' }}
 
       - name: Set up the Rust toolchain
-        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-deny' || inputs.concern == 'scan-clippy'
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
         with:
           # The clippy scan compiles the workspace, so it takes the same system libraries
           # as the rust-app concern (webkit, dbus, openssl).
-          concern: ${{ inputs.concern == 'scan-clippy' && 'rust-app' || inputs.concern }}
+          concern: ${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
 
       - name: Fetch pinned vendored sources
-        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-deny' || inputs.concern == 'scan-clippy'
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
         shell: bash
         run: |
           set -euo pipefail
@@ -143,7 +143,7 @@ jobs:
       # nothing about their contents.
       - name: Locate Cargo home for the third-party source cache
         id: cargo-home
-        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') }}
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -155,7 +155,7 @@ jobs:
 
       - name: Restore cached third-party crate sources
         id: cargo-sources
-        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') }}
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -171,7 +171,7 @@ jobs:
       # private Cargo.lock; anything that does not match, or is not in a lock at
       # all, is deleted before cargo runs. Only counts are printed.
       - name: Verify restored crate archives against Cargo.lock
-        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') }}
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
         shell: bash
         env:
           CARGO_SOURCES_DIR: ${{ steps.cargo-home.outputs.dir }}
@@ -236,15 +236,18 @@ jobs:
           echo 'playwright-install: passed'
 
       - name: Run the scanner
-        if: startsWith(inputs.concern, 'scan-')
+        if: inputs.concern == 'scan-security'
+        # One job, five scanners (gitleaks, npm audit, Semgrep, cargo-deny, clippy): each runs as
+        # its own step with its own report, so one failing scanner does not hide the others.
+        # Clippy, the slow one, runs last.
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
         with:
-          scanner: ${{ case(inputs.concern == 'scan-gitleaks', 'gitleaks', inputs.concern == 'scan-npm-audit', 'npm-audit', inputs.concern == 'scan-clippy', 'clippy', inputs.concern == 'scan-semgrep', 'semgrep', 'deny') }}
+          scanner: all
 
       - name: Run isolated Linux validation concern
         id: concern-validation
-        if: ${{ !startsWith(inputs.concern, 'scan-') }}
+        if: ${{ inputs.concern != 'scan-security' }}
         shell: bash
         env:
           CONCERN: ${{ inputs.concern }}
@@ -649,7 +652,7 @@ jobs:
       # run elsewhere; the condition repeats it so the write permission is explicit)
       # and only on a miss, so a key is written once and never overwritten.
       - name: Save verified third-party crate sources
-        if: ${{ always() && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ always() && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.cargo-sources.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |

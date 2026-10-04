@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       profile:
-        description: quick runs the fast concerns only (no rust-app, rust-db, rust-dbx, scan-clippy, a11y or regression e2e tiers) and gives a PASS (partial) verdict; full runs everything
+        description: quick runs the fast concerns only (no rust-app, rust-db, rust-dbx, scan-security, a11y or regression e2e tiers) and gives a PASS (partial) verdict; full runs everything
         required: false
         default: full
         type: choice
@@ -225,7 +225,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: Linux
-          expected-concerns: '["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality","taurine-cli","rust-domain","rust-db","rust-net","rust-app","rust-dbx","e2e-critical","e2e-a11y","e2e-regression-1","e2e-regression-2","e2e-regression-3","e2e-regression-4","scan-gitleaks","scan-npm-audit","scan-deny","scan-clippy","scan-semgrep","rust-packaging","rust-tls-openssl"]'
+          expected-concerns: '["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality","taurine-cli","rust-domain","rust-db","rust-net","rust-app","rust-dbx","e2e-critical","e2e-a11y","e2e-regression-1","e2e-regression-2","e2e-regression-3","e2e-regression-4","rust-packaging","rust-tls-openssl","scan-security"]'
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}
