@@ -291,6 +291,10 @@ jobs:
               # advisory sweep), through the same deferred reporting as the Rust concerns.
               run_deferred contracts-check npm run check:contracts
               run_deferred wire-check npm run check:wire
+              # The flaky-test quarantine list must have no expired entry, and the third-party
+              # notices must match the lockfiles; both are static checks of the source.
+              run_deferred quarantine-check npm run check:quarantine
+              run_deferred notices-check npm run check:notices
               run_deferred packages-tests npm run test:packages -- \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"
