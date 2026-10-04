@@ -86,6 +86,10 @@ jobs:
           repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
 
+      - name: Install the shared sanitizers
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
+
       - name: Normalize private source line endings
         shell: bash
         run: |
@@ -114,6 +118,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           run_quiet() {
             local label="$1"
             shift
@@ -137,25 +142,6 @@ jobs:
               fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
               if [[ "${label}" == desktop-tests-* || "${label}" == mobile-tests || "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
-                # The keyword grep below can match a vitest, Jest, or node
-                # --test code-frame line whose quoted source happens to
-                # contain a keyword, which would publish a private
-                # test-source line. The excerpt shapes are therefore dropped
-                # before the allow-list: a numbered source line
-                # (`12 | code`), the babel/vitest code-frame form whose
-                # failing line is marked with a `>` gutter (`> 12 | code`),
-                # a caret/underline annotation (`| ^^^^`, `| ___^`, `| |___`),
-                # and the bare separator (`|`). The assertion library's own
-                # expected/received VALUE lines and pass/fail headers are
-                # test expectations, not app source, so they are the
-                # publishable diagnostic and stay; only the adjacent raw
-                # source lines are removed. Location lines carry no source
-                # text and survive.
-                strip_excerpts() {
-                  sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
-                          /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
-                          /^[[:space:]]*[|][[:space:]]*$/d'
-                }
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#([A-Za-z]:)?\\.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
@@ -365,6 +351,7 @@ jobs:
           CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           run_quiet() {
             local label="$1"
             shift
@@ -381,25 +368,6 @@ jobs:
               elif grep -Eiq 'test failed|assertion|failed [0-9]+ test|vitest' "${log}"; then reason='test failure'; fi
               echo "${label}: failed (${reason}; detailed output withheld)" >&2
               if [[ "${label}" == desktop-tests-* || "${label}" == mobile-tests || "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
-                # The keyword grep below can match a vitest, Jest, or node
-                # --test code-frame line whose quoted source happens to
-                # contain a keyword, which would publish a private
-                # test-source line. The excerpt shapes are therefore dropped
-                # before the allow-list: a numbered source line
-                # (`12 | code`), the babel/vitest code-frame form whose
-                # failing line is marked with a `>` gutter (`> 12 | code`),
-                # a caret/underline annotation (`| ^^^^`, `| ___^`, `| |___`),
-                # and the bare separator (`|`). The assertion library's own
-                # expected/received VALUE lines and pass/fail headers are
-                # test expectations, not app source, so they are the
-                # publishable diagnostic and stay; only the adjacent raw
-                # source lines are removed. Location lines carry no source
-                # text and survive.
-                strip_excerpts() {
-                  sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
-                          /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
-                          /^[[:space:]]*[|][[:space:]]*$/d'
-                }
                 sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "${log}" |
                   sed -E 's#([A-Za-z]:)?\\.*#<private-path>#g; s#/Users/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
                   strip_excerpts |
@@ -467,6 +435,7 @@ jobs:
           OS_LABEL: Windows
         run: |
           set -euo pipefail
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
 
           # The helpers below are the Linux `rust-*` concerns' own (see
           # linux-validation-concern.yml, which is where the reasoning for each lives),
@@ -481,68 +450,8 @@ jobs:
           # Everything else, including what is and is not published, is unchanged: only
           # failing test names, `error[Ennnn]` headers with their location, and cargo's
           # own fixed failure shapes leave this runner.
-          workspace_strip='s#^$##'
-          if [[ "${GITHUB_WORKSPACE}" != *\\* ]]; then
-            workspace_strip="s#${GITHUB_WORKSPACE}/src/##g"
-          fi
 
-          cargo_sanitize() {
-            tr -d '\r' <"$1" |
-              sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' |
-              sed -E 's#\\\\\?\\##g' |
-              sed -E 's#[^ ]*[\\/]registry[\\/]src[\\/][^\\/ ]+[\\/]#<registry>/#g' |
-              sed -E "${workspace_strip}" |
-              sed -E 's#[A-Za-z]:\\ct\\#<target>/#g; s#[A-Za-z]:\\.*#<private-path>#g' |
-              sed -E 's#/Users/.*#<private-path>#g; s#/private/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
-              cut -c1-200
-          }
 
-          # A failed test's captured output (`---- name stdout ----` up to the next
-          # `failures:`) is dropped whole, compiler warnings are dropped, an
-          # `error[Ennnn]` header is published with its `-->` location, and an uncoded
-          # `error:` line only when it is followed by a `-->` location or is one of
-          # cargo's own fixed shapes. `error: building <port>:<triplet> failed` is
-          # vcpkg's own fixed line naming a public third-party port, never private code.
-          cargo_test_detail() {
-            cargo_sanitize "$1" | awk '
-              /^---- .* (stdout|stderr) ----$/ { in_output = 1; next }
-              /^failures:$/ { in_output = 0; next }
-              in_output { next }
-              /^warning: / { block = "warning"; pending = ""; next }
-              /^error\[E[0-9]+\]: / { block = "error"; pending = ""; print; next }
-              /^error: building [A-Za-z0-9_.+-]+:[A-Za-z0-9_-]+ failed/ { block = "vcpkg"; pending = ""; print; next }
-              /^error: / {
-                block = "error"; pending = ""
-                if ($0 ~ /^error: (could not compile|test failed, to rerun pass|[0-9]+ targets? failed:|failed to run custom build command for|workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
-                else pending = $0
-                next
-              }
-              /^[[:space:]]*--> / {
-                if (block == "error") { if (pending != "") print pending; pending = ""; print }
-                next
-              }
-              /^test .* FAILED$/ || /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }
-            ' | head -80 >&2 || true
-          }
-
-          cargo_test_reason() {
-            local log="$1"
-            if grep -qE '^error: workspace member ' "${log}"; then echo "a workspace member is assigned to no ${OS_LABEL} Rust test concern"
-            elif grep -qE 'needs to be updated but --locked was passed|lock file .* needs to be updated' "${log}"; then echo 'committed Cargo.lock is out of date (refused by --locked)'
-            elif grep -qE '^error: building .* failed|vcpkg install failed|error: vcpkg' "${log}"; then echo 'vcpkg dependency install failure'
-            elif grep -qE 'Unable to find libclang|libclang.*[Nn]o such file' "${log}"; then echo 'libclang or bindgen failure'
-            elif grep -qE 'failed to run custom build command' "${log}"; then echo 'dependency or crate build script failure'
-            elif grep -qE 'No space left on device|not enough space on the disk|os error 112' "${log}"; then echo 'runner disk exhaustion'
-            elif grep -qE '^error: linking with ' "${log}"; then echo 'link failure (missing system library or resource exhaustion)'
-            elif grep -qE 'signal: 9|SIGKILL' "${log}"; then echo 'a process was killed (likely memory exhaustion)'
-            elif grep -qE '0xc0000139|STATUS_ENTRYPOINT_NOT_FOUND|0xc0000135|STATUS_DLL_NOT_FOUND|Library not loaded' "${log}"; then echo 'a test binary could not start (missing entry point, DLL or dynamic library)'
-            elif grep -qE '0xc00000fd|STATUS_STACK_OVERFLOW|has overflowed its stack' "${log}"; then echo 'a test binary overflowed its stack'
-            elif grep -qE 'test result: FAILED|^error: test failed|^error: [0-9]+ targets? failed' "${log}"; then echo 'test failure'
-            elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
-            elif grep -qE 'failed to (download|select|get|load|parse|fetch)' "${log}"; then echo 'dependency download or resolution failure'
-            else echo 'command returned non-zero'
-            fi
-          }
 
           run_quiet() {
             local label="$1"; shift

@@ -1,0 +1,101 @@
+name: Install the shared sanitizers
+description: >
+  Writes the shared output sanitizers (path, token, ANSI and excerpt scrubbing and
+  the cargo failure classifiers) to the runner's temp directory, so later steps can
+  source one copy instead of carrying their own. Reads nothing from the private
+  source and publishes nothing.
+
+runs:
+  using: composite
+  steps:
+    - name: Write the sanitizer library
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${RUNNER_TEMP}/taurine-ci"
+        cat > "${RUNNER_TEMP}/taurine-ci/sanitize.sh" <<'TCI_SANITIZE_LIBRARY'
+        # shellcheck shell=bash
+        # Shared sanitizers for published CI output. Sourced by the protected jobs; nothing
+        # here reads the private source. Every pattern removes to the end of the line (a
+        # path may contain spaces), and only fixed, public shapes are ever republished.
+
+        TCI_WORKSPACE_STRIP='s#^$##'
+        case "${GITHUB_WORKSPACE:-}" in
+          '' | *\\*) ;;
+          *) TCI_WORKSPACE_STRIP="s#${GITHUB_WORKSPACE}/src/##g" ;;
+        esac
+
+        # Any text on stdin: carriage returns (Windows tools end lines with CRLF, so anchored
+        # patterns would never match), ANSI colour, the \\?\ prefix, a dependency's registry
+        # checkout, the workspace prefix, and every absolute private path and token shape.
+        sanitize_stream() {
+          tr -d '\r' |
+            sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' |
+            sed -E 's#\\\\\?\\##g' |
+            sed -E 's#[^ ]*[\\/]registry[\\/]src[\\/][^\\/ ]+[\\/]#<registry>/#g' |
+            sed -E "${TCI_WORKSPACE_STRIP}" |
+            sed -E 's#[A-Za-z]:\\ct\\#<target>/#g; s#/mnt/cargo-target#<target>#g; s#[A-Za-z]:\\.*#<private-path>#g' |
+            sed -E 's#/Users/.*#<private-path>#g; s#/private/.*#<private-path>#g; s#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g'
+        }
+
+        cargo_sanitize() {
+          sanitize_stream <"$1" | cut -c1-200
+        }
+
+        # Drops source excerpts from a tool's output before a keyword allow-list runs: a
+        # numbered source line (`12 | code`), the code-frame form whose failing line is marked
+        # with a `>` gutter, a caret or underline annotation, and the bare separator. Location
+        # (`--> file:line:col`) and error-header lines carry no source text and survive.
+        strip_excerpts() {
+          sed -E '/^[[:space:]]*([>][[:space:]]*)?[0-9]+[[:space:]]*[|]/d;
+                  /^[[:space:]]*[|][[:space:]]*[_^|+>-]/d;
+                  /^[[:space:]]*[|][[:space:]]*$/d'
+        }
+
+        # A failed test's captured output (`---- name stdout ----` up to the next
+        # `failures:`) is dropped whole, compiler warnings are dropped, an
+        # `error[Ennnn]` header is published with its `-->` location, and an uncoded
+        # `error:` line only when it is followed by a `-->` location or is one of
+        # cargo's own fixed shapes. `error: building <port>:<triplet> failed` is
+        # vcpkg's own fixed line naming a public third-party port, never private code.
+        cargo_test_detail() {
+          cargo_sanitize "$1" | awk '
+            /^---- .* (stdout|stderr) ----$/ { in_output = 1; next }
+            /^failures:$/ { in_output = 0; next }
+            in_output { next }
+            /^warning: / { block = "warning"; pending = ""; next }
+            /^error\[E[0-9]+\]: / { block = "error"; pending = ""; print; next }
+            /^error: building [A-Za-z0-9_.+-]+:[A-Za-z0-9_-]+ failed/ { block = "vcpkg"; pending = ""; print; next }
+            /^error: / {
+              block = "error"; pending = ""
+              if ($0 ~ /^error: (could not compile|test failed, to rerun pass|[0-9]+ targets? failed:|failed to run custom build command for|workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
+              else pending = $0
+              next
+            }
+            /^[[:space:]]*--> / {
+              if (block == "error") { if (pending != "") print pending; pending = ""; print }
+              next
+            }
+            /^test .* FAILED$/ || /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }
+          ' | head -80 >&2 || true
+        }
+
+        cargo_test_reason() {
+          local log="$1"
+          if grep -qE '^error: workspace member ' "${log}"; then echo "a workspace member is assigned to no ${OS_LABEL:-${RUNNER_OS:-this OS}} Rust test concern"
+          elif grep -qE 'needs to be updated but --locked was passed|lock file .* needs to be updated' "${log}"; then echo 'committed Cargo.lock is out of date (refused by --locked)'
+          elif grep -qE '^error: building .* failed|vcpkg install failed|error: vcpkg' "${log}"; then echo 'vcpkg dependency install failure'
+          elif grep -qE 'Unable to find libclang|libclang.*[Nn]o such file' "${log}"; then echo 'libclang or bindgen failure'
+          elif grep -qE 'failed to run custom build command' "${log}"; then echo 'dependency or crate build script failure'
+          elif grep -qE 'No space left on device|not enough space on the disk|os error 112' "${log}"; then echo 'runner disk exhaustion'
+          elif grep -qE '^error: linking with ' "${log}"; then echo 'link failure (missing system library or resource exhaustion)'
+          elif grep -qE 'signal: 9|SIGKILL' "${log}"; then echo 'a process was killed (likely memory exhaustion)'
+          elif grep -qE '0xc0000139|STATUS_ENTRYPOINT_NOT_FOUND|0xc0000135|STATUS_DLL_NOT_FOUND|Library not loaded' "${log}"; then echo 'a test binary could not start (missing entry point, DLL or dynamic library)'
+          elif grep -qE '0xc00000fd|STATUS_STACK_OVERFLOW|has overflowed its stack' "${log}"; then echo 'a test binary overflowed its stack'
+          elif grep -qE 'test result: FAILED|^error: test failed|^error: [0-9]+ targets? failed' "${log}"; then echo 'test failure'
+          elif grep -qE '^error(\[E[0-9]{4}\])?: |could not compile' "${log}"; then echo 'compilation failure'
+          elif grep -qE 'failed to (download|select|get|load|parse|fetch)' "${log}"; then echo 'dependency download or resolution failure'
+          else echo 'command returned non-zero'
+          fi
+        }
+        TCI_SANITIZE_LIBRARY
