@@ -456,6 +456,19 @@ jobs:
                 cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
               run_deferred rust-domain-tests \
                 cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
+              # dbx-core has `cfg(windows)` code (the reparse-point-safe key-file open and the
+              # windows-native credential backend behind `os-keyring`) that no hosted job
+              # compiles. This is a non-test library check of the minimal feature set that
+              # still holds the storage and secret-codec modules: `sqlite-bundled` (rusqlite
+              # needs its bundled SQLite to build on Windows) plus `os-keyring`, without the
+              # default DynamoDB, MQ admin and system-fonts features. It covers those two
+              # modules' Windows paths and their dependency closure, not the dropped
+              # features. dbx-core's `openssl` dependency is unconditionally vendored, so this
+              # builds OpenSSL from source with the runner image's Perl and NASM; if the image
+              # lacks either the sub-step fails with a build-script classification and the rest
+              # of the concern is unaffected.
+              run_deferred rust-dbx-core-keyring-check \
+                cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --no-default-features --features sqlite-bundled,os-keyring
               ;;
             rust-db)
               # Every `taurine-db*` crate, which on Windows includes the `#[cfg(windows)]`
