@@ -186,7 +186,9 @@ jobs:
           project_command = /^\s*(sudo\s+)?(npm|npx|pnpm|yarn|node|cargo|rustup|rustc|dotnet|nuget|xcodebuild|xcrun|gradle|gradlew|make|cmake|pip|pip3|python|python3|ruby|brew|docker|choco|vcpkg|bash\s+scripts\/|sh\s+scripts\/|\.\/scripts\/)(\s|$)/
           allowed_before = [
             /\Aactions\/checkout@/,
-            /\Aactions\/create-github-app-token@/
+            /\Aactions\/create-github-app-token@/,
+            # The timer is a reviewed composite that only records a timestamp.
+            /\A\.\/\.github\/actions\/timings\z/
           ]
           failures = []
           (doc['jobs'] || {}).each do |job_id, job|
@@ -355,6 +357,7 @@ jobs:
                 ./.github/actions/source-checkout) ;;
                 ./.github/actions/sanitize) ;;
                 ./.github/actions/concern-report) ;;
+                ./.github/actions/timings) ;;
                 ./.github/workflows/linux-validation-concern.yml) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;
