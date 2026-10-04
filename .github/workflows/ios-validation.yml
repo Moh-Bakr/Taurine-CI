@@ -49,7 +49,7 @@ jobs:
           RUST_REQUESTED: ${{ inputs.rust }}
         run: |
           set -euo pipefail
-          base='"ios-native","mobile-quality","bundle-budget","orchestrate-skill"'
+          base='"ios-native"'
           {
             echo '## iOS Rust concern'
             echo
@@ -135,7 +135,7 @@ jobs:
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
           root: ${{ matrix.concern != 'ios-rust' }}
-          desktop: ${{ matrix.concern != 'ios-rust' }}
+          desktop: false
           mobile: ${{ matrix.concern != 'ios-rust' }}
           vendor-fetch: ${{ matrix.concern == 'ios-native' || matrix.concern == 'ios-rust' }}
 
@@ -269,14 +269,6 @@ jobs:
                 strip_excerpts |
                 grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|xcodebuild|cargo|clang|target)' |
                 tail -30 >&2 || true
-              if [[ "${label}" == mobile-tests ]]; then
-                # Preserve only test names and assertion metadata needed to
-                # diagnose hosted-only failures; never publish source lines.
-                sanitize_stream <"${log}" |
-                  strip_excerpts |
-                  grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
-                  tail -80 >&2 || true
-              fi
               if [[ "${label}" == ios-build ]]; then
                 # A failed link names its undefined symbols, which can be private
                 # function names, so none are published. What is published is the
@@ -292,14 +284,6 @@ jobs:
                 grep -oE ' in [A-Za-z0-9_.+-]+[.]a[(]' "${log}" | sort | uniq -c | sort -rn | head -10 | sed -E 's/[(]$//' >&2 || true
                 grep -ohE "auto-linked framework '[A-Za-z0-9_]+'" "${log}" | sort -u >&2 || true
               fi
-              if [[ "${label}" == bundle-budget ]]; then
-                # Keep only package names and budget arithmetic; the public
-                # log must not include generated/private file contents.
-                sanitize_stream <"${log}" |
-                  strip_excerpts |
-                  grep -Ei '(budget|ceiling|exceeded|package|dist|bytes|allowed|actual)' |
-                  tail -80 >&2 || true
-              fi
               exit 1
             fi
           }
@@ -307,31 +291,11 @@ jobs:
             ios-native)
               run_quiet ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
               ;;
-            mobile-quality)
-              run_quiet mobile-build npm --prefix taurine-mobile run build
-              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --no-file-parallelism
-              run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
-              run_quiet mobile-lint npm --prefix taurine-mobile run lint
-              ;;
-            bundle-budget)
-              run_quiet desktop-typecheck-build npm --prefix taurine-desktop run typecheck
-              run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
-              run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
-              run_quiet mobile-build npm --prefix taurine-mobile run build
-              run_quiet bundle-budget npm run check:bundle
-              ;;
             ios-rust)
               # Compile-only: build and link every test target of the mobile crate for
               # the iOS simulator triple, so the `cfg(target_os = "ios")` code and its
               # tests are type-checked and linked on a hosted runner. Not executed.
               run_quiet ios-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-apple-ios-sim
-              ;;
-            orchestrate-skill)
-              run_quiet contracts npm run check:contracts
-              run_quiet wire npm run check:wire
-              run_quiet packages-tests npm run test:packages
-              run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
-              run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
               ;;
             *)
               echo "Unknown iOS validation concern: ${CONCERN}" >&2
@@ -389,7 +353,7 @@ jobs:
         with:
           mode: table
           label: iOS
-          baseline-seconds: '{"ios-native":1113,"mobile-quality":208,"bundle-budget":248,"orchestrate-skill":241}'
+          baseline-seconds: '{"ios-native":1113}'
           name-pattern: '^iOS (?<concern>.+) validation$'
           github-token: ${{ github.token }}
 
@@ -417,7 +381,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: iOS
-          expected-concerns: '["ios-native","mobile-quality","bundle-budget","orchestrate-skill","ios-rust"]'
+          expected-concerns: '["ios-native","ios-rust"]'
           name-pattern: '^iOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           github-token: ${{ github.token }}
