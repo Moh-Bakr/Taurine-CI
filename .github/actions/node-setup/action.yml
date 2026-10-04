@@ -37,9 +37,13 @@ runs:
   using: composite
   steps:
     - name: Set up the pinned Node.js release
-      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: ${{ inputs.node-version }}
+        # setup-node 5 and later cache the package manager's downloads automatically when a
+        # package.json declares `packageManager`. This control plane caches nothing but
+        # cargo's (and NuGet's) verified third-party sources, so the automatic cache is off.
+        package-manager-cache: false
 
     - name: Install locked JavaScript dependencies
       shell: bash
