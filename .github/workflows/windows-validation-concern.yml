@@ -45,18 +45,17 @@ jobs:
       run:
         working-directory: src
     steps:
-      - name: Start the concern timer
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
-          echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
-
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Start the concern timer
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: start
 
       - name: Validate protected dispatch input
         shell: bash
@@ -657,16 +656,11 @@ jobs:
           cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
           cat "${section_file}"
 
-      # The concern's own wall-clock time from its first step, so the summary shows it
-      # next to the result. Queue time is not included. The dispatcher's timings job
-      # tabulates every concern and compares it with a committed baseline.
+      # The job's own wall-clock time, shown next to its result; the timings job
+      # tabulates it against a committed baseline.
       - name: Report concern duration
         if: ${{ always() }}
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          started="${CONCERN_STARTED_AT:-}"
-          [[ -n "${started}" ]] || exit 0
-          elapsed=$(( $(date +%s) - started ))
-          printf '### Concern duration\n\n%dm%02ds from the first step, excluding runner queue time.\n' \
-            $((elapsed / 60)) $((elapsed % 60)) >> "${GITHUB_STEP_SUMMARY}"
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: report

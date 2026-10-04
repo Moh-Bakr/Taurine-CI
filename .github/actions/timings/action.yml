@@ -1,0 +1,88 @@
+name: Concern timings
+description: >
+  Three modes. start records the job's start time and the runner image; report
+  writes the job's own duration to its summary; table (run in a separate job with
+  actions: read) tabulates every matching job of the run against a committed
+  baseline and warns, never fails, when one is more than 25% and two minutes slower.
+
+inputs:
+  mode:
+    description: start, report or table
+    required: true
+  label:
+    description: Platform label for the table heading and warnings (table mode)
+    required: false
+    default: ''
+  baseline-seconds:
+    description: JSON object of concern name to baseline seconds (table mode)
+    required: false
+    default: '{}'
+  name-pattern:
+    description: Regular expression with a named group concern matching job names (table mode)
+    required: false
+    default: ''
+  github-token:
+    description: Token with actions read, for listing the run's jobs (table mode)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Start the concern timer
+      if: ${{ inputs.mode == 'start' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      # The only value written is the current epoch time from date, never input.
+      run: |  # zizmor: ignore[github-env]
+        echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+        echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
+
+    - name: Report concern duration
+      if: ${{ inputs.mode == 'report' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        started="${CONCERN_STARTED_AT:-}"
+        [[ -n "${started}" ]] || exit 0
+        elapsed=$(( $(date +%s) - started ))
+        printf '### Concern duration\n\n%dm%02ds from the first step, excluding runner queue time.\n' \
+          $((elapsed / 60)) $((elapsed % 60)) >> "${GITHUB_STEP_SUMMARY}"
+
+    - name: Tabulate timings against the baseline
+      if: ${{ inputs.mode == 'table' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LABEL: ${{ inputs.label }}
+        BASELINE_SECONDS: ${{ inputs.baseline-seconds }}
+        NAME_PATTERN: ${{ inputs.name-pattern }}
+      run: |
+        set -euo pipefail
+        rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+          | jq -r --arg re "${NAME_PATTERN}" '.jobs[]
+            | select(.started_at != null and .completed_at != null)
+            | select(.name | test($re))
+            | [(.name | capture($re).concern), (.conclusion // "unknown"),
+               (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)]
+            | @tsv' | sort)"
+        {
+          echo "## ${LABEL} timings"
+          echo
+          echo '| Concern | Duration | Baseline | Conclusion |'
+          echo '| --- | --- | --- | --- |'
+        } >> "${GITHUB_STEP_SUMMARY}"
+        while IFS=$'\t' read -r concern conclusion seconds; do
+          [[ -n "${concern}" ]] || continue
+          base="$(jq -r --arg c "${concern}" '.[$c] // empty' <<<"${BASELINE_SECONDS}")"
+          shown='none'
+          if [[ -n "${base}" ]]; then
+            shown="$((base / 60))m$(printf '%02d' $((base % 60)))s"
+            if (( seconds > base * 125 / 100 && seconds > base + 120 )); then
+              echo "::warning title=Slow job::${LABEL} ${concern} took $((seconds / 60))m$((seconds % 60))s against a baseline of ${shown} (more than 25% slower)"
+              shown="${shown} (SLOWER)"
+            fi
+          fi
+          printf '| %s | %dm%02ds | %s | %s |\n' "${concern}" $((seconds / 60)) $((seconds % 60)) "${shown}" "${conclusion}" >> "${GITHUB_STEP_SUMMARY}"
+        done <<<"${rows}"
