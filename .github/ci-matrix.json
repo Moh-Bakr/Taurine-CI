@@ -2,45 +2,207 @@
   "version": 1,
   "rules": {
     "full_if_any_changed": [
-      "Cargo.toml", "Cargo.lock", "**/Cargo.lock", "rust-toolchain.toml", "rust-toolchain",
-      ".cargo/**", "vendor.lock", "scripts/vendor-openvpn3.sh", "scripts/patches/**",
-      "package-lock.json", "**/package-lock.json", ".github/**", "deny.toml", "clippy.toml",
-      "rustfmt.toml", ".gitleaks.toml", ".semgrep/**", ".semgrepignore"
+      "Cargo.toml",
+      "Cargo.lock",
+      "**/Cargo.lock",
+      "rust-toolchain.toml",
+      "rust-toolchain",
+      ".cargo/**",
+      "vendor.lock",
+      "scripts/vendor-openvpn3.sh",
+      "scripts/patches/**",
+      "package-lock.json",
+      "**/package-lock.json",
+      ".github/**",
+      "deny.toml",
+      "clippy.toml",
+      "rustfmt.toml",
+      ".gitleaks.toml",
+      ".semgrep/**",
+      ".semgrepignore"
     ],
     "docs_only": [
-      "**/*.md", "docs/**", "plans/**", ".claude/**", ".gitignore", ".editorconfig", "LICENSE*"
+      "**/*.md",
+      "docs/**",
+      "plans/**",
+      ".claude/**",
+      ".gitignore",
+      ".editorconfig",
+      "LICENSE*"
     ],
     "max_changed_files_before_full": 3000
   },
   "excluded_trees": {
-    "taurine-backend/dbx-core": ["rust-dbx", "rust-app"],
-    "taurine-backend/dbx-mongo-shell": ["rust-dbx", "rust-app"]
+    "taurine-backend/dbx-core": [
+      "rust-dbx",
+      "rust-app"
+    ],
+    "taurine-backend/dbx-mongo-shell": [
+      "rust-dbx",
+      "rust-app"
+    ]
   },
   "concerns": {
     "linux": {
-      "contracts": {"always": true, "paths": ["scripts/**", "skills/**", "package.json"]},
-      "frontend-build-budget": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "desktop-quality": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "desktop-shard-1": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "desktop-shard-2": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "mobile-quality": {"paths": ["taurine-mobile/**", "packages/**"]},
-      "taurine-cli": {"rust_packages": ["taurine-cli"]},
-      "rust-domain": {"rust_packages": ["taurine-model", "taurine-atomic", "taurine-auth", "taurine-crypt", "taurine-store", "taurine-repo", "taurine-replicate", "taurine-sync", "taurine-notes", "taurine-core", "taurine-exec", "taurine-scripting", "taurine-mock", "taurine-git", "taurine-transport-fs", "taurine-transport-git", "taurine-transport-wifi"]},
-      "rust-db": {"rust_package_glob": "taurine-db*"},
-      "rust-net": {"rust_packages": ["taurine-peer-sys", "taurine-net", "taurine-ovpn-sys", "taurine-net-conformance"]},
-      "rust-app": {"rust_packages": ["taurine-app", "taurine-desktop", "taurine-mobile"]},
-      "rust-dbx": {"excluded_trees": ["taurine-backend/dbx-core", "taurine-backend/dbx-mongo-shell"]},
-      "e2e-critical": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "e2e-a11y": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "e2e-regression-1": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "e2e-regression-2": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "e2e-regression-3": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "e2e-regression-4": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "scan-gitleaks": {"always": true},
-      "scan-npm-audit": {"paths": ["package.json", "**/package.json"]},
-      "scan-deny": {"paths": ["**/Cargo.toml"]},
-      "scan-clippy": {"paths": ["**/*.rs"]},
-      "scan-semgrep": {"paths": ["**/*.rs", "**/*.ts", "**/*.tsx"]}
+      "contracts": {
+        "always": true,
+        "paths": [
+          "scripts/**",
+          "skills/**",
+          "package.json"
+        ]
+      },
+      "frontend-build-budget": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ]
+      },
+      "desktop-quality": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ]
+      },
+      "desktop-shard-1": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ]
+      },
+      "desktop-shard-2": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ]
+      },
+      "mobile-quality": {
+        "paths": [
+          "taurine-mobile/**",
+          "packages/**"
+        ]
+      },
+      "taurine-cli": {
+        "rust_packages": [
+          "taurine-cli"
+        ]
+      },
+      "rust-domain": {
+        "rust_packages": [
+          "taurine-model",
+          "taurine-atomic",
+          "taurine-auth",
+          "taurine-crypt",
+          "taurine-store",
+          "taurine-repo",
+          "taurine-replicate",
+          "taurine-sync",
+          "taurine-notes",
+          "taurine-core",
+          "taurine-exec",
+          "taurine-scripting",
+          "taurine-mock",
+          "taurine-git",
+          "taurine-transport-fs",
+          "taurine-transport-git",
+          "taurine-transport-wifi"
+        ]
+      },
+      "rust-db": {
+        "rust_package_glob": "taurine-db*",
+        "full_only": true
+      },
+      "rust-net": {
+        "rust_packages": [
+          "taurine-peer-sys",
+          "taurine-net",
+          "taurine-ovpn-sys",
+          "taurine-net-conformance"
+        ]
+      },
+      "rust-app": {
+        "rust_packages": [
+          "taurine-app",
+          "taurine-desktop",
+          "taurine-mobile"
+        ],
+        "full_only": true
+      },
+      "rust-dbx": {
+        "excluded_trees": [
+          "taurine-backend/dbx-core",
+          "taurine-backend/dbx-mongo-shell"
+        ],
+        "full_only": true
+      },
+      "e2e-critical": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ]
+      },
+      "e2e-a11y": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true
+      },
+      "e2e-regression-1": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true
+      },
+      "e2e-regression-2": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true
+      },
+      "e2e-regression-3": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true
+      },
+      "e2e-regression-4": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true
+      },
+      "scan-gitleaks": {
+        "always": true
+      },
+      "scan-npm-audit": {
+        "paths": [
+          "package.json",
+          "**/package.json"
+        ]
+      },
+      "scan-deny": {
+        "paths": [
+          "**/Cargo.toml"
+        ]
+      },
+      "scan-clippy": {
+        "paths": [
+          "**/*.rs"
+        ],
+        "full_only": true
+      },
+      "scan-semgrep": {
+        "paths": [
+          "**/*.rs",
+          "**/*.ts",
+          "**/*.tsx"
+        ]
+      }
     }
   }
 }
