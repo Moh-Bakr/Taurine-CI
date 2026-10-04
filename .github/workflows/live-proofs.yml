@@ -184,6 +184,9 @@ jobs:
 
           case "${ENGINE}" in
             doris)
+              # Images pinned by index digest (tags fe-2.1.8 / be-2.1.8, resolved
+              # 2026-10-04; amd64 compressed 1.26 GB fe, 2.14 GB be — the be alone
+              # is over the 2 GB per-engine cap, recorded rather than hidden).
               # Apache Doris fe + be, the pair the official quick-start
               # compose brings up (FE keeps the MySQL wire on 9030; the BE is
               # reached by the FE over the docker network, never from the
@@ -197,11 +200,11 @@ jobs:
                 --network dbx-doris-net --ip 172.20.80.2 \
                 -e FE_SERVERS=fe1:172.20.80.2:9010 -e FE_ID=1 \
                 -p 127.0.0.1:9030:9030 \
-                apache/doris:fe-2.1.8
+                apache/doris@sha256:3e225c86c64ad2a2d45652abe5dea0d482c2c257551e17f323613dcfb6ebf7a8
               docker run -d --name dbx-doris-be --hostname be \
                 --network dbx-doris-net --ip 172.20.80.3 \
                 -e FE_SERVERS=fe1:172.20.80.2:9010 -e BE_ADDR=172.20.80.3:9050 \
-                apache/doris:be-2.1.8
+                apache/doris@sha256:c272e0406d26af1bc2579e49e250858926d7ced28910e7a9df55c01626ea2664
               for _ in $(seq 1 60); do
                 if mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\G' 2>/dev/null | grep -q 'Alive: true'; then
                   ready=1
@@ -230,6 +233,8 @@ jobs:
               ;;
 
             starrocks)
+              # Pinned by index digest (tag 3.2.3, resolved 2026-10-04; amd64
+              # compressed 3.62 GB — over the 2 GB per-engine cap, recorded).
               # StarRocks all-in-one (FE + BE in one container, supervisord).
               # The image is ~3.6 GB compressed and the docs ask for at least
               # 4 GB of RAM for Docker; the hosted runner provides more. Same
@@ -240,7 +245,7 @@ jobs:
               # suite's flavour qualifies table paths by database.
               docker run -d --name dbx-starrocks --hostname dbx-sr \
                 -p 127.0.0.1:9030:9030 \
-                starrocks/allin1-ubuntu:3.2.3
+                starrocks/allin1-ubuntu@sha256:f31f55cd091bf623ed8112391fbfc3c9a09c1441113fac714d2fb7ae952aca66
               for _ in $(seq 1 80); do
                 if mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\G' 2>/dev/null | grep -q 'Alive: true'; then
                   ready=1
@@ -262,6 +267,8 @@ jobs:
               ;;
 
             db2)
+              # Pinned by index digest (tag 11.5.9.0, resolved 2026-10-04; amd64
+              # compressed 1.58 GB).
               # IBM Db2 Community on the amd64-only icr.io image. Requires a
               # privileged container and ~10 minutes on first boot while the
               # instance and the DBNAME database are created; IBM's own docs
@@ -273,7 +280,7 @@ jobs:
               docker run -d --name dbx-db2 --privileged \
                 -p 127.0.0.1:50000:50000 \
                 -e LICENSE=accept -e DB2INST1_PASSWORD="${db2_pass}" -e DBNAME=taurine \
-                icr.io/db2_community/db2:11.5.9.0
+                icr.io/db2_community/db2@sha256:77095d4e04cf4448c0257086afcb2c166193d718dc33441da3b949f97e21efd5
               for _ in $(seq 1 90); do
                 if docker logs dbx-db2 2>&1 | grep -q 'Setup has completed'; then
                   ready=1
@@ -308,6 +315,8 @@ jobs:
               ;;
 
             informix)
+              # Pinned by manifest digest (tag 14.10.FC7W1DE, resolved 2026-10-04;
+              # single-platform image, compressed 0.87 GB).
               # IBM Informix Developer Edition, the amd64-only community
               # image (the icr.io community repository needs IBM
               # entitlement; this Docker Hub image is the anonymously
@@ -328,7 +337,7 @@ jobs:
               docker run -d -t --name dbx-informix --hostname dbx-ifx --privileged \
                 -p 127.0.0.1:9088:9088 -p 127.0.0.1:9089:9089 \
                 -e LICENSE=accept \
-                ibmcom/informix-developer-database:14.10.FC7W1DE
+                ibmcom/informix-developer-database@sha256:069febf6b08d72866ad8d7b06c1caf190df423f7b407de1ce18e3d89a8f8803d
               # Two readiness signals, either of which proves the server is
               # open for business: the engine's own onstat by binary path,
               # and the SQLI listener dialled **inside the container** — the
@@ -390,6 +399,8 @@ jobs:
               ;;
 
             rocketmq)
+              # Pinned by index digest (tag 5.3.2, resolved 2026-10-04; amd64
+              # compressed 0.20 GB).
               # Apache RocketMQ 5.3.2, the NameServer-plus-broker pair the
               # official quick start describes, on a docker network (the
               # image is a few hundred MB compressed — the smallest guest
@@ -421,13 +432,13 @@ jobs:
                 --network dbx-rocketmq-net \
                 -p 127.0.0.1:9876:9876 \
                 -e JAVA_OPT_EXT="-Xms256m -Xmx256m" \
-                apache/rocketmq:5.3.2 sh mqnamesrv
+                apache/rocketmq@sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587 sh mqnamesrv
               docker run -d --name dbx-rocketmq-broker --hostname broker \
                 --network dbx-rocketmq-net \
                 -p 127.0.0.1:10911:10911 -p 127.0.0.1:10909:10909 \
                 -v "${RUNNER_TEMP}/broker.conf:/home/rocketmq/conf/broker.conf" \
                 -e JAVA_OPT_EXT="-Xms512m -Xmx512m" \
-                apache/rocketmq:5.3.2 sh mqbroker -n namesrv:9876 -c /home/rocketmq/conf/broker.conf
+                apache/rocketmq@sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587 sh mqbroker -n namesrv:9876 -c /home/rocketmq/conf/broker.conf
               for _ in $(seq 1 30); do
                 if docker exec dbx-rocketmq-broker sh mqadmin clusterList -n namesrv:9876 2>/dev/null | grep -q 'broker-a'; then
                   ready=1
@@ -507,6 +518,13 @@ jobs:
           esac
 
           docker ps --format '{{.Names}} {{.Status}}'
+          # What actually ran, as the references the containers were created
+          # from (digest-pinned): published in the summary as the proof's
+          # image identity. Names and image references only.
+          docker ps --format '{{.Names}}' | while read -r c; do
+            docker inspect --format '{{.Name}} {{.Config.Image}}' "${c}"
+          done | sed 's#^/##' > "${RUNNER_TEMP}/proof-images.txt"
+          cat "${RUNNER_TEMP}/proof-images.txt"
 
       # The suite output goes to a runner-local log, and only the sanitized
       # inventory below is ever published: the report's header line, each
@@ -576,14 +594,18 @@ jobs:
             echo "- Source SHA: \`${checked_out_sha}\`"
             echo "- Server: ${PROOF_SERVER_VERSION:-version unavailable}"
             case "${ENGINE}" in
-              doris)     echo '- Images: apache/doris:fe-2.1.8 + apache/doris:be-2.1.8 (single fe + single be)' ;;
-              starrocks) echo '- Image: starrocks/allin1-ubuntu:3.2.3 (all-in-one fe + be)' ;;
+              doris)     echo '- Images: apache/doris:fe-2.1.8 + apache/doris:be-2.1.8 (single fe + single be; digest-pinned, see resolved images)' ;;
+              starrocks) echo '- Image: starrocks/allin1-ubuntu 3.2.3 (all-in-one fe + be)' ;;
               db2)       echo '- Image: icr.io/db2_community/db2:11.5.9.0 (privileged, amd64)' ;;
               informix)  echo '- Image: ibmcom/informix-developer-database:14.10.FC7W1DE (privileged, amd64)' ;;
               rocketmq)  echo '- Images: apache/rocketmq:5.3.2 (NameServer + broker, brokerIP1 pinned to 127.0.0.1)' ;;
               iris)      echo '- Image: containers.intersystems.com/intersystems/iris-community:2025.3 (pinned by digest, amd64; Atelier REST on the private web server)' ;;
             esac
             echo "- Source token: revoked before any project command"
+            if [[ -s "${RUNNER_TEMP}/proof-images.txt" ]]; then
+              echo '- Resolved images (container, digest-pinned reference):'
+              sed 's/^/  - /' "${RUNNER_TEMP}/proof-images.txt"
+            fi
             echo "- Runner: $(nproc) vCPU, $(free -m | awk '/^Mem:/{print $2}') MB RAM, $(df -BG --output=avail / | tail -1 | tr -d ' ') GB disk free after the run"
             echo
             if [[ -z "${header}" ]]; then
