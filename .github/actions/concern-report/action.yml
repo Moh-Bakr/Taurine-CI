@@ -64,7 +64,20 @@ runs:
           local label="$1"; shift
           local log="${RUNNER_TEMP}/${label}.log"
           if "$@" >"${log}" 2>&1; then
-            echo "${label}: passed"
+            if [[ "${label}" == rust-*-tests ]]; then
+              # A cargo test run that executes nothing proves nothing (a mis-selected package,
+              # a filter that matches no target, a crate whose tests are all ignored). Sum the
+              # executed tests over every `test result:` line (passed + failed); fewer than one
+              # fails the sub-step. The count is a number, so it is safe to publish.
+              executed="$(tr -d '\r' <"${log}" | awk '/^test result: / { for (i = 1; i <= NF; i++) { if ($i == "passed;" || $i == "failed;") n += $(i - 1) } } END { print n + 0 }')"
+              if [[ "${executed}" -lt 1 ]]; then
+                echo "${label}: failed (no tests were executed; a test run that runs nothing proves nothing)" >&2
+                exit 1
+              fi
+              echo "${label}: passed (${executed} tests executed)"
+            else
+              echo "${label}: passed"
+            fi
           else
             # Windows tools end lines with CRLF, which would defeat every anchored
             # pattern below; normalise before classifying.
