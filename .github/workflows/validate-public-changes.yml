@@ -354,6 +354,7 @@ jobs:
                 # here deliberately and held to the composite rules below.
                 ./.github/actions/source-checkout) ;;
                 ./.github/actions/sanitize) ;;
+                ./.github/actions/concern-report) ;;
                 ./.github/workflows/linux-validation-concern.yml) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;

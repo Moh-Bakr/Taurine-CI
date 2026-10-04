@@ -90,6 +90,10 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
 
+      - name: Install the shared concern reporting
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
+
       - name: Normalize private source line endings
         shell: bash
         run: |
@@ -436,6 +440,7 @@ jobs:
         run: |
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+          source "${RUNNER_TEMP}/taurine-ci/report.sh"
 
           # The helpers below are the Linux `rust-*` concerns' own (see
           # linux-validation-concern.yml, which is where the reasoning for each lives),
@@ -452,61 +457,6 @@ jobs:
           # own fixed failure shapes leave this runner.
 
 
-
-          run_quiet() {
-            local label="$1"; shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
-              echo "${label}: failed ($(cargo_test_reason "${log}"); sanitized detail below)" >&2
-              cargo_test_detail "${log}"
-              exit 1
-            fi
-          }
-
-          # Every sub-step runs and is reported, as in the Linux concerns: the sub-steps
-          # are independent, so stopping at the first failure would hide results.
-          deferred_results=()
-          deferred_failed=0
-          run_deferred() {
-            local label="$1"; shift
-            local status
-            set +e
-            ( set -e; run_quiet "${label}" "$@" )
-            status=$?
-            set -e
-            if [[ "${status}" -eq 0 ]]; then
-              deferred_results+=("${label}|passed")
-            else
-              deferred_results+=("${label}|failed: $(cargo_test_reason "${RUNNER_TEMP}/${label}.log")")
-              deferred_failed=1
-            fi
-          }
-
-          finish_deferred() {
-            local entry
-            {
-              echo "## ${OS_LABEL} ${CONCERN} sub-steps"
-              echo
-              echo '| Sub-step | Result |'
-              echo '| --- | --- |'
-              for entry in "${deferred_results[@]}"; do
-                echo "| \`${entry%%|*}\` | ${entry#*|} |"
-              done
-              echo
-            } >> "${GITHUB_STEP_SUMMARY}"
-            echo "${CONCERN} sub-step results:"
-            for entry in "${deferred_results[@]}"; do
-              echo "  ${entry%%|*}: ${entry#*|}"
-            done
-            df -h / 2>/dev/null || true
-            if [[ "${deferred_failed}" -ne 0 ]]; then
-              echo "${CONCERN}: failed (one or more sub-steps failed; each is listed above)" >&2
-              exit 1
-            fi
-          }
 
           # Which workspace crates each Rust concern tests on this OS. Every member of the
           # private workspace belongs to a concern, and `rust_coverage_check` (run by
