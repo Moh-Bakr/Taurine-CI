@@ -168,7 +168,16 @@ runs:
           # cargo-deny writes its diagnostics as JSON lines on stderr. Only the advisory
           # id, the crate and its version (public registry facts) are published.
           deny_status=0
-          "${RUNNER_TEMP}/scan-bin/cargo-deny" --format json --manifest-path "${manifest}" check --config deny.toml advisories >/dev/null 2>"${out}" || deny_status=$?
+          # `--config` is a global option of cargo-deny, so it goes before `check`.
+          "${RUNNER_TEMP}/scan-bin/cargo-deny" --manifest-path "${manifest}" --format json --config deny.toml check advisories >/dev/null 2>"${out}" || deny_status=$?
+          if [[ "${deny_status}" -gt 1 ]]; then
+            # An exit above 1 means the tool did not run its checks (usage, config or
+            # fetch error). Its own error log lines carry no source content; published
+            # after the shared path and token scrubbing.
+            source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+            echo "cargo-deny ${manifest}: did not complete (exit ${deny_status}); error lines:" >&2
+            jq -r 'select(.type == "log") | select(.fields.level == "ERROR") | .fields.message' "${out}" 2>/dev/null | sanitize_stream | head -5 >&2 || true
+          fi
           # Total diagnostics and the exit status show the scan really ran (a zero advisory
           # count with zero diagnostics and a failing status would mean it did not).
           echo "cargo-deny ${manifest}: exit ${deny_status}, $(jq -s '[.[] | select(.type == "diagnostic")] | length' "${out}" 2>/dev/null || echo '?') diagnostics, $(jq -s 'length' "${out}" 2>/dev/null || echo '?') records"
@@ -211,12 +220,21 @@ runs:
         # shellcheck disable=SC2086
         cargo clippy --locked --workspace --exclude taurine-ovpn-sys --exclude taurine-net-conformance \
           --message-format=json -- ${flags} >"${raw}" 2>"${RUNNER_TEMP}/clippy.err" || true
+        clippy_failed=0
         if jq -e 'select(.reason == "build-finished") | select(.success == false)' "${raw}" >/dev/null 2>&1; then
-          echo 'clippy: the build failed (detailed output withheld)' >&2
-          exit 1
+          clippy_failed=1
+        elif ! jq -e 'select(.reason == "build-finished")' "${raw}" >/dev/null 2>&1; then
+          clippy_failed=1
         fi
-        if ! jq -e 'select(.reason == "build-finished")' "${raw}" >/dev/null 2>&1; then
-          echo 'clippy: produced no build result (detailed output withheld)' >&2
+        if [[ "${clippy_failed}" -eq 1 ]]; then
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+          echo "clippy: the build did not finish ($(cargo_test_reason "${RUNNER_TEMP}/clippy.err"); sanitized detail below)" >&2
+          # Cargo's own fixed failure shapes from stderr, then the error-level diagnostics
+          # from the JSON stream as code, repository-relative path and line only.
+          cargo_test_detail "${RUNNER_TEMP}/clippy.err"
+          jq -r 'select(.reason == "compiler-message") | .message | select(.level == "error") | select(.spans | length > 0)
+            | "  error \(.code.code // "-") \(.spans[0].file_name):\(.spans[0].line_start)"' "${raw}" 2>/dev/null \
+            | sanitize_stream | head -20 >&2 || true
           exit 1
         fi
         # Only code, level, repository-relative path and line leave the runner: never the
@@ -258,10 +276,7 @@ runs:
           echo '- semgrep: no .semgrep/rules in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
           exit 0
         fi
-        ignore=()
-        if [[ -f .semgrepignore ]]; then
-          ignore=(--exclude-from-file /src/.semgrepignore)
-        fi
+        # .semgrepignore is read from the scan root automatically; there is no flag for it.
         report="${RUNNER_TEMP}/semgrep.json"
         # The official image, pinned by digest (version 1.140.0), run with no network: the
         # rules are the source's own, metrics and version checks are off, and nothing is
@@ -270,8 +285,7 @@ runs:
         docker pull --quiet "${image}" >/dev/null
         set +e
         docker run --rm --network none -v "${PWD}":/src:ro -v "${RUNNER_TEMP}":/out -w /src "${image}" \
-          semgrep scan --config .semgrep/rules --metrics=off --disable-version-check --json --output /out/semgrep.json --quiet \
-          ${ignore[@]+"${ignore[@]}"} . >"${RUNNER_TEMP}/semgrep.log" 2>&1
+          semgrep scan --config .semgrep/rules --metrics=off --disable-version-check --json --output /out/semgrep.json --quiet . >"${RUNNER_TEMP}/semgrep.log" 2>&1
         status=$?
         set -e
         if [[ ! -s "${report}" ]]; then
@@ -280,6 +294,13 @@ runs:
         fi
         total="$(jq '.results | length' "${report}")"
         errors="$(jq '.errors | length' "${report}")"
+        if [[ "${errors}" -gt 0 ]]; then
+          # Rule or scan errors silently shrink the results (an unsupported rule language
+          # drops findings), so they are always surfaced: counts per error type only.
+          echo "::warning title=semgrep errors::${errors} rule or scan error(s); findings may be incomplete"
+          echo 'semgrep error types:'
+          jq -r '.errors | group_by(.type) | map("  \(.[0].type | if type == "array" then .[0] else . end): \(length)") | .[]' "${report}"
+        fi
         {
           echo '## Semgrep (offline, warning only)'
           echo
