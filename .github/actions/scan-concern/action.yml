@@ -1,0 +1,161 @@
+name: Scanner concern
+description: >
+  Runs one security scanner over the checked-out private source and publishes only
+  counts, rule ids and public advisory ids: never an excerpt, a matched value or a
+  file path. gitleaks (secret scan of the working tree, redacted) and npm audit
+  signatures fail the concern on a finding; npm audit advisories and cargo-deny
+  advisories are advisory-only and emit warnings. Tool binaries are pinned release
+  downloads verified against a committed SHA-256.
+
+inputs:
+  scanner:
+    description: gitleaks, npm-audit or deny
+    required: true
+  path:
+    description: Directory, relative to the workspace, holding the private source
+    required: false
+    default: src
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned gitleaks release
+      if: ${{ inputs.scanner == 'gitleaks' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        bin="${RUNNER_TEMP}/scan-bin"
+        mkdir -p "${bin}"
+        curl --fail --silent --show-error --location --retry 3 -o "${bin}/gitleaks.tar.gz" \
+          https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+        echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  '"${bin}/gitleaks.tar.gz" | sha256sum --check --status
+        tar xzf "${bin}/gitleaks.tar.gz" -C "${bin}" gitleaks
+        "${bin}/gitleaks" version
+
+    - name: Install the pinned cargo-deny release
+      if: ${{ inputs.scanner == 'deny' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        bin="${RUNNER_TEMP}/scan-bin"
+        mkdir -p "${bin}"
+        curl --fail --silent --show-error --location --retry 3 -o "${bin}/cargo-deny.tar.gz" \
+          https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+        echo '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  '"${bin}/cargo-deny.tar.gz" | sha256sum --check --status
+        tar xzf "${bin}/cargo-deny.tar.gz" -C "${bin}" --strip-components 1 cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny
+        "${bin}/cargo-deny" --version
+
+    - name: Scan for secrets with gitleaks
+      if: ${{ inputs.scanner == 'gitleaks' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        report="${RUNNER_TEMP}/gitleaks.json"
+        config=()
+        if [[ -f .gitleaks.toml ]]; then
+          config=(--config .gitleaks.toml)
+        fi
+        # Working-tree scan (no history), values redacted in the report. The raw report
+        # stays on the runner; only rule ids and counts are published, never a path.
+        set +e
+        "${RUNNER_TEMP}/scan-bin/gitleaks" dir . --redact --no-banner --report-format json --report-path "${report}" ${config[@]+"${config[@]}"} >"${RUNNER_TEMP}/gitleaks.log" 2>&1
+        status=$?
+        set -e
+        if [[ "${status}" -ne 0 && "${status}" -ne 1 ]]; then
+          echo 'gitleaks: failed to run (detailed output withheld)' >&2
+          exit 1
+        fi
+        total=0
+        if [[ -s "${report}" ]]; then
+          total="$(jq 'length' "${report}")"
+        fi
+        {
+          echo '## Secret scan (gitleaks)'
+          echo
+          echo "- Findings: ${total}"
+          if [[ "${total}" -gt 0 ]]; then
+            echo
+            echo '| Rule | Findings |'
+            echo '| --- | --- |'
+            jq -r 'group_by(.RuleID) | map("| \(.[0].RuleID) | \(length) |") | .[]' "${report}"
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+        if [[ "${total}" -gt 0 ]]; then
+          echo "gitleaks: ${total} finding(s); rule ids and counts are in the run summary (values and paths withheld)" >&2
+          exit 1
+        fi
+        echo 'gitleaks: no findings'
+
+    - name: Check npm registry signatures and advisories
+      if: ${{ inputs.scanner == 'npm-audit' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        failed=0
+        {
+          echo '## npm audit'
+          echo
+          echo '| Workspace | Signatures | Advisories (info, low, moderate, high, critical) |'
+          echo '| --- | --- | --- |'
+        } >> "${GITHUB_STEP_SUMMARY}"
+        for workspace in . taurine-desktop taurine-mobile; do
+          [[ -f "${workspace}/package-lock.json" ]] || continue
+          log="${RUNNER_TEMP}/npm-signatures-${workspace//\//_}.log"
+          sig='verified'
+          if ! (cd "${workspace}" && npm audit signatures) >"${log}" 2>&1; then
+            sig='FAILED'
+            failed=1
+            # Package names and versions are public registry facts; nothing else is published.
+            grep -E '^[0-9]+ (packages? (has|have) (an )?(invalid|missing) )|^[^ ]+@[0-9][^ ]*$' "${log}" | head -20 >&2 || true
+          fi
+          counts='unknown'
+          if (cd "${workspace}" && npm audit --json) >"${RUNNER_TEMP}/npm-audit.json" 2>/dev/null || [[ -s "${RUNNER_TEMP}/npm-audit.json" ]]; then
+            counts="$(jq -r '.metadata.vulnerabilities // {} | "\(.info // 0), \(.low // 0), \(.moderate // 0), \(.high // 0), \(.critical // 0)"' "${RUNNER_TEMP}/npm-audit.json" 2>/dev/null || echo unknown)"
+            ids="$(jq -r '[.vulnerabilities[]?.via[]? | objects | .url // empty] | unique | .[]' "${RUNNER_TEMP}/npm-audit.json" 2>/dev/null | head -20 || true)"
+            if [[ "${counts}" != '0, 0, 0, 0, 0' && "${counts}" != unknown ]]; then
+              echo "::warning title=npm advisories::${workspace}: ${counts} (info, low, moderate, high, critical); advisory-only"
+              if [[ -n "${ids}" ]]; then
+                printf '%s\n' "${ids}" | sed 's/^/  advisory: /'
+              fi
+            fi
+          fi
+          echo "| ${workspace} | ${sig} | ${counts} |" >> "${GITHUB_STEP_SUMMARY}"
+        done
+        [[ "${failed}" -eq 0 ]] || { echo 'npm audit signatures: a registry signature check failed (package names above)' >&2; exit 1; }
+
+    - name: Check Rust advisories with cargo-deny (advisory-only)
+      if: ${{ inputs.scanner == 'deny' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        if [[ ! -f deny.toml ]]; then
+          echo '- cargo-deny: no deny.toml in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
+          exit 0
+        fi
+        {
+          echo '## Rust advisories (cargo-deny, advisory-only)'
+          echo
+          echo '| Lockfile | Findings |'
+          echo '| --- | --- |'
+        } >> "${GITHUB_STEP_SUMMARY}"
+        total=0
+        for manifest in Cargo.toml taurine-backend/dbx-core/Cargo.toml taurine-backend/dbx-mongo-shell/Cargo.toml; do
+          [[ -f "${manifest}" ]] || continue
+          out="${RUNNER_TEMP}/deny-$(echo "${manifest}" | tr '/' '_').jsonl"
+          # cargo-deny writes its diagnostics as JSON lines on stderr. Only the advisory
+          # id, the crate and its version (public registry facts) are published.
+          "${RUNNER_TEMP}/scan-bin/cargo-deny" --format json --manifest-path "${manifest}" check --config deny.toml advisories >/dev/null 2>"${out}" || true
+          count="$(jq -s '[.[] | select(.type == "diagnostic") | select(.fields.advisory != null)] | length' "${out}" 2>/dev/null || echo 0)"
+          total=$((total + count))
+          if [[ "${count}" -gt 0 ]]; then
+            echo "::warning title=Rust advisories::${manifest}: ${count} advisory finding(s); advisory-only"
+            jq -r 'select(.type == "diagnostic") | select(.fields.advisory != null) | "  \(.fields.advisory.id) \(.fields.advisory.package)"' "${out}" 2>/dev/null | sort -u | head -30
+          fi
+          echo "| ${manifest} | ${count} |" >> "${GITHUB_STEP_SUMMARY}"
+        done
+        echo "cargo-deny: ${total} advisory finding(s) in total (advisory-only)"

@@ -35,7 +35,10 @@
       "e2e-regression-1": {"paths": ["taurine-desktop/**", "packages/**"]},
       "e2e-regression-2": {"paths": ["taurine-desktop/**", "packages/**"]},
       "e2e-regression-3": {"paths": ["taurine-desktop/**", "packages/**"]},
-      "e2e-regression-4": {"paths": ["taurine-desktop/**", "packages/**"]}
+      "e2e-regression-4": {"paths": ["taurine-desktop/**", "packages/**"]},
+      "scan-gitleaks": {"always": true},
+      "scan-npm-audit": {"paths": ["package.json", "**/package.json"]},
+      "scan-deny": {"paths": ["**/Cargo.toml"]}
     }
   }
 }
