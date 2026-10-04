@@ -320,6 +320,21 @@ jobs:
                   grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
                   tail -80 >&2 || true
               fi
+              if [[ "${label}" == ios-build ]]; then
+                # A failed link names its undefined symbols, which can be private
+                # function names, so none are published. What is published is the
+                # toolchain (public) and counts: how many symbols, of which kinds,
+                # and which static archives referenced them, which is enough to tell
+                # a Swift plugin problem from a missing platform framework.
+                xcodebuild -version 2>/dev/null | tr '\n' ' ' >&2 || true
+                echo >&2
+                symbols="$(grep -cE '^[[:space:]]+"[^"]+", referenced from:' "${log}" || true)"
+                swift_symbols="$(grep -cE '^[[:space:]]+"_?[$]s' "${log}" || true)"
+                objc_symbols="$(grep -cE '^[[:space:]]+"_?[_]?OBJC_' "${log}" || true)"
+                echo "ios-build link diagnostics: ${symbols} undefined symbols (${swift_symbols} Swift, ${objc_symbols} Objective-C)" >&2
+                grep -oE ' in [A-Za-z0-9_.+-]+[.]a[(]' "${log}" | sort | uniq -c | sort -rn | head -10 | sed -E 's/[(]$//' >&2 || true
+                grep -ohE "auto-linked framework '[A-Za-z0-9_]+'" "${log}" | sort -u >&2 || true
+              fi
               if [[ "${label}" == bundle-budget ]]; then
                 # Keep only package names and budget arithmetic; the public
                 # log must not include generated/private file contents.
