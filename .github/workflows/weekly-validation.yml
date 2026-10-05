@@ -205,7 +205,7 @@ jobs:
 
   # Freshness of the pinned tools (.github/tool-pins.json): warn-only, like the openssl-src
   # note. It reads that committed list and each tool's public release list; it uses no source
-  # token, checks out only this repository, and never fails the run.
+  # token, checks nothing out, and never fails the run.
   tool-freshness:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Pinned tool freshness
