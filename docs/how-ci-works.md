@@ -177,12 +177,12 @@ that receives the App private key. A workflow that fast-forwards it would need `
 write` and a bypass of untrusted's push restriction, which adds a second writer to a ref that
 holds the key. The safer option is to keep the owner as the only writer and sync by hand after
 each merge to main. The runs enforce it: a run from a stale or diverged `untrusted` fails at
-the guard with a message to sync. The command is a fast-forward only (`force=false` refuses
-anything else):
+the guard with a message to sync. Only the admin role may update `untrusted` (its ruleset), and
+the ruleset blocks non-fast-forward updates, so the sync is an admin fast-forward push:
 
 ```bash
-gh api -X PATCH repos/Moh-Bakr/Taurine-CI/git/refs/heads/untrusted \
-  -f sha="$(gh api repos/Moh-Bakr/Taurine-CI/commits/main -q .sha)" -F force=false
+git fetch origin && git push origin origin/main:refs/heads/untrusted
+gh api repos/Moh-Bakr/Taurine-CI/compare/main...untrusted -q '[.status, .ahead_by, .behind_by] | @tsv'   # identical 0 0
 ```
 
 ### Repository settings the owner applies (once)
@@ -192,18 +192,21 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
 
 1. **Protect `untrusted`.** Settings → Rules → Rulesets → New branch ruleset. Name it
    `untrusted`, enforcement Active, target branch `untrusted` (include by name). Turn on
-   "Restrict deletions", "Block force pushes" and "Restrict updates", with only the repository
-   owner in the bypass list (no GitHub Actions, no apps). Equivalent under Settings → Branches:
+   "Restrict deletions", "Block force pushes" and "Restrict updates", with only the Repository
+   admin role in the bypass list (no GitHub Actions, no apps). Applied 2026-10-05 as ruleset
+   24500573. Equivalent under Settings → Branches:
    a branch protection rule for `untrusted` with "Restrict who can push" (owner only), force
    pushes and deletions not allowed.
-2. **Let `source-read` deploy to `untrusted`.** Settings → Environments → `source-read` →
-   Deployment branches and tags → "Selected branches and tags" → Add rule → `untrusted`
-   (alongside the existing `main`). Do not add a wildcard.
+2. **Let `source-read` deploy to `untrusted`.** The environment's deployment policy is
+   "Protected branches only" (`protected_branches: true`), so `untrusted` qualifies as soon as
+   step 1 protects it; no environment change is needed. (With "Selected branches and tags"
+   instead, add `untrusted` alongside `main`, never a wildcard.)
 3. **Check both:**
 
    ```bash
-   gh api repos/Moh-Bakr/Taurine-CI/environments/source-read/deployment-branch-policies \
-     -q '.branch_policies[] | [.name, .type] | @tsv'          # expect main and untrusted only
+   gh api repos/Moh-Bakr/Taurine-CI/environments/source-read -q .deployment_branch_policy
+                                                    # expect protected_branches: true
+   gh api repos/Moh-Bakr/Taurine-CI/branches/untrusted -q .protected     # expect true
    gh api repos/Moh-Bakr/Taurine-CI/rules/branches/untrusted \
      -q '.[].type'                                             # expect deletion, non_fast_forward, update
    gh api repos/Moh-Bakr/Taurine-CI/rulesets -q '.[] | [.id, .name, .enforcement] | @tsv'
