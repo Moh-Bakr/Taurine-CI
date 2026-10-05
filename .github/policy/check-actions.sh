@@ -45,6 +45,9 @@ check_action_references() {
       ./.github/actions/linux-test-identities) ;;
       ./.github/workflows/keeldock-validation-concern.yml) ;;
       ./.github/workflows/live-proof-arm.yml) ;;
+      ./.github/actions/mobile-report) ;;
+      ./.github/actions/android-sdk-setup) ;;
+      ./.github/actions/ios-project-init) ;;
       ./.github/actions/live-build) ;;
       ./.github/actions/live-run) ;;
       ./.github/actions/live-summary) ;;

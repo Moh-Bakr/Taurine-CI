@@ -1,0 +1,88 @@
+name: Android SDK, JDK and Rust targets
+description: >
+  Pins and installs everything an Android build needs on the hosted runner (command-line tools by
+  SHA-256, SDK platform, build-tools and NDK by exact version, the libclang bindgen needs and the
+  Rust target) and exports the build environment. Runs after the source token is revoked.
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare Android SDK, JDK, and Rust targets
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      # Only runner-image paths and pinned constants are written to the env and path files.
+      run: |  # zizmor: ignore[github-env]
+        set -euo pipefail
+        : "${ANDROID_HOME:?The hosted image Android SDK is required}"
+        : "${JAVA_HOME_17_X64:?The hosted image JDK 17 installation is required}"
+        export JAVA_HOME="${JAVA_HOME_17_X64}"
+        echo "JAVA_HOME=${JAVA_HOME}" >> "${GITHUB_ENV}"
+        # Every Android build input is pinned: the command-line tools archive by
+        # SHA-256 (the checksum Google publishes beside the download), and the SDK
+        # platform, build-tools and NDK by exact version. Nothing is taken from
+        # `cmdline-tools/latest` or the image's preinstalled revisions.
+        cmdline_tools_build='15859902'
+        cmdline_tools_sha256='4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583'
+        cmdline_tools_zip="${RUNNER_TEMP}/commandlinetools.zip"
+        curl --fail --silent --show-error --location --retry 3 -o "${cmdline_tools_zip}" \
+          "https://dl.google.com/android/repository/commandlinetools-linux-${cmdline_tools_build}_latest.zip"
+        echo "${cmdline_tools_sha256}  ${cmdline_tools_zip}" | sha256sum --check --status
+        unzip -q "${cmdline_tools_zip}" -d "${RUNNER_TEMP}/android-cmdline-tools"
+        sdkmanager_bin="${RUNNER_TEMP}/android-cmdline-tools/cmdline-tools/bin/sdkmanager"
+        [[ -x "${sdkmanager_bin}" ]] || { echo 'pinned sdkmanager is unavailable' >&2; exit 1; }
+        yes | "${sdkmanager_bin}" --sdk_root="${ANDROID_HOME}" --licenses >/dev/null || true
+        # Tauri 2's Android Gradle plugin and bindgen are validated against
+        # NDK r27c.  Do not rely on whichever NDK happens to be preinstalled
+        # on the hosted image: a newer image can otherwise change the linker
+        # layout underneath a source-bearing run.
+        local_ndk_version='27.2.12479018'
+        "${sdkmanager_bin}" --sdk_root="${ANDROID_HOME}" \
+          'platforms;android-36' 'build-tools;36.0.0' "ndk;${local_ndk_version}" >/dev/null
+        export NDK_HOME="${ANDROID_HOME}/ndk/${local_ndk_version}"
+        ndk_bin="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        ndk_sysroot="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        [[ -x "${ndk_bin}/clang" && -d "${ndk_sysroot}" ]] || { echo 'required Android NDK is unavailable' >&2; exit 1; }
+        # Some hosted NDK images omit the versioned clang launcher names.
+        # Cargo needs a real executable path, so use a runner-local wrapper
+        # that supplies the Android target and sysroot to the stable clang.
+        linker_wrapper="${RUNNER_TEMP}/aarch64-linux-android-linker"
+        printf '%s\n' '#!/usr/bin/env bash' \
+          "exec \"${ndk_bin}/clang\" --target=aarch64-linux-android24 --sysroot=\"${ndk_sysroot}\" \"\$@\"" \
+          >"${linker_wrapper}"
+        chmod 700 "${linker_wrapper}"
+        "${linker_wrapper}" --version >/dev/null
+        # OpenSSL's Android build helper asks PATH for the target-prefixed
+        # binutils names. NDK r27 ships the LLVM implementations without
+        # those aliases, so provide runner-local aliases rather than relying
+        # on an image-specific PATH.
+        android_bin="${RUNNER_TEMP}/android-bin"
+        mkdir -p "${android_bin}"
+        for tool in ar ranlib strip; do
+          ln -s "${ndk_bin}/llvm-${tool}" "${android_bin}/aarch64-linux-android-${tool}"
+          ln -s "${ndk_bin}/llvm-${tool}" "${android_bin}/aarch64-linux-android24-${tool}"
+        done
+        echo "${android_bin}" >> "${GITHUB_PATH}"
+        echo "NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
+        echo "ANDROID_NDK_HOME=${NDK_HOME}" >> "${GITHUB_ENV}"
+        echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "${GITHUB_ENV}"
+        echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${linker_wrapper}" >> "${GITHUB_ENV}"
+        echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=${android_bin}/aarch64-linux-android-ar" >> "${GITHUB_ENV}"
+        echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB=${android_bin}/aarch64-linux-android-ranlib" >> "${GITHUB_ENV}"
+        echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_STRIP=${android_bin}/aarch64-linux-android-strip" >> "${GITHUB_ENV}"
+        echo "CC_aarch64_linux_android=${linker_wrapper}" >> "${GITHUB_ENV}"
+        echo "AR_aarch64_linux_android=${android_bin}/aarch64-linux-android-ar" >> "${GITHUB_ENV}"
+        echo "RANLIB_aarch64_linux_android=${android_bin}/aarch64-linux-android-ranlib" >> "${GITHUB_ENV}"
+        echo "STRIP_aarch64_linux_android=${android_bin}/aarch64-linux-android-strip" >> "${GITHUB_ENV}"
+        echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android24 --sysroot=${ndk_sysroot}" >> "${GITHUB_ENV}"
+        # taurine-scripting enables rquickjs bindgen for Android. The
+        # hosted Ubuntu image has clang, but not always the libclang shared
+        # library that bindgen loads at runtime; missing it surfaces only as
+        # the unhelpful `No such file or directory` from Cargo's build script.
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends clang libclang-dev
+        # Debian/Ubuntu package revisions commonly expose this as
+        # libclang-18.so.1 rather than the unversioned libclang.so symlink.
+        libclang_file="$(find /usr/lib -type f \( -name 'libclang.so*' -o -name 'libclang-*.so*' \) -print -quit)"
+        [[ -n "${libclang_file}" ]] || { echo 'libclang shared library is unavailable' >&2; exit 1; }
+        echo "LIBCLANG_PATH=$(dirname "${libclang_file}")" >> "${GITHUB_ENV}"
+        rustup target add aarch64-linux-android
