@@ -23,6 +23,11 @@ on:
         required: false
         default: false
         type: boolean
+      gitleaks_history:
+        description: Also scan the full git history of source_sha with gitleaks (the opt-in scan-history concern). Report only, never enforcing; publishes counts, rule ids and commit short SHAs
+        required: false
+        default: false
+        type: boolean
       base_sha:
         description: Optional base commit; when set, only the concerns the diff to source_sha affects run (a partial selection, which does not admit a merge)
         required: false
@@ -132,6 +137,7 @@ jobs:
         env:
           PROFILE: ${{ inputs.profile }}
           VISUAL: ${{ inputs.visual }}
+          GITLEAKS_HISTORY: ${{ inputs.gitleaks_history }}
         run: |
           set -euo pipefail
           # profile=quick drops the concerns the table marks full_only (the slowest ones);
@@ -141,9 +147,13 @@ jobs:
           else
             filter='.concerns.linux | to_entries | map(select(.value.opt_in == null))'
           fi
-          # An opt-in concern (the visual tier) joins the list only when its input is true.
+          # An opt-in concern (the visual tier, the gitleaks history scan) joins the list only
+          # when its input is true.
           if [[ "${VISUAL}" == true ]]; then
             filter="(${filter}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"visual\")))"
+          fi
+          if [[ "${GITLEAKS_HISTORY}" == true ]]; then
+            filter="(${filter}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"gitleaks_history\")))"
           fi
           echo "matrix=$(jq -c "{concern: ((${filter}) | map(.key))}" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
           # The Result job expects every non-opt-in concern, plus the opt-in ones enabled above,
@@ -153,14 +163,20 @@ jobs:
           if [[ "${VISUAL}" == true ]]; then
             expected="(${expected}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"visual\")))"
           fi
+          if [[ "${GITLEAKS_HISTORY}" == true ]]; then
+            expected="(${expected}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"gitleaks_history\")))"
+          fi
           echo "expected=$(jq -c "(${expected}) | map(.key)" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
           # The opt-in concerns this dispatch asked for: they must run (the selector appends
           # them) and the Result fails if one is missing.
+          optin='[]'
           if [[ "${VISUAL}" == true ]]; then
-            echo "optin=$(jq -c '[.concerns.linux | to_entries[] | select(.value.opt_in == "visual") | .key]' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
-          else
-            echo 'optin=[]' >> "${GITHUB_OUTPUT}"
+            optin="$(jq -c '. + ["e2e-visual"]' <<<"${optin}")"
           fi
+          if [[ "${GITLEAKS_HISTORY}" == true ]]; then
+            optin="$(jq -c '. + ["scan-history"]' <<<"${optin}")"
+          fi
+          echo "optin=${optin}" >> "${GITHUB_OUTPUT}"
           # Per-concern timeouts (minutes) come from the same table.
           echo "timeouts=$(jq -c '.concerns.linux | map_values(.timeout)' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
 
@@ -211,6 +227,9 @@ jobs:
     needs: [validate]
     name: Timings
     runs-on: ubuntu-24.04
+    # Reporting only: a queued, slow or cancelled timings job must never fail a run whose
+    # concerns all passed (run 37342723559 was cancelled while waiting for a runner).
+    continue-on-error: true
     timeout-minutes: 5
     permissions:
       actions: read
