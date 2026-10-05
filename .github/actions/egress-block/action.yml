@@ -59,7 +59,7 @@ runs:
         sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
           "dnsmasq-base=${DNSMASQ_PIN}" "nftables=${NFTABLES_PIN}" >/dev/null
         dnsmasq_version="$(dnsmasq --version | head -n 1)"
-        dnsmasq --version | grep -qw 'nftset' || die "dnsmasq lacks nftset support (${dnsmasq_version})"
+        dnsmasq --version | grep -qE '(^|[[:space:]])nftset([[:space:]]|$)' || die "dnsmasq lacks nftset support (${dnsmasq_version})"
         nft --version >/dev/null
         echo "egress-block: ${dnsmasq_version}; $(nft --version)"
 
