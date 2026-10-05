@@ -58,9 +58,9 @@ check_cache_policy() {
         # The KeelDock concern caches only NuGet's downloaded third-party
         # package folder (restored packages, their .nupkg archives and
         # metadata): never bin/, obj/, publish output or anything under the
-        # checked-out private source. Each restored package is re-verified
-        # against the private packages.lock.json hashes before use. No other
-        # workflow may name this path.
+        # checked-out private source. Each restored .nupkg is re-hashed against
+        # the private packages.lock.json contentHash and the extracted folders
+        # are discarded before use. No other workflow may name this path.
         [~]/.nuget/packages)
           if [[ "$workflow" != ".github/workflows/keeldock-validation-concern.yml" && "$workflow" != "./.github/workflows/keeldock-validation-concern.yml" ]]; then
             cache_paths_ok=0; echo "NuGet cache path outside the KeelDock concern: $cache_line" >&2
@@ -102,16 +102,15 @@ check_cache_policy() {
         exit 1
       fi
     done < <(awk '/^      - name:/ { cond = "" } /^[[:space:]]+if:/ { cond = $0 } /uses:[[:space:]]*actions\/cache\/save@/ { print cond }' "$workflow")
-    # Every cargo cache save also requires the protected-ancestry answer of the
-    # source checkout (KeelDock's NuGet cache has its own inline checkout).
-    if [[ "$workflow" != *keeldock-validation-concern.yml ]]; then
-      while IFS= read -r save_if; do
-        if [[ "$save_if" != *"steps.verified-source.outputs.protected-ancestor == 'true'"* ]]; then
-          echo "A cargo cache save must require the protected-ancestry answer: $save_if" >&2
-          exit 1
-        fi
-      done < <(awk '/^      - name:/ { cond = "" } /^[[:space:]]+if:/ { cond = $0 } /uses:[[:space:]]*actions\/cache\/save@/ { print cond }' "$workflow")
-    fi
+    # Every cache save, cargo and NuGet alike, requires the protected-ancestry
+    # answer of the source checkout (KeelDock's inline checkout gives the same
+    # answer under the same step id), fixed before any project code ran.
+    while IFS= read -r save_if; do
+      if [[ "$save_if" != *"steps.verified-source.outputs.protected-ancestor == 'true'"* ]]; then
+        echo "A cache save must require the protected-ancestry answer: $save_if" >&2
+        exit 1
+      fi
+    done < <(awk '/^      - name:/ { cond = "" } /^[[:space:]]+if:/ { cond = $0 } /uses:[[:space:]]*actions\/cache\/save@/ { print cond }' "$workflow")
     # The compiled-dependency cache: one exact key from the locate step and no
     # restore-keys; every save follows a successful strip-and-prove step; the
     # restore is followed by the restore-time strip.
@@ -170,6 +169,28 @@ check_cache_policy() {
         echo "A restored NuGet cache must be verified against packages.lock.json before use: $workflow" >&2
         exit 1
       fi
+      # Findings H1/M1 (2026-10-05): the NuGet restore and save stay off until
+      # unprotected SHAs run from a ref whose cache scope main never reads. The
+      # save key is the restore step's primary key (computed before project
+      # code), never a hashFiles evaluated after it.
+      while IFS='|' read -r cond key; do
+        if ! compiled_cache_gated_off "$cond"; then
+          echo "The NuGet cache is disabled until ref isolation exists (findings H1/M1): every restore and save must be conditioned on a leading literal 'false &&': $cond" >&2
+          exit 1
+        fi
+        if [[ -n "$key" && "$key" != *'key: ${{ steps.nuget-packages.outputs.cache-primary-key }}' ]]; then
+          echo "The NuGet cache save key must be the restore step's cache-primary-key: $key" >&2
+          exit 1
+        fi
+      done < <(awk '
+        function flush() { if (cache) print cond "|" (kind == "save" ? key : ""); cache = 0; key = ""; cond = ""; kind = "" }
+        /^      - name:/ { flush() }
+        /^[[:space:]]+if:/ { cond = $0 }
+        /uses:[[:space:]]*actions\/cache\/save@/ { cache = 1; kind = "save" }
+        /uses:[[:space:]]*actions\/cache\/restore@/ { cache = 1; kind = "restore" }
+        /^[[:space:]]+key:/ { key = $0 }
+        END { flush() }
+      ' "$workflow")
       if grep -nE '^[[:space:]]+path:.*(bin|obj|publish|artifacts)([/[:space:]]|$)' "$workflow"; then
         echo "The KeelDock cache must never name build or publish output: $workflow" >&2
         exit 1
