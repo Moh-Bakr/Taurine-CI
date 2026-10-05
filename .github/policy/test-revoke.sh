@@ -184,7 +184,8 @@ load .github/workflows/keeldock-validation-concern.yml 'Verify identity, exact c
   '{"${{ steps.source-token.outputs.token }}":"'"${token}"'","${{ inputs.source_sha }}":"'"${sha}"'"}'
 verify_scenarios
 
-# The weekly resolver: identity, the develop tip, last week's tip, the three lock files, revoke;
+# The weekly resolver: identity, the develop and main tips, last week's develop tip, the three
+# lock files, revoke;
 # outputs only after every check passed.
 target=weekly-resolver
 repo_id=1330267721 owner=Moh-Bakr name=Taurine
@@ -193,6 +194,7 @@ load .github/workflows/weekly-validation.yml 'Resolve the develop tip and revoke
   '{"${{ steps.source-token.outputs.token }}":"'"${token}"'"}'
 identity="GET ${api}/repositories/${repo_id}"
 tip="GET ${api}/repos/${owner}/${name}/commits/develop"
+main_tip="GET ${api}/repos/${owner}/${name}/commits/main"
 week="GET ${api}/repos/${owner}/${name}/commits?sha=develop&until=2026-09-29T00:00:00Z&per_page=1"
 locks=()
 for lock in Cargo.lock taurine-backend/dbx-core/Cargo.lock taurine-backend/dbx-mongo-shell/Cargo.lock; do
@@ -202,7 +204,8 @@ revoke="DELETE ${api}/installation/token"
 revoke_run refs/heads/main
 expect 'resolved' 0 "sha=${sha}
 base=${other}
-openssl_locked=300.5.0+3.5.0,300.5.0+3.5.0,300.5.0+3.5.0" "${identity}" "${tip}" "${week}" "${locks[@]}" "${revoke}"
+main_sha=${sha}
+openssl_locked=300.5.0+3.5.0,300.5.0+3.5.0,300.5.0+3.5.0" "${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${revoke}"
 for bad in FAKE_IDENTITY=fail FAKE_ID=1 FAKE_OWNER=someone-else FAKE_NAME=other-repo; do
   revoke_run refs/heads/main "${bad}"
   expect "identity check (${bad})" fail '' "${identity}" "${revoke}"
@@ -212,7 +215,7 @@ expect 'develop tip unreadable' fail '' "${identity}" "${tip}" "${revoke}"
 revoke_run refs/heads/main FAKE_API_SHA=not-a-sha
 expect 'develop tip malformed' fail '' "${identity}" "${tip}" "${revoke}"
 revoke_run refs/heads/main FAKE_REVOKE_RC=22
-expect 'revoke failed' fail '' "${identity}" "${tip}" "${week}" "${locks[@]}" "${revoke}"
+expect 'revoke failed' fail '' "${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${revoke}"
 revoke_run refs/heads/main SOURCE_TOKEN=
 expect 'no token minted' fail -
 echo 'revoke fixtures: source-checkout, the Keel Dock concern and the weekly resolver revoke on every path with the source token, call only the reviewed endpoints, and main refuses an unprotected SHA'
