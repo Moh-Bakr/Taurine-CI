@@ -377,9 +377,49 @@ runs:
         # which sub-steps failed without opening the log.
         deferred_results=()
         deferred_failed=0
+        # A doctest run (`--doc`) or one that already builds nothing (`--no-run`) is not split.
+        rust_build_splittable() {
+          local arg
+          for arg in "$@"; do
+            if [[ "${arg}" == --doc || "${arg}" == --no-run ]]; then return 1; fi
+          done
+          return 0
+        }
+        # One "label seconds" line per sub-step that ran, for the summary's time column and the
+        # compile and test totals. A text variable, not an associative array, so it also works
+        # on the macOS runners' older bash.
+        deferred_timing=''
         run_deferred() {
           local label="$1"; shift
-          local status
+          local status started build_label
+          # Compile and test time are reported apart. A crate-test sub-step (`cargo test` or
+          # `cargo nextest run`, doctests excluded) is first built on its own with `--no-run`,
+          # then run: the same targets, features and flags, so nothing different is tested,
+          # and the run step finds every binary already built (cargo's no-op freshness check
+          # takes seconds). The build keeps its own label (`*-build`), pass line, failure
+          # classification and sanitized detail, so a compile failure is named as one and the
+          # test run is then reported as not run rather than repeating the same failure.
+          if [[ "${label}" == rust-* && "${1:-}" == cargo && ( "${2:-}" == test || ( "${2:-}" == nextest && "${3:-}" == run ) ) ]] &&
+             rust_build_splittable "$@"; then
+            build_label="${label%-tests}-build"
+            if [[ "${build_label}" == "${label}" ]]; then build_label="${label}-build"; fi
+            started="${SECONDS}"
+            set +e
+            ( set -e; run_quiet "${build_label}" "$@" --no-run )
+            status=$?
+            set -e
+            deferred_timing+="${build_label} $((SECONDS - started))"$'\n'
+            if [[ "${status}" -ne 0 ]]; then
+              exit_code="$(cat "${RUNNER_TEMP}/${build_label}.log.exit" 2>/dev/null || echo '?')"
+              reason="$(cargo_test_reason "${RUNNER_TEMP}/${build_label}.log")"
+              deferred_results+=("${build_label}|failed: ${reason} (exit ${exit_code})")
+              deferred_results+=("${label}|not run (the build failed)")
+              deferred_failed=1
+              return 0
+            fi
+            deferred_results+=("${build_label}|passed")
+          fi
+          started="${SECONDS}"
           # Not `if ( ... )` or `( ... ) || status=$?`: either would run the
           # subshell with errexit suspended, which is not how `run_quiet`
           # runs anywhere else.
@@ -387,6 +427,7 @@ runs:
           ( set -e; run_quiet "${label}" "$@" )
           status=$?
           set -e
+          deferred_timing+="${label} $((SECONDS - started))"$'\n'
           if [[ "${status}" -eq 0 ]]; then
             deferred_results+=("${label}|passed")
           else
@@ -401,22 +442,38 @@ runs:
           fi
         }
 
+        # Seconds as minutes and seconds; "-" for a sub-step with no recorded time.
+        deferred_duration() {
+          local secs
+          secs="$(printf '%s' "${deferred_timing}" | awk -v l="$1" '$1 == l { print $2; exit }')"
+          if [[ -z "${secs}" ]]; then printf -- '-'; else printf '%dm%02ds' $((secs / 60)) $((secs % 60)); fi
+        }
+
         finish_deferred() {
-          local entry
+          local entry compile_secs test_secs
+          compile_secs="$(printf '%s' "${deferred_timing}" | awk '$1 ~ /-build$/ { s += $2 } END { print s + 0 }')"
+          test_secs="$(printf '%s' "${deferred_timing}" | awk '$1 ~ /-tests$/ { s += $2 } END { print s + 0 }')"
           {
             echo "## ${OS_LABEL:-${RUNNER_OS}} ${CONCERN} sub-steps"
             echo
-            echo '| Sub-step | Result |'
-            echo '| --- | --- |'
+            echo '| Sub-step | Result | Time |'
+            echo '| --- | --- | --- |'
             for entry in "${deferred_results[@]}"; do
-              echo "| \`${entry%%|*}\` | ${entry#*|} |"
+              echo "| \`${entry%%|*}\` | ${entry#*|} | $(deferred_duration "${entry%%|*}") |"
             done
             echo
+            if [[ "${compile_secs}" -gt 0 ]]; then
+              printf 'Compile (`*-build` sub-steps) %dm%02ds; test run (`*-tests` sub-steps) %dm%02ds.\n\n' \
+                $((compile_secs / 60)) $((compile_secs % 60)) $((test_secs / 60)) $((test_secs % 60))
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
           echo "${CONCERN} sub-step results:"
           for entry in "${deferred_results[@]}"; do
-            echo "  ${entry%%|*}: ${entry#*|}"
+            echo "  ${entry%%|*}: ${entry#*|} ($(deferred_duration "${entry%%|*}"))"
           done
+          if [[ "${compile_secs}" -gt 0 ]]; then
+            echo "${CONCERN} compile ${compile_secs}s, test run ${test_secs}s"
+          fi
           df -h / 2>/dev/null || true
           if [[ "${deferred_failed}" -ne 0 ]]; then
             echo "${CONCERN}: failed (one or more sub-steps failed; each is listed above)" >&2
