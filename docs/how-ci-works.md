@@ -14,7 +14,9 @@ actions and one concern table, and never any product source.
 Every validation is a manual `workflow_dispatch` (plus the weekly schedule) on `main` of this
 repository, given the exact 40-character SHA of the private commit to test. Nothing runs on
 pull requests or pushes with source access. Source never lands in this repository, and the
-policy workflow rejects tracked source, credential and starter-document paths.
+policy workflow rejects tracked source, credential and starter-document paths; the only tracked
+files are workflows, composite actions (`action.yml`), the policy scripts, the concern and tool tables, and
+flat `docs/*.md` guides such as this one.
 
 ## Token lifecycle
 
@@ -43,20 +45,50 @@ Linux and Windows concerns therefore only install dependencies, run `npm ci`, `c
 
 | Workflow | Concerns |
 | --- | --- |
-| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 22 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and opt-in e2e-visual |
+| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and opt-in e2e-visual |
 | `macos-validation.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app, rust-packaging, rust-tls-openssl |
-| `windows-validation.yml` and `windows-validation-concern.yml` | The same app concerns plus contracts; Rust concerns with `rust=true` |
+| `windows-validation.yml` and `windows-validation-concern.yml` | The same app concerns plus contracts; Rust concerns with `rust=true`; `windows_image` selects `windows-2022` (default) or `windows-2025` |
 | `android-validation.yml` | android-native (debug build for aarch64); android-rust with `rust=true` (compile-only mobile test targets, not executed) |
 | `ios-validation.yml` | ios-native (unsigned simulator build); ios-rust with `rust=true` (compile-only) |
 | `orchestrate-validation.yml` | dashboard, release-verification |
-| `keeldock-validation.yml` and `keeldock-validation-concern.yml` | build-format, structural, unit, db-containers, contracts-publish-smoke; opt-in apphost-cold-start |
+| `keeldock-validation.yml` and `keeldock-validation-concern.yml` | build-format, structural, unit and contracts-publish-smoke on Linux, macOS and Windows; Linux-only db-containers and supply-chain; opt-in apphost-cold-start |
 | `source-read.yml` | Reads an exact private SHA, a smoke test of the access path |
+| `live-proofs.yml` (dispatcher) and `live-proof-arm.yml` | One arm per database engine; see [The live proofs](#the-live-proofs) |
 
 Android uses `ubuntu-24.04` with a pinned command-line tools archive (SHA-256 verified), SDK
 platform 36, build-tools 36.0.0 and NDK 27.2.12479018. iOS uses `macos-15`, the runner's Xcode
 toolchain for libclang, and a pinned, checksum-verified XcodeGen archive. Both install JavaScript
 dependencies through the `node-setup` composite (`npm ci --include=optional --ignore-scripts`,
 then `scripts/vendor-openvpn3.sh fetch`, which verifies the vendored sources against pinned checksums).
+
+## How the files are split
+
+No workflow or composite is over 400 lines (the policy warns above 400 and fails above 800). Files are
+split by responsibility: a workflow keeps everything that must run before project code (input
+validation, the token mint, the exact-SHA checkout and the revoke) plus the job wiring, and the work
+that runs after the revoke lives in composites under `.github/actions/`.
+
+| Area | Workflow (entry point) | Composites it calls |
+| --- | --- | --- |
+| Shared | every protected workflow | `source-checkout` (mint, exact checkout, verify, revoke), `sanitize`, `timings`, `node-setup`, `rust-toolchain`, `vendor-fetch`, `verify-cargo-cache`, `concern-report`, `run-result` |
+| Linux | `linux-validation.yml` calls `linux-validation-concern.yml`; `select-concerns.yml` plans | `linux-concern-js`, `linux-concern-e2e`, `linux-concern-rust`, `scan-concern`, `select-concerns`, `linux-test-identities` |
+| macOS | `macos-validation.yml` | `macos-concern-js`, `macos-concern-rust` |
+| Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust` |
+| Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report` |
+| iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report` |
+| Keel Dock | `keeldock-validation.yml` calls `keeldock-validation-concern.yml` | `keeldock-restore`, `keeldock-build-format`, `keeldock-test-suites`, `keeldock-supply-chain`, `keeldock-apphost`, `keeldock-contracts-publish`, `keeldock-summary`, `keeldock-proof`, `keeldock-nuget-verify` |
+| Live proofs | `live-proofs.yml` calls `live-proof-arm.yml` once per arm | `live-build`, `live-run`, `live-summary`, `live-start-mpp`, `live-start-ibm`, `live-start-rocketmq`, `live-start-iris`, `live-start-pg`, `live-start-sql` |
+| Policy | `validate-public-changes.yml` | the scripts under `.github/policy/` |
+
+Two conventions apply across all of them. Private source is checked out into `src/` and the
+composites run from there, so the control plane's own composites stay available after the checkout;
+the Keel Dock concern follows the same layout (its own mint and checks stay inline in the workflow, as
+its policy requires). A step that must run whatever happens, such as the revoke, the summary and the
+duration report, is conditioned on `always()` in the workflow, never inside a composite alone.
+
+Every `uses:` reference, including each local workflow and composite, is on an allow-list in
+`.github/policy/check-actions.sh`; adding a file means adding its exact reference there, in the same pull
+request, and a reviewer sees the addition.
 
 ## ci-matrix.json and change-aware selection
 
@@ -90,7 +122,9 @@ Only Linux uses `base_sha`; the other platforms always run their whole list.
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `apphost` | Keel Dock | Adds the experimental Aspire apphost-cold-start concern |
-| `engine` | live-proofs | Which database engine to prove |
+| `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
+| `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
+| `vulnerability_gate` | Keel Dock | `none` (warn-only), `high` or `critical`: the severity that fails supply-chain |
 
 ## The Result verdict
 
@@ -111,10 +145,11 @@ warns, without failing, when a job is more than 25% and two minutes slower.
 
 ## The weekly run and drift
 
-`weekly-validation.yml` runs Monday 05:00 UTC (or manually, with `dry_run`). It resolves the
+`weekly-validation.yml` runs Monday 05:23 UTC, deliberately off the top of the hour because GitHub delays or drops scheduled runs at :00 (or manually, with `dry_run`). If Monday's run is missing, dispatch it by hand on `main`. It resolves the
 private `develop` tip with a source-reader token it revokes immediately, then dispatches
 `linux-validation` (full), the same Linux run with `base_sha` set to the develop tip from seven
-days earlier, and `macos-validation` and `windows-validation` with `rust=true`. Android and iOS
+days earlier, and `macos-validation` and `windows-validation` with `rust=true` (plus a non-gating
+`windows-2025` run). Android and iOS
 are not part of the weekly run; dispatch them by hand. The base_sha run is the drift check:
 a concern that fails in the full run but is "not selected" in the selective run reveals a gap
 in the `ci-matrix.json` rules. The summary also reports how far the locked `openssl-src` is
@@ -122,11 +157,24 @@ behind the newest 300.5.x release.
 
 ## The live proofs
 
-`live-proofs.yml` runs one database engine's env-gated conformance suite against its real
-single-node Docker server at an exact private SHA (engines such as Postgres, MySQL, SQL Server,
-Db2, Informix, Doris, StarRocks, RocketMQ and IRIS). These runs find driver defects that the
-offline suites cannot. Each engine has its own concurrency group, runs are never cancelled, and
-only check titles and counts are published.
+`live-proofs.yml` runs each selected database engine's env-gated conformance suite against its real
+single-node Docker server at an exact private SHA (Postgres, MySQL, SQL Server, Db2, Informix, Doris,
+StarRocks, RocketMQ, IRIS, plus the Postgres TLS and bastion proofs). These runs find driver defects
+that the offline suites cannot.
+
+It is split three ways:
+
+- **The dispatcher** (`live-proofs.yml`) validates the dispatch input, holds the arm roster (one JSON
+  definition per arm) and calls the arm workflow once per selected arm. It passes only the source-reader
+  key, by name, and tabulates arm durations against a committed baseline.
+- **The arm workflow** (`live-proof-arm.yml`, reusable and protected) runs in the `source-read`
+  environment, performs the exact-SHA checkout and revoke through `source-checkout`, then builds,
+  starts the server, runs the suite and publishes the summary.
+- **The `live-*` composites** hold the per-engine server start-up (image digest pins, ports, readiness),
+  the cargo build, the run and the summary.
+
+Each selection has its own concurrency group, runs are never cancelled, and only check titles and counts
+are published.
 
 ## Sanitising: no artifacts, no source in logs
 
@@ -152,7 +200,7 @@ Source-bearing output is public, so it is treated as hostile:
 
 1. **Linux:** add the entry to `.github/ci-matrix.json` with a `timeout` and its `paths` or
    Rust packages (`full_only` or `opt_in` as needed). Handle its name in
-   `linux-validation-concern.yml`, and add a baseline to the `timings` step of
+   `linux-validation-concern.yml` (or the `linux-concern-*` composite it calls), and add a baseline to the `timings` step of
    `linux-validation.yml` if wanted. The policy fails if the table, the handler or the baselines
    disagree.
 2. **macOS, Windows, Android, iOS:** add it to the `plan` job's matrix (behind its input if opt-in),
