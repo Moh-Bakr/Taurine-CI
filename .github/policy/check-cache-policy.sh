@@ -5,13 +5,42 @@
 # run from a Taurine-CI ref whose cache scope main never reads. A gated-off condition is
 # `if: ${{ false && ... }}` with no `||` outside parentheses (which would re-open it).
 compiled_cache_gated_off() {
-  local cond="$1" flat
+  local cond="$1" terms
   [[ "$cond" =~ ^[[:space:]]*if:[[:space:]]*\$\{\{[[:space:]]*false[[:space:]]+\&\&[[:space:]] ]] || return 1
-  flat="$cond"
+  terms="$(cond_top_terms "$cond")" || return 1
+  [[ "$(head -n 1 <<<"$terms")" == false ]]
+}
+
+# The top-level conjuncts of an `if:` condition, one per line. The `${{ }}` wrapper is
+# dropped, every parenthesised group (a call's arguments, an `(a || b)` alternative, a
+# negated `!(...)`) is removed whole, and what remains is split on `&&`. A required term
+# therefore counts only when it stands alone at the top level: `(x == 'true' || true)`,
+# `!(x == 'true')` and `x == 'true' || true` do not yield the exact term `x == 'true'`.
+# Returns 1 (no output) when an `||` remains at the top level.
+cond_top_terms() {
+  local flat="$1" term
+  flat="${flat#*if:}"
+  flat="${flat#"${flat%%[![:space:]]*}"}"
+  flat="${flat%"${flat##*[![:space:]]}"}"
+  if [[ "$flat" == '${{'*'}}' ]]; then
+    flat="${flat#'${{'}"; flat="${flat%'}}'}"
+  fi
   while [[ "$flat" =~ \([^()]*\) ]]; do
-    flat="${flat//${BASH_REMATCH[0]}/}"
+    flat="${flat//"${BASH_REMATCH[0]}"/}"
   done
-  [[ "$flat" != *'||'* ]]
+  [[ "$flat" != *'||'* ]] || return 1
+  while IFS= read -r term; do
+    term="${term#"${term%%[![:space:]]*}"}"
+    term="${term%"${term##*[![:space:]]}"}"
+    printf '%s\n' "$term"
+  done <<<"${flat//&&/$'\n'}"
+}
+
+# True when the condition has the exact top-level conjunct $2.
+cond_requires() {
+  local terms
+  terms="$(cond_top_terms "$1")" || return 1
+  grep -qxF -- "$2" <<<"$terms"
 }
 
 check_cache_policy() {
@@ -21,10 +50,9 @@ check_cache_policy() {
   # jobs may use ONLY actions/cache/restore and actions/cache/save
   # (never the combined actions/cache, whose implicit post-step save
   # cannot be conditioned or audited), and ONLY for:
-  # - cargo's downloaded third-party sources: the registry index, the
-  #   registry `.crate` archives and the git dependency databases under
-  #   Cargo home, re-verified against the private Cargo.lock checksums
-  #   after every restore;
+  # - cargo's downloaded third-party `.crate` archives (registry/cache under
+  #   Cargo home), re-hashed against the private Cargo.lock checksums after
+  #   every restore and saved before any project code runs;
   # - compiled third-party crates (2026-10-05, approved; DISABLED the same
   #   day, finding H1, see compiled_cache_gated_off): the deps/,
   #   build/ and .fingerprint/ directories of the debug profile under the
@@ -53,7 +81,9 @@ check_cache_policy() {
     # step is inspected line by line from its `uses:` to the next step.
     while IFS= read -r cache_line; do
       case "$cache_line" in
-        *'steps.cargo-home.outputs.dir }}/registry/index'|*'steps.cargo-home.outputs.dir }}/registry/cache'|*'steps.cargo-home.outputs.dir }}/git/db') ;;
+        # Only the `.crate` archives: each is re-hashed against Cargo.lock on restore. The
+        # registry index and git databases cannot be verified that way (finding L1).
+        '${{ steps.cargo-home.outputs.dir }}/registry/cache') ;;
         '${{ steps.cargo-target.outputs.dir }}/debug/deps'|'${{ steps.cargo-target.outputs.dir }}/debug/build'|'${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint') ;;
         # The KeelDock concern caches only NuGet's downloaded third-party
         # package folder (restored packages, their .nupkg archives and
@@ -76,7 +106,7 @@ check_cache_policy() {
       in_cache && in_path && NF { sub(/^[[:space:]]+/, ""); print "            " $0 }
     ' "$workflow" | sed -E 's/^ +//')
     if (( ! cache_paths_ok )); then
-      echo "Cache steps may only name registry/index, registry/cache and git/db under the located Cargo home, or debug/deps, debug/build and debug/.fingerprint under the located target directory: $workflow" >&2
+      echo "Cache steps may only name registry/cache under the located Cargo home, debug/deps, debug/build and debug/.fingerprint under the located target directory, or the KeelDock NuGet folder: $workflow" >&2
       exit 1
     fi
     if grep -nE 'enableCrossOsArchive|fail-on-cache-miss|lookup-only' "$workflow"; then
@@ -93,11 +123,7 @@ check_cache_policy() {
     # `||` outside parentheses would let one alternative skip the main guard
     # (the bug `A && B && C || D && E` had), so it is rejected outright.
     while IFS= read -r save_if; do
-      flat="$save_if"
-      while [[ "$flat" =~ \([^()]*\) ]]; do
-        flat="${flat//${BASH_REMATCH[0]}/}"
-      done
-      if [[ "$save_if" != *"github.ref == 'refs/heads/main'"* || "$flat" == *'||'* ]]; then
+      if ! cond_requires "$save_if" "github.ref == 'refs/heads/main'"; then
         echo "The cache save condition must require the main branch as a top-level term, with no unparenthesised ||: $save_if" >&2
         exit 1
       fi
@@ -106,11 +132,26 @@ check_cache_policy() {
     # answer of the source checkout (KeelDock's inline checkout gives the same
     # answer under the same step id), fixed before any project code ran.
     while IFS= read -r save_if; do
-      if [[ "$save_if" != *"steps.verified-source.outputs.protected-ancestor == 'true'"* ]]; then
-        echo "A cache save must require the protected-ancestry answer: $save_if" >&2
+      if ! cond_requires "$save_if" "steps.verified-source.outputs.protected-ancestor == 'true'"; then
+        echo "A cache save must require the protected-ancestry answer as an exact top-level term: $save_if" >&2
         exit 1
       fi
     done < <(awk '/^      - name:/ { cond = "" } /^[[:space:]]+if:/ { cond = $0 } /uses:[[:space:]]*actions\/cache\/save@/ { print cond }' "$workflow")
+    # The cargo source cache saves under the key its restore step computed before any
+    # project code ran (finding L2), never a hashFiles evaluated at save time.
+    while IFS= read -r key; do
+      if [[ "$key" != *'key: ${{ steps.cargo-sources.outputs.cache-primary-key }}' ]]; then
+        echo "The cargo source cache save key must be the restore step's cache-primary-key: $key" >&2
+        exit 1
+      fi
+    done < <(awk '
+      function flush() { if (save && home) print key; save = 0; home = 0; key = "" }
+      /^      - name:/ { flush() }
+      /uses:[[:space:]]*actions\/cache\/save@/ { save = 1 }
+      /steps\.cargo-home\.outputs\.dir/ { home = 1 }
+      /^[[:space:]]+key:/ { key = $0 }
+      END { flush() }
+    ' "$workflow")
     # The compiled-dependency cache: one exact key from the locate step and no
     # restore-keys; every save follows a successful strip-and-prove step; the
     # restore is followed by the restore-time strip.

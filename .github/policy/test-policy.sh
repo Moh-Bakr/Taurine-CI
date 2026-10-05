@@ -176,6 +176,20 @@ cache_expect_fail 'compiled cache gate re-opened by ||' 'disabled until ref isol
   's/(if: \$\{\{ false && startsWith\(inputs\.concern, .rust-app-.\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
 cache_expect_fail 'compiled cache strip re-enabled' 'strip steps are disabled' \
   's/if: \$\{\{ false && (github\.ref == [^\n]*steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
+# Findings L1-L3: the source cache holds only the verified archives, saves under the restore's
+# key, and the required save terms count only as exact top-level conjuncts.
+cache_expect_fail 'the unverified registry index' 'Disallowed cache path line' \
+  's#(            \$\{\{ steps\.cargo-home\.outputs\.dir \}\}/registry/cache\n)#$1            \${{ steps.cargo-home.outputs.dir }}/registry/index\n#'
+cache_expect_fail 'the unverified git databases' 'Disallowed cache path line' \
+  's#(            \$\{\{ steps\.cargo-home\.outputs\.dir \}\}/registry/cache\n)#$1            \${{ steps.cargo-home.outputs.dir }}/git/db\n#'
+cache_expect_fail 'a source save key evaluated after project code' 'cache-primary-key' \
+  's/key: \$\{\{ steps\.cargo-sources\.outputs\.cache-primary-key \}\}/key: cargo-sources-v3-\$\{\{ runner.os \}\}-\$\{\{ hashFiles(\x27src\/Cargo.lock\x27) \}\}/'
+cache_expect_fail 'protected ancestry inside an always-true alternative' 'exact top-level term' \
+  's/ && (steps\.verified-source\.outputs\.protected-ancestor == .true.) && steps\.cargo-sources/ \&\& ($1 || true) \&\& steps.cargo-sources/g'
+cache_expect_fail 'protected ancestry negated' 'exact top-level term' \
+  's/ && (steps\.verified-source\.outputs\.protected-ancestor == .true.) && steps\.cargo-sources/ \&\& !($1) \&\& steps.cargo-sources/g'
+cache_expect_fail 'the main guard inside an always-true alternative' 'main branch as a top-level term' \
+  's/if: \$\{\{ (github\.ref == .refs\/heads\/main.) && (\(inputs\.concern == .taurine-cli.)/if: \${{ ($1 || true) \&\& $2/g'
 echo 'cache policy fixtures: the compiled-dependency guards reject restore-keys, an unguarded save, an unreviewed path and a re-enabled cache'
 
 # The KeelDock NuGet cache: the reviewed concern passes; a re-enabled restore or save, a save

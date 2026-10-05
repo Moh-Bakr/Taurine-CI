@@ -5,7 +5,8 @@ name: Prune stale caches (scheduled)
 # documented route to displacing a legitimate entry with a planted one). This workflow
 # checks out nothing, runs no project code, holds no secret and no environment: it lists
 # the cache entries through the API with the run's own token and deletes
-# - entries of a superseded key shape (the per-concern cargo-sources keys);
+# - entries of a superseded key shape (every cargo-sources key but v3, which caches only the
+#   re-verified registry/cache archives);
 # - entries nobody has restored for seven days;
 # - every entry of a key family but the most recently used one (a family is the key
 #   without its lockfile or toolchain hashes: one per OS for the cargo sources and NuGet,
@@ -62,8 +63,8 @@ jobs:
             age=$(( now - $(date -u -d "${accessed}" +%s) ))
             case "${key}" in
               cargo-target-*) family="${ref} ${key%%-rustc*}" ;;
-              cargo-sources-v2-*|nuget-*) family="${ref} ${key%-*}" ;;
-              cargo-sources-*) printf '%s\t%s\t%s\n' "${id}" "${size}" 'superseded per-concern key' >> "${plan}"; continue ;;
+              cargo-sources-v3-*|nuget-*) family="${ref} ${key%-*}" ;;
+              cargo-sources-*) printf '%s\t%s\t%s\n' "${id}" "${size}" 'superseded key shape' >> "${plan}"; continue ;;
               *) family="${ref} ${key}" ;;
             esac
             if (( age > stale_after )); then
