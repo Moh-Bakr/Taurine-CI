@@ -11,12 +11,13 @@ inputs:
     required: true
   machete-fail:
     description: >
-      Whether an unused dependency found by cargo-machete fails the contracts concern. False
-      reports the findings as a warning only; true enforces them. A real false positive is
-      listed in the private manifest's [package.metadata.cargo-machete] ignored table, with
+      Whether an unused dependency found by cargo-machete fails the contracts concern. True
+      (the default) enforces them; false reports the findings as a warning only. Only the
+      Taurine-owned crates are scanned; the vendored and adopted trees are excluded below. A
+      real false positive is listed in the private manifest's [package.metadata.cargo-machete] ignored table, with
       a comment saying why, never here.
     required: false
-    default: 'false'
+    default: 'true'
 
 runs:
   using: composite
@@ -175,8 +176,28 @@ runs:
               deferred_results+=("cargo-machete|failed: the pinned scanner did not install")
               deferred_failed=1
             else
+              # Scan only the Taurine-owned crates: the vendored and adopted third-party trees
+              # (vendor/, taurine-backend/vendor/, dbx-core, dbx-mongo-shell, dbx-sqlite-worker)
+              # are not ours to prune, and their manifests stay byte-identical to upstream. Each
+              # owned crate directory is passed explicitly (never the repository root), so the
+              # exclusion lives here rather than in a `.ignore` file that would also hide those
+              # trees from code search.
+              machete_dirs=()
+              while IFS= read -r machete_manifest; do
+                machete_manifest="${machete_manifest#./}"
+                [[ "${machete_manifest}" == Cargo.toml ]] && continue
+                case "${machete_manifest}" in
+                  vendor/*|taurine-backend/vendor/*|taurine-backend/dbx-core/*|taurine-backend/dbx-mongo-shell/*|taurine-backend/dbx-sqlite-worker/*) continue ;;
+                esac
+                machete_dirs+=("$(dirname "${machete_manifest}")")
+              done < <(find . -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' | sort)
               machete_status=0
-              "${machete_exe}" >"${RUNNER_TEMP}/cargo-machete.out" 2>&1 || machete_status=$?
+              if [[ "${#machete_dirs[@]}" -eq 0 ]]; then
+                echo "cargo-machete: no owned crate manifests found" >&2
+                machete_status=2
+              else
+                "${machete_exe}" "${machete_dirs[@]}" >"${RUNNER_TEMP}/cargo-machete.out" 2>&1 || machete_status=$?
+              fi
               if [[ "${machete_status}" -eq 0 ]]; then
                 deferred_results+=("cargo-machete|passed")
               elif [[ "${machete_status}" -eq 1 ]]; then
