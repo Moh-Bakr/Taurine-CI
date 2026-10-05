@@ -22,10 +22,6 @@ on:
         required: false
         default: windows-2022
         type: string
-    secrets:
-      SOURCE_READER_PRIVATE_KEY:
-        description: The source-reader App private key, passed explicitly by the dispatcher (never inherited)
-        required: true
 
 permissions: {}
 

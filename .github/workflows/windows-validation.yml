@@ -105,9 +105,7 @@ jobs:
           - bundle-budget
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
-    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
-    secrets:
-      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    # No secret is passed: the called job declares environment source-read and reads the App key itself.
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
@@ -142,9 +140,7 @@ jobs:
           - rust-tls-openssl
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
-    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
-    secrets:
-      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    # No secret is passed: the called job declares environment source-read and reads the App key itself.
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
