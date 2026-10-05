@@ -260,12 +260,13 @@ jobs:
           # (by name, or by the scan-/e2e- prefix groups); every baseline key names a real
           # concern. A concern added to one place and forgotten in another fails here.
           full = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux']
-          concern_text = File.read('.github/workflows/linux-validation-concern.yml', encoding: 'UTF-8')
+          # The concern bodies live in the linux-concern-* composites (one per family).
+          concern_text = ([ '.github/workflows/linux-validation-concern.yml' ] + Dir.glob('.github/actions/linux-concern-*/action.yml')).map { |f| File.read(f, encoding: 'UTF-8') }.join("\n")
           problems = []
           full.each do |name, spec|
             problems << "#{name}: no integer timeout in ci-matrix.json" unless spec['timeout'].is_a?(Integer)
             handled = name.start_with?('scan-', 'e2e-') || concern_text.match?(/(?<![A-Za-z0-9-])#{Regexp.escape(name)}(?![A-Za-z0-9-])/)
-            problems << "#{name}: not handled by linux-validation-concern.yml" unless handled
+            problems << "#{name}: not handled by linux-validation-concern.yml or a linux-concern-* action" unless handled
           end
           timing = wf['jobs']['timings']['steps'].find { |st| st['uses'].to_s == './.github/actions/timings' }
           JSON.parse(timing['with']['baseline-seconds']).each_key do |name|
@@ -580,6 +581,9 @@ jobs:
                 ./.github/workflows/select-concerns.yml) ;;
                 ./.github/actions/select-concerns) ;;
                 ./.github/actions/scan-concern) ;;
+                ./.github/actions/linux-concern-js) ;;
+                ./.github/actions/linux-concern-e2e) ;;
+                ./.github/actions/linux-concern-rust) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;
                 *)

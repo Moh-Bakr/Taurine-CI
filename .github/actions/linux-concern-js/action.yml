@@ -1,0 +1,176 @@
+name: Linux JavaScript concern runner
+description: |
+  Runs the Linux JavaScript concerns: contracts, frontend build and bundle budget, desktop test shards, desktop quality and mobile quality inside the protected concern job, after the source is checked
+  out and the token revoked. Behaviour is the reviewed case body of
+  linux-validation-concern.yml, moved here by responsibility (one family per action).
+  It does nothing for a concern outside its family.
+
+inputs:
+  concern:
+    description: The Linux validation concern being run
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run the JavaScript concern
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        CONCERN: ${{ inputs.concern }}
+        OS_LABEL: Linux
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        source "${RUNNER_TEMP}/taurine-ci/report.sh"
+
+        case "${CONCERN}" in
+          contracts)
+            # Every sub-step runs and is reported (the checks are independent: a failed
+            # contracts check must not hide the wire check, the package tests or the
+            # advisory sweep), through the same deferred reporting as the Rust concerns.
+            run_deferred contracts-check npm run check:contracts
+            run_deferred wire-check npm run check:wire
+            # The flaky-test quarantine list must have no expired entry, and the third-party
+            # notices must match the lockfiles; both are static checks of the source.
+            run_deferred quarantine-check npm run check:quarantine
+            # The notices generator runs `cargo metadata --offline`, so every crate must already
+            # be downloaded: a developer machine has them, a fresh runner does not, which is
+            # why this passed locally and failed here. Fetch them (locked) first.
+            run_deferred notices-fetch cargo fetch --locked
+            run_deferred notices-check npm run check:notices
+            if [[ "${deferred_results[*]}" == *"notices-check|failed"* ]]; then
+              # Say why: whether the graph could not be read at all, or which crate and
+              # licence lines differ (names, versions and licence expressions only: public
+              # registry facts; repository URLs and everything else are left out).
+              echo 'notices diagnostics:' >&2
+              if ! cargo metadata --format-version 1 --offline >/dev/null 2>"${RUNNER_TEMP}/notices-meta.err"; then
+                echo '  cargo metadata --offline failed: the crates are not all downloaded (see notices-fetch)' >&2
+              else
+                cp THIRD-PARTY-NOTICES "${RUNNER_TEMP}/notices.before" 2>/dev/null || : > "${RUNNER_TEMP}/notices.before"
+                if node scripts/third-party-notices.mjs >/dev/null 2>&1; then
+                  diff <(grep -E '^- \*\*|^- [A-Za-z0-9@/_.-]+ [0-9]' "${RUNNER_TEMP}/notices.before" | sort) \
+                       <(grep -E '^- \*\*|^- [A-Za-z0-9@/_.-]+ [0-9]' THIRD-PARTY-NOTICES | sort) |
+                    grep -E '^[<>]' | sed -E 's/^< /  committed: /; s/^> /  generated: /' | cut -c1-160 | head -40 >&2 || true
+                  cp "${RUNNER_TEMP}/notices.before" THIRD-PARTY-NOTICES
+                else
+                  echo '  the notices generator itself failed' >&2
+                fi
+              fi
+            fi
+            run_deferred packages-tests npm run test:packages -- \
+              --reporter=default --reporter=json \
+              --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"
+
+            # Supply-chain sweep (milestone-1 audit, tooling-gap finding;
+            # coverage widened per the 2026-10-02 security conformance
+            # audit): the RustSec advisory database is swept against EVERY
+            # Cargo.lock committed to the private source on every
+            # contracts concern. The
+            # scanner is the RustSec project's own release tarball, pinned
+            # here to an exact version AND an exact sha256 recorded in this
+            # file — a changed or moved release fails the checksum gate
+            # instead of being silently installed, so this step cannot
+            # float. No Rust toolchain is pulled in for it: a scanner that
+            # could compile anything is also a step that could execute
+            # anything, and this one only needs to read a lock file.
+            # Unmaintained-crate warnings (rustls-pemfile, paste) are
+            # recorded acceptances tracked in the private repository and do
+            # not fail the concern; only vulnerabilities do.
+            run_deferred cargo-audit-install bash -c '
+              set -euo pipefail
+              bin_dir="${RUNNER_TEMP}/cargo-audit-bin"
+              mkdir -p "${bin_dir}"
+              tgz="${RUNNER_TEMP}/cargo-audit-v0.22.2.tgz"
+              curl --fail --silent --show-error --retry 2 --location \
+                --output "${tgz}" \
+                "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz"
+              echo "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  ${tgz}" | sha256sum --check --status
+              tar -xzf "${tgz}" -C "${bin_dir}"
+              "${bin_dir}/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit" --version
+            '
+            # Accepted advisories are recorded in exactly one place: the
+            # reviewed `.cargo/audit.toml` committed at the root of the
+            # private source, which cargo-audit picks up automatically from
+            # its working directory. This workflow hard-codes no advisory
+            # ids, so the suppression list and its review record cannot
+            # drift apart across the repository boundary: an entry removed
+            # from that baseline un-suppresses CI on the next run (fail
+            # closed), and a finding the baseline does not name fails the
+            # concern. Each entry's crate, locked version, dependency path,
+            # rationale and review-by note live in the baseline itself,
+            # beside the lock it qualifies — the reachability record and
+            # the suppression are the same artifact.
+            #
+            # Why every lock, not just the root one: vendored forks and
+            # sub-workspaces commit their own resolved pins (the backend
+            # sub-workspaces and the vendored rumqttc fork each carry a
+            # Cargo.lock), so sweeping only the workspace root leaves whole
+            # dependency sets unscanned. The enumeration is `find`,
+            # excluding only build output (target/) and npm's installed
+            # tree (node_modules/, gitignored — a lock an npm package
+            # ships there is not this repository's resolution). All
+            # discovered locks are audited even after one fails, so a
+            # single run names every failing lock, and on failure the
+            # findings are published exactly as the single-lock sweep
+            # published them.
+            # The sweep needs the pinned scanner; if its install failed, say so instead of
+            # failing a second time on a missing binary.
+            if [[ "${deferred_results[*]}" == *"cargo-audit-install|failed"* ]]; then
+              run_deferred cargo-audit bash -c 'echo "cargo-audit not run: the pinned scanner did not install" >&2; exit 1'
+            else
+            run_deferred cargo-audit bash -c '
+              set -euo pipefail
+              audit_bin="${RUNNER_TEMP}/cargo-audit-bin/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit"
+              failed=0
+              while IFS= read -r lock; do
+                if "${audit_bin}" audit --file "${lock}"; then
+                  echo "cargo-audit: ${lock}: passed"
+                else
+                  echo "error: unaccepted advisory findings in ${lock}" >&2
+                  failed=1
+                fi
+              done < <(find . -name Cargo.lock -not -path "*/target/*" -not -path "*/node_modules/*" | sort)
+              if [[ "${failed}" -ne 0 ]]; then
+                echo "error: the committed Cargo.lock advisory sweep failed" >&2
+              fi
+              exit "${failed}"
+            '
+            fi
+            ;;
+          frontend-build-budget)
+            # The desktop typecheck runs once, in desktop-quality; it is not repeated here.
+            run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
+            run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
+            run_quiet mobile-build npm --prefix taurine-mobile run build
+            run_quiet bundle-budget npm run check:bundle
+            ;;
+          desktop-shard-1)
+            run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --no-file-parallelism \
+              --reporter=default --reporter=json \
+              --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-1.json"
+            ;;
+          desktop-shard-2)
+            run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --no-file-parallelism \
+              --reporter=default --reporter=json \
+              --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-2.json"
+            ;;
+          desktop-quality)
+            run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
+            run_quiet desktop-lint npm --prefix taurine-desktop run lint
+            ;;
+          mobile-quality)
+            run_quiet mobile-tests npm --prefix taurine-mobile run test -- --no-file-parallelism \
+              --reporter=default --reporter=json \
+              --outputFile.json="${RUNNER_TEMP}/test-ids/mobile.json"
+            run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
+            run_quiet mobile-lint npm --prefix taurine-mobile run lint
+            ;;
+          *)
+            # Another family's concern: nothing to do here.
+            exit 0
+            ;;
+        esac
+        # Every `rust-*` and contracts branch ran its sub-steps through `run_deferred`;
+        # this is where their results are reported and the concern fails if one did.
+        if [[ "${CONCERN}" == contracts ]]; then finish_deferred; fi
