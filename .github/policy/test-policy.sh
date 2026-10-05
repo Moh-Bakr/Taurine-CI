@@ -322,3 +322,28 @@ for guard_file in .github/actions/source-checkout/action.yml .github/workflows/k
   [[ "${freshness_rc}" -eq 0 ]] || { echo "${guard_file}: the guard must not apply to a run from main" >&2; cat "${fresh_dir}/out" >&2; exit 1; }
 done
 echo 'freshness fixtures: untrusted behind or identical to main is accepted (behind warns); ahead, diverged and unreadable are refused'
+
+# Egress modes: the reviewed table passes; a Linux concern without Docker switched back to
+# audit without a recorded reason fails, as do an unknown mode and a missing one; the same
+# switch with an explicit reason passes.
+egress_fixture="${base}/ci-matrix.json"
+egress_mutate() { jq "$1" .github/ci-matrix.json > "${egress_fixture}"; }
+egress_expect_fail() {
+  local label="$1" filter="$2" needle="$3"
+  egress_mutate "${filter}"
+  if bash "${policy}/check-egress-modes.sh" "${egress_fixture}" >/dev/null 2>"${base}/err"; then
+    echo "egress fixture '${label}' should fail but passed" >&2
+    exit 1
+  fi
+  grep -qF -- "${needle}" "${base}/err" || { echo "egress fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+bash "${policy}/check-egress-modes.sh" .github/ci-matrix.json >/dev/null || { echo 'the reviewed egress modes should pass' >&2; exit 1; }
+egress_expect_fail 'contracts switched to audit without a reason' \
+  '.concerns.linux.contracts.egress = "audit" | del(.concerns.linux.contracts.egress_audit_reason)' 'without an egress_audit_reason'
+egress_expect_fail 'an audit exception with an empty reason' \
+  '.concerns.linux.contracts.egress = "audit" | .concerns.linux.contracts.egress_audit_reason = " "' 'without an egress_audit_reason'
+egress_expect_fail 'an unknown egress mode' '.concerns.linux.contracts.egress = "off"' 'must be "block" or "audit"'
+egress_expect_fail 'a concern with no egress mode' 'del(.concerns.linux.contracts.egress)' 'must be "block" or "audit"'
+egress_mutate '.concerns.linux.contracts.egress = "audit" | .concerns.linux.contracts.egress_audit_reason = "kept in audit while a named dependency is investigated"'
+bash "${policy}/check-egress-modes.sh" "${egress_fixture}" >/dev/null || { echo 'an audit exception with its reason should pass' >&2; exit 1; }
+echo 'egress-mode fixtures: audit without a recorded reason, an unknown mode and a missing mode are refused'
