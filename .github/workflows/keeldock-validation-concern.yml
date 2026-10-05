@@ -100,10 +100,12 @@ jobs:
           REQUESTED_PLATFORM: ${{ inputs.platform }}
           REQUESTED_CONCERN: ${{ inputs.concern }}
           REQUESTED_VULN_GATE: ${{ inputs.vulnerability_gate }}
+          # This repository's own read-only job token, used only to read main's tip below.
+          CONTROL_PLANE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
-            echo 'keeldock-validation must run only from the protected main branch' >&2
+          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || ( "${GITHUB_REF}" != "refs/heads/main" && "${GITHUB_REF}" != "refs/heads/untrusted" ) ]]; then
+            echo 'keeldock-validation must run only from the protected main or untrusted branch' >&2
             exit 1
           fi
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -122,6 +124,16 @@ jobs:
             *) echo "Unsupported concern: ${REQUESTED_CONCERN}" >&2; exit 1 ;;
           esac
           case "${REQUESTED_VULN_GATE}" in none|high|critical) ;; *) echo 'vulnerability_gate must be none, high or critical' >&2; exit 1 ;; esac
+          # Ref isolation (the source-checkout composite's rule, inline as the KeelDock policy
+          # requires): a run from untrusted must be running exactly main's reviewed workflows.
+          if [[ "${GITHUB_REF}" == refs/heads/untrusted ]]; then
+            main_sha="$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/main" | jq -er '.sha')" \
+              || { echo 'untrusted ref: the tip of main could not be read; refusing to continue' >&2; exit 1; }
+            if [[ "${main_sha}" != "${GITHUB_SHA}" ]]; then
+              echo "untrusted ref: this run's workflows (${GITHUB_SHA}) are not main's tip (${main_sha}); fast-forward untrusted to main, then dispatch again" >&2
+              exit 1
+            fi
+          fi
 
       - name: Mint read-only private-source token
         id: source-token
@@ -197,7 +209,13 @@ jobs:
                 break
               fi
             done
-            [[ "${protected_ancestor}" == true ]] || echo 'protected ancestry: the source SHA is on no protected branch; the NuGet cache is not saved'
+            [[ "${protected_ancestor}" == true ]] || echo 'protected ancestry: the source SHA is on no protected branch'
+          fi
+          # Ref isolation, fail-closed: main runs only protected-ancestry SHAs (see source-checkout).
+          if [[ "${GITHUB_REF}" == refs/heads/main && "${failed}" -eq 0 && "${protected_ancestor}" != true ]]; then
+            echo 'This source SHA is not on a protected branch of the source repository, so main refuses it.' >&2
+            echo 'Dispatch it from the untrusted ref: gh workflow run keeldock-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted -f source_sha=<sha>' >&2
+            failed=1
           fi
           if ! curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors -X DELETE -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/installation/token"; then
             echo 'Source token revocation failed; refusing to execute project code' >&2
@@ -242,16 +260,13 @@ jobs:
       # of their contents; one cache per OS serves every concern (all do the same locked restore). The
       # key is computed here, before project code, and the save reuses it (cache-primary-key).
       #
-      # DISABLED (2026-10-05, findings H1 and M1): a cache write is authorised by the runner's runtime
-      # token, which project code of ANY dispatched SHA can read (it has root on a hosted runner), and
-      # every run is on ref main, so an unprotected SHA can plant main's entry directly. Re-hashing the
-      # restored packages (below) defeats a tampered package, but not the archive itself: the cache action
-      # extracts with `tar -P` relative to the workspace, so a planted archive can write files outside
-      # the cached path. Restore and save carry a literal `false &&` (the cache policy enforces it) until
-      # unprotected SHAs run from a separate ref whose cache scope main never reads.
+      # Main only, for a protected source SHA (ref isolation, findings H1 and M1): a cache write
+      # needs only the runner's runtime token, so feature-branch SHAs run from the untrusted ref, whose
+      # cache scope main never reads, and main runs only protected-ancestry SHAs. Restore and save carry
+      # both top-level terms (github.ref == main, protected-ancestor == true); the cache policy enforces it.
       - name: Restore cached NuGet packages
         id: nuget-packages
-        if: ${{ false && steps.verified-source.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.verified-source.outcome == 'success' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -361,7 +376,7 @@ jobs:
       # is written once), only after the verification and the whole concern passed, and under the key
       # computed before project code, never a hashFiles evaluated after it.
       - name: Save verified NuGet packages
-        if: ${{ false && github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.nuget-packages.outputs.cache-hit != 'true' && steps.nuget-verify.outcome == 'success' && steps.concern-summary.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.nuget-packages.outputs.cache-hit != 'true' && steps.nuget-verify.outcome == 'success' && steps.concern-summary.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

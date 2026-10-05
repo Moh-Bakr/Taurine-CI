@@ -42,7 +42,7 @@ jobs:
     permissions: {}
     # workflow_dispatch can be selected on another branch in the UI. Fail
     # closed unless this exact workflow came from the protected default branch.
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     name: Plan the live proofs
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -129,7 +129,7 @@ jobs:
   prove:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     needs: [plan]
     strategy:
       fail-fast: false
@@ -153,7 +153,7 @@ jobs:
   # with the run's read-only token, and publishes no artifact. An arm with no
   # baseline is listed without a comparison.
   timings:
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
     needs: [prove]
     name: Timings
     runs-on: ubuntu-24.04

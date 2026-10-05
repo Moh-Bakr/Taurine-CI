@@ -54,7 +54,7 @@ concurrency:
 jobs:
   validate-input:
     permissions: {}
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -74,7 +74,7 @@ jobs:
   validate:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     needs: validate-input
     strategy:
       # Each concern on each operating system is independent evidence. A Windows
@@ -131,7 +131,7 @@ jobs:
   # artifact, and uses only this repository's own run API with the run's read-only token. A concern with
   # no baseline (supply-chain, until measured) is listed without a comparison.
   timings:
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
     needs: [validate]
     name: Concern timings
     runs-on: ubuntu-24.04

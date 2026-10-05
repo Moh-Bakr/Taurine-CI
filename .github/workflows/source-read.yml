@@ -30,7 +30,7 @@ jobs:
       contents: read
     # workflow_dispatch can be selected on another branch in the UI. Fail
     # closed unless this exact workflow came from the protected default branch.
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     name: Fetch exact private source SHA
     environment: source-read
     runs-on: ubuntu-24.04
@@ -53,8 +53,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
-            echo 'source-read must run only from the protected main branch' >&2
+          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || ( "${GITHUB_REF}" != "refs/heads/main" && "${GITHUB_REF}" != "refs/heads/untrusted" ) ]]; then
+            echo 'source-read must run only from the protected main or untrusted branch' >&2
             exit 1
           fi
 

@@ -40,8 +40,8 @@ inputs:
     description: >
       'true' to ask, while the token is still live, whether the requested SHA is reachable from
       a protected private branch (develop, uat or main). The answer is the protected-ancestor
-      output, which gates every cache save: a feature-branch SHA may restore a cache but never
-      write one.
+      output, which gates every cache save. On ref main the question is always asked, and a
+      SHA with no protected ancestry is refused (ref isolation: it must run from untrusted).
     required: false
     default: 'false'
 
@@ -60,15 +60,32 @@ runs:
       working-directory: ${{ github.workspace }}
       env:
         REQUESTED_SOURCE_SHA: ${{ inputs.source-sha }}
+        # This repository's own read-only job token, used only to read main's tip below.
+        CONTROL_PLANE_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
-          echo 'The private source may only be read from the protected main branch' >&2
+        if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || ( "${GITHUB_REF}" != "refs/heads/main" && "${GITHUB_REF}" != "refs/heads/untrusted" ) ]]; then
+          echo 'The private source may only be read from the protected main or untrusted branch' >&2
           exit 1
         fi
         if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
           echo 'source-sha must be a full 40-character hexadecimal commit SHA' >&2
           exit 1
+        fi
+        # Ref isolation: feature-branch SHAs run from the untrusted ref, whose cache writes
+        # main never reads. The workflows that run there must be exactly main's reviewed
+        # ones, so a run from untrusted refuses to start unless untrusted is main's tip
+        # (a stale or diverged untrusted fails here, before any token is minted).
+        if [[ "${GITHUB_REF}" == refs/heads/untrusted ]]; then
+          main_sha="$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors \
+            -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/main" | jq -er '.sha')" \
+            || { echo 'untrusted ref: the tip of main could not be read; refusing to continue' >&2; exit 1; }
+          if [[ "${main_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "untrusted ref: this run's workflows (${GITHUB_SHA}) are not main's tip (${main_sha})." >&2
+            echo 'Fast-forward untrusted to main first (docs/how-ci-works.md, "Ref isolation"), then dispatch again.' >&2
+            exit 1
+          fi
         fi
 
     - name: Mint read-only private-source token
@@ -149,6 +166,8 @@ runs:
         # the branch tip or one of its ancestors. A missing branch, an API error or anything
         # else answers false (fail closed), never fails the validation itself.
         protected_ancestor=false
+        # On main the answer is always needed: main runs only protected-ancestry SHAs.
+        [[ "${GITHUB_REF}" == refs/heads/main ]] && CHECK_PROTECTED_ANCESTRY=true
         if [[ "${CHECK_PROTECTED_ANCESTRY}" == true && "${failed}" -eq 0 ]]; then
           for branch in develop uat main; do
             status="$(curl --fail --silent --retry 3 --retry-delay 2 --retry-max-time 30 \
@@ -162,7 +181,17 @@ runs:
               break
             fi
           done
-          [[ "${protected_ancestor}" == true ]] || echo 'protected ancestry: the source SHA is on no protected branch; caches may be restored but not saved'
+          [[ "${protected_ancestor}" == true ]] || echo 'protected ancestry: the source SHA is on no protected branch'
+        fi
+        # Ref isolation, fail-closed: main reads and writes the caches protected runs share, so
+        # it runs only SHAs on develop, uat or main of the source repository. Anything else
+        # (a feature branch, an API error) is refused here, after the token is revoked below
+        # and before any project code.
+        if [[ "${GITHUB_REF}" == refs/heads/main && "${failed}" -eq 0 && "${protected_ancestor}" != true ]]; then
+          echo 'This source SHA is not on a protected branch (develop, uat or main) of the source repository,' >&2
+          echo 'so main refuses it. Dispatch feature-branch validation from the untrusted ref instead:' >&2
+          echo '  gh workflow run <workflow>.yml --repo Moh-Bakr/Taurine-CI --ref untrusted -f source_sha=<sha>' >&2
+          failed=1
         fi
         if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then
           echo 'Source token revocation failed; refusing to execute project code' >&2
