@@ -2,8 +2,7 @@
 
 Every source-bearing job in this repository mints its short-lived checkout token from one
 credential: the private key of the source-reader GitHub App, stored as the Actions secret
-`SOURCE_READER_PRIVATE_KEY` (a repository secret until the move below is done, then a secret of the
-`source-read` environment). The App's client ID is the `SOURCE_READER_APP_ID` variable. The
+`SOURCE_READER_PRIVATE_KEY`. The App's client ID is the `SOURCE_READER_APP_ID` variable. The
 App is installed on the private source repositories (`Moh-Bakr/Taurine` and
 `Moh-Bakr/keeldock-cloud`) with contents read only.
 
@@ -34,22 +33,18 @@ the old one is deleted. Validation does not need to stop.
 1. **Generate a new key.** Go to GitHub, then Settings, Developer settings, GitHub Apps, the
    source-reader App, and finally Private keys. Choose **Generate a private key**. The browser
    downloads a `.pem` file. Note the fingerprint GitHub shows next to the new key.
-2. **Update the secret.** Update it where it currently lives. If the key has been moved (see
-   "Move the key into the `source-read` environment"), that is Settings, Environments,
-   `source-read`, Environment secrets; otherwise Settings, Secrets and variables, Actions,
-   Repository secrets. Choose **Update** and paste the full contents of the new `.pem` file. The
-   command line equivalent is below; run it yourself so the key never passes through an agent
-   or a shell history:
+2. **Update the secret.** In `Moh-Bakr/Taurine-CI`, go to Settings, Secrets and variables,
+   Actions, then `SOURCE_READER_PRIVATE_KEY`, and choose **Update**. Paste the full contents of
+   the new `.pem` file. If you prefer the command line, run this yourself so the key never
+   passes through an agent or a shell history:
 
    ```bash
-   # environment secret (after the move)
-   gh secret set SOURCE_READER_PRIVATE_KEY --env source-read --repo Moh-Bakr/Taurine-CI < path/to/new-key.pem
-   # repository secret (before the move)
    gh secret set SOURCE_READER_PRIVATE_KEY --repo Moh-Bakr/Taurine-CI < path/to/new-key.pem
    ```
 
-   The best moment to do the move is the next rotation: generate the new key, add it as the
-   environment secret (step A below), and delete the repository secret once verified.
+   Today the secret is a **repository** secret, not a `source-read` environment secret (the
+   Keel Dock dispatcher comments record this). Update it in the place where it currently lives.
+   See "Optional hardening" before moving it.
 3. **Verify with the new key** (next section). Wait for that to pass before going on to step 4.
 4. **Destroy the local copy.** Securely delete the downloaded `.pem` from the device. Nothing
    needs it once it is in the secret.
@@ -92,19 +87,11 @@ None of these is required by the runbook. Each one trades convenience for a stro
 - **Move the key into the `source-read` environment.** As a repository secret, the key can be
   read by any workflow run in this repository except fork pull requests, and by any branch an
   owner pushes. An environment secret is released only to jobs that enter `source-read`, and
-  that environment is already limited to protected branches. The workflows are ready: every job
-  that reads `secrets.SOURCE_READER_PRIVATE_KEY` declares `environment: source-read` and reads it
-  itself, and no dispatcher passes it through `secrets:` (the policy enforces both, in
-  `check-universal.rb`). A job in the environment reads the environment secret, or the
-  repository secret if there is no environment one, so the workflows work before and after the
-  move. GitHub cannot copy a secret, so you paste the key yourself:
-  - **A.** In `Moh-Bakr/Taurine-CI`, go to Settings, Environments, `source-read`, Environment
-    secrets, **Add environment secret**. Name it `SOURCE_READER_PRIVATE_KEY` and paste the same
-    PEM (or the new key, when you do this during a rotation).
-  - **B.** Verify: dispatch `source-read.yml` from `main` and from `untrusted` (see "Verifying a
-    rotation") and require both to succeed.
-  - **C.** Go to Settings, Secrets and variables, Actions, Repository secrets, and delete
-    `SOURCE_READER_PRIVATE_KEY`. Verify once more with a `source-read.yml` dispatch from `main`.
+  that environment is already limited to protected branches. Moving it needs a reviewed
+  workflow change first. The Keel Dock dispatcher passes `secrets.SOURCE_READER_PRIVATE_KEY`
+  from a job outside the environment, so the reusable concern must read it from its own
+  environment instead. Make that change and verify it with the dispatches above, then delete
+  the repository secret.
 - **Restrict deployment branches to `main` only.** Today `source-read` allows "protected
   branches". A custom deployment-branch rule of `main` removes any other protected branch from
   the trusted set. The protected workflows already refuse any ref other than `refs/heads/main`.

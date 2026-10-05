@@ -24,6 +24,10 @@ name: KeelDock Cloud validation concern (protected)
 
 on:
   workflow_call:
+    secrets:
+      SOURCE_READER_PRIVATE_KEY:
+        description: Private key of the source-reader GitHub App for keeldock-cloud
+        required: true
     inputs:
       source_sha:
         description: Exact 40-character commit SHA to validate from private keeldock-cloud
