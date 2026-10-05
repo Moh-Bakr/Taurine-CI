@@ -124,6 +124,8 @@ jobs:
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
           # Gates every cache save below: only a SHA on a protected private branch may write.
           check-protected-ancestry: 'true'
+          # Only the opt-in gitleaks history scan needs the full history.
+          fetch-depth: ${{ inputs.concern == 'scan-history' && '0' || '1' }}
 
       # The concern's egress mode, from ci-matrix.json (`egress`): block enforces the
       # allow-list from the enforce step below; audit only records. The policy requires block
@@ -379,6 +381,15 @@ jobs:
         with:
           scanner: all
 
+      # Opt-in, report-only: gitleaks over the full git history of the exact SHA. The token was
+      # revoked inside the checkout step above, before this runs.
+      - name: Scan the full git history for secrets
+        if: inputs.concern == 'scan-history'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
+        with:
+          scanner: gitleaks-history
+
       - name: Run the isolated Linux JavaScript concern
         id: concern-js
         if: ${{ contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) }}
@@ -405,7 +416,7 @@ jobs:
 
       # A concern no family above handles must fail loudly, never pass by omission.
       - name: Reject an unsupported concern
-        if: ${{ inputs.concern != 'scan-security' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) || startsWith(inputs.concern, 'e2e-') || inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
+        if: ${{ inputs.concern != 'scan-security' && inputs.concern != 'scan-history' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) || startsWith(inputs.concern, 'e2e-') || inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
         shell: bash
         env:
           CONCERN: ${{ inputs.concern }}
