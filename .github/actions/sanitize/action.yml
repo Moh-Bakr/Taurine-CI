@@ -15,6 +15,12 @@ runs:
         mkdir -p "${RUNNER_TEMP}/taurine-ci"
         cat > "${RUNNER_TEMP}/taurine-ci/sanitize.sh" <<'TCI_SANITIZE_LIBRARY'
         # shellcheck shell=bash
+        # POLICY (compiler diagnostics, every platform): a published `error[Ennnn]` header is
+        # the code and the repo-relative file:line only. The message text is never published,
+        # because it quotes identifiers, types and expressions from private source. An uncoded
+        # `error:` line is published only in cargo's own fixed shapes; otherwise it appears as
+        # "error: (message withheld)" above its location. Android and iOS follow the same rule
+        # by calling cargo_detail / cargo_test_detail from this library.
         # Shared sanitizers for published CI output. Sourced by the protected jobs; nothing
         # here reads the private source. Every pattern removes to the end of the line (a
         # path may contain spaces), and only fixed, public shapes are ever republished.
@@ -71,7 +77,7 @@ runs:
             /^-{10,}$/ { in_output = 0; next }
             in_output { next }
             /^warning: / { block = "warning"; pending = ""; next }
-            /^error\[E[0-9]+\]: / { block = "error"; pending = ""; print; next }
+            /^error\[E[0-9]+\]: / { block = "error"; pending = ""; code = $1; sub(/\]:.*$/, "]", code); print code; next }
             /^error: building [A-Za-z0-9_.+-]+:[A-Za-z0-9_-]+ failed/ { block = "vcpkg"; pending = ""; print; next }
             /^error: / {
               block = "error"; pending = ""
@@ -80,7 +86,7 @@ runs:
               next
             }
             /^[[:space:]]*--> / {
-              if (block == "error") { if (pending != "") print pending; pending = ""; print }
+              if (block == "error") { if (pending != "") print "error: (message withheld)"; pending = ""; print }
               next
             }
             /^test .* FAILED$/ || /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }

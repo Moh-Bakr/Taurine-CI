@@ -192,6 +192,20 @@ jobs:
             grep -qF "1 screenshot mismatch" <<<"${out}"
             if grep -q "SECRETTEXT" <<<"${out}"; then exit 1; fi
           ' _ "${dir}"
+          # Compiler diagnostics: an error[Ennnn] is its code and location, never its message.
+          awk "/cat > .*report.sh.* <<'TCI_REPORT_LIBRARY'/{on=1; next} /^        TCI_REPORT_LIBRARY/{on=0} on" .github/actions/concern-report/action.yml | sed -E 's/^        //' > "${dir}/report.sh"
+          printf 'error[E0599]: no method named `secret_thing` found\n  --> taurine-core/src/lib.rs:12:5\nerror: unused variable: `private_var`\n  --> taurine-core/src/x.rs:3:9\n' > "${dir}/cargo.log"
+          bash -c '
+            set -euo pipefail
+            source "$1/lib.sh"
+            source "$1/report.sh"
+            out="$(cargo_detail "$1/cargo.log" 2>&1)"
+            grep -qF "error[E0599]" <<<"${out}"
+            grep -qF "taurine-core/src/lib.rs:12:5" <<<"${out}"
+            if grep -qE "secret_thing|private_var" <<<"${out}"; then echo "an error message leaked" >&2; exit 1; fi
+            out="$(cargo_test_detail "$1/cargo.log" 2>&1)"
+            if grep -qE "secret_thing|private_var" <<<"${out}"; then echo "an error message leaked (test detail)" >&2; exit 1; fi
+          ' _ "${dir}"
           echo 'failure-detail extractor fixtures: ok'
 
       # The concern table (.github/ci-matrix.json) drives the Linux dispatcher's matrix and
