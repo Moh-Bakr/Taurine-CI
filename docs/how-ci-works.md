@@ -108,6 +108,9 @@ code. What remains:
   builds the bastion image from the source's Dockerfile, and the SQL Server init uses the host
   network. None of these containers can see host processes. Db2 and Informix run privileged
   but from digest-pinned vendor images with no source mounted.
+- **The live-proof `bastion` arm keeps Docker**: its tunnel test asks `docker inspect` for the
+  lab postgres container's network address, which only the bastion can route to. Every other
+  live-proof arm closes Docker. `sudo` is removed in all of them.
 - **Keel Dock `db-containers` and `apphost-cold-start` keep Docker**, because their project
   code starts containers itself (Testcontainers, the Aspire AppHost). Docker access is
   root-equivalent, so in those two concerns project code can still reach root through Docker.

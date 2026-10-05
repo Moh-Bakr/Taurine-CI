@@ -265,8 +265,10 @@ drop_expect_fail 'a scanner before drop-root' .github/workflows/linux-validation
   's/scanner: semgrep-container/scanner: all/'
 drop_expect_fail 'sudo after drop-root' .github/workflows/ios-validation.yml 'calls sudo after drop-root' \
   's/(          rustup target add aarch64-apple-ios-sim\n)/$1          sudo true\n/'
-drop_expect_fail 'docker after drop-root' .github/workflows/live-proof-arm.yml 'calls Docker after drop-root' \
-  's/(          echo .vendor-fetch: passed.\n)/$1          docker ps\n/'
+drop_expect_fail 'docker after drop-root' .github/workflows/ios-validation.yml 'calls Docker after drop-root' \
+  's/(          rustup target add aarch64-apple-ios-sim\n)/$1          docker ps\n/'
+drop_expect_fail 'docker after drop-root once keep-docker is gone' .github/workflows/live-proof-arm.yml 'calls Docker after drop-root' \
+  's/        with:\n          keep-docker: [^\n]*\n//; s/(          echo .vendor-fetch: passed.\n)/$1          docker ps\n/'
 drop_expect_fail 'a sudo composite after drop-root' .github/workflows/android-validation.yml 'contains sudo and is called after drop-root' \
   's/(      - name: Remove root before project code\n        # Kept as \.\/ : the policy matches this exact form for local actions\.\n        uses: \.\/\.github\/actions\/drop-root[^\n]*\n)/$1\n      - name: Late privileged setup\n        uses: .\/.github\/actions\/root-setup\n        with:\n          concern: x\n/'
 echo 'drop-root fixtures: a missing drop, project code or a setup composite before it, and sudo or Docker after it are rejected'
