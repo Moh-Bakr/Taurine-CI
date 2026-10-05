@@ -1,0 +1,76 @@
+name: Linux browser concern runner
+description: |
+  Runs the Linux Playwright browser tiers: critical, visual, accessibility and the regression shards inside the protected concern job, after the source is checked
+  out and the token revoked. Behaviour is the reviewed case body of
+  linux-validation-concern.yml, moved here by responsibility (one family per action).
+  It does nothing for a concern outside its family.
+
+inputs:
+  concern:
+    description: The Linux validation concern being run
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run the browser concern
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        CONCERN: ${{ inputs.concern }}
+        OS_LABEL: Linux
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        source "${RUNNER_TEMP}/taurine-ci/report.sh"
+
+        cd taurine-desktop
+
+        case "${CONCERN}" in
+          e2e-critical)
+            # The three narrow tiers together: they share a dev server start,
+            # and splitting 156 tests across three runners would spend more on
+            # `npm ci` than on testing.
+            #
+            # The JSON reporter writes the per-test inventory (file, title,
+            # status, duration) to RUNNER_TEMP for the publishing step below;
+            # it is read by `scripts/ci/collect-test-ids.ts` from the checked
+            # out source and sanitized there. It never leaves this runner
+            # unsanitized. The console reporter stays `github`, so the log and
+            # its failure diagnostics are exactly what they were before.
+            export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/e2e-critical.json"
+            run_quiet e2e-critical npx --no-install playwright test \
+              --reporter=github --reporter=json \
+              --project=smoke --project=critical --project=shell-browser
+            ;;
+          e2e-visual)
+            # The visual tier: screenshot comparison against baselines committed in the source
+            # (Linux ones, `-linux` suffixed). Opt-in: it runs only when the dispatch sets
+            # visual=true, after the baselines exist. Comparison images and diffs stay on the
+            # runner; only the runner's pass/fail lines are published.
+            export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/e2e-visual.json"
+            run_quiet e2e-visual npx --no-install playwright test \
+              --reporter=github --reporter=json \
+              --project=visual
+            ;;
+          e2e-a11y)
+            # Serial by the project's own config: axe walks the whole tree, and
+            # two of them racing on one dev server produced a timeout rather
+            # than a finding.
+            export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/e2e-a11y.json"
+            run_quiet e2e-a11y npx --no-install playwright test \
+              --reporter=github --reporter=json --project=a11y
+            ;;
+          e2e-regression-1|e2e-regression-2|e2e-regression-3|e2e-regression-4)
+            # Playwright's own sharding, so a rebalanced suite does not need a
+            # workflow edit. The shard index is the concern's own suffix.
+            export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/${CONCERN}.json"
+            run_quiet "${CONCERN}" npx --no-install playwright test \
+              --reporter=github --reporter=json \
+              --project=regression --shard="${CONCERN##*-}/4"
+            ;;
+          *)
+            # Another family's concern: nothing to do here.
+            exit 0
+            ;;
+        esac

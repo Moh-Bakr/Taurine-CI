@@ -1,0 +1,274 @@
+name: Linux Rust concern runner
+description: |
+  Runs the Linux Rust concerns: the headless CLI and the crate-test families (domain, db, net, app partitions, packaging, TLS spike, dbx) inside the protected concern job, after the source is checked
+  out and the token revoked. Behaviour is the reviewed case body of
+  linux-validation-concern.yml, moved here by responsibility (one family per action).
+  It does nothing for a concern outside its family.
+
+inputs:
+  concern:
+    description: The Linux validation concern being run
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run the Rust concern
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        CONCERN: ${{ inputs.concern }}
+        OS_LABEL: Linux
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        source "${RUNNER_TEMP}/taurine-ci/report.sh"
+
+        # Which workspace crates each Rust concern tests. Every member of the
+        # private workspace belongs to exactly one concern, and
+        # `rust_coverage_check` (run by `rust-domain`) fails when a member is
+        # in none of them — so a crate added later cannot go untested by
+        # omission. The database family needs no list: `rust-db` selects it
+        # with cargo's own `taurine-db*` package glob, so a new driver crate
+        # is in it the day it joins the workspace.
+        rust_domain_packages=(
+          taurine-model taurine-atomic taurine-auth taurine-crypt taurine-store
+          taurine-repo taurine-replicate taurine-sync taurine-notes taurine-core
+          taurine-exec taurine-scripting taurine-mock taurine-git
+          taurine-transport-fs taurine-transport-git taurine-transport-wifi
+        )
+        rust_net_packages=(taurine-peer-sys taurine-net taurine-ovpn-sys taurine-net-conformance)
+        rust_app_packages=(taurine-app taurine-desktop taurine-mobile)
+
+        rust_coverage_check() {
+          local members member missing=0
+          if ! members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)" || [[ -z "${members}" ]]; then
+            echo 'error: failed to load the workspace member list' >&2
+            return 1
+          fi
+          while IFS= read -r member; do
+            case " taurine-cli ${rust_domain_packages[*]} ${rust_net_packages[*]} ${rust_app_packages[*]} " in
+              *" ${member} "*) continue ;;
+            esac
+            [[ "${member}" == taurine-db* ]] && continue
+            echo "error: workspace member ${member} is tested by no Linux Rust concern" >&2
+            missing=1
+          done <<<"${members}"
+          return "${missing}"
+        }
+
+        case "${CONCERN}" in
+          taurine-cli)
+            # Format and lint first: they are seconds and need almost nothing
+            # compiled, so a style failure does not arrive after a full build.
+            run_quiet cli-fmt cargo fmt --package taurine-cli -- --check
+
+            # `--keep-going` because this lane is dispatched, not pushed, and
+            # every dispatch costs the whole matrix. Cargo stops the build at
+            # the first unit that errors, so a denied lint anywhere in the
+            # closure hides every lint behind it and each one costs another
+            # full run to discover. Keeping going reports them all at once;
+            # the exit status is unchanged, so the gate is no weaker.
+            #
+            # The closure, not just this package: `cargo clippy` wraps every
+            # *workspace* member with clippy-driver and clippy-driver applies
+            # the trailing `--deny warnings` to each of them, so `--package
+            # taurine-cli` still lints the sibling crates it depends on. That
+            # is why a failure here can name a file outside `taurine-cli`.
+            run_quiet cli-clippy cargo clippy --package taurine-cli --all-targets --keep-going -- --deny warnings
+            run_quiet cli-tests cargo test --package taurine-cli
+            run_quiet cli-build cargo build --package taurine-cli --release
+
+            # The binary's documented contract, exercised on the artifact that
+            # was just built rather than on the library behind it. Both cases
+            # are hermetic: no network, no fixture server, no collection that
+            # could drift. `taurine-cli` unit tests cover report shapes; what
+            # they cannot cover is whether the produced executable still
+            # starts and still exits with the codes CI pipelines branch on.
+            # Each expectation says what it observed when it fails. A bare
+            # `test` under `set -e` exits silently, which would leave
+            # `cli-smoke: failed` with an empty log and nothing to read. Exit
+            # codes and flag names are the binary's documented contract, not
+            # source, so they are safe to print.
+            run_quiet cli-smoke bash -c '
+              set -euo pipefail
+              bin=target/release/taurine
+              if [ ! -x "$bin" ]; then
+                echo "smoke: the release build produced no executable at the expected path" >&2
+                exit 1
+              fi
+
+              # --help must succeed: a pipeline that probes for the CLI would
+              # otherwise read a non-zero exit as "not installed".
+              set +e
+              "$bin" --help >/dev/null 2>&1
+              help_status=$?
+              set -e
+              if [ "$help_status" -ne 0 ]; then
+                echo "smoke: --help exited $help_status, expected 0" >&2
+                exit 1
+              fi
+
+              # An unreadable collection must exit 2, not 1. The difference is
+              # load-bearing: 1 means tests failed and 2 means the run never
+              # started, and a pipeline that confuses them reports a broken
+              # config as a failing test suite.
+              set +e
+              "$bin" test /nonexistent/collection.json >/dev/null 2>&1
+              missing_status=$?
+              set -e
+              if [ "$missing_status" -ne 2 ]; then
+                echo "smoke: a missing collection exited $missing_status, expected 2" >&2
+                exit 1
+              fi
+
+              # Malformed JSON is the same class of failure and must agree.
+              tmp="$(mktemp -d)"
+              printf "{ not json" > "$tmp/bad.json"
+              set +e
+              "$bin" test "$tmp/bad.json" >/dev/null 2>&1
+              bad_status=$?
+              set -e
+              rm -rf "$tmp"
+              if [ "$bad_status" -ne 2 ]; then
+                echo "smoke: a malformed collection exited $bad_status, expected 2" >&2
+                exit 1
+              fi
+            '
+            ;;
+          # The crate-test concerns. Shared by all four workspace ones:
+          # - `--locked`: the committed Cargo.lock is what was reviewed and
+          #   what the contracts concern's advisory sweep audits, so a test
+          #   run must not quietly resolve anything else;
+          # - `--no-fail-fast`: the `--keep-going` argument above, for tests.
+          #   Every failing target is reported in one dispatch; the exit
+          #   status is unchanged;
+          # - no `--features`/`--all-features`: each crate is tested as its
+          #   manifest builds it. That leaves `taurine-app`'s opt-in `openvpn`
+          #   and `dbx-breadth` code paths out, as `cargo test --workspace`
+          #   does.
+          # Env-gated live suites (`TAURINE_TEST_<ENGINE>=host:port`) print
+          # SKIPPED and pass when the variable is unset, and `#[ignore]`d lab
+          # tests stay ignored; the live servers belong to live-proofs.yml.
+          rust-domain)
+            # The application's storage, sync, scripting and git core — every
+            # crate below the command tier that is not a database or network
+            # crate. taurine-crypt is run a second time without its default
+            # `keychain` feature: that is the build a machine with no OS
+            # keychain gets, and the private CI plan lists it beside the
+            # workspace run.
+            #
+            # The coverage check runs first: it compiles nothing (`cargo
+            # metadata --no-deps` lists members without resolving, so it
+            # cannot touch Cargo.lock ahead of the `--locked` runs), and a
+            # crate tested by no concern is the one failure no test result
+            # below can reveal.
+            run_deferred rust-coverage rust_coverage_check
+            run_deferred rust-crypt-no-keychain-tests \
+              cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
+            run_deferred rust-domain-tests \
+              cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
+            ;;
+          rust-db)
+            # Every `taurine-db*` crate: the model, the engine and its law
+            # tests, the HTTP and sidecar machinery, each driver's offline
+            # unit and mapping tests, and taurine-db-conformance's offline
+            # suites (sqlite, duckdb, turso, the recorded fixtures, the
+            # falsification and transfer runs). Only the conformance suite's
+            # live targets need a server, and they skip without one.
+            db_packages=()
+            while IFS= read -r db_package; do
+              db_packages+=("--package=${db_package}")
+            done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
+            rust_tests rust-db-tests "${db_packages[@]}"
+            ;;
+          rust-net)
+            # The dialer, the egress verifier and the vendored openvpn3 shim.
+            # The OpenVPN lab tests are `#[ignore]`d: they need a TUN device
+            # and the local lab's servers, which a hosted runner does not have.
+            run_deferred rust-net-tests \
+              cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
+            ;;
+          rust-app-1|rust-app-2)
+            # Two nextest partitions of the same package set (measured: the single concern ran
+            # over 1.8x the next slowest). `count:N/2` splits deterministically; no artifact
+            # crosses between the jobs. Doctests ride with partition 1, the openvpn check with
+            # partition 2, so neither runs twice and the two stay balanced.
+            export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
+            # The command tier both shells call, and the two shells' own unit
+            # tests. Tauri's `test` feature drives the commands through its
+            # mock runtime, so no display or WebView process is started; the
+            # webkit2gtk install above is only what the crates link.
+            if [[ "${CONCERN}" == rust-app-1 ]]; then
+              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+            else
+              NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+            fi
+            # The `openvpn` feature of taurine-app links the vendored openvpn3 C++ shim; no
+            # test build enables it. A library check compiles it (the C++ build runs, the
+            # system libraries above are the ones openvpn3 needs).
+            #
+            # Known unverified lane, recorded rather than hidden: taurine-app's
+            # `dbx-breadth` feature is NOT built anywhere. Its forked database clients and
+            # OpenSSL only resolve inside dbx-core's own workspace; enabling it from the
+            # root workspace is deliberately off, so a change that only breaks that feature
+            # is not caught by this CI.
+            if [[ "${CONCERN}" == rust-app-2 ]]; then
+              run_deferred rust-app-openvpn-check \
+                cargo check --locked --lib --package taurine-app --features openvpn
+            fi
+            ;;
+          rust-packaging)
+            # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
+            # CLI, to prove the app still bundles on this OS. Nothing is signed, notarised
+            # or uploaded; the output stays on the runner.
+            run_deferred rust-packaging-smoke \
+              npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci
+            ;;
+          rust-tls-openssl)
+            # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
+            # one). Present only on sources that carry it; otherwise a note and a pass,
+            # not a silent skip of a concern the source never had.
+            tls_manifest=taurine-backend/taurine-tls-openssl/Cargo.toml
+            if [[ -f "${tls_manifest}" ]]; then
+              run_deferred rust-tls-openssl-tests \
+                cargo test --locked --manifest-path "${tls_manifest}"
+            else
+              echo "rust-tls-openssl: the source has no ${tls_manifest}; nothing to build"
+              run_deferred rust-tls-openssl-absent true
+            fi
+            ;;
+          rust-dbx)
+            # The trees the root manifest excludes from the workspace, each
+            # with its own committed Cargo.lock. `dbx-core` runs through the
+            # root `package.json` script so the stack size it needs is set in
+            # one place; its Postgres-backed tests start a disposable
+            # container when Docker answers, which it does on this runner.
+            # `dbx-sqlite-worker` is compiled here as dbx-core's path
+            # dependency, but its own tests are not run: it commits no
+            # Cargo.lock, so a standalone run would resolve dependency
+            # versions nobody reviewed. `vendor/boringtun`'s standalone run is
+            # left out for the same reason (its lock is generated, not
+            # fetched); the patched copy the product links is exercised by
+            # taurine-net under the workspace lock.
+            run_deferred rust-dbx-core-tests \
+              npm run --silent test:dbx-core -- --locked --no-fail-fast
+            run_deferred rust-dbx-mongo-shell-tests \
+              cargo test --locked --no-fail-fast --manifest-path taurine-backend/dbx-mongo-shell/Cargo.toml
+            # The Linux Secret Service half of dbx-core's `os-keyring` feature
+            # (`all(feature = "os-keyring", target_os = "linux", not(test))`) is
+            # compiled by no other job: the tests above run without the feature and
+            # neither shell enables it. A non-test library check compiles it. The
+            # Secret Service client is pure Rust (zbus), so no system library is
+            # needed beyond what this concern already installs.
+            run_deferred rust-dbx-core-keyring-check \
+              cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --features os-keyring
+            ;;
+          *)
+            # Another family's concern: nothing to do here.
+            exit 0
+            ;;
+        esac
+        # Every `rust-*` and contracts branch ran its sub-steps through `run_deferred`;
+        # this is where their results are reported and the concern fails if one did.
+        if [[ "${CONCERN}" == rust-* ]]; then finish_deferred; fi
