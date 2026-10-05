@@ -31,10 +31,10 @@ inputs:
   deny-policy-fail:
     description: >
       Whether an error from cargo-deny's bans, licenses or sources checks fails the
-      concern. False reports the findings (crate names and lint codes) as warnings only;
-      true enforces them. Advisories stay advisory-only either way.
+      concern. False reports the findings (name hashes and lint codes) as warnings only;
+      true (the default) enforces them. Advisories stay advisory-only either way.
     required: false
-    default: 'false'
+    default: 'true'
 
 runs:
   using: composite
