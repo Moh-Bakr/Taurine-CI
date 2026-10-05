@@ -283,6 +283,8 @@
       "scan-history": {
         "opt_in": "gitleaks_history",
         "timeout": 30,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern",
         "paths": [
           "**/*"
         ]
