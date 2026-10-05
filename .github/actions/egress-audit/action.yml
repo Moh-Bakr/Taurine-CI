@@ -4,8 +4,9 @@ description: >
   private project code runs, using only tools already on the runner image (no
   third-party Action, no vendor telemetry). Two phases: start, called straight
   after the source-checkout composite (the token is already revoked), and report,
-  called last under always(), which publishes the observed host names and
-  destination ports to the job log and summary. Audit only: it never blocks a
+  called last under always(), which publishes the allow-listed host names (any
+  other name only as a SHA-256 prefix) and destination ports to the job log and
+  summary. Audit only: it never blocks a
   connection and never fails the job. Project code runs with sudo, so a hostile
   dependency could tamper with what this records; it is evidence for building an
   allow-list, not a control.
@@ -56,19 +57,29 @@ runs:
           fi
           logged=0
           for table in iptables ip6tables; do
-            # New outbound connections that leave the host; loopback and the
-            # Docker bridges are local traffic.
-            if sudo -n "${table}" -w -I OUTPUT 1 ! -o lo ! -o docker+ ! -o br-+ \
-              -m conntrack --ctstate NEW -j LOG --log-prefix 'egress-audit: ' --log-level 6 2>/dev/null; then
+            # One audit chain, entered from OUTPUT (the host) and DOCKER-USER (containers,
+            # such as live-proof servers and the Keel Dock PostgreSQL). Loopback and the
+            # Docker bridges are local traffic; only new connections that leave are logged.
+            # iptables accepts one -o per rule, hence the RETURN rules.
+            sudo -n "${table}" -w -N EGRESS_AUDIT 2>/dev/null || continue
+            sudo -n "${table}" -w -A EGRESS_AUDIT -o lo -j RETURN
+            sudo -n "${table}" -w -A EGRESS_AUDIT -o docker+ -j RETURN
+            sudo -n "${table}" -w -A EGRESS_AUDIT -o br-+ -j RETURN
+            if sudo -n "${table}" -w -A EGRESS_AUDIT -m conntrack --ctstate NEW \
+              -j LOG --log-prefix 'egress-audit: ' --log-level 6 2>"${state}/${table}.err" \
+              && sudo -n "${table}" -w -I OUTPUT 1 -j EGRESS_AUDIT 2>>"${state}/${table}.err"; then
               logged=1
             fi
-            # Containers (live-proof servers, Keel Dock PostgreSQL) leave through FORWARD.
             if sudo -n "${table}" -w -L DOCKER-USER -n >/dev/null 2>&1; then
-              sudo -n "${table}" -w -I DOCKER-USER 1 ! -o docker+ ! -o br-+ \
-                -m conntrack --ctstate NEW -j LOG --log-prefix 'egress-audit: ' --log-level 6 2>/dev/null || true
+              sudo -n "${table}" -w -I DOCKER-USER 1 -j EGRESS_AUDIT 2>/dev/null || true
             fi
           done
-          (( logged )) && coverage+=('new outbound connections (iptables LOG)')
+          if (( logged )); then
+            coverage+=('new outbound connections (iptables LOG)')
+          else
+            # The iptables error text only, so a missing recorder is diagnosable.
+            echo "egress-audit: connection logging unavailable: $(head -c 300 "${state}/iptables.err" 2>/dev/null)"
+          fi
         else
           iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
           if [[ -n "${iface}" ]]; then
@@ -170,35 +181,82 @@ runs:
             ' "${state}/tcpdump.txt" > "${conns}" || true
           fi
         fi
-        cut -f1 "${map}" | grep -E '^[A-Za-z0-9_.-]+\.[A-Za-z]{2,}$' | tr '[:upper:]' '[:lower:]' | sort -u > "${names}"
-        # One line per destination: the host name(s) that resolved to the address, or the address.
+        # Every name seen (queried, resolved or a CNAME target). The full list stays on the
+        # runner: only names on the reviewed allow-list are published; any other name, however
+        # it is shaped, is published as a truncated SHA-256 (internal, customer or
+        # exfiltration-shaped names must never reach a public log).
+        cut -f1 "${map}" | tr '[:upper:]' '[:lower:]' | tr -d ' ' | grep -v '^$' | sort -u > "${names}"
+        pats="${state}/patterns.txt"
+        if [[ -f "${GITHUB_WORKSPACE}/.github/egress-allowlist.txt" ]]; then
+          sed -E 's/#.*//' "${GITHUB_WORKSPACE}/.github/egress-allowlist.txt" | awk 'NF >= 2 { print tolower($2) }' | sort -u > "${pats}"
+        else
+          : > "${pats}"
+        fi
+        hash12() {
+          if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" | sha256sum | cut -c1-12
+          else printf '%s' "$1" | shasum -a 256 | cut -c1-12; fi
+        }
+        # name -> published label: the name itself when an exact entry or a "*.suffix" entry
+        # (subdomains only) matches it, else unlisted:<hash>.
+        labels="${state}/labels.txt"
+        awk 'NR == FNR { p[$1] = 1; next }
+          { n = $1; ok = (n in p); s = n
+            while (!ok && (i = index(s, ".")) > 0) { s = substr(s, i + 1); if (("*." s) in p) ok = 1 }
+            print n, ok }' "${pats}" "${names}" |
+          while read -r n ok; do
+            if [[ "${ok}" == 1 ]]; then echo "${n} ${n}"; else echo "${n} unlisted:$(hash12 "${n}")"; fi
+          done > "${labels}"
+        # address -> label, preferring a listed name.
+        iplabels="${state}/iplabels.txt"
+        awk 'NR == FNR { l[$1] = $2; next }
+          { split($0, f, "\t"); n = tolower(f[1]); a = f[2]
+            if (a == "-" || !(n in l)) next
+            if (!(a in best) || (best[a] ~ /^unlisted:/ && l[n] !~ /^unlisted:/)) best[a] = l[n] }
+          END { for (a in best) print a, best[a] }' "${labels}" "${map}" > "${iplabels}"
         report="${state}/report.txt"
-        awk 'NR == FNR { split($0, f, "\t"); if (f[2] != "-") { k = f[2]; h = tolower(f[1]); if (index("," n[k] ",", "," h ",") == 0) n[k] = (n[k] ? n[k] "," : "") h } next }
-          {
-            ip = $1; proto = $2; port = $3
-            local = (ip ~ /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|168\.63\.129\.16$|::1$|fe80:|fd)/)
-            host = (ip in n) ? n[ip] : (local ? "local:" ip : "unresolved:" ip)
-            key = host " " proto "/" port
-            c[key]++
-          }
-          END { for (k in c) print k " " c[k] }' "${map}" "${conns}" | sort > "${report}"
+        : > "${report}"
+        while read -r ip proto port; do
+          if [[ "${ip}" =~ ^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|168\.63\.129\.16$|::1$|0000:0000:0000:0000:0000:0000:0000:0001$|fe80:|fd) ]]; then
+            label=local
+          else
+            label="$(awk -v a="${ip}" '$1 == a { print $2; exit }' "${iplabels}")"
+            [[ -n "${label}" ]] || label="unresolved:$(hash12 "${ip}")"
+          fi
+          echo "${label} ${proto}/${port}"
+        done < "${conns}" | tr '[:upper:]' '[:lower:]' | sort | uniq -c | awk '{ print $2, $3, $1 }' > "${report}"
+        listed="$(awk '$2 !~ /^unlisted:/ { print $2 }' "${labels}")"
+        unlisted="$(awk '$2 ~ /^unlisted:/ { print $2 }' "${labels}" | sort -u)"
+        # Defence in depth: the shared sanitiser when this job installed it, then only lines
+        # made of host-name, label and count characters survive (no fence or markup break-out).
+        publish() {
+          if [[ -f "${RUNNER_TEMP}/taurine-ci/sanitize.sh" ]]; then
+            # shellcheck source=/dev/null
+            ( . "${RUNNER_TEMP}/taurine-ci/sanitize.sh" && sanitize_stream )
+          else
+            cat
+          fi | grep -E '^[a-z0-9_.:*/ -]{1,200}$' || true
+        }
+        n_listed="$(printf '%s\n' "${listed}" | grep -c . || true)"
+        n_unlisted="$(printf '%s\n' "${unlisted}" | grep -c . || true)"
         echo "::group::egress-audit (${RUNNER_OS}, audit mode)"
         echo "egress-audit: coverage ${coverage}"
-        while read -r h; do echo "egress-audit-name: ${h}"; done < "${names}"
-        while read -r host port count; do echo "egress-audit-dest: ${host} ${port} ${count}"; done < "${report}"
+        echo "egress-audit: ${n_listed} allow-listed names, ${n_unlisted} unlisted names (hashed)"
+        printf '%s\n' "${listed}" | publish | sed 's/^/egress-audit-name: /'
+        printf '%s\n' "${unlisted}" | publish | sed 's/^/egress-audit-unlisted: /'
+        publish < "${report}" | sed 's/^/egress-audit-dest: /'
         echo '::endgroup::'
         {
           printf '### Egress audit (audit mode, nothing blocked)\n\n'
-          printf -- '- Coverage: %s\n- %d host names resolved, %d destination/port pairs contacted\n\n' \
-            "${coverage}" "$(wc -l < "${names}" | tr -d ' ')" "$(wc -l < "${report}" | tr -d ' ')"
-          if [[ -s "${names}" ]]; then
+          printf -- '- Coverage: %s\n- %d allow-listed host names, %d unlisted (published as a SHA-256 prefix only), %d destination/port pairs\n\n' \
+            "${coverage}" "${n_listed}" "${n_unlisted}" "$(wc -l < "${report}" | tr -d ' ')"
+          if (( n_listed + n_unlisted > 0 )); then
             printf '<details><summary>Host names</summary>\n\n```\n'
-            head -n 300 "${names}"
+            { printf '%s\n' "${listed}"; printf '%s\n' "${unlisted}"; } | publish | head -n 300
             printf '```\n</details>\n\n'
           fi
           if [[ -s "${report}" ]]; then
-            printf '<details><summary>Destinations (host proto/port connections)</summary>\n\n```\n'
-            head -n 300 "${report}"
+            printf '<details><summary>Destinations (label proto/port connections)</summary>\n\n```\n'
+            publish < "${report}" | head -n 300
             printf '```\n</details>\n'
           fi
         } >> "${GITHUB_STEP_SUMMARY}"
@@ -217,20 +275,48 @@ runs:
         $names = @()
         try {
           # 3006: a DNS query is called for the name in the first property.
-          $names = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-DNS-Client/Operational'; Id = 3006; StartTime = $started } -ErrorAction Stop |
+          $names = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-DNS-Client/Operational'; Id = 3006; StartTime = $started } -ErrorAction Stop |
             ForEach-Object { "$($_.Properties[0].Value)".ToLowerInvariant().TrimEnd('.') } |
-            Where-Object { $_ -match '^[a-z0-9_.-]+\.[a-z]{2,}$' } | Sort-Object -Unique
+            Where-Object { $_ -match '^[a-z0-9_-]+(\.[a-z0-9_-]+)+$' } | Sort-Object -Unique)
         } catch { $names = @() }
+        # The full list stays on the runner: only allow-listed names are published, any other
+        # name as a truncated SHA-256 (see the Linux and macOS step).
+        $patterns = @()
+        $allowFile = Join-Path $env:GITHUB_WORKSPACE '.github/egress-allowlist.txt'
+        if (Test-Path $allowFile) {
+          $patterns = @(Get-Content $allowFile | ForEach-Object { ($_ -replace '#.*', '').Trim() } |
+            Where-Object { $_ } | ForEach-Object { (($_ -split '\s+')[1]).ToLowerInvariant() } | Sort-Object -Unique)
+        }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $listed = @(); $unlisted = @()
+        foreach ($n in $names) {
+          $ok = $patterns -contains $n
+          $s = $n
+          while (-not $ok -and $s.Contains('.')) { $s = $s.Substring($s.IndexOf('.') + 1); if ($patterns -contains "*.$s") { $ok = $true } }
+          if ($ok) { $listed += $n }
+          else {
+            $h = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($n)) | ForEach-Object { $_.ToString('x2') })
+            $unlisted += "unlisted:$($h.Substring(0, 12))"
+          }
+        }
+        $unlisted = @($unlisted | Sort-Object -Unique)
+        # Only host-name and label characters are ever published (no fence or markup break-out).
+        $safe = '^[a-z0-9_.:*/ -]{1,200}$'
+        $listed = @($listed | Where-Object { $_ -match $safe })
+        $unlisted = @($unlisted | Where-Object { $_ -match $safe })
         Write-Output '::group::egress-audit (Windows, audit mode)'
         Write-Output "egress-audit: coverage $coverage"
-        foreach ($n in $names) { Write-Output "egress-audit-name: $n" }
+        Write-Output "egress-audit: $($listed.Count) allow-listed names, $($unlisted.Count) unlisted names (hashed)"
+        foreach ($n in $listed) { Write-Output "egress-audit-name: $n" }
+        foreach ($n in $unlisted) { Write-Output "egress-audit-unlisted: $n" }
         Write-Output '::endgroup::'
-        $summary = @('### Egress audit (audit mode, nothing blocked)', '', "- Coverage: $coverage", "- $(@($names).Count) host names queried (Windows records names, not connections)", '')
-        if (@($names).Count -gt 0) {
+        $summary = @('### Egress audit (audit mode, nothing blocked)', '', "- Coverage: $coverage",
+          "- $($listed.Count) allow-listed host names, $($unlisted.Count) unlisted (published as a SHA-256 prefix only); Windows records names, not connections", '')
+        if (($listed.Count + $unlisted.Count) -gt 0) {
           $summary += '<details><summary>Host names</summary>'
           $summary += ''
           $summary += '```'
-          $summary += @($names | Select-Object -First 300)
+          $summary += @(($listed + $unlisted) | Select-Object -First 300)
           $summary += '```'
           $summary += '</details>'
         }

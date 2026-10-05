@@ -27,8 +27,9 @@ runs:
         source "${RUNNER_TEMP}/keeldock/substeps.sh"
         # Vulnerable packages (direct and transitive, from the NuGet advisory feed) and the
         # CycloneDX SBOM; the locked package set is identical on every OS, so Linux alone runs
-        # them. Published: package id, resolved version, advisory id (the last segment of the
-        # public advisory URL) and severity; warn-only unless VULN_FAIL_ON is high or critical.
+        # them. Published: a hash of the package id (no dependency name), advisory id (the last
+        # segment of the public advisory URL) and severity; warn-only unless VULN_FAIL_ON is
+        # high or critical.
         if ! passed restore; then
           skip_all 'restore did not pass' vulnerable-packages sbom-generate
         else
@@ -49,7 +50,12 @@ runs:
             echo "vulnerable-packages: failed (${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate)" >&2
             record vulnerable-packages FAIL "${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate"; any_failed=1
           elif [[ "${vuln_count}" -gt 0 ]]; then
-            awk -F'\t' '{ printf "::warning title=Vulnerable package::%s %s (%s, %s)\n", $1, $2, $3, $4 }' "${vuln_rows}" | awk 'NR <= 50'
+            # Package ids are published as a name hash only (8 hex of the SHA-256), with the
+            # advisory id and severity; run `dotnet list package --vulnerable --include-transitive`
+            # in the private checkout to see the names.
+            while IFS=$'\t' read -r vp_id vp_ver vp_adv vp_sev; do
+              printf '::warning title=Vulnerable package::%s (%s, %s)\n' "$(printf '%s' "${vp_id}" | sha256sum | cut -c1-8)" "${vp_adv}" "${vp_sev}"
+            done < "${vuln_rows}" | awk 'NR <= 50'
             record vulnerable-packages warn "${vuln_count} advisory(ies); warn-only (gate: ${VULN_FAIL_ON})"
           else
             record vulnerable-packages pass 'none reported'
