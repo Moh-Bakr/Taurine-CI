@@ -225,7 +225,7 @@ jobs:
         with:
           mode: table
           label: Linux
-          baseline-seconds: '{"rust-app":2820,"rust-db":840,"rust-dbx":420,"rust-domain":180,"rust-net":120,"taurine-cli":180,"desktop-shard-1":600,"desktop-shard-2":660,"desktop-quality":120,"mobile-quality":120,"frontend-build-budget":120,"contracts":60,"e2e-critical":600,"e2e-a11y":300,"e2e-regression-1":600,"e2e-regression-2":600,"e2e-regression-3":660,"e2e-regression-4":900}'
+          baseline-seconds: '{"rust-app-1":900,"rust-app-2":900,"rust-db":840,"rust-dbx":420,"rust-domain":180,"rust-net":120,"taurine-cli":180,"desktop-shard-1":600,"desktop-shard-2":660,"desktop-quality":120,"mobile-quality":120,"frontend-build-budget":120,"contracts":60,"e2e-critical":600,"e2e-a11y":300,"e2e-regression-1":600,"e2e-regression-2":600,"e2e-regression-3":660,"e2e-regression-4":900}'
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           github-token: ${{ github.token }}
 

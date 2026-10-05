@@ -315,7 +315,7 @@ jobs:
           sha="$(change docs/a.md)"
           expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-security'
           sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-          expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app,scan-security'
+          expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app-1,rust-app-2,scan-security'
           sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
           expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-security'
           sha="$(change taurine-desktop/src/a.ts)"

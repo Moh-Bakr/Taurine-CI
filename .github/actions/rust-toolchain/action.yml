@@ -37,7 +37,7 @@ runs:
         cargo --version
 
     - name: Install the pinned cargo-nextest release
-      if: ${{ inputs.concern == 'rust-app' || inputs.concern == 'rust-db' }}
+      if: ${{ startsWith(inputs.concern, 'rust-app') || inputs.concern == 'rust-db' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
       env:
@@ -137,7 +137,7 @@ runs:
         case "${CONCERN}" in
           rust-domain) extra_packages=(libdbus-1-dev pkg-config) ;;
           rust-net) extra_packages=(libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev libssl-dev pkg-config) ;;
-          rust-app|rust-packaging) extra_packages=(libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
+          rust-app|rust-app-1|rust-app-2|rust-packaging) extra_packages=(libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
           rust-dbx) extra_packages=(libfontconfig1-dev libfreetype-dev libssl-dev pkg-config) ;;
           rust-tls-openssl) extra_packages=(libssl-dev pkg-config) ;;
         esac

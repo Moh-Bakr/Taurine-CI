@@ -342,7 +342,9 @@ runs:
             # says: ask for them on the command line (status shown while running, repeated in
             # the final list) so a failure is never reduced to counts.
             run_deferred "${label}" cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail ${NEXTEST_PARTITION:+--partition "${NEXTEST_PARTITION}"} "$@"
-            run_deferred "${label%-tests}-doctests" cargo test --locked --doc --no-fail-fast "$@"
+            if [[ "${NEXTEST_DOCTESTS:-run}" != skip ]]; then
+              run_deferred "${label%-tests}-doctests" cargo test --locked --doc --no-fail-fast "$@"
+            fi
           else
             run_deferred "${label}" cargo test --locked --no-fail-fast "$@"
           fi
