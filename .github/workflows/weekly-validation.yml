@@ -214,18 +214,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out public control plane
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
       - name: Compare each pinned tool with its newest stable release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PINS_REF: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # The pin list is read from this repository at the run's commit; nothing is checked out.
+          pins="$(gh api -H 'Accept: application/vnd.github.raw+json' "repos/${GH_REPO}/contents/.github/tool-pins.json?ref=${PINS_REF}")"
           {
             echo '## Pinned tool freshness'
             echo
@@ -248,5 +246,5 @@ jobs:
               state='pin is newer than the newest stable release'
             fi
             echo "| ${name} | ${current} | ${latest:-unknown} | ${state} |" >> "${GITHUB_STEP_SUMMARY}"
-          done < <(jq -r '.tools[] | [.name, .repo, .tag_prefix, .current] | join("|")' .github/tool-pins.json)
+          done < <(jq -r '.tools[] | [.name, .repo, .tag_prefix, .current] | join("|")' <<<"${pins}")
           echo "tools behind: ${behind}"
