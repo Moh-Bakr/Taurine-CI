@@ -56,7 +56,7 @@ check_weekly_resolver() {
     fi
     while IFS= read -r dispatched; do
       case "$dispatched" in
-        linux-validation.yml|macos-validation.yml|windows-validation.yml) ;;
+        linux-validation.yml|macos-validation.yml|windows-validation.yml|android-validation.yml|ios-validation.yml) ;;
         *)
           echo "The scheduled resolver may only dispatch the protected validation workflows, not: $dispatched" >&2
           exit 1
