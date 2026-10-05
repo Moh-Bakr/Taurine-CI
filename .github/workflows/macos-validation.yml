@@ -67,16 +67,16 @@ jobs:
         run: |
           set -euo pipefail
           base='"desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"'
-          rust='"rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging","rust-tls-openssl"'
+          rust='"rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"'
           {
             echo '## macOS Rust concerns'
             echo
             if [[ "${RUST_REQUESTED}" == true ]]; then
               echo "matrix={\"concern\":[${base},${rust}]}" >> "${GITHUB_OUTPUT}"
-              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app and rust-packaging are scheduled.'
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging are scheduled.'
             else
               echo "matrix={\"concern\":[${base}]}" >> "${GITHUB_OUTPUT}"
-              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
@@ -93,7 +93,7 @@ jobs:
     # third-party crates; compiled private source is never cached): `rust-app` carries DuckDB's C++ amalgamation, Tauri and
     # over a hundred test binaries (about 40 minutes on the four-core Linux
     # runner), `rust-db` the same drivers' offline suites (about 10 there).
-    timeout-minutes: ${{ (matrix.concern == 'rust-app' || matrix.concern == 'rust-packaging') && 120 || matrix.concern == 'rust-db' && 90 || startsWith(matrix.concern, 'rust-') && 60 || 45 }}
+    timeout-minutes: ${{ (startsWith(matrix.concern, 'rust-app') || matrix.concern == 'rust-packaging') && 120 || matrix.concern == 'rust-db' && 90 || startsWith(matrix.concern, 'rust-') && 60 || 45 }}
     strategy:
       fail-fast: false
       # The concern list comes from the `plan` job: the TypeScript concerns always,
@@ -471,7 +471,7 @@ jobs:
         with:
           mode: table
           label: macOS
-          baseline-seconds: '{"rust-app":3246,"rust-db":1095,"rust-domain":804,"rust-ovpn":158,"rust-net":166,"rust-packaging":924,"rust-tls-openssl":62,"desktop-shard-1":532,"desktop-shard-2":629,"desktop-quality":235,"mobile":182,"bundle-budget":145,"orchestrate-skill":241}'
+          baseline-seconds: '{"rust-app-1":2600,"rust-app-2":2600,"rust-db":1287,"rust-domain":772,"rust-ovpn":229,"rust-net":160,"rust-packaging":1009,"rust-tls-openssl":71,"desktop-shard-1":532,"desktop-shard-2":629,"desktop-quality":235,"mobile":182,"bundle-budget":145,"orchestrate-skill":241}'
           name-pattern: '^macOS (?<concern>.+) validation$'
           github-token: ${{ github.token }}
 
@@ -499,7 +499,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: macOS
-          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging","rust-tls-openssl"]'
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           name-pattern: '^macOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           github-token: ${{ github.token }}
