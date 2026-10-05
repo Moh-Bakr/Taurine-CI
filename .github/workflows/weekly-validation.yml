@@ -1,7 +1,8 @@
-name: Weekly develop validation (scheduled)
+name: Weekly develop and main validation (scheduled)
 
-# Once a week, validate the private `develop` tip on every platform, so drift is
-# caught even when nobody has dispatched a run. This workflow runs no project
+# Once a week, validate the private `develop` tip on every platform (Linux, macOS, Windows,
+# Android and iOS) and the private `main` tip (the production line) on Linux only, so drift
+# is caught even when nobody has dispatched a run. This workflow runs no project
 # code and checks out nothing: it only (1) resolves the current develop tip SHA
 # with the same short-lived, read-only, contents-only source-reader token the
 # protected workflows use, revoking it before anything else happens, and (2)
@@ -9,9 +10,10 @@ name: Weekly develop validation (scheduled)
 # the run's own token. The dispatched workflows do all the source-bearing work
 # under their own protections.
 #
-# Missed-run check. No other workflow in this repository runs on a frequent schedule (the
-# policy workflow runs on pull requests and pushes only), so there is no watchdog job; check by
-# hand instead: `gh run list --repo Moh-Bakr/Taurine-CI --workflow weekly-validation.yml
+# Missed-run check. The dispatch job warns in its summary when the previous scheduled run of
+# this workflow is older than 8 days (or absent), so a dropped Monday is noticed on the next
+# manual or scheduled run. It cannot fire by itself when no run happens, so also check by
+# hand: `gh run list --repo Moh-Bakr/Taurine-CI --workflow weekly-validation.yml
 # --event schedule --limit 3` should show a run each Monday after 05:23 UTC. If Monday's is
 # missing, dispatch this workflow by hand from the Actions tab or the gh CLI on main (a manual
 # dispatch uses the same jobs; set dry_run to only resolve and summarise). A repository with no
@@ -54,6 +56,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       base: ${{ steps.resolve.outputs.base }}
       openssl_locked: ${{ steps.resolve.outputs.openssl_locked }}
+      main_sha: ${{ steps.resolve.outputs.main_sha }}
     steps:
       - name: Mint read-only private-source token
         id: source-token
@@ -80,6 +83,7 @@ jobs:
           sha=''
           base=''
           openssl_locked=''
+          main_sha=''
           if [[ -z "${SOURCE_TOKEN}" ]]; then
             echo 'No source token was minted; refusing to continue' >&2
             exit 1
@@ -99,6 +103,12 @@ jobs:
             || [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'The develop tip could not be resolved to a full commit SHA' >&2
             failed=1
+          fi
+          # The production line's tip, validated on Linux only. Best effort: an empty value
+          # just skips that run and the summary says so.
+          if [[ "${failed}" -eq 0 ]]; then
+            main_sha="$(api "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/main" | jq -r '.sha // empty | ascii_downcase' || true)"
+            [[ "${main_sha}" =~ ^[0-9a-f]{40}$ ]] || main_sha=''
           fi
           # The develop tip from seven days ago, for the drift check below: the selective run
           # of the week's diff. Best effort; an empty base just skips that run.
@@ -126,6 +136,7 @@ jobs:
           if (( failed != 0 )); then exit 1; fi
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "base=${base}" >> "${GITHUB_OUTPUT}"
+          echo "main_sha=${main_sha}" >> "${GITHUB_OUTPUT}"
           echo "openssl_locked=${openssl_locked}" >> "${GITHUB_OUTPUT}"
           echo "- Resolved private develop tip: \`${sha}\`" >> "${GITHUB_STEP_SUMMARY}"
 
@@ -134,11 +145,11 @@ jobs:
     needs: resolve
     name: Dispatch the protected validations
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       actions: write
     steps:
-      - name: Dispatch Linux, macOS and Windows validation for the resolved SHA
+      - name: Dispatch the protected validations for the resolved SHAs
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -147,6 +158,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
           BASE_SHA: ${{ needs.resolve.outputs.base }}
+          MAIN_SHA: ${{ needs.resolve.outputs.main_sha }}
+          THIS_RUN_ID: ${{ github.run_id }}
           OPENSSL_LOCKED: ${{ needs.resolve.outputs.openssl_locked }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
@@ -154,6 +167,19 @@ jobs:
           if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'The resolved source SHA is not a full commit SHA' >&2
             exit 1
+          fi
+          # Missed-run check: the previous scheduled run of this workflow (not this one) should be
+          # at most 8 days old. GitHub drops or disables schedules silently, so warn loudly.
+          MISSED_NOTE=''
+          previous="$(gh run list --workflow weekly-validation.yml --event schedule --limit 5 --json databaseId,createdAt \
+            --jq "[.[] | select(.databaseId != (${THIS_RUN_ID} | tonumber))] | first | .createdAt // empty" || true)"
+          if [[ -z "${previous}" ]]; then
+            MISSED_NOTE='no earlier scheduled run was found'
+          elif (( $(date -u +%s) - $(date -u -d "${previous}" +%s) > 8 * 86400 )); then
+            MISSED_NOTE="the last scheduled run was ${previous}, more than 8 days ago; a weekly run was missed"
+          fi
+          if [[ -n "${MISSED_NOTE}" ]]; then
+            echo "::warning title=weekly run missed::${MISSED_NOTE}"
           fi
           if [[ "${DRY_RUN}" == true ]]; then
             echo "dry run: no validation runs dispatched"
@@ -167,6 +193,13 @@ jobs:
             fi
             gh workflow run macos-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
             gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+            # Mobile, develop only (the Rust tests on the emulator and the simulator).
+            gh workflow run android-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+            gh workflow run ios-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+            # The production line: the main tip, Linux only (full, no base), to keep the cost down.
+            if [[ -n "${MAIN_SHA}" && "${MAIN_SHA}" != "${SOURCE_SHA}" ]]; then
+              gh workflow run linux-validation.yml --ref main -f "source_sha=${MAIN_SHA}"
+            fi
             # The Windows 2025 image, every week, alongside (never instead of) the baseline run.
             # It does not gate anything; two consecutive green weeks switch the default
             # (see the header of windows-validation.yml).
@@ -201,12 +234,14 @@ jobs:
           {
             echo '## Weekly develop validation'
             echo
-            echo "- Source SHA: \`${SOURCE_SHA}\`"
+            echo "- Source SHA (develop): \`${SOURCE_SHA}\`"
+            echo "- Main tip (Linux only): \`${MAIN_SHA:-unresolved}\`"
+            if [[ -n "${MISSED_NOTE}" ]]; then echo "- WARNING, missed-run check: ${MISSED_NOTE}"; else echo '- Missed-run check: the previous scheduled run is within 8 days'; fi
             echo "- ${OPENSSL_NOTE}"
             if [[ "${DRY_RUN}" == true ]]; then
               echo '- Dry run: nothing was dispatched'
             else
-              echo '- Dispatched: linux-validation (full), macos-validation (rust=true), windows-validation (rust=true), windows-validation on windows-2025 (rust=true, non-gating)'
+              echo '- Dispatched: linux-validation (full), macos-validation (rust=true), windows-validation (rust=true), windows-validation on windows-2025 (rust=true, non-gating), android-validation and ios-validation (rust=true), linux-validation for the main tip'
             fi
             if [[ -n "${BASE_SHA}" && "${DRY_RUN}" != true ]]; then
               echo "- Drift check: linux-validation with base_sha \`${BASE_SHA}\` (the week's selective run); compare its Result with the full run's"

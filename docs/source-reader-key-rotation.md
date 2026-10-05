@@ -1,8 +1,8 @@
 # Rotating the source-reader App key
 
 Every source-bearing job in this repository mints its short-lived checkout token from one
-credential: the private key of the source-reader GitHub App, stored as the Actions secret
-`SOURCE_READER_PRIVATE_KEY`. The App's client ID is the `SOURCE_READER_APP_ID` variable. The
+credential: the private key of the source-reader GitHub App, stored only as the `source-read`
+**environment** secret `SOURCE_READER_PRIVATE_KEY` (the repository has no repository-level secrets). The App's client ID is the `SOURCE_READER_APP_ID` variable. The
 App is installed on the private source repositories (`Moh-Bakr/Taurine` and
 `Moh-Bakr/keeldock-cloud`) with contents read only.
 
@@ -33,18 +33,26 @@ the old one is deleted. Validation does not need to stop.
 1. **Generate a new key.** Go to GitHub, then Settings, Developer settings, GitHub Apps, the
    source-reader App, and finally Private keys. Choose **Generate a private key**. The browser
    downloads a `.pem` file. Note the fingerprint GitHub shows next to the new key.
-2. **Update the secret.** In `Moh-Bakr/Taurine-CI`, go to Settings, Secrets and variables,
-   Actions, then `SOURCE_READER_PRIVATE_KEY`, and choose **Update**. Paste the full contents of
-   the new `.pem` file. If you prefer the command line, run this yourself so the key never
-   passes through an agent or a shell history:
+2. **Update the environment secret.** In `Moh-Bakr/Taurine-CI`, go to Settings, Environments,
+   `source-read`, then the environment secret `SOURCE_READER_PRIVATE_KEY`, and choose **Update**.
+   Paste the full contents of the new `.pem` file. If you prefer the command line, run this
+   yourself so the key never passes through an agent or a shell history:
 
    ```bash
-   gh secret set SOURCE_READER_PRIVATE_KEY --repo Moh-Bakr/Taurine-CI < path/to/new-key.pem
+   gh secret set SOURCE_READER_PRIVATE_KEY --env source-read --repo Moh-Bakr/Taurine-CI < path/to/new-key.pem
    ```
 
-   Today the secret is a **repository** secret, not a `source-read` environment secret (the
-   Keel Dock dispatcher comments record this). Update it in the place where it currently lives.
-   See "Optional hardening" before moving it.
+   Do not use `gh secret set` without `--env`: that creates a repository secret, which source-bearing
+   jobs do not read, so the old key would stay active. Confirm the environment secret was updated
+   (the `updated_at` timestamp changes):
+
+   ```bash
+   gh api repos/Moh-Bakr/Taurine-CI/environments/source-read/secrets \
+     -q '.secrets[] | {name, updated_at}'
+   ```
+
+   Also confirm no repository secret of that name exists:
+   `gh api repos/Moh-Bakr/Taurine-CI/actions/secrets -q '.secrets[].name'` must not list it.
 3. **Verify with the new key** (next section). Wait for that to pass before going on to step 4.
 4. **Destroy the local copy.** Securely delete the downloaded `.pem` from the device. Nothing
    needs it once it is in the secret.
@@ -87,8 +95,8 @@ None of these is required by the runbook. Each one trades convenience for a stro
 - **Where the key lives.** `SOURCE_READER_PRIVATE_KEY` is an environment secret of
   `source-read` (there is no repository-level copy). It is released only to jobs that enter
   `source-read`, and that environment is limited to exactly the branches `main` and `untrusted`.
-  When rotating, update the secret under Settings → Environments → `source-read`; do not create a
-  repository secret.
+  When rotating, update the secret under Settings → Environments → `source-read` (step 2); do not
+  create a repository secret.
 - **Keep the deployment rule at exactly `main` and `untrusted`** ("Selected branches and tags",
   two branch rules). Not "Protected branches only": rulesets do not count as protected branches
   for environments, so that setting admits every branch, and the pre-flight refuses it.
