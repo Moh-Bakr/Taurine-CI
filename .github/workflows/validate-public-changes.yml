@@ -165,6 +165,35 @@ jobs:
           [[ "${count}" -gt 0 ]] || { echo 'No sanitizer expressions were found to test' >&2; exit 1; }
           echo "sanitizer fixtures: ${count} expressions checked"
 
+      # The shared sanitize library's detail extractors, run over fixtures: a Tauri version
+      # mismatch pair is listed, a panic keeps only a fixed `code=` token (never other message
+      # text), and a Playwright JSON report yields failing spec names and screenshot-mismatch
+      # counts without any message body.
+      - name: Test the failure-detail extractors against fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/extractor-fixtures"
+          mkdir -p "${dir}"
+          awk "/cat > .*sanitize.sh.* <<'TCI_SANITIZE_LIBRARY'/{on=1; next} /^        TCI_SANITIZE_LIBRARY/{on=0} on" .github/actions/sanitize/action.yml | sed -E 's/^        //' > "${dir}/lib.sh"
+          [[ -s "${dir}/lib.sh" ]] || { echo 'the sanitize library was not found' >&2; exit 1; }
+          printf 'Error Found version mismatched Tauri packages:\r\n  tauri-plugin-dialog (v2.4.1) : @tauri-apps/plugin-dialog (v2.3.0)\r\n' > "${dir}/tauri.log"
+          printf "thread 'a::b' panicked at tests/x.rs:4:9:\ndbx_children failed: code=not_connected secret=hunter2\n" > "${dir}/panic.log"
+          printf '{"suites":[{"specs":[{"title":"t","file":"e2e/a.spec.ts","line":3,"tests":[{"projectName":"visual","status":"unexpected","results":[{"error":{"message":"Screenshot comparison failed: SECRETTEXT"}}]}]}]}]}' > "${dir}/pw.json"
+          bash -c '
+            set -euo pipefail
+            source "$1/lib.sh"
+            tauri_version_mismatch "$1/tauri.log" | grep -qF "tauri-plugin-dialog (v2.4.1) : @tauri-apps/plugin-dialog (v2.3.0)"
+            out="$(panic_summary "$1/panic.log")"
+            grep -qF "code=not_connected" <<<"${out}"
+            if grep -q "hunter2" <<<"${out}"; then exit 1; fi
+            out="$(playwright_json_failures "$1/pw.json")"
+            grep -qF "e2e/a.spec.ts:3" <<<"${out}"
+            grep -qF "1 screenshot mismatch" <<<"${out}"
+            if grep -q "SECRETTEXT" <<<"${out}"; then exit 1; fi
+          ' _ "${dir}"
+          echo 'failure-detail extractor fixtures: ok'
+
       # The concern table (.github/ci-matrix.json) drives the Linux dispatcher's matrix and
       # the selector; the result check lists the concerns it expects. They must be the same
       # set, so a concern added to one cannot be silently missing from the verdict.

@@ -125,7 +125,11 @@ runs:
             function emit(name, loc,    n, a, where) {
               n = split(loc, a, ":");
               where = a[1] ":" a[2];
-              printf "  %s  %s  %s\n", name, where, classify(msg);
+              # A fixed error `code=<[a-z_]+>` token (an enum string, never a value) is allowed
+              # through next to the class; nothing else of the message is.
+              code = "";
+              if (match(msg, /code=[a-z_]+/)) code = "  " substr(msg, RSTART, RLENGTH);
+              printf "  %s  %s  %s%s\n", name, where, classify(msg), code;
             }
             /thread \047[^\047]+\047.* panicked at / {
               name = $0; sub(/^.*thread \047/, "", name); sub(/\047.*$/, "", name);
@@ -174,9 +178,16 @@ runs:
         # major/minor releases, and lists the pairs as `crate (vX) : @tauri-apps/package (vY)`.
         # Package names and versions are public; nothing else is kept.
         tauri_version_mismatch() {
+          # Unanchored: the CLI indents or bullets the pairs, and colour codes may precede them.
           tr -d '\r' <"$1" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' |
-            grep -E 'version mismatched Tauri packages|^[A-Za-z0-9@/_.-]+ \(v[0-9][0-9A-Za-z.+-]*\) : [A-Za-z0-9@/_.-]+ \(v[0-9][0-9A-Za-z.+-]*\)' |
-            cut -c1-200 | head -30
+            grep -oE '[A-Za-z0-9@/_.-]+ \(v?[0-9][0-9A-Za-z.+-]*\) *: *[A-Za-z0-9@/_.-]+ \(v?[0-9][0-9A-Za-z.+-]*\)' |
+            awk '!seen[$0]++' | cut -c1-200 | head -30
+          # Fallback when the pair layout differs: the lines after the headline that consist only
+          # of package-name, version and punctuation characters.
+          if ! tr -d '\r' <"$1" | grep -qE '\(v?[0-9][0-9A-Za-z.+-]*\) *: *[A-Za-z@]'; then
+            tr -d '\r' <"$1" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -iA12 'mismatched Tauri packages' |
+              grep -E '^[[:space:]]*[A-Za-z0-9@/_.() :+*-]+$' | sed -E 's/^[[:space:]]+//' | cut -c1-160 | head -14
+          fi
         }
 
         # Which bundle budget a failed check:bundle exceeded: the app, the budget and the
