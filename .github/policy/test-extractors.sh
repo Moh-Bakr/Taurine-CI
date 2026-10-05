@@ -13,7 +13,7 @@ awk "/cat > .*sanitize.sh.* <<'TCI_SANITIZE_LIBRARY'/{on=1; next} /^        TCI_
 [[ -s "${dir}/lib.sh" ]] || { echo 'the sanitize library was not found' >&2; exit 1; }
 printf 'Error Found version mismatched Tauri packages:\r\n  tauri-plugin-dialog (v2.4.1) : @tauri-apps/plugin-dialog (v2.3.0)\r\n' > "${dir}/tauri.log"
 printf "thread 'a::b' panicked at tests/x.rs:4:9:\ndbx_children failed: code=not_connected secret=hunter2\n" > "${dir}/panic.log"
-printf '{"suites":[{"specs":[{"title":"t","file":"e2e/a.spec.ts","line":3,"tests":[{"projectName":"visual","status":"unexpected","results":[{"error":{"message":"Screenshot comparison failed: SECRETTEXT"}}]}]}]}]}' > "${dir}/pw.json"
+printf '{"suites":[{"specs":[{"title":"t","file":"e2e/a.spec.ts","line":3,"tests":[{"projectName":"visual","status":"unexpected","results":[{"error":{"message":"Screenshot comparison failed:\\n  1234 pixels (ratio 0.02) are different. SECRETTEXT"}}]},{"projectName":"critical","status":"unexpected","results":[{"error":{"message":"Error: expect(locator).toHaveText(expected)\\nLocator: getByRole(heading)\\nExpected string: Welcome\\nReceived string: Loading"}}]}]}]}]}' > "${dir}/pw.json"
 bash -c '
   set -euo pipefail
   source "$1/lib.sh"
@@ -24,6 +24,9 @@ bash -c '
   out="$(playwright_json_failures "$1/pw.json")"
   grep -qF "e2e/a.spec.ts:3" <<<"${out}"
   grep -qF "1 screenshot mismatch" <<<"${out}"
+  grep -qF "1234 pixels differ" <<<"${out}"
+  grep -qF "Locator: getByRole(heading)" <<<"${out}"
+  grep -qF "Received string: Loading" <<<"${out}"
   if grep -q "SECRETTEXT" <<<"${out}"; then exit 1; fi
 ' _ "${dir}"
 # Compiler diagnostics: an error[Ennnn] is its code and location, never its message.

@@ -113,6 +113,23 @@ runs:
         # The packaging smoke build (an unsigned Tauri build): which phase failed and a fixed
         # class of the reason. Cargo's own error shapes follow from cargo_test_detail; nothing
         # else from the output is published.
+        # What failed after the frontend build started: the lines after vite's start line
+        # (or the whole log when there is none) that are build errors, as fixed classes with
+        # quoted strings blanked, plus repo-relative file:line locations of TypeScript and
+        # vite errors and the first bundler stage word seen. Messages are never republished.
+        build_stage_lines() {
+          local log="$1" body stage
+          body="$(sanitize_stream <"${log}" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | awk '{ all[NR] = $0 } /vite v[0-9.]+ building/ { start = NR } END { for (i = (start ? start : 1); i <= NR; i++) print all[i] }')"
+          [[ -n "${body}" ]] || return 0
+          stage="$(grep -oiE 'transforming|rendering chunks|computing gzip size|building for production|resolving|bundl(e|ing)' <<<"${body}" | tail -1)"
+          echo "build stage reached: ${stage:-unknown}"
+          echo 'build error lines (quoted text blanked):'
+          grep -E '^(error|Error|ERROR)|error during build|error TS[0-9]+|Could not resolve|\[plugin|\[vite|Build failed|ELIFECYCLE|ENOENT|ERR_[A-Z_]+|Command failed|exit code|Cannot find|is not exported|failed to' <<<"${body}" |
+            sed -E "s/error (TS[0-9]+): .*/error \\1/; s/\"[^\"]*\"/\"...\"/g; s/'[^']*'/'...'/g" | sed -E 's/^[[:space:]]+//' | cut -c1-160 | awk '!seen[$0]++' | head -20
+          echo 'locations (file:line):'
+          grep -oE '(^|[ (])[A-Za-z0-9_./@-]+\.(ts|tsx|js|mjs|vue|css|json)[:(][0-9]+' <<<"${body}" | sed -E 's/^[ (]//; s/[(]/:/' | awk '!seen[$0]++' | head -12
+        }
+
         packaging_detail() {
           local log="$1" phase reason
           if grep -qE 'Running (beforeBuildCommand|before_build_command)|beforeBuildCommand' "${log}" && ! grep -qE '^[[:space:]]*Compiling ' "${log}"; then
@@ -130,7 +147,7 @@ runs:
           elif grep -qE 'error(\[E[0-9]+\])?: could not compile|error\[E[0-9]+\]' "${log}"; then reason='Rust compilation failure'
           elif grep -qiE 'frontendDist|dist.*(does not exist|not found)' "${log}"; then reason='frontend output directory missing'
           elif grep -qiE 'tauri.conf|invalid configuration|unknown field' "${log}"; then reason='Tauri configuration error'
-          elif grep -qiE 'version mismatched|mismatch' "${log}"; then reason='Tauri package version mismatch'
+          elif grep -qiE 'Found version mismatched Tauri packages|version mismatched Tauri' "${log}"; then reason='Tauri package version mismatch'
           elif grep -qE 'No space left on device' "${log}"; then reason='runner disk exhaustion'
           else reason='unclassified (output withheld)'
           fi
@@ -139,13 +156,10 @@ runs:
           tauri_version_mismatch "${log}" >&2 || true
           if [[ "${reason}" == 'Tauri package version mismatch' ]]; then tauri_versions_inventory >&2 || true; fi
           if [[ "${reason}" == 'Tauri package version mismatch' ]]; then
-            # The tool's own mismatch lines (the real pair is there), through the shared path
-            # and token scrubbing and a charset allow-list: package names, versions and
-            # punctuation only. The pattern is broad, so this also shows what matched.
             echo 'lines naming a mismatch (charset-restricted):' >&2
-            sanitize_stream <"${log}" | grep -iE -B1 -A6 'mismatch' | grep -E '^[[:space:]]*[A-Za-z0-9@/_.() :+*>-]+$' | sed -E 's/^[[:space:]]+//' | cut -c1-160 | awk '!seen[$0]++' | head -24 >&2 || true
-            echo "tauri CLI versions seen by the desktop install: $(cd taurine-desktop && npx --no-install tauri --version 2>&1 | head -1 | cut -c1-80)" >&2 || true
+            sanitize_stream <"${log}" | grep -iE -A8 'Found version mismatched' | grep -E '^[[:space:]]*[A-Za-z0-9@/_.() :+*>-]+$' | sed -E 's/^[[:space:]]+//' | cut -c1-160 | head -14 >&2 || true
           fi
+          build_stage_lines "${log}" >&2 || true
         }
 
         # Installed `@tauri-apps/*` npm package versions per install root, and the locked
