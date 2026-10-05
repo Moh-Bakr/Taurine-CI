@@ -3,16 +3,19 @@
 # Format: one entry per line, "<scope> <pattern>  # reason". The reason is required.
 #   scope    all, or one workflow family: linux, macos, windows, android, ios,
 #            orchestrate, keeldock, live
-#   pattern  an exact host name, or "*.suffix" for any subdomain of suffix (not suffix itself)
+#   pattern  an exact host name; a leading "*." matches one or more labels (subdomains only,
+#            never the suffix itself); any other "*" matches characters within one label.
+#            Wildcards are kept to operator-owned names: a wildcard on a platform where anyone
+#            can create a name (CDNs, cloud storage) would publish a customer's resource name.
 #
 # Two uses:
 #   1. Audit (now): the egress-audit composite publishes a queried host name only when it
 #      matches an entry here. Every other name is published as a count and a truncated
 #      SHA-256, so internal, customer or exfiltration-shaped names never reach a public log.
 #   2. Block (Linux, later): the per-family entries become the enforced allow-list.
-# Wildcards on shared storage (*.blob.core.windows.net, *.r2.cloudflarestorage.com) are
-# exfiltration-capable; they are listed because the runner and registries depend on them,
-# and are the documented residual of block mode.
+# Shared-storage entries (productionresultssa*.blob.core.windows.net,
+# docker-images-prod.*.r2.cloudflarestorage.com) are narrowed to the operator's own account
+# prefix; even so, they are the documented residual of block mode.
 #
 # Checked by .github/policy/check-egress-allowlist.sh.
 
@@ -25,21 +28,18 @@ all *.actions.githubusercontent.com             # runner service: logs, results,
 all githubapp.com                               # runner service apex
 all *.githubapp.com                             # hosted compute orchestrator and watchdog
 all ghcr.io                                     # GitHub container registry (Homebrew bottles)
-all *.blob.core.windows.net                     # Actions cache and results storage
-all *.servicebus.windows.net                    # runner broker
-all *.github.com                                # GitHub service subdomains (uploads, pipelines)
+all productionresultssa*.blob.core.windows.net  # Actions results storage (logs, summaries)
+all *.github.com                                # GitHub service subdomains (glb-*, uploads, pipelines)
+all blob.bn3prdstrz12a.trafficmanager.net       # Azure storage stamp behind the results storage
 
-# --- CDN names returned as CNAME targets of the hosts below -----------------------------
-all *.fastly.net                                # crates.io, rust-lang.org, npm and PyPI CDN
-all *.cloudfront.net                            # static.crates.io CDN
-all *.akamaiedge.net                            # Microsoft and Apple CDN
-all *.akamai.net                                # Microsoft and Apple CDN
-all *.edgekey.net                               # Microsoft and Apple CDN
-all *.edgesuite.net                             # Microsoft and Apple CDN
-all *.azureedge.net                             # Microsoft CDN (dotnet, Playwright)
-all *.azurefd.net                               # Azure Front Door (Microsoft downloads)
-all *.trafficmanager.net                        # Azure Traffic Manager CNAMEs
-all *.cloudflare.net                            # Cloudflare CNAMEs (npm, Docker Hub)
+# --- CDN names returned as CNAME targets of the hosts below (exact names only) ------------
+all dualstack.k.sni.global.fastly.net           # Fastly edge for crates.io, rust-lang.org and npm
+all fastly-static.crates.io                     # static.crates.io CNAME
+all fastly-index.crates.io                      # index.crates.io CNAME
+all ubuntu-archive-asm.trafficmanager.net       # azure.archive.ubuntu.com CNAME
+all azurefd-critical-t-prod-stage2.trafficmanager.net  # packages.microsoft.com CNAME
+all pmc-prod-afd-endpoint-evdhh8f8byhsezfp.b01.azurefd.net  # packages.microsoft.com Front Door
+all repo.apache.maven.org.cdn.cloudflare.net    # repo.maven.apache.org CNAME
 
 # --- Rust ------------------------------------------------------------------------------
 all static.rust-lang.org                        # rustup toolchains and components
@@ -59,6 +59,11 @@ linux playwright.download.prss.microsoft.com    # Playwright browser download
 all azure.archive.ubuntu.com                    # apt on hosted Ubuntu (Linux, Android, live)
 all archive.ubuntu.com                          # apt fallback mirror
 all security.ubuntu.com                         # apt security pocket
+all esm.ubuntu.com                              # apt ESM metadata probe on the image
+all motd.ubuntu.com                             # image message-of-the-day refresh
+all ubuntu.com                                  # Ubuntu service apex queried by the image
+all connectivitycheck.gstatic.com               # connectivity probe (image, Android emulator)
+all www.google.com                              # connectivity probe (image, Android emulator)
 all packages.microsoft.com                      # apt repository preconfigured on the image
 all formulae.brew.sh                            # Homebrew metadata (macOS, iOS)
 
@@ -72,6 +77,8 @@ android services.gradle.org                     # Gradle distribution
 android downloads.gradle.org                    # Gradle distribution CDN
 android plugins.gradle.org                      # Gradle plugin portal
 android plugins-artifacts.gradle.org            # Gradle plugin portal artifacts
+android repo.apache.maven.org                   # Maven Central alias returned by its CDN
+android time.android.com                        # Android emulator NTP
 
 # --- .NET (Keel Dock) ------------------------------------------------------------------
 keeldock api.nuget.org                          # NuGet restore from the lock files
@@ -84,7 +91,7 @@ keeldock aka.ms                                 # setup-dotnet redirects
 live registry-1.docker.io                       # Docker Hub (RocketMQ, Doris, StarRocks, Informix)
 live auth.docker.io                             # Docker Hub token service
 live production.cloudflare.docker.com           # Docker Hub layer CDN
-live *.r2.cloudflarestorage.com                 # Docker Hub layer storage
+live docker-images-prod.*.r2.cloudflarestorage.com  # Docker Hub layer storage
 live mcr.microsoft.com                          # SQL Server images
 live *.data.mcr.microsoft.com                   # SQL Server image layers
 live icr.io                                     # IBM Db2 Community image
@@ -92,4 +99,4 @@ live containers.intersystems.com                # InterSystems IRIS Community im
 keeldock registry-1.docker.io                   # PostgreSQL for the Migrator proof
 keeldock auth.docker.io                         # Docker Hub token service
 keeldock production.cloudflare.docker.com       # Docker Hub layer CDN
-keeldock *.r2.cloudflarestorage.com             # Docker Hub layer storage
+keeldock docker-images-prod.*.r2.cloudflarestorage.com  # Docker Hub layer storage
