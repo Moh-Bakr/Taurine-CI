@@ -352,7 +352,7 @@ jobs:
         with:
           mode: table
           label: iOS
-          baseline-seconds: '{"ios-native":1113}'
+          baseline-seconds: '{"ios-native":1113,"ios-rust":687}'
           name-pattern: '^iOS (?<concern>.+) validation$'
           github-token: ${{ github.token }}
 
