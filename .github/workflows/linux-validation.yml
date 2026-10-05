@@ -211,6 +211,9 @@ jobs:
     needs: [validate]
     name: Timings
     runs-on: ubuntu-24.04
+    # Reporting only: a queued, slow or cancelled timings job must never fail a run whose
+    # concerns all passed (run 37342723559 was cancelled while waiting for a runner).
+    continue-on-error: true
     timeout-minutes: 5
     permissions:
       actions: read
