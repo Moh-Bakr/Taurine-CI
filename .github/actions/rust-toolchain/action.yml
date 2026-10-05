@@ -410,6 +410,18 @@ runs:
           # vcpkg's own telemetry, off: Taurine is telemetry-free and so is its CI.
           echo 'VCPKG_DISABLE_METRICS=1'
         } >> "${GITHUB_ENV}"
+        # Link with rust-lld instead of link.exe for the crate-test concerns, which link over a
+        # hundred test binaries (rust-app alone). The target-specific linker variable leaves
+        # any RUSTFLAGS and checked-out cargo config untouched; rustc still takes the MSVC
+        # library paths from the installed Visual Studio and finds rust-lld in its own
+        # sysroot. The packaging smoke build (a Tauri build with resources and a manifest)
+        # keeps link.exe until lld is proven on it.
+        if [[ "${CONCERN}" != rust-packaging ]]; then
+          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe' >> "${GITHUB_ENV}"
+          echo 'linker: rust-lld (CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER)'
+        else
+          echo 'linker: link.exe (packaging build)'
+        fi
         # Disk. C: holds the target directory. For the heavy concerns, reclaim the Android
         # SDK and other large image content no Rust concern reads when C: is under 40 GiB
         # free, and print the free space before and after.
