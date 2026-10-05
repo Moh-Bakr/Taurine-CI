@@ -129,7 +129,7 @@ runs:
         # occurrence in a cached file is a reference into private source.
         private_path_pattern() {
           local ws
-          ws="$(basename "${GITHUB_WORKSPACE}")"
+          ws="$(basename "$(to_unix_path "${GITHUB_WORKSPACE}")")"
           printf '%s[/\\]+src[/\\]' "${ws}"
         }
 
@@ -276,7 +276,7 @@ runs:
         set -euo pipefail
         source "${RUNNER_TEMP}/taurine-ci/target-cache.sh"
         profile="$(to_unix_path "${TARGET_DIR}")/debug"
-        sets="${RUNNER_TEMP}/target-cache-restored"
+        sets="$(to_unix_path "${RUNNER_TEMP}")/target-cache-restored"
         classify_lock "${sets}"
         if [[ "${CACHE_HIT}" == true ]]; then
           # Defence in depth: whatever the entry holds, a workspace crate is never taken from
@@ -300,7 +300,7 @@ runs:
         set -euo pipefail
         source "${RUNNER_TEMP}/taurine-ci/target-cache.sh"
         profile="$(to_unix_path "${TARGET_DIR}")/debug"
-        sets="${RUNNER_TEMP}/target-cache-save"
+        sets="$(to_unix_path "${RUNNER_TEMP}")/target-cache-save"
         classify_lock "${sets}"
         before="$(size_mib "${profile}")"
         removed="$(strip_profile "${profile}" "${sets}")"
@@ -317,7 +317,7 @@ runs:
         set -euo pipefail
         source "${RUNNER_TEMP}/taurine-ci/target-cache.sh"
         profile="$(to_unix_path "${TARGET_DIR}")/debug"
-        sets="${RUNNER_TEMP}/target-cache-proof"
+        sets="$(to_unix_path "${RUNNER_TEMP}")/target-cache-proof"
         # Recomputed from the lockfile on its own, not taken from the strip step.
         classify_lock "${sets}"
         failed=0

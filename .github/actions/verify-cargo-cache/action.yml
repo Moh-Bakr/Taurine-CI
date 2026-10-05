@@ -47,7 +47,8 @@ runs:
         cache_dir="${CARGO_SOURCES_DIR}/registry/cache"
         if [[ -d "${cache_dir}" ]]; then
           find "${cache_dir}" -type f ! -name '*.crate' -delete
-          work="${RUNNER_TEMP}/crate-verify"
+          # A POSIX path on every runner (Git Bash tools are given no drive-letter form).
+          work="$(cygpath -u "${RUNNER_TEMP}" 2>/dev/null || printf '%s' "${RUNNER_TEMP}")/crate-verify"
           rm -rf "${work}"
           mkdir -p "${work}"
           (cd "${cache_dir}" && find . -type f -name '*.crate' -print) > "${work}/restored.txt"
