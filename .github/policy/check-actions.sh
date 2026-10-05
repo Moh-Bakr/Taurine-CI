@@ -48,6 +48,8 @@ check_action_references() {
       ./.github/actions/mobile-report) ;;
       ./.github/actions/android-sdk-setup) ;;
       ./.github/actions/ios-project-init) ;;
+      ./.github/actions/android-emulator-tests) ;;
+      ./.github/actions/ios-simulator-tests) ;;
       ./.github/actions/live-build) ;;
       ./.github/actions/live-run) ;;
       ./.github/actions/live-summary) ;;
