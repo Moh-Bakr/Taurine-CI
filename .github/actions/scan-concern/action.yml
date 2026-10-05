@@ -2,10 +2,13 @@ name: Scanner concern
 description: >
   Runs one security scanner over the checked-out private source and publishes only
   counts, rule ids and public advisory ids: never an excerpt, a matched value or a
-  file path. gitleaks (secret scan of the working tree, redacted) and npm audit
-  signatures fail the concern on a finding; npm audit advisories and cargo-deny
-  advisories are advisory-only and emit warnings. Tool binaries are pinned release
-  downloads verified against a committed SHA-256.
+  file path. gitleaks (secret scan of the working tree, redacted), npm audit
+  signatures, high or critical npm advisories in production dependencies and
+  Semgrep findings of ERROR severity fail the concern; the remaining npm advisories,
+  the cargo-deny advisories and the other Semgrep severities are advisory-only and
+  emit warnings, and cargo-deny's bans, licences and sources checks are enforced
+  once deny-policy-fail is true. Tool binaries are pinned release downloads
+  verified against a committed SHA-256.
 
 inputs:
   scanner:
@@ -22,6 +25,13 @@ inputs:
       commit, to go back to warning only. Rule ids and counts only are ever published.
     required: false
     default: 'true'
+  deny-policy-fail:
+    description: >
+      Whether an error from cargo-deny's bans, licenses or sources checks fails the
+      concern. False reports the findings (crate names and lint codes) as warnings only;
+      true enforces them. Advisories stay advisory-only either way.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -122,11 +132,12 @@ runs:
         set -euo pipefail
         trap 'echo "$?" > "${RUNNER_TEMP}/scan-npm.exit"' EXIT
         failed=0
+        failed_prod=0
         {
           echo '## npm audit'
           echo
-          echo '| Workspace | Signatures | Advisories (info, low, moderate, high, critical) |'
-          echo '| --- | --- | --- |'
+          echo '| Workspace | Signatures | Advisories (info, low, moderate, high, critical) | Production high or critical |'
+          echo '| --- | --- | --- | --- |'
         } >> "${GITHUB_STEP_SUMMARY}"
         for workspace in . taurine-desktop taurine-mobile; do
           [[ -f "${workspace}/package-lock.json" ]] || continue
@@ -149,11 +160,31 @@ runs:
               fi
             fi
           fi
-          echo "| ${workspace} | ${sig} | ${counts} |" >> "${GITHUB_STEP_SUMMARY}"
+          # Production dependencies only (dev tooling is not shipped): a high or critical
+          # advisory here fails the concern. The advisory-only warning above still lists
+          # everything, development dependencies included. A result that cannot be read
+          # fails closed, as the signature check does. Only public package names, their
+          # severity and advisory URLs are published.
+          prod='unknown'
+          prod_json="${RUNNER_TEMP}/npm-audit-prod.json"
+          if (cd "${workspace}" && npm audit --omit=dev --json) >"${prod_json}" 2>/dev/null || [[ -s "${prod_json}" ]]; then
+            prod="$(jq -r '.metadata.vulnerabilities | select(. != null) | ((.high // 0) + (.critical // 0))' "${prod_json}" 2>/dev/null || true)"
+            [[ -n "${prod}" ]] || prod='unknown'
+          fi
+          if [[ "${prod}" == unknown ]]; then
+            echo "npm audit ${workspace}: the production advisory result could not be read" >&2
+            failed_prod=1
+          elif [[ "${prod}" -gt 0 ]]; then
+            echo "npm audit ${workspace}: ${prod} high or critical advisory finding(s) in production dependencies:" >&2
+            jq -r '.vulnerabilities | to_entries[] | select(.value.severity == "high" or .value.severity == "critical") | "  \(.key) \(.value.severity) \([.value.via[]? | objects | .url // empty] | unique | join(" "))"' "${prod_json}" 2>/dev/null | head -20 >&2 || true
+            failed_prod=1
+          fi
+          echo "| ${workspace} | ${sig} | ${counts} | ${prod} |" >> "${GITHUB_STEP_SUMMARY}"
         done
         [[ "${failed}" -eq 0 ]] || { echo 'npm audit signatures: a registry signature check failed (package names above)' >&2; exit 1; }
+        [[ "${failed_prod}" -eq 0 ]] || { echo 'npm audit: high or critical advisories in production dependencies (package names above)' >&2; exit 1; }
 
-    - name: Run Semgrep Community Edition offline (warning only)
+    - name: Run Semgrep Community Edition offline (ERROR severity enforced)
       id: scan-semgrep
       continue-on-error: ${{ inputs.scanner == 'all' }}
       if: ${{ inputs.scanner == 'semgrep' || inputs.scanner == 'all' }}
@@ -192,7 +223,7 @@ runs:
           jq -r '.errors | group_by(.type) | map("  \(.[0].type | if type == "array" then .[0] else . end): \(length)") | .[]' "${report}"
         fi
         {
-          echo '## Semgrep (offline, warning only)'
+          echo '## Semgrep (offline, ERROR severity enforced)'
           echo
           echo "- Findings: ${total}; scan errors: ${errors}"
           if [[ "${total}" -gt 0 ]]; then
@@ -202,19 +233,29 @@ runs:
             jq -r '.results | group_by(.check_id) | map("| \(.[0].check_id) | \(length) |") | .[]' "${report}"
           fi
         } >> "${GITHUB_STEP_SUMMARY}"
+        # ERROR severity is the source's own statement that a rule is a real defect (disabled
+        # TLS verification, dynamic code); a finding of that severity fails the concern. INFO
+        # and WARNING findings stay warnings, and scan errors above stay warnings too.
+        blocking="$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' "${report}")"
         if [[ "${total}" -gt 0 ]]; then
-          echo "::warning title=semgrep::${total} finding(s), warning only"
+          echo "::warning title=semgrep::${total} finding(s), ${blocking} of ERROR severity"
           echo 'semgrep per-rule counts:'
-          jq -r '.results | group_by(.check_id) | map("  \(.[0].check_id): \(length)") | .[]' "${report}"
+          jq -r '.results | group_by(.check_id) | map("  \(.[0].check_id) (\(.[0].extra.severity)): \(length)") | .[]' "${report}"
         else
           echo 'semgrep: no findings'
         fi
-    - name: Check Rust advisories with cargo-deny (advisory-only)
+        if [[ "${blocking}" -gt 0 ]]; then
+          echo "semgrep: ${blocking} finding(s) of ERROR severity; rule ids and counts are above (paths and excerpts withheld)" >&2
+          exit 1
+        fi
+    - name: Check Rust advisories and dependency policy with cargo-deny
       id: scan-deny
       continue-on-error: ${{ inputs.scanner == 'all' }}
       if: ${{ inputs.scanner == 'deny' || inputs.scanner == 'all' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        DENY_POLICY_FAIL: ${{ inputs.deny-policy-fail }}
       run: |
         set -euo pipefail
         trap 'echo "$?" > "${RUNNER_TEMP}/scan-deny.exit"' EXIT
@@ -222,13 +263,15 @@ runs:
           echo '- cargo-deny: no deny.toml in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
           exit 0
         fi
+        if [[ "${DENY_POLICY_FAIL}" == true ]]; then policy_mode='enforced'; else policy_mode='report only'; fi
         {
-          echo '## Rust advisories (cargo-deny, advisory-only)'
+          echo "## Rust advisories (advisory-only) and dependency policy (${policy_mode}), cargo-deny"
           echo
-          echo '| Lockfile | Findings |'
-          echo '| --- | --- |'
+          echo '| Lockfile | Advisories | Policy errors | Policy warnings |'
+          echo '| --- | --- | --- | --- |'
         } >> "${GITHUB_STEP_SUMMARY}"
         total=0
+        policy_errors=0
         for manifest in Cargo.toml taurine-backend/dbx-core/Cargo.toml taurine-backend/dbx-mongo-shell/Cargo.toml; do
           [[ -f "${manifest}" ]] || continue
           out="${RUNNER_TEMP}/deny-$(echo "${manifest}" | tr '/' '_').jsonl"
@@ -254,9 +297,38 @@ runs:
             echo "::warning title=Rust advisories::${manifest}: ${count} advisory finding(s); advisory-only"
             jq -r 'select(.type == "diagnostic") | select(.fields.advisory != null) | "  \(.fields.advisory.id) \(.fields.advisory.package)"' "${out}" 2>/dev/null | sort -u | head -30
           fi
-          echo "| ${manifest} | ${count} |" >> "${GITHUB_STEP_SUMMARY}"
+
+          # The dependency policy: bans (denied and, as configured, duplicate crates), licences
+          # (the deny.toml allow-list) and sources (registries and git origins). Same published
+          # shape as above: severity, lint code, crate name and version; a diagnostic's message
+          # and labels (which can quote a source URL) are never published.
+          policy_out="${RUNNER_TEMP}/deny-policy-$(echo "${manifest}" | tr '/' '_').jsonl"
+          policy_status=0
+          "${RUNNER_TEMP}/scan-bin/cargo-deny" --manifest-path "${manifest}" --format json --config deny.toml check bans licenses sources >/dev/null 2>"${policy_out}" || policy_status=$?
+          if [[ "${policy_status}" -gt 1 ]]; then
+            source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+            echo "cargo-deny policy ${manifest}: did not complete (exit ${policy_status}); error lines:" >&2
+            jq -r 'select(.type == "log") | select(.fields.level == "ERROR") | .fields.message' "${policy_out}" 2>/dev/null | sanitize_stream | head -5 >&2 || true
+            policy_errors=$((policy_errors + 1))
+          fi
+          perr="$(jq -s '[.[] | select(.type == "diagnostic") | select((.fields.severity // "" | ascii_downcase) == "error")] | length' "${policy_out}" 2>/dev/null || echo 0)"
+          pwarn="$(jq -s '[.[] | select(.type == "diagnostic") | select((.fields.severity // "" | ascii_downcase) == "warning")] | length' "${policy_out}" 2>/dev/null || echo 0)"
+          echo "cargo-deny policy ${manifest}: exit ${policy_status}, ${perr} error(s), ${pwarn} warning(s), $(jq -s '[.[] | select(.type == "diagnostic")] | length' "${policy_out}" 2>/dev/null || echo '?') diagnostics"
+          echo "  policy diagnostics by severity and lint code:"
+          jq -r 'select(.type == "diagnostic") | "\(.fields.severity // "?" | ascii_downcase) \(.fields.code // "-")"' "${policy_out}" 2>/dev/null | sort | uniq -c | sed 's/^/    /' | head -30 || true
+          # Which crate, for everything except the duplicate-version noise (counted above).
+          jq -r 'select(.type == "diagnostic") | select((.fields.code // "") != "duplicate") | select((.fields.severity // "" | ascii_downcase) as $s | $s == "error" or $s == "warning") | "  \(.fields.severity | ascii_downcase) \(.fields.code // "-") \(.fields.graphs[0].Krate.name // "-") \(.fields.graphs[0].Krate.version // "")"' "${policy_out}" 2>/dev/null | sort -u | head -60 || true
+          policy_errors=$((policy_errors + perr))
+          echo "| ${manifest} | ${count} | ${perr} | ${pwarn} |" >> "${GITHUB_STEP_SUMMARY}"
         done
-        echo "cargo-deny: ${total} advisory finding(s) in total (advisory-only)"
+        echo "cargo-deny: ${total} advisory finding(s) in total (advisory-only); ${policy_errors} dependency policy error(s) (${policy_mode})"
+        if [[ "${policy_errors}" -gt 0 ]]; then
+          if [[ "${DENY_POLICY_FAIL}" == true ]]; then
+            echo "cargo-deny: ${policy_errors} dependency policy error(s) in bans, licences or sources (crate names and lint codes above)" >&2
+            exit 1
+          fi
+          echo "::warning title=cargo-deny policy::${policy_errors} dependency policy error(s) in bans, licences or sources; report only (deny-policy-fail is false)"
+        fi
 
     - name: Run the security lints with clippy (warning only)
       id: scan-clippy

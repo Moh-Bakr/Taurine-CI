@@ -9,6 +9,14 @@ inputs:
   concern:
     description: The Linux validation concern being run
     required: true
+  machete-fail:
+    description: >
+      Whether an unused dependency found by cargo-machete fails the contracts concern. False
+      reports the findings as a warning only; true enforces them. A real false positive is
+      listed in the private manifest's [package.metadata.cargo-machete] ignored table, with
+      a comment saying why, never here.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -19,6 +27,7 @@ runs:
       env:
         CONCERN: ${{ inputs.concern }}
         OS_LABEL: Linux
+        MACHETE_FAIL: ${{ inputs.machete-fail }}
       run: |
         set -euo pipefail
         source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
@@ -136,6 +145,54 @@ runs:
               fi
               exit "${failed}"
             '
+            fi
+
+            # Unused dependencies (cargo-machete): text matching over each manifest and its
+            # sources, so no compile, no nightly toolchain and seconds to run; every unused
+            # crate is compile time on three operating systems. The release is pinned to an
+            # exact version and the SHA-256 GitHub records for that asset. Findings are the
+            # manifest's repository-relative path and the dependency names (public crate
+            # names), never an excerpt. A false positive is acknowledged in the private
+            # manifest's `[package.metadata.cargo-machete] ignored` table with a comment, so
+            # the list lives beside the dependency it excuses.
+            machete_bin="${RUNNER_TEMP}/cargo-machete-bin"
+            machete_installed=0
+            mkdir -p "${machete_bin}"
+            machete_tgz="${RUNNER_TEMP}/cargo-machete-v0.9.2.tar.gz"
+            if curl --fail --silent --show-error --retry 2 --location --output "${machete_tgz}" \
+                 "https://github.com/bnjbvr/cargo-machete/releases/download/v0.9.2/cargo-machete-v0.9.2-x86_64-unknown-linux-musl.tar.gz" &&
+               echo "48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9  ${machete_tgz}" | sha256sum --check --status &&
+               tar -xzf "${machete_tgz}" -C "${machete_bin}" &&
+               machete_exe="$(find "${machete_bin}" -type f -name cargo-machete | head -n 1)" && [[ -n "${machete_exe}" ]]; then
+              machete_installed=1
+            fi
+            if [[ "${machete_installed}" -ne 1 ]]; then
+              deferred_results+=("cargo-machete|failed: the pinned scanner did not install")
+              deferred_failed=1
+            else
+              machete_status=0
+              "${machete_exe}" >"${RUNNER_TEMP}/cargo-machete.out" 2>&1 || machete_status=$?
+              if [[ "${machete_status}" -eq 0 ]]; then
+                deferred_results+=("cargo-machete|passed")
+              elif [[ "${machete_status}" -eq 1 ]]; then
+                # Exit 1 is "unused dependencies found". The report lists, per manifest, the
+                # dependency names; paths are repository-relative already (the tool is run
+                # from the source root) and pass through the shared scrubbing regardless.
+                machete_count="$(grep -cE '^[[:space:]]+[A-Za-z0-9_-]+$' "${RUNNER_TEMP}/cargo-machete.out" || true)"
+                echo "cargo-machete: ${machete_count} unused dependency finding(s):"
+                sanitize_stream <"${RUNNER_TEMP}/cargo-machete.out" | grep -E '^[[:space:]]+[A-Za-z0-9_-]+$|^[A-Za-z0-9_./-]+ -- ' | head -80 || true
+                if [[ "${MACHETE_FAIL}" == true ]]; then
+                  deferred_results+=("cargo-machete|failed: ${machete_count} unused dependency finding(s) (listed above; exit 1)")
+                  deferred_failed=1
+                else
+                  echo "::warning title=cargo-machete::${machete_count} unused dependency finding(s); report only (machete-fail is false)"
+                  deferred_results+=("cargo-machete|report only: ${machete_count} unused dependency finding(s)")
+                fi
+              else
+                echo "cargo-machete: did not complete (exit ${machete_status}); output withheld" >&2
+                deferred_results+=("cargo-machete|failed: the scanner did not complete (exit ${machete_status})")
+                deferred_failed=1
+              fi
             fi
             ;;
           frontend-build-budget)
