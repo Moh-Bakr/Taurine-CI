@@ -221,6 +221,53 @@ runs:
         rustc --version
         cargo --version
 
+        # Disk. A hosted macOS runner has well under 100 GiB free, and the heavy concerns
+        # (rust-app above all: over a hundred test binaries, each linking the whole command
+        # tier) have run it down to under 1 GiB mid-link. So for those two concerns the
+        # space is reclaimed up front, always, from things no Rust concern reads: the
+        # Android SDK, every Xcode but the selected one, simulator devices and runtimes.
+        # Deleting those is the slowest part of this setup (measured: about five minutes per
+        # job, against under one for a concern that skips it), so it runs in the background
+        # from here, each removal in parallel, while the toolchain below installs and while
+        # the vendor fetch and the crate-source cache restore run. The macOS concern runner
+        # joins it before the first cargo command (and runs it in the foreground itself if
+        # the background process did not survive), so the disk is the same by the time
+        # anything compiles. Each removal is best effort: a path that is absent or busy
+        # never fails the setup. Package-manager and user caches are cleared below, after
+        # the installs that use them.
+        free_gib() { df -g "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}'; }
+        echo "disk before reclaim: $(free_gib) GiB free"
+        df -h "${GITHUB_WORKSPACE}"
+        reclaim_script="${RUNNER_TEMP}/taurine-reclaim.sh"
+        if [[ "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ]]; then
+          cat > "${reclaim_script}" <<'TCI_RECLAIM'
+        #!/usr/bin/env bash
+        # Usage: taurine-reclaim.sh <selected Xcode app> <done marker>
+        selected_xcode="$1"
+        marker="$2"
+        started="$(date +%s)"
+        rm -rf "${HOME}/Library/Android" 2>/dev/null &
+        for xcode in /Applications/Xcode*.app; do
+          [[ -d "${xcode}" && "${xcode}" != "${selected_xcode}" ]] || continue
+          sudo rm -rf "${xcode}" 2>/dev/null &
+        done
+        (
+          xcrun simctl delete all >/dev/null 2>&1 || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
+          rm -rf "${HOME}/Library/Developer/CoreSimulator" 2>/dev/null || true
+        ) &
+        wait
+        echo "disk reclaim finished after $(( $(date +%s) - started )) s"
+        touch "${marker}"
+        TCI_RECLAIM
+          rm -f "${RUNNER_TEMP}/taurine-reclaim.done" "${RUNNER_TEMP}/taurine-reclaim.pid"
+          selected_xcode="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer.*##')"
+          nohup bash "${reclaim_script}" "${selected_xcode}" "${RUNNER_TEMP}/taurine-reclaim.done" >"${RUNNER_TEMP}/taurine-reclaim.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/taurine-reclaim.pid"
+          disown || true
+          echo 'disk reclaim: started in the background'
+        fi
+
         # taurine-scripting's rquickjs `bindgen` feature needs the standalone libclang
         # dylib at build-script runtime, the same reason ios-validation installs llvm.
         brew list llvm >/dev/null 2>&1 || brew install llvm
@@ -285,33 +332,14 @@ runs:
           echo 'CARGO_PROFILE_TEST_DEBUG=0'
         } >> "${GITHUB_ENV}"
 
-        # Disk. A hosted macOS runner has well under 100 GiB free, and the heavy concerns
-        # (rust-app above all: over a hundred test binaries, each linking the whole command
-        # tier) have run it down to under 1 GiB mid-link. So for those two concerns the
-        # space is reclaimed up front, always, from things no Rust concern reads: the
-        # Android SDK, every Xcode but the selected one, simulator devices and runtimes,
-        # and package-manager and user caches. Free space is printed before and after so
-        # the effect is measured on every run. Each removal is best effort: a path that is
-        # absent or busy never fails the setup.
-        free_gib() { df -g "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}'; }
-        echo "disk before reclaim: $(free_gib) GiB free"
-        df -h "${GITHUB_WORKSPACE}"
+        # Package-manager and user caches, now that the installs above are done with them;
+        # the background reclaim started at the top handles the large trees.
         if [[ "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ]]; then
-          rm -rf "${HOME}/Library/Android" 2>/dev/null || true
-          selected_xcode="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer.*##')"
-          for xcode in /Applications/Xcode*.app; do
-            [[ -d "${xcode}" && "${xcode}" != "${selected_xcode}" ]] || continue
-            sudo rm -rf "${xcode}" 2>/dev/null || true
-          done
-          xcrun simctl delete all >/dev/null 2>&1 || true
-          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
-          rm -rf "${HOME}/Library/Developer/CoreSimulator" "${HOME}/Library/Caches"/* 2>/dev/null || true
+          rm -rf "${HOME}/Library/Caches"/* 2>/dev/null || true
           brew_cache="$(brew --cache 2>/dev/null || true)"
           if [[ -n "${brew_cache}" && -d "${brew_cache}" ]]; then
             rm -rf "${brew_cache}"/* 2>/dev/null || true
           fi
-          echo "disk after reclaim: $(free_gib) GiB free"
-          df -h "${GITHUB_WORKSPACE}"
         fi
 
         # taurine-crypt's `keychain` feature talks to the real macOS Keychain, and its

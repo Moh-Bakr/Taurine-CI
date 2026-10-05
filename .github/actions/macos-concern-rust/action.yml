@@ -23,6 +23,37 @@ runs:
         source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
         source "${RUNNER_TEMP}/taurine-ci/report.sh"
 
+        # Join the background disk reclaim that the toolchain setup started (rust-app and
+        # rust-db only; every other concern never wrote the script, so this is a no-op). It
+        # has been running since the start of the setup, through the toolchain installs, the
+        # vendor fetch and the crate-source cache restore, so what is left to wait for is
+        # printed. If the background process did not survive the end of its step (no done
+        # marker and no live process), the same script runs here in the foreground, which is
+        # what the setup did before the reclaim moved to the background.
+        reclaim_script="${RUNNER_TEMP}/taurine-reclaim.sh"
+        reclaim_marker="${RUNNER_TEMP}/taurine-reclaim.done"
+        if [[ -f "${reclaim_script}" ]]; then
+          join_started="${SECONDS}"
+          reclaim_pid="$(cat "${RUNNER_TEMP}/taurine-reclaim.pid" 2>/dev/null || echo 0)"
+          while [[ ! -f "${reclaim_marker}" ]]; do
+            if ! kill -0 "${reclaim_pid}" 2>/dev/null && [[ ! -f "${reclaim_marker}" ]]; then
+              echo 'disk reclaim: the background process is gone without finishing; running it here'
+              selected_xcode="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer.*##')"
+              bash "${reclaim_script}" "${selected_xcode}" "${reclaim_marker}" || true
+              break
+            fi
+            if [[ $((SECONDS - join_started)) -ge 1200 ]]; then
+              echo 'disk reclaim: still running after 20 minutes; continuing without it' >&2
+              break
+            fi
+            sleep 2
+          done
+          cat "${RUNNER_TEMP}/taurine-reclaim.log" 2>/dev/null || true
+          echo "disk reclaim: joined after waiting $((SECONDS - join_started)) s"
+          echo "disk after reclaim: $(df -g "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}') GiB free"
+          df -h "${GITHUB_WORKSPACE}"
+        fi
+
         # The helpers below are the Linux `rust-*` concerns' own (see
         # linux-validation-concern.yml, which is where the reasoning for each lives),
         # with the changes a macOS or Windows runner needs and nothing else:
