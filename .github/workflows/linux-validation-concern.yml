@@ -362,6 +362,23 @@ jobs:
               echo "### Tests exercised by this run"
               echo
               echo "Test inventory unavailable: the collector did not complete."
+              # Fallback from the runner's own JSON reports, so a failing run still names its
+              # failing specs: counts per status and, for each non-passing test, its project,
+              # repo-relative spec file:line and title. The collector's own error is reduced to
+              # fixed class names (an Error type or ERR_ code), never its message.
+              echo
+              echo "collector error class: $(grep -ohE '\b[A-Z][A-Za-z]*Error\b|\bERR_[A-Z_]+\b' "${RUNNER_TEMP}/test-ids/collector-private.log" 2>/dev/null | head -1 || true)"
+              for report in "${RUNNER_TEMP}"/test-ids/*.json; do
+                [[ -f "${report}" ]] || continue
+                echo
+                echo "#### $(basename "${report}" .json) (fallback, from the runner report)"
+                jq -r '
+                  [ (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
+                    | { status: ($t.status // "?"), project: ($t.projectName // "?"), file: ($s.file // "?"), line: ($s.line // 0), title: ($s.title // "?") } ] as $all
+                  | "- tests: \($all | length); " + ([$all | group_by(.status)[] | "\(.[0].status) \(length)"] | join(", ")),
+                    ($all[] | select(.status != "expected" and .status != "skipped") | "- FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))")
+                ' "${report}" 2>/dev/null | sed -E 's#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g' | cut -c1-220 | head -80 || true
+              done
             } > "${section_file}"
           fi
           cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
