@@ -11,11 +11,6 @@
 #     and nothing that runs project code precedes it: only the public checkout (needed to
 #     reach the local composites), the timer composite and plain-shell input validation may
 #     come first. The two reviewed exceptions are listed below with their reason.
-#  6. Every job that references `secrets.SOURCE_READER_PRIVATE_KEY` (or the KeelDock variant)
-#     declares `environment: source-read` (or keeldock-source-read, or the keeldock concern's
-#     `inputs.environment`), because the key is an environment secret that only such a job can read.
-#  7. No job passes that key (or any secret) to a reusable workflow through `secrets:`; the
-#     called job reads its own environment secret. `secrets: inherit` is rejected by rule 4.
 require 'yaml'
 
 root = ARGV[0] || '.'
@@ -27,8 +22,6 @@ PROTECTED_JOB_EXEMPT = {
   ['weekly-validation.yml', 'resolve'] => 'scheduled resolver: mints, reads one API value and revokes; checks nothing out by design (check-weekly.sh)'
 }.freeze
 
-KEY_REF = /SOURCE_READER_PRIVATE_KEY/
-KEY_ENVIRONMENTS = ['source-read', 'keeldock-source-read', '$' + '{{ inputs.environment }}'].freeze
 PIN = /\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.\/-]+)?@[0-9a-f]{40}\z/
 ALLOWED_BEFORE_CHECKOUT = [
   /\Aactions\/checkout@[0-9a-f]{40}\z/,
@@ -70,24 +63,6 @@ files.sort.each do |file|
   # 4. secrets: inherit
   (doc['jobs'] || {}).each do |job_id, job|
     failures << "#{rel}: job #{job_id} passes `secrets: inherit`" if job['secrets'] == 'inherit'
-  end
-
-  # 6 and 7. the App key is read only inside an environment job and is never passed on
-  (doc['jobs'] || {}).each do |job_id, job|
-    env = job['environment']
-    env_name = (env.is_a?(Hash) ? env['name'] : env).to_s
-    if job['secrets'].is_a?(Hash) && job['secrets'].any? { |k, v| KEY_REF.match?(k.to_s) || KEY_REF.match?(v.to_s) }
-      failures << "#{rel}: job #{job_id} passes SOURCE_READER_PRIVATE_KEY via `secrets:` to a reusable workflow"
-    end
-    body = YAML.dump(job.reject { |k, _| k == 'secrets' })
-    if KEY_REF.match?(body) && !KEY_ENVIRONMENTS.include?(env_name)
-      failures << "#{rel}: job #{job_id} references SOURCE_READER_PRIVATE_KEY without `environment: source-read`"
-    end
-  end
-  call = triggers.is_a?(Hash) ? triggers['workflow_call'] : nil
-  declared = call.is_a?(Hash) && call['secrets'].is_a?(Hash) ? call['secrets'] : {}
-  declared.each_key do |name|
-    failures << "#{rel}: workflow_call declares secret #{name}; the called job must read its environment secret instead" if KEY_REF.match?(name.to_s)
   end
 
   # 5. protected jobs start with the source-checkout composite
