@@ -1,0 +1,85 @@
+name: Install the mobile failure reporter
+description: >
+  Writes the mobile failure-reporting library (mobile_run and its fixed classifiers) to the runner
+  temp directory, to be sourced after the shared sanitizers by the Android and iOS concern steps.
+  Reads nothing from the private source and publishes nothing.
+
+runs:
+  using: composite
+  steps:
+    - name: Write the mobile failure reporter library
+      shell: bash
+      run: |
+        set -euo pipefail
+        cat > "${RUNNER_TEMP}/taurine-ci/mobile-report.sh" <<'TCI_MOBILE_REPORT_LIBRARY'
+        # shellcheck shell=bash
+        # Mobile failure reporting. Sourced after the shared sanitize library. A failed command
+        # publishes one fixed classification, its exit status, and (for Rust errors) the error
+        # code with its repository-relative file:line. Message text, source excerpts, symbol
+        # names and tool output are never published.
+
+        mobile_reason() {
+          local log="$1" reason
+          reason="$(cargo_test_reason "${log}")"
+          if [[ "${reason}" != 'command returned non-zero' ]]; then echo "${reason}"
+          elif grep -qE 'SDK location not found|No version of NDK matched' "${log}"; then echo 'Android SDK or NDK not found'
+          elif grep -qE 'Could not (resolve|download|GET)|UnknownHostException|Connection (reset|timed out)' "${log}"; then echo 'dependency download failure (network)'
+          elif grep -qE '^> Task [^[:space:]]+ FAILED$|^FAILURE: Build failed' "${log}"; then echo 'Gradle build failure'
+          elif grep -qE 'Undefined symbols for architecture' "${log}"; then echo 'link failure: undefined symbols'
+          elif grep -qiE 'no such module' "${log}"; then echo 'Swift module not found'
+          elif grep -qiE 'code ?sign|provisioning profile' "${log}"; then echo 'code signing or provisioning failure'
+          elif grep -qE '[*][*] (BUILD|ARCHIVE) FAILED [*][*]' "${log}"; then echo 'xcodebuild build failure'
+          elif grep -qiE 'ETIMEDOUT|ECONNRESET|EAI_AGAIN' "${log}"; then echo 'network failure'
+          else echo 'command returned non-zero'
+          fi
+        }
+
+        # `error[Ennnn]` as the code, with the repository-relative file:line of its `-->` location.
+        mobile_error_sites() {
+          local sites
+          sites="$(sanitize_stream <"$1" | strip_excerpts | awk '
+            match($0, /error\[E[0-9][0-9]*\]/) { code = substr($0, RSTART + 6, RLENGTH - 7); next }
+            match($0, /--> [^ ]*:[0-9][0-9]*:[0-9][0-9]*/) {
+              if (code != "") {
+                n = split(substr($0, RSTART + 4, RLENGTH - 4), a, ":")
+                print "  " code " " a[1] ":" a[2]
+                code = ""
+              }
+            }
+          ' | awk '!seen[$0]++' | head -30)"
+          if [[ -n "${sites}" ]]; then
+            echo 'Rust errors (code and file:line; messages withheld):' >&2
+            printf '%s\n' "${sites}" >&2
+          fi
+        }
+
+        # Gradle names the failed task on a fixed shape of line; task names are build structure.
+        mobile_failed_tasks() {
+          local tasks
+          tasks="$(tr -d '\r' <"$1" | grep -E '^> Task [^[:space:]]+ FAILED$' | head -10 || true)"
+          if [[ -n "${tasks}" ]]; then
+            echo 'Gradle tasks that failed:' >&2
+            printf '%s\n' "${tasks}" >&2
+          fi
+        }
+
+        # One command, one published line. Output stays in a runner-local log. A caller may define
+        # mobile_extra_detail <label> <log> for fixed, count-only diagnostics of one label.
+        mobile_run() {
+          local label="$1"; shift
+          local log="${RUNNER_TEMP}/${label}.log" rc=0
+          "$@" >"${log}" 2>&1 || rc=$?
+          if [[ "${rc}" -eq 0 ]]; then
+            echo "${label}: passed"
+            return 0
+          fi
+          tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
+          echo "${label}: failed ($(mobile_reason "${log}"); exit ${rc}; sanitized detail below)" >&2
+          mobile_error_sites "${log}"
+          mobile_failed_tasks "${log}"
+          # Tauri refuses mismatched npm/crate pairs; package names and versions only.
+          tauri_version_mismatch "${log}" >&2 || true
+          if declare -F mobile_extra_detail >/dev/null; then mobile_extra_detail "${label}" "${log}"; fi
+          exit 1
+        }
+        TCI_MOBILE_REPORT_LIBRARY

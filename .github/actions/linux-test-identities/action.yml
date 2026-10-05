@@ -1,0 +1,77 @@
+name: Linux test identities
+description: >
+  Complements the sanitised validation proof: names the tests that ran,
+  including failures, so a public run shows which tests a SHA exercised. The inventory is repo-
+  relative file paths and test titles, plus status and duration — never test source, fixtures,
+  data values or environment details. The collector (checked out with the source it reports on)
+  re-scans every path and title with the repository's own secret-shape rules and drops rather than
+  publishes anything that matches; it builds the whole section in memory and writes it once, so
+  nothing reaches the summary unless the sanitized render completed. The runner's raw reporter
+  JSON stays in RUNNER_TEMP and is not uploaded.
+
+inputs:
+  concern:
+    description: The Linux validation concern that ran
+    required: true
+  source-sha:
+    description: The requested 40-character private source SHA
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Publish test identities exercised by this concern
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        REQUESTED_SOURCE_SHA: ${{ inputs.source-sha }}
+        CONCERN: ${{ inputs.concern }}
+      run: |
+        set -euo pipefail
+        # Only the concerns that ran a JavaScript test suite have an
+        # inventory; every other concern leaves its summary as it was.
+        case "${CONCERN}" in
+          contracts|desktop-shard-1|desktop-shard-2|mobile-quality|e2e-*) ;;
+          *) exit 0 ;;
+        esac
+        checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
+        requested_sha="${REQUESTED_SOURCE_SHA,,}"
+        [[ "${checked_out_sha}" == "${requested_sha}" ]]
+        # The collector exits zero even when it cannot collect (fail closed:
+        # a fixed "unavailable" line instead of an error or a partial list),
+        # but if the collector itself fails to run, publish the same fixed
+        # line rather than letting the step turn a green concern red. The
+        # section goes to the step log as well as the summary: the summary is
+        # what a reader sees, the log is the greppable record of exactly
+        # which identities were published to this run.
+        mkdir -p "${RUNNER_TEMP}/test-ids"
+        section_file="${RUNNER_TEMP}/test-ids/summary-section.md"
+        if ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
+          TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}/src" \
+          taurine-desktop/node_modules/.bin/vite-node scripts/ci/collect-test-ids.ts \
+          > "${section_file}" 2> "${RUNNER_TEMP}/test-ids/collector-private.log"; then
+          {
+            echo "### Tests exercised by this run"
+            echo
+            echo "Test inventory unavailable: the collector did not complete."
+            # Fallback from the runner's own JSON reports, so a failing run still names its
+            # failing specs: counts per status and, for each non-passing test, its project,
+            # repo-relative spec file:line and title. The collector's own error is reduced to
+            # fixed class names (an Error type or ERR_ code), never its message.
+            echo
+            echo "collector error class: $(grep -ohE '\b[A-Z][A-Za-z]*Error\b|\bERR_[A-Z_]+\b' "${RUNNER_TEMP}/test-ids/collector-private.log" 2>/dev/null | head -1 || true)"
+            for report in "${RUNNER_TEMP}"/test-ids/*.json; do
+              [[ -f "${report}" ]] || continue
+              echo
+              echo "#### $(basename "${report}" .json) (fallback, from the runner report)"
+              jq -r '
+                [ (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
+                  | { status: ($t.status // "?"), project: ($t.projectName // "?"), file: ($s.file // "?"), line: ($s.line // 0), title: ($s.title // "?") } ] as $all
+                | "- tests: \($all | length); " + ([$all | group_by(.status)[] | "\(.[0].status) \(length)"] | join(", ")),
+                  ($all[] | select(.status != "expected" and .status != "skipped") | "- FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))")
+              ' "${report}" 2>/dev/null | sed -E 's#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g' | cut -c1-220 | head -80 || true
+            done
+          } > "${section_file}"
+        fi
+        cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
+        cat "${section_file}"

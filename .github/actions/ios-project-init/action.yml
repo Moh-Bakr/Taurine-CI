@@ -1,0 +1,64 @@
+name: Generate the ephemeral iOS project
+description: >
+  Runs the Tauri iOS init, installs the simulator and device Rust targets, declares the
+  SystemConfiguration framework for older sources and generates the Xcode project with a pinned,
+  checksum-verified XcodeGen release. Runs from the private source after the token is revoked.
+
+runs:
+  using: composite
+  steps:
+    - name: Generate the ephemeral iOS project
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      # The only value written to the path file is the directory of the pinned, checksum-verified xcodegen.
+      run: |  # zizmor: ignore[github-env]
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+        # Keep native outputs runner-local.  The checked-in Xcode project is
+        # intentionally source-only; Tauri recreates the generated Rust
+        # framework inputs during the build.
+        mobile_run ios-init npm --prefix taurine-mobile run ios:init -- --ci --skip-targets-install
+        # The current project has no third-party pods. Calling `pod install`
+        # here adds a hosted-machine/Xcode-license dependency and creates a
+        # workspace that Tauri does not consume. Install the exact simulator
+        # Rust target required by the explicit build below instead.
+        rustup target add aarch64-apple-ios-sim aarch64-apple-ios
+        # swift-rs 1.0.8 under Xcode >= 27 promotes Swift static-archive
+        # @_cdecl exports with llvm-objcopy; the rustup llvm-tools
+        # component ships it in the sysroot the private build script
+        # probes. Missing it fails the app link with undefined arm64
+        # symbols (_register_plugin and friends).
+        rustup component add llvm-tools
+        # hickory-resolver's Apple system-configuration reader (feature-
+        # unified in via mongodb's dns-resolver) binds SystemConfiguration
+        # through a cargo build-script flag that Xcode's libapp.a link
+        # drops. Declare the framework in the generated project so the
+        # app link keeps it, then regenerate the project.
+        # Newer sources declare the framework themselves (tauri.conf.json
+        # bundle.iOS.frameworks); only older ones need it inserted here.
+        if ! grep -q 'SystemConfiguration.framework' taurine-mobile/src-tauri/gen/apple/project.yml \
+          && ! grep -q 'SystemConfiguration' taurine-mobile/src-tauri/tauri.conf.json; then
+        python3 - <<'PY'
+        p = 'taurine-mobile/src-tauri/gen/apple/project.yml'
+        s = open(p).read()
+        needle = '      - sdk: UIKit.framework'
+        assert needle in s, 'UIKit framework entry not found in project.yml'
+        s = s.replace(needle, '      - sdk: SystemConfiguration.framework\n' + needle, 1)
+        open(p, 'w').write(s)
+        PY
+        fi
+        # XcodeGen is a pinned release archive verified against its SHA-256 (the
+        # digest GitHub publishes for the release asset), never a Homebrew formula.
+        xcodegen_version='2.46.0'
+        xcodegen_sha256='4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806'
+        xcodegen_zip="${RUNNER_TEMP}/xcodegen.zip"
+        curl --fail --silent --show-error --location --retry 3 -o "${xcodegen_zip}" \
+          "https://github.com/yonaskolb/XcodeGen/releases/download/${xcodegen_version}/xcodegen.zip"
+        echo "${xcodegen_sha256}  ${xcodegen_zip}" | shasum -a 256 --check --status
+        unzip -q "${xcodegen_zip}" -d "${RUNNER_TEMP}/xcodegen-${xcodegen_version}"
+        xcodegen_bin="${RUNNER_TEMP}/xcodegen-${xcodegen_version}/xcodegen/bin/xcodegen"
+        [[ -x "${xcodegen_bin}" ]] || { echo 'pinned xcodegen is unavailable' >&2; exit 1; }
+        echo "${xcodegen_bin%/*}" >> "${GITHUB_PATH}"
+        (cd taurine-mobile/src-tauri/gen/apple && "${xcodegen_bin}" generate)
+        test -f taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj/project.pbxproj
