@@ -53,6 +53,7 @@ jobs:
           {
             echo '## iOS Rust concern'
             echo
+            echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS} ${RUNNER_ARCH})"
             if [[ "${RUST_REQUESTED}" == true ]]; then
               echo "matrix={\"concern\":[${base},\"ios-rust\"]}" >> "${GITHUB_OUTPUT}"
               echo '- Requested (rust=true): ios-rust is scheduled.'
@@ -98,6 +99,18 @@ jobs:
         with:
           mode: start
 
+      - name: Record the runner image
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          {
+            echo '### Runner'
+            echo
+            echo "- Image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- Runner: ${RUNNER_OS} ${RUNNER_ARCH}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Validate protected dispatch input
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -139,21 +152,118 @@ jobs:
           mobile: ${{ matrix.concern != 'ios-rust' }}
           vendor-fetch: ${{ matrix.concern == 'ios-native' || matrix.concern == 'ios-rust' }}
 
+      - name: Install the mobile failure reporter
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/taurine-ci/mobile-report.sh" <<'TCI_MOBILE_REPORT_LIBRARY'
+          # shellcheck shell=bash
+          # Mobile failure reporting. Sourced after the shared sanitize library. A failed command
+          # publishes one fixed classification, its exit status, and (for Rust errors) the error
+          # code with its repository-relative file:line. Message text, source excerpts, symbol
+          # names and tool output are never published.
+
+          mobile_reason() {
+            local log="$1" reason
+            reason="$(cargo_test_reason "${log}")"
+            if [[ "${reason}" != 'command returned non-zero' ]]; then echo "${reason}"
+            elif grep -qE 'SDK location not found|No version of NDK matched' "${log}"; then echo 'Android SDK or NDK not found'
+            elif grep -qE 'Could not (resolve|download|GET)|UnknownHostException|Connection (reset|timed out)' "${log}"; then echo 'dependency download failure (network)'
+            elif grep -qE '^> Task [^[:space:]]+ FAILED$|^FAILURE: Build failed' "${log}"; then echo 'Gradle build failure'
+            elif grep -qE 'Undefined symbols for architecture' "${log}"; then echo 'link failure: undefined symbols'
+            elif grep -qiE 'no such module' "${log}"; then echo 'Swift module not found'
+            elif grep -qiE 'code ?sign|provisioning profile' "${log}"; then echo 'code signing or provisioning failure'
+            elif grep -qE '[*][*] (BUILD|ARCHIVE) FAILED [*][*]' "${log}"; then echo 'xcodebuild build failure'
+            elif grep -qiE 'ETIMEDOUT|ECONNRESET|EAI_AGAIN' "${log}"; then echo 'network failure'
+            else echo 'command returned non-zero'
+            fi
+          }
+
+          # `error[Ennnn]` as the code, with the repository-relative file:line of its `-->` location.
+          mobile_error_sites() {
+            local sites
+            sites="$(sanitize_stream <"$1" | strip_excerpts | awk '
+              match($0, /error\[E[0-9][0-9]*\]/) { code = substr($0, RSTART + 6, RLENGTH - 7); next }
+              match($0, /--> [^ ]*:[0-9][0-9]*:[0-9][0-9]*/) {
+                if (code != "") {
+                  n = split(substr($0, RSTART + 4, RLENGTH - 4), a, ":")
+                  print "  " code " " a[1] ":" a[2]
+                  code = ""
+                }
+              }
+            ' | awk '!seen[$0]++' | head -30)"
+            if [[ -n "${sites}" ]]; then
+              echo 'Rust errors (code and file:line; messages withheld):' >&2
+              printf '%s\n' "${sites}" >&2
+            fi
+          }
+
+          # Gradle names the failed task on a fixed shape of line; task names are build structure.
+          mobile_failed_tasks() {
+            local tasks
+            tasks="$(tr -d '\r' <"$1" | grep -E '^> Task [^[:space:]]+ FAILED$' | head -10 || true)"
+            if [[ -n "${tasks}" ]]; then
+              echo 'Gradle tasks that failed:' >&2
+              printf '%s\n' "${tasks}" >&2
+            fi
+          }
+
+          # One command, one published line. Output stays in a runner-local log. A caller may define
+          # mobile_extra_detail <label> <log> for fixed, count-only diagnostics of one label.
+          mobile_run() {
+            local label="$1"; shift
+            local log="${RUNNER_TEMP}/${label}.log" rc=0
+            "$@" >"${log}" 2>&1 || rc=$?
+            if [[ "${rc}" -eq 0 ]]; then
+              echo "${label}: passed"
+              return 0
+            fi
+            tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
+            echo "${label}: failed ($(mobile_reason "${log}"); exit ${rc}; sanitized detail below)" >&2
+            mobile_error_sites "${log}"
+            mobile_failed_tasks "${log}"
+            # Tauri refuses mismatched npm/crate pairs; package names and versions only.
+            tauri_version_mismatch "${log}" >&2 || true
+            if declare -F mobile_extra_detail >/dev/null; then mobile_extra_detail "${label}" "${log}"; fi
+            exit 1
+          }
+          TCI_MOBILE_REPORT_LIBRARY
+
+      - name: Locate libclang in the Xcode toolchain
+        if: matrix.concern == 'ios-native' || matrix.concern == 'ios-rust'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # rquickjs's bindgen needs the standalone libclang dylib. It comes from the
+          # Xcode toolchain of the runner image (the image version and Xcode release are
+          # recorded in the job summary), so no formula or archive is installed and
+          # nothing floats: a Homebrew llvm would be whichever release brew serves today.
+          toolchain_lib="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          [[ -f "${toolchain_lib}/libclang.dylib" ]] || { echo 'libclang dylib is unavailable in the Xcode toolchain' >&2; exit 1; }
+          {
+            echo "LIBCLANG_PATH=${toolchain_lib}"
+            # rquickjs 0.9 constructs its own bindgen `--target` argument from Cargo's
+            # simulator triple and does not consume BINDGEN_EXTRA_*. Keep a global override
+            # for bindgen implementations that do honor it; the patch step below applies the
+            # equivalent runner-local workaround to rquickjs without changing the source.
+            echo 'BINDGEN_EXTRA_CLANG_ARGS=--target=aarch64-apple-ios'
+            # Cargo names the Rust simulator target `aarch64-apple-ios-sim`, but that suffix
+            # is not a valid clang target triple. Bindgen only needs the Apple ABI while
+            # Cargo/Xcode still selects the simulator SDK.
+            echo 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim=--target=aarch64-apple-ios'
+          } >> "${GITHUB_ENV}"
+
       - name: Generate the ephemeral iOS project
         if: matrix.concern == 'ios-native'
         shell: bash
         run: |
           set -euo pipefail
-          log="${RUNNER_TEMP}/ios-init.log"
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+          source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
           # Keep native outputs runner-local.  The checked-in Xcode project is
           # intentionally source-only; Tauri recreates the generated Rust
           # framework inputs during the build.
-          if npm --prefix taurine-mobile run ios:init -- --ci --skip-targets-install >"${log}" 2>&1; then
-            echo 'ios-init: passed'
-          else
-            echo 'ios-init: failed' >&2
-            exit 1
-          fi
+          mobile_run ios-init npm --prefix taurine-mobile run ios:init -- --ci --skip-targets-install
           # The current project has no third-party pods. Calling `pod install`
           # here adds a hosted-machine/Xcode-license dependency and creates a
           # workspace that Tauri does not consume. Install the exact simulator
@@ -165,22 +275,6 @@ jobs:
           # probes. Missing it fails the app link with undefined arm64
           # symbols (_register_plugin and friends).
           rustup component add llvm-tools
-          # rquickjs bindgen is shared by the mobile Rust target. Xcode ships
-          # clang, but the bindgen loader needs the standalone libclang dylib.
-          brew list llvm >/dev/null 2>&1 || brew install llvm
-          llvm_prefix="$(brew --prefix llvm)"
-          [[ -f "${llvm_prefix}/lib/libclang.dylib" ]] || { echo 'libclang dylib is unavailable' >&2; exit 1; }
-          echo "LIBCLANG_PATH=${llvm_prefix}/lib" >> "${GITHUB_ENV}"
-          # rquickjs 0.9 constructs its own bindgen `--target` argument from
-          # Cargo's simulator triple and does not consume BINDGEN_EXTRA_*.
-          # Keep a global override for bindgen implementations that do honor
-          # it; the next step applies the equivalent runner-local workaround
-          # to rquickjs without changing the private source checkout.
-          echo 'BINDGEN_EXTRA_CLANG_ARGS=--target=aarch64-apple-ios' >> "${GITHUB_ENV}"
-          # Cargo names the Rust simulator target `aarch64-apple-ios-sim`, but
-          # that suffix is not a valid clang target triple. Bindgen only needs
-          # the Apple ABI while Cargo/Xcode still selects the simulator SDK.
-          echo 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim=--target=aarch64-apple-ios' >> "${GITHUB_ENV}"
           # hickory-resolver's Apple system-configuration reader (feature-
           # unified in via mongodb's dns-resolver) binds SystemConfiguration
           # through a cargo build-script flag that Xcode's libapp.a link
@@ -199,8 +293,19 @@ jobs:
           open(p, 'w').write(s)
           PY
           fi
-          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
-          (cd taurine-mobile/src-tauri/gen/apple && xcodegen generate)
+          # XcodeGen is a pinned release archive verified against its SHA-256 (the
+          # digest GitHub publishes for the release asset), never a Homebrew formula.
+          xcodegen_version='2.46.0'
+          xcodegen_sha256='4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806'
+          xcodegen_zip="${RUNNER_TEMP}/xcodegen.zip"
+          curl --fail --silent --show-error --location --retry 3 -o "${xcodegen_zip}" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${xcodegen_version}/xcodegen.zip"
+          echo "${xcodegen_sha256}  ${xcodegen_zip}" | shasum -a 256 --check --status
+          unzip -q "${xcodegen_zip}" -d "${RUNNER_TEMP}/xcodegen-${xcodegen_version}"
+          xcodegen_bin="${RUNNER_TEMP}/xcodegen-${xcodegen_version}/xcodegen/bin/xcodegen"
+          [[ -x "${xcodegen_bin}" ]] || { echo 'pinned xcodegen is unavailable' >&2; exit 1; }
+          echo "${xcodegen_bin%/*}" >> "${GITHUB_PATH}"
+          (cd taurine-mobile/src-tauri/gen/apple && "${xcodegen_bin}" generate)
           test -f taurine-mobile/src-tauri/gen/apple/taurine-mobile.xcodeproj/project.pbxproj
 
       - name: Prepare the iOS simulator Rust target for the test-target build
@@ -208,18 +313,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The Rust half of the native concern's setup, without the Xcode project:
-          # the simulator target, libclang for rquickjs's bindgen, and the bindgen
-          # target override (the Cargo simulator triple is not a clang triple).
+          # The Rust half of the native concern's setup, without the Xcode project: the
+          # simulator target. libclang and the bindgen target override come from the
+          # toolchain step above.
           rustup target add aarch64-apple-ios-sim
-          brew list llvm >/dev/null 2>&1 || brew install llvm
-          llvm_prefix="$(brew --prefix llvm)"
-          [[ -f "${llvm_prefix}/lib/libclang.dylib" ]] || { echo 'libclang dylib is unavailable' >&2; exit 1; }
-          {
-            echo "LIBCLANG_PATH=${llvm_prefix}/lib"
-            echo 'BINDGEN_EXTRA_CLANG_ARGS=--target=aarch64-apple-ios'
-            echo 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim=--target=aarch64-apple-ios'
-          } >> "${GITHUB_ENV}"
 
       - name: Patch rquickjs simulator bindgen target on runner
         if: matrix.concern == 'ios-native' || matrix.concern == 'ios-rust'
@@ -266,48 +363,33 @@ jobs:
         run: |
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          run_quiet() {
-            local label="$1"; shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              echo "${label}: failed" >&2
-              # Keep hosted diagnostics actionable while redacting workspace
-              # paths and excluding compiler/source output from the public log.
-              sanitize_stream <"${log}" |
-                strip_excerpts |
-                grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|xcodebuild|cargo|clang|target)' |
-                tail -30 >&2 || true
-              # Tauri refuses mismatched npm/crate pairs; name them (package names and versions only).
-              tauri_version_mismatch "${log}" >&2 || true
-              if [[ "${label}" == ios-build ]]; then
-                # A failed link names its undefined symbols, which can be private
-                # function names, so none are published. What is published is the
-                # toolchain (public) and counts: how many symbols, of which kinds,
-                # and which static archives referenced them, which is enough to tell
-                # a Swift plugin problem from a missing platform framework.
-                xcodebuild -version 2>/dev/null | tr '\n' ' ' >&2 || true
-                echo >&2
-                symbols="$(grep -cE '^[[:space:]]+"[^"]+", referenced from:' "${log}" || true)"
-                swift_symbols="$(grep -cE '^[[:space:]]+"_?[$]s' "${log}" || true)"
-                objc_symbols="$(grep -cE '^[[:space:]]+"_?[_]?OBJC_' "${log}" || true)"
-                echo "ios-build link diagnostics: ${symbols} undefined symbols (${swift_symbols} Swift, ${objc_symbols} Objective-C)" >&2
-                grep -oE ' in [A-Za-z0-9_.+-]+[.]a[(]' "${log}" | sort | uniq -c | sort -rn | head -10 | sed -E 's/[(]$//' >&2 || true
-                grep -ohE "auto-linked framework '[A-Za-z0-9_]+'" "${log}" | sort -u >&2 || true
-              fi
-              exit 1
-            fi
+          source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+          # A failed link names its undefined symbols, which can be private function
+          # names, so none are published. What is published is the toolchain (public)
+          # and counts: how many symbols, of which kinds, and which static archives
+          # referenced them, which is enough to tell a Swift plugin problem from a
+          # missing platform framework.
+          mobile_extra_detail() {
+            local label="$1" log="$2" symbols swift_symbols objc_symbols
+            [[ "${label}" == ios-build ]] || return 0
+            xcodebuild -version 2>/dev/null | tr '\n' ' ' >&2 || true
+            echo >&2
+            symbols="$(grep -cE '^[[:space:]]+"[^"]+", referenced from:' "${log}" || true)"
+            swift_symbols="$(grep -cE '^[[:space:]]+"_?[$]s' "${log}" || true)"
+            objc_symbols="$(grep -cE '^[[:space:]]+"_?[_]?OBJC_' "${log}" || true)"
+            echo "ios-build link diagnostics: ${symbols} undefined symbols (${swift_symbols} Swift, ${objc_symbols} Objective-C)" >&2
+            grep -oE ' in [A-Za-z0-9_.+-]+[.]a[(]' "${log}" | sort | uniq -c | sort -rn | head -10 | sed -E 's/[(]$//' >&2 || true
+            grep -ohE "auto-linked framework '[A-Za-z0-9_]+'" "${log}" | sort -u >&2 || true
           }
           case "${CONCERN}" in
             ios-native)
-              run_quiet ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
+              mobile_run ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
               ;;
             ios-rust)
               # Compile-only: build and link every test target of the mobile crate for
               # the iOS simulator triple, so the `cfg(target_os = "ios")` code and its
               # tests are type-checked and linked on a hosted runner. Not executed.
-              run_quiet ios-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-apple-ios-sim
+              mobile_run ios-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-apple-ios-sim
               ;;
             *)
               echo "Unknown iOS validation concern: ${CONCERN}" >&2
@@ -329,6 +411,10 @@ jobs:
             echo "## iOS ${CONCERN} validation"
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
+            echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS} ${RUNNER_ARCH}, $(sw_vers -productName) $(sw_vers -productVersion))"
+            echo "- Xcode: $(xcodebuild -version | tr '\n' ' ')"
+            echo "- libclang: ${LIBCLANG_PATH:-not used}"
+            echo "- Node.js: $(node --version); Rust: $(rustc --version)"
             echo '- Isolated concern passed; no private artifacts were shared between runners'
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
@@ -359,6 +445,17 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Record the runner image
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '### Runner'
+            echo
+            echo "- Image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- Runner: ${RUNNER_OS} ${RUNNER_ARCH}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Tabulate timings against the baseline
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
@@ -387,6 +484,17 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Record the runner image
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '### Runner'
+            echo
+            echo "- Image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- Runner: ${RUNNER_OS} ${RUNNER_ARCH}"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Write the run verdict
         # Kept as ./ : the policy matches this exact form for local actions.
