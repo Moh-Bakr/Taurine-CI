@@ -17,6 +17,11 @@ on:
         description: Independent validation concern to execute
         required: true
         type: string
+      windows_image:
+        description: Hosted Windows image (windows-2022 or windows-2025; anything else runs on windows-2022)
+        required: false
+        default: windows-2022
+        type: string
 
 permissions: {}
 
@@ -29,9 +34,9 @@ jobs:
   validate:
     permissions:
       contents: read
-    name: Windows ${{ inputs.concern }}
+    name: Windows ${{ inputs.concern }}${{ inputs.windows_image == 'windows-2025' && ' (2025)' || '' }}
     environment: source-read
-    runs-on: windows-2022
+    runs-on: ${{ inputs.windows_image == 'windows-2025' && 'windows-2025' || 'windows-2022' }}
     # The TypeScript concerns stay on the reviewed 60. The Rust concerns compile
     # their closure cold, because compiled output is never cached in this
     # control plane (only third-party crate sources are):
