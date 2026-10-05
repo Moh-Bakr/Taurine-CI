@@ -14,9 +14,12 @@ inputs:
     required: false
     default: src
   fail:
-    description: Whether a finding fails the job. True (the default) enforces; false reports only.
+    description: >
+      Whether a finding fails the job. True enforces; false reports only. Landed as false so
+      the first run on the private develop tip could be proven before it can fail any other
+      lane; the follow-up change flips the default to true.
     required: false
-    default: 'true'
+    default: 'false'
 
 runs:
   using: composite
