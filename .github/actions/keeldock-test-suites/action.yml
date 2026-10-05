@@ -1,0 +1,121 @@
+name: KeelDock test suite sub-steps
+description: >
+  The structural, unit and db-containers concerns: discovers the suites assigned to the concern by
+  the rule scripts/run-tests.sh uses, builds and runs them, publishes only totals, durations and
+  failing test names, then checks the contracts diff. Runs after the locked restore.
+
+inputs:
+  concern:
+    description: The KeelDock concern being run
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build and run the assigned suites
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        KD_CONCERN: ${{ inputs.concern }}
+      run: |
+        # KD_PLATFORM / KD_CONCERN, never PLATFORM: MSBuild turns every environment variable into a
+        # property, and Platform=linux makes `dotnet restore` fail with MSB4126 in every child process.
+        set -uo pipefail
+        source "${RUNNER_TEMP}/keeldock/substeps.sh"
+        reason_contracts() { echo "generated contracts differ from the commit ($(grep -c . "$1") area(s) changed; regenerate and commit)"; }
+        selected=()
+        while IFS= read -r project; do
+          if [[ "$(suite_concern "${project}")" == "${KD_CONCERN}" ]]; then selected+=("${project}"); fi
+        done < <(find tests -name '*.csproj' | sort)
+        echo "${KD_CONCERN}: ${#selected[@]} suite(s) assigned"
+        if [[ "${#selected[@]}" -eq 0 ]]; then
+          echo 'suites: failed (no suite is assigned to this concern; discovery is broken)' >&2
+          record suites FAIL 'no suite is assigned to this concern (discovery is broken)'; any_failed=1
+        else
+          if [[ "${KD_CONCERN}" == structural ]]; then sub_step suite-assignment reason_text structural_present; fi
+          build_suites() {
+            local project; for project in "${selected[@]}"; do dotnet build "${project}" --no-restore --nologo -v quiet --configuration Release || return 1; done
+          }
+          after restore build reason_diag build_suites
+          if passed build; then
+            suites_total=0; suites_failed=0
+            for project in "${selected[@]}"; do
+              name="$(basename "${project}" .csproj)"
+              log="${RUNNER_TEMP}/suite-${name}.log"
+              clean="${log}.clean"
+              # `--output Detailed` prints each passing test with its duration (slowest-tests table); a
+              # runner that rejects it prints no summary, so the suite re-runs plainly: the gate never
+              # depends on the extra detail.
+              dotnet run --project "${project}" --no-build --configuration Release -- --output Detailed >"${log}" 2>&1
+              rc=$?
+              if ! grep -q 'total:' "${log}"; then
+                dotnet run --project "${project}" --no-build --configuration Release >"${log}" 2>&1
+                rc=$?
+              fi
+              strip_ansi < "${log}" | tr -d '\r' > "${clean}"
+              # The last total / failed the runner printed (colour already stripped: the runner colours
+              # its summary on a hosted runner only).
+              total="$(grep -oE '^[[:space:]]*total:[[:space:]]*[0-9]+' "${clean}" | tail -1 | grep -oE '[0-9]+$' || true)"
+              failed="$(grep -oE '^[[:space:]]*failed:[[:space:]]*[0-9]+' "${clean}" | tail -1 | grep -oE '[0-9]+$' || true)"
+              # A suite that ran no tests did not pass: lost discovery reports total 0 and exit 0.
+              if [[ -z "${total}" || -z "${failed}" ]]; then
+                result=FAIL; reason='no test summary printed (crash, timeout or build output only)'; total='-'; failed='-'
+              elif [[ "${total}" -eq 0 ]]; then
+                result=FAIL; reason='0 tests discovered; an empty suite is not a passing suite'
+              elif [[ "${failed}" -gt 0 ]]; then
+                result=FAIL; reason="${failed} of ${total} tests failed"
+              elif [[ "${rc}" -ne 0 ]]; then
+                result=FAIL; reason="exit code ${rc} with no failing test"
+              else
+                result=pass; reason='-'
+              fi
+              # The runner's own `duration:` line in seconds; "-" when missing, never 0.
+              dur="$(grep -oE '^[[:space:]]*duration:[[:space:]]*.*$' "${clean}" | tail -1 | sed -E 's/^[[:space:]]*duration:[[:space:]]*//' | awk "${secs_awk}"' { s = secs($0); if (s >= 0) printf "%.1f", s }')"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${result}" "${total}" "${failed}" "${reason}" "${dur:--}" >> "${suite_rows}"
+              # Test identities only, never the assertion text: the name with theory arguments cut off
+              # and every character outside a conservative identifier set replaced.
+              awk -v suite="${name}" '
+                /^failed / { line = $0; sub(/^failed /, "", line)
+                             sub(/ \([0-9.]+ ?(ms|s|m|h)[^)]*\)$/, "", line)
+                             sub(/\(.*$/, "", line)
+                             gsub(/[^A-Za-z0-9_.+<>,-]/, "?", line)
+                             print suite "\t" substr(line, 1, 200) }
+              ' "${clean}" | awk 'NR <= 20' >> "${failed_names}"
+              awk -v suite="${name}" "${secs_awk}"'
+                /^[[:space:]]*passed / && match($0, / \([^()]*\)$/) {
+                  n = substr($0, 1, RSTART - 1); sub(/^[[:space:]]*passed /, "", n); sub(/\(.*$/, "", n); sub(/ +$/, "", n)
+                  gsub(/[^A-Za-z0-9_.+<>,-]/, "?", n); s = secs(substr($0, RSTART + 2, RLENGTH - 3))
+                  if (s >= 0) printf "%s\t%s\t%.3f\n", suite, substr(n, 1, 200), s
+                }' "${clean}" >> "${test_times}"
+              suites_total=$((suites_total + 1))
+              if [[ "${result}" == pass ]]; then
+                echo "suite ${name}: passed (${total} tests)"
+              else
+                suites_failed=$((suites_failed + 1))
+                echo "suite ${name}: failed (${reason})" >&2
+              fi
+              rm -f "${log}" "${clean}"
+            done
+            if [[ -s "${failed_names}" ]]; then
+              echo 'failing tests (names only):' >&2
+              head -60 "${failed_names}" | awk -F'\t' '{ print "  " $2 }' >&2
+            fi
+            if [[ "${suites_failed}" -eq 0 ]]; then
+              record test-suites pass '-'
+              echo "test-suites: passed (${suites_total} suites)"
+            else
+              record test-suites FAIL "${suites_failed} of ${suites_total} suites failed"
+              any_failed=1
+            fi
+          else
+            skip_step test-suites 'build did not pass'
+          fi
+          # Snapshot tests write a missing baseline and report skipped, so an uncommitted regeneration
+          # would otherwise be green. Checked, never printed.
+          contracts_diff() {
+            git diff --quiet -- contracts/ && return 0
+            git diff --name-only -- contracts/ | awk -F/ '{ print $2 }' | sort | uniq -c; return 1
+          }
+          sub_step contracts-committed reason_contracts contracts_diff
+        fi
+        exit 0

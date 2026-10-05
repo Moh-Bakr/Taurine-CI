@@ -7,6 +7,7 @@
     { "name": "gitleaks", "repo": "gitleaks/gitleaks", "tag_prefix": "v", "current": "8.30.1", "file": ".github/actions/scan-concern/action.yml" },
     { "name": "semgrep", "repo": "semgrep/semgrep", "tag_prefix": "v", "current": "1.140.0", "file": ".github/actions/scan-concern/action.yml" },
     { "name": "cargo-audit", "repo": "rustsec/rustsec", "tag_prefix": "cargo-audit/v", "current": "0.22.2", "file": ".github/actions/linux-concern-js/action.yml" },
+    { "name": "cargo-machete", "repo": "bnjbvr/cargo-machete", "tag_prefix": "v", "current": "0.9.2", "file": ".github/actions/linux-concern-js/action.yml" },
     { "name": "actionlint", "repo": "rhysd/actionlint", "tag_prefix": "v", "current": "1.7.12", "file": ".github/policy/lint.sh" },
     { "name": "zizmor", "repo": "zizmorcore/zizmor", "tag_prefix": "v", "current": "1.30.1", "file": ".github/policy/lint.sh" },
     { "name": "scorecard", "repo": "ossf/scorecard", "tag_prefix": "v", "current": "5.5.0", "file": ".github/workflows/scorecard.yml" },

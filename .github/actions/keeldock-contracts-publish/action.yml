@@ -1,0 +1,98 @@
+name: KeelDock contracts and publish smoke sub-steps
+description: >
+  The contracts-publish-smoke concern: TypeScript contract check, publish of Api, Worker and
+  Migrator, the Migrator smoke and, on Linux, the Migrator against the digest-pinned PostgreSQL
+  started earlier in the job. Runs after the locked restore.
+
+inputs:
+  platform:
+    description: linux, macos or windows
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check the contracts, publish and run the Migrator
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        KD_PLATFORM: ${{ inputs.platform }}
+      run: |
+        # KD_PLATFORM / KD_CONCERN, never PLATFORM: MSBuild turns every environment variable into a
+        # property, and Platform=linux makes `dotnet restore` fail with MSB4126 in every child process.
+        set -uo pipefail
+        source "${RUNNER_TEMP}/keeldock/substeps.sh"
+        reason_typescript() { echo 'generated TypeScript contract differs from the committed files, or does not typecheck'; }
+        reason_smoke() { echo 'Migrator failed for an unexpected reason or reported success with no database'; }
+        # Installed first: the generated TypeScript is verified only when node_modules exists.
+        sub_step typescript-install reason_diag npm --prefix tools/graphql-codegen ci
+        after typescript-install typescript-contract reason_typescript npm --prefix tools/graphql-codegen run verify --silent
+        for host in Api Worker Migrator; do
+          after restore "publish-${host}" reason_diag dotnet publish "src/Hosts/KeelDock.Cloud.${host}" \
+            --no-restore --configuration Release --output "${RUNNER_TEMP}/publish/${host}"
+        done
+        # With no connection string the Migrator must fail loudly and by name: the cheapest check that
+        # the published artifact is the program we think it is.
+        migrator_smoke() {
+          local output rc
+          output="$(dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll" 2>&1)"
+          rc=$?
+          if [[ "${rc}" -eq 0 ]]; then return 10; fi
+          grep -q 'owner connection string' <<<"${output}" || return 11
+        }
+        after publish-Migrator migrator-smoke reason_smoke migrator_smoke
+        # The Migrator against a real PostgreSQL (Linux): migrate every module from empty, then run
+        # again (the same module count: idempotent). EF Core refuses to migrate past a pending model
+        # change, so the first run is also the model-drift check. The Migrator's refusals can quote
+        # SQL, so its output stays in the withheld log: only exit status, module counts and the ids
+        # of failing modules are published.
+        if [[ "${KD_PLATFORM}" == linux ]]; then
+          wait_postgres() {
+            local _
+            for _ in $(seq 1 60); do
+              if docker exec kd-postgres pg_isready --username postgres --dbname keeldock; then return 0; fi
+              sleep 1
+            done
+            return 1
+          }
+          # Development: the local database serves no certificate, and outside Development the
+          # Migrator demands SslMode=VerifyFull.
+          run_migrator() {
+            env DOTNET_ENVIRONMENT=Development \
+              "ConnectionStrings__keeldock-owner=Host=127.0.0.1;Port=5432;Database=keeldock;Username=postgres;Password=${KD_PG_PASSWORD:-}" \
+              dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll"
+          }
+          migrated_count() { grep -oE '^All [0-9]+ module migrations completed' "$1" | grep -oE '[0-9]+' | head -1; }
+          reason_migrate() {
+            local ok failing
+            ok="$(grep -c '^\[ok\]' "$1" || true)"
+            failing="$(grep -oE '^\[FAIL\] [A-Za-z0-9_.-]+' "$1" | awk '{ print $2 }' | paste -sd, - || true)"
+            echo "Migrator failed or reported no completion; ${ok} module(s) migrated; failing module ids: ${failing:-none}"
+          }
+          if ! passed publish-Migrator; then
+            skip_all 'Migrator publish did not pass' postgres-ready migrator-migrate migrator-idempotent
+          else
+            sub_step postgres-ready reason_text wait_postgres
+            if ! passed postgres-ready; then
+              skip_all 'PostgreSQL did not become ready' migrator-migrate migrator-idempotent
+            else
+              sub_step migrator-migrate reason_migrate run_migrator
+              first_count="$(migrated_count "${RUNNER_TEMP}/migrator-migrate.log" || true)"
+              if ! passed migrator-migrate; then
+                skip_step migrator-idempotent 'first run failed'
+              elif [[ -z "${first_count}" ]]; then
+                override migrator-migrate FAIL 'exited 0 without the completion line'
+                skip_step migrator-idempotent 'first run did not complete'
+              else
+                echo "migrator-migrate: ${first_count} module(s) migrated from empty and passed catalog invariants"
+                sub_step migrator-idempotent reason_migrate run_migrator
+                second_count="$(migrated_count "${RUNNER_TEMP}/migrator-idempotent.log" || true)"
+                if passed migrator-idempotent && [[ "${second_count}" != "${first_count}" ]]; then
+                  override migrator-idempotent FAIL "second run reported ${second_count:-no} modules against ${first_count}"
+                  any_failed=1
+                fi
+              fi
+            fi
+          fi
+        fi
+        exit 0

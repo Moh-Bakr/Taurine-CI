@@ -56,6 +56,15 @@ check_action_references() {
       ./.github/actions/live-start-pg) ;;
       ./.github/actions/live-start-rocketmq) ;;
       ./.github/actions/live-start-sql) ;;
+      ./.github/actions/keeldock-restore) ;;
+      ./.github/actions/keeldock-build-format) ;;
+      ./.github/actions/keeldock-test-suites) ;;
+      ./.github/actions/keeldock-supply-chain) ;;
+      ./.github/actions/keeldock-apphost) ;;
+      ./.github/actions/keeldock-contracts-publish) ;;
+      ./.github/actions/keeldock-summary) ;;
+      ./.github/actions/keeldock-proof) ;;
+      ./.github/actions/keeldock-nuget-verify) ;;
       '') ;;
       *)
         echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2

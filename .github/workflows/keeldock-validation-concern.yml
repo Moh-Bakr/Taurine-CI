@@ -13,8 +13,14 @@ name: KeelDock Cloud validation concern (protected)
 #                           and, on Linux, the Migrator against a digest-pinned PostgreSQL.
 #   supply-chain            (Linux) vulnerable-package scan (warn-only unless the dispatch input
 #                           vulnerability_gate is high or critical) and the CycloneDX SBOM with its
-#                           denied-licence gate (SBOM_DENIED_LICENSES below).
+#                           denied-licence gate (SBOM_DENIED_LICENSES in the keeldock-restore composite).
 #   apphost-cold-start      (Linux, opt-in) bounded Aspire AppHost cold start.
+#
+# This file owns everything that must run before project code (the protected call input, the token
+# mint, the exact private checkout into src/, the identity check and the token revoke) and the
+# job-level wiring. Everything after the revoke lives in the keeldock-* composites, one per concern
+# plus the restore, summary and proof steps; the private source is checked out into src/ so the
+# control plane's local composites stay available after the checkout.
 
 on:
   workflow_call:
@@ -134,6 +140,7 @@ jobs:
           repository: ${{ env.SOURCE_REPOSITORY_OWNER }}/${{ env.SOURCE_REPOSITORY_NAME }}
           ref: ${{ inputs.source_sha }}
           token: ${{ steps.source-token.outputs.token }}
+          path: src
           fetch-depth: 1
           persist-credentials: false
           submodules: false
@@ -142,6 +149,7 @@ jobs:
       - name: Verify identity, exact checkout, and revoke source token
         if: always()
         shell: bash
+        working-directory: ${{ github.workspace }}
         env:
           SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -161,7 +169,7 @@ jobs:
             echo 'The configured source repository identity did not match' >&2
             failed=1
           fi
-          if ! checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
+          if ! checked_out_sha="$(git -C src rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"; then
             echo 'The private source checkout did not complete' >&2
             failed=1
           elif [[ "${checked_out_sha}" != "${requested_sha}" ]]; then
@@ -183,12 +191,11 @@ jobs:
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
           (( failed == 0 ))
 
-
       - name: Set up .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           # The SDK band comes from the source's own global.json.
-          global-json-file: global.json
+          global-json-file: src/global.json
 
       - name: Set up Node
         if: inputs.concern == 'contracts-publish-smoke'
@@ -206,7 +213,7 @@ jobs:
         with:
           path: |
             ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json', 'Directory.Packages.props') }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json', 'src/Directory.Packages.props') }}
           restore-keys: |
             nuget-${{ runner.os }}-
 
@@ -216,56 +223,10 @@ jobs:
       # already validated (NU1403 on a mismatch).
       - name: Verify restored NuGet packages against the lock files
         id: nuget-verify
-        shell: bash
-        env:
-          CACHE_HIT: ${{ steps.nuget-packages.outputs.cache-hit }}
-          KD_PLATFORM: ${{ inputs.platform }}
-        run: |
-          set -euo pipefail
-          pkgs="${HOME}/.nuget/packages"
-          if [[ ! -d "${pkgs}" ]]; then
-            echo "- ${KD_PLATFORM} NuGet package cache: miss" >> "${GITHUB_STEP_SUMMARY}"
-            exit 0
-          fi
-          # Lock files: id, resolved version and content hash per package, lower-cased as NuGet names folders.
-          expected="${RUNNER_TEMP}/nuget-expected.tsv"
-          : > "${expected}"
-          while IFS= read -r -d '' lock; do
-            jq -r '.dependencies[]? | to_entries[] | select(.value.contentHash != null) | [(.key | ascii_downcase), (.value.resolved | ascii_downcase), .value.contentHash] | @tsv' "${lock}" >> "${expected}"
-          done < <(find . -name packages.lock.json -not -path '*/node_modules/*' -print0)
-          sort -u "${expected}" -o "${expected}"
-          if [[ ! -s "${expected}" ]]; then
-            # Nothing to verify against: trust nothing and let the locked restore download everything.
-            find "${pkgs}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-            exit 0
-          fi
-          meta="${RUNNER_TEMP}/nuget-cache-meta.tsv"
-          : > "${meta}"
-          cd "${pkgs}"
-          find . -mindepth 3 -maxdepth 3 -name '.nupkg.metadata' -print0 | xargs -0 -r jq -r '[input_filename, (.contentHash // "")] | @tsv' > "${meta}" || : > "${meta}"
-          awk -F'\t' '
-            FILENAME == ARGV[1] { want[$1 "\t" $2] = $3; next }
-            {
-              path = $1; sub(/^\.\//, "", path)
-              split(path, parts, "/")
-              w = want[tolower(parts[1]) "\t" tolower(parts[2])]
-              if (w != "" && $2 == w) print "./" parts[1] "/" parts[2]
-            }
-          ' "${expected}" "${meta}" | sort -u > "${RUNNER_TEMP}/nuget-keep.txt"
-          kept=0; dropped=0
-          while IFS= read -r -d '' dir; do
-            if grep -qxF "${dir}" "${RUNNER_TEMP}/nuget-keep.txt"; then
-              kept=$((kept + 1))
-            else
-              rm -rf "${dir}"
-              dropped=$((dropped + 1))
-            fi
-          done < <(find . -mindepth 2 -maxdepth 2 -type d -print0)
-          find . -mindepth 1 -maxdepth 1 -type f -delete
-          find . -mindepth 1 -maxdepth 1 -type d -empty -delete
-          case "${CACHE_HIT}" in true) state='exact hit' ;; false) state='restored from an earlier lock-file set' ;; *) state='miss' ;; esac
-          echo "nuget-packages: ${state}; ${kept} packages verified, ${dropped} dropped"
-          echo "- ${KD_PLATFORM} NuGet package cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
+        uses: ./.github/actions/keeldock-nuget-verify  # zizmor: ignore[self-repository]
+        with:
+          cache-hit: ${{ steps.nuget-packages.outputs.cache-hit }}
+          platform: ${{ inputs.platform }}
 
       # The Migrator proof runs the published program against a real PostgreSQL, the image and digest
       # the repository's own Testcontainers fixtures use (17.6, about 160 MB, under the 2 GB cap). Started
@@ -285,438 +246,46 @@ jobs:
             'postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929' >/dev/null
           echo 'postgres: started (pinned by digest)'
 
-      # One step, every sub-step reported. Each runs regardless of the others (one that needs an earlier
-      # one is reported as skipped, never dropped); full output stays in files under RUNNER_TEMP, and
-      # only a fixed reason per sub-step, the runner's own per-suite totals and failing test names are
-      # published. Assertion text, stack traces and source excerpts never leave the runner.
-      - name: Validate every sub-step
-        shell: bash
-        env:
-          KD_PLATFORM: ${{ inputs.platform }}
-          KD_CONCERN: ${{ inputs.concern }}
+      # The sub-steps below are one logical step per concern, split by responsibility. Each runs
+      # regardless of the others (one that needs an earlier one is reported as skipped, never dropped);
+      # full output stays in files under RUNNER_TEMP, and only a fixed reason per sub-step, the runner's
+      # own per-suite totals and failing test names are published. Assertion text, stack traces and
+      # source excerpts never leave the runner. The summary step fails the concern at the end.
+      - name: Restore the solution and install the sub-step library
+        uses: ./.github/actions/keeldock-restore  # zizmor: ignore[self-repository]
+
+      - name: Build and check formatting
+        if: inputs.concern == 'build-format'
+        uses: ./.github/actions/keeldock-build-format  # zizmor: ignore[self-repository]
+
+      - name: Run the assigned test suites
+        if: inputs.concern == 'structural' || inputs.concern == 'unit' || inputs.concern == 'db-containers'
+        uses: ./.github/actions/keeldock-test-suites  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+
+      - name: Scan vulnerable packages and generate the SBOM
+        if: inputs.concern == 'supply-chain'
+        uses: ./.github/actions/keeldock-supply-chain  # zizmor: ignore[self-repository]
+        with:
           # Vulnerable-package gate, from the dispatch input: none (warn-only), high or critical.
-          VULN_FAIL_ON: ${{ inputs.vulnerability_gate }}
-          # CycloneDX 6.2.0, pinned by the SHA-256 of its nupkg (verified before unpacking), and the
-          # licences that fail the supply-chain concern: SPDX ids, `*` as a prefix wildcard.
-          CDX_VERSION: '6.2.0'
-          CDX_SHA256: 3473525381eee02a649b75bbf5b4f0ffa66112f62917aff798fed196e290a884
-          SBOM_DENIED_LICENSES: 'AGPL-*,GPL-*,SSPL-*,BUSL-*,CC-BY-NC-*,Elastic-*'
-        run: |
-          # KD_PLATFORM / KD_CONCERN, never PLATFORM: MSBuild turns every environment variable into a
-          # property, and Platform=linux makes `dotnet restore` fail with MSB4126 in every child process.
-          set -uo pipefail
-          results="${RUNNER_TEMP}/substeps.tsv"
-          suite_rows="${RUNNER_TEMP}/suite-totals.tsv"
-          failed_names="${RUNNER_TEMP}/failed-tests.tsv"
-          test_times="${RUNNER_TEMP}/test-times.tsv"
-          : > "${results}"; : > "${suite_rows}"; : > "${failed_names}"; : > "${test_times}"
-          any_failed=0
-          # awk: durations as the runner prints them ("1m 17s 566ms", "23s", "508ms") to seconds, -1 if unparseable.
-          secs_awk='function secs(d,  p, k, i, v, t, ok) { k = split(d, p, " "); t = 0; ok = 0
-            for (i = 1; i <= k; i++) { v = p[i] + 0
-              if (p[i] ~ /^[0-9.]+ms$/) { t += v / 1000; ok = 1 } else if (p[i] ~ /^[0-9.]+s$/) { t += v; ok = 1 }
-              else if (p[i] ~ /^[0-9.]+m$/) { t += v * 60; ok = 1 } else if (p[i] ~ /^[0-9.]+h$/) { t += v * 3600; ok = 1 } }
-            return ok ? t : -1 }'
-          strip_ansi() { sed -E $'s/\033\\[[0-9;]*[[:alpha:]]//g'; }
-          # Compiler, NuGet and npm diagnostic ids (CS0103, NU1004, EINTEGRITY ...) are public catalogue
-          # codes that name the failure class and carry no source; the message after the code does.
-          diag_codes() {
-            {
-              strip_ansi < "$1" | grep -oE '(error|warning) [A-Z]{2,5}[0-9]{3,5}' | awk '{ print $2 }'
-              strip_ansi < "$1" | grep -oE '^npm (ERR!|error) code [A-Z0-9_]+' | awk '{ print $4 }'
-            } | sort | uniq -c | sort -rn | awk 'NR <= 12' | awk '{ printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1 }'
-          }
-          record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${results}"; }
-          # Replaces an earlier row, so a sub-step found wanting on a follow-up check is never both.
-          override() {
-            awk -F'\t' -v l="$1" '$1 != l' "${results}" > "${results}.tmp" && mv "${results}.tmp" "${results}"
-            record "$1" "$2" "$3"
-          }
-          passed() { awk -F'\t' -v l="$1" '$1 == l && $2 == "pass" { f = 1 } END { exit !f }' "${results}"; }
-          # One sub-step, output captured to a file; the outcome is recorded, the concern fails at the end.
-          sub_step() {
-            local label="$1" reason_fn="$2"; shift 2
-            local log="${RUNNER_TEMP}/${label}.log" reason
-            if "$@" >"${log}" 2>&1; then echo "${label}: passed"; record "${label}" pass '-'
-            else
-              reason="$("${reason_fn}" "${log}")"
-              echo "${label}: failed (${reason}; output withheld)" >&2
-              record "${label}" FAIL "${reason}"; any_failed=1
-            fi
-          }
-          skip_step() { echo "$1: skipped (${2})"; record "$1" skipped "$2"; any_failed=1; }
-          skip_all() { local why="$1"; shift; local l; for l in "$@"; do skip_step "${l}" "${why}"; done; }
-          # A sub-step that needs an earlier one: skipped, never silently dropped, when that did not pass.
-          after() {
-            local dep="$1" label="$2"; shift 2
-            if passed "${dep}"; then sub_step "${label}" "$@"; else skip_step "${label}" "${dep} did not pass"; fi
-          }
-          reason_restore() {
-            local codes; codes="$(diag_codes "$1")"
-            if grep -q 'NU1004' "$1"; then echo "lock file out of date with the projects (${codes})"
-            elif grep -q 'NU1403' "$1"; then echo "package content hash differs from the lock file (${codes})"
-            else echo "restore failed (diagnostic ids: ${codes:-none})"; fi
-          }
-          reason_text() { head -c 300 "$1" | tr '\n' ' '; }
-          reason_diag() { echo "$(basename "$1" .log) diagnostic ids: $(diag_codes "$1" || true)"; }
-          reason_format() { echo 'formatting drift (run dotnet format) or the formatter could not run'; }
-          reason_typescript() { echo 'generated TypeScript contract differs from the committed files, or does not typecheck'; }
-          reason_smoke() { echo 'Migrator failed for an unexpected reason or reported success with no database'; }
-          reason_contracts() { echo "generated contracts differ from the commit ($(grep -c . "$1") area(s) changed; regenerate and commit)"; }
-          # Suite assignment, as scripts/run-tests.sh: a suite needs a container runtime exactly when its
-          # project has a Testcontainers package reference (not the bare word).
-          needs_docker() { grep -Eq '<PackageReference[^>]+Include="Testcontainers' "$1"; }
-          structural_suites=' KeelDock.Cloud.ArchitectureTests KeelDock.Cloud.CompatibilityTests KeelDock.Cloud.GraphQLCompositionTests '
-          suite_concern() {
-            local name; name="$(basename "$1" .csproj)"
-            if needs_docker "$1"; then echo db-containers
-            elif [[ "${structural_suites}" == *" ${name} "* ]]; then echo structural
-            else echo unit; fi
-          }
-          structural_present() {
-            local name p
-            for name in ${structural_suites}; do
-              p="$(find tests -name "${name}.csproj" | head -n 1)"
-              if [[ -z "${p}" || "$(suite_concern "${p}")" != structural ]]; then
-                echo "structural suite ${name} is missing or now needs a container runtime"; return 1
-              fi
-            done
-          }
-          sub_step restore reason_restore dotnet restore KeelDock.Cloud.slnx --locked-mode
-          case "${KD_CONCERN}" in
-            build-format)
-              after restore build reason_diag dotnet build KeelDock.Cloud.slnx --no-restore --nologo -v quiet --configuration Release
-              after build format reason_format dotnet format KeelDock.Cloud.slnx --verify-no-changes --no-restore
-              sub_step suite-assignment reason_text structural_present
-              ;;
-            structural|unit|db-containers)
-              selected=()
-              while IFS= read -r project; do
-                if [[ "$(suite_concern "${project}")" == "${KD_CONCERN}" ]]; then selected+=("${project}"); fi
-              done < <(find tests -name '*.csproj' | sort)
-              echo "${KD_CONCERN}: ${#selected[@]} suite(s) assigned"
-              if [[ "${#selected[@]}" -eq 0 ]]; then
-                echo 'suites: failed (no suite is assigned to this concern; discovery is broken)' >&2
-                record suites FAIL 'no suite is assigned to this concern (discovery is broken)'; any_failed=1
-              else
-                if [[ "${KD_CONCERN}" == structural ]]; then sub_step suite-assignment reason_text structural_present; fi
-                build_suites() {
-                  local project; for project in "${selected[@]}"; do dotnet build "${project}" --no-restore --nologo -v quiet --configuration Release || return 1; done
-                }
-                after restore build reason_diag build_suites
-                if passed build; then
-                  suites_total=0; suites_failed=0
-                  for project in "${selected[@]}"; do
-                    name="$(basename "${project}" .csproj)"
-                    log="${RUNNER_TEMP}/suite-${name}.log"
-                    clean="${log}.clean"
-                    # `--output Detailed` prints each passing test with its duration (slowest-tests table); a
-                    # runner that rejects it prints no summary, so the suite re-runs plainly: the gate never
-                    # depends on the extra detail.
-                    dotnet run --project "${project}" --no-build --configuration Release -- --output Detailed >"${log}" 2>&1
-                    rc=$?
-                    if ! grep -q 'total:' "${log}"; then
-                      dotnet run --project "${project}" --no-build --configuration Release >"${log}" 2>&1
-                      rc=$?
-                    fi
-                    strip_ansi < "${log}" | tr -d '\r' > "${clean}"
-                    # The last total / failed the runner printed (colour already stripped: the runner colours
-                    # its summary on a hosted runner only).
-                    total="$(grep -oE '^[[:space:]]*total:[[:space:]]*[0-9]+' "${clean}" | tail -1 | grep -oE '[0-9]+$' || true)"
-                    failed="$(grep -oE '^[[:space:]]*failed:[[:space:]]*[0-9]+' "${clean}" | tail -1 | grep -oE '[0-9]+$' || true)"
-                    # A suite that ran no tests did not pass: lost discovery reports total 0 and exit 0.
-                    if [[ -z "${total}" || -z "${failed}" ]]; then
-                      result=FAIL; reason='no test summary printed (crash, timeout or build output only)'; total='-'; failed='-'
-                    elif [[ "${total}" -eq 0 ]]; then
-                      result=FAIL; reason='0 tests discovered; an empty suite is not a passing suite'
-                    elif [[ "${failed}" -gt 0 ]]; then
-                      result=FAIL; reason="${failed} of ${total} tests failed"
-                    elif [[ "${rc}" -ne 0 ]]; then
-                      result=FAIL; reason="exit code ${rc} with no failing test"
-                    else
-                      result=pass; reason='-'
-                    fi
-                    # The runner's own `duration:` line in seconds; "-" when missing, never 0.
-                    dur="$(grep -oE '^[[:space:]]*duration:[[:space:]]*.*$' "${clean}" | tail -1 | sed -E 's/^[[:space:]]*duration:[[:space:]]*//' | awk "${secs_awk}"' { s = secs($0); if (s >= 0) printf "%.1f", s }')"
-                    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${result}" "${total}" "${failed}" "${reason}" "${dur:--}" >> "${suite_rows}"
-                    # Test identities only, never the assertion text: the name with theory arguments cut off
-                    # and every character outside a conservative identifier set replaced.
-                    awk -v suite="${name}" '
-                      /^failed / { line = $0; sub(/^failed /, "", line)
-                                   sub(/ \([0-9.]+ ?(ms|s|m|h)[^)]*\)$/, "", line)
-                                   sub(/\(.*$/, "", line)
-                                   gsub(/[^A-Za-z0-9_.+<>,-]/, "?", line)
-                                   print suite "\t" substr(line, 1, 200) }
-                    ' "${clean}" | awk 'NR <= 20' >> "${failed_names}"
-                    awk -v suite="${name}" "${secs_awk}"'
-                      /^[[:space:]]*passed / && match($0, / \([^()]*\)$/) {
-                        n = substr($0, 1, RSTART - 1); sub(/^[[:space:]]*passed /, "", n); sub(/\(.*$/, "", n); sub(/ +$/, "", n)
-                        gsub(/[^A-Za-z0-9_.+<>,-]/, "?", n); s = secs(substr($0, RSTART + 2, RLENGTH - 3))
-                        if (s >= 0) printf "%s\t%s\t%.3f\n", suite, substr(n, 1, 200), s
-                      }' "${clean}" >> "${test_times}"
-                    suites_total=$((suites_total + 1))
-                    if [[ "${result}" == pass ]]; then
-                      echo "suite ${name}: passed (${total} tests)"
-                    else
-                      suites_failed=$((suites_failed + 1))
-                      echo "suite ${name}: failed (${reason})" >&2
-                    fi
-                    rm -f "${log}" "${clean}"
-                  done
-                  if [[ -s "${failed_names}" ]]; then
-                    echo 'failing tests (names only):' >&2
-                    head -60 "${failed_names}" | awk -F'\t' '{ print "  " $2 }' >&2
-                  fi
-                  if [[ "${suites_failed}" -eq 0 ]]; then
-                    record test-suites pass '-'
-                    echo "test-suites: passed (${suites_total} suites)"
-                  else
-                    record test-suites FAIL "${suites_failed} of ${suites_total} suites failed"
-                    any_failed=1
-                  fi
-                else
-                  skip_step test-suites 'build did not pass'
-                fi
-                # Snapshot tests write a missing baseline and report skipped, so an uncommitted regeneration
-                # would otherwise be green. Checked, never printed.
-                contracts_diff() {
-                  git diff --quiet -- contracts/ && return 0
-                  git diff --name-only -- contracts/ | awk -F/ '{ print $2 }' | sort | uniq -c; return 1
-                }
-                sub_step contracts-committed reason_contracts contracts_diff
-              fi
-              ;;
-            supply-chain)
-              # Vulnerable packages (direct and transitive, from the NuGet advisory feed) and the
-              # CycloneDX SBOM; the locked package set is identical on every OS, so Linux alone runs
-              # them. Published: package id, resolved version, advisory id (the last segment of the
-              # public advisory URL) and severity; warn-only unless VULN_FAIL_ON is high or critical.
-              if ! passed restore; then
-                skip_all 'restore did not pass' vulnerable-packages sbom-generate
-              else
-                vuln_log="${RUNNER_TEMP}/vulnerable.log"; vuln_rows="${RUNNER_TEMP}/vulnerable.tsv"
-                dotnet list KeelDock.Cloud.slnx package --vulnerable --include-transitive --no-restore >"${vuln_log}" 2>&1; vuln_rc=$?
-                strip_ansi < "${vuln_log}" | tr -d '\r' | awk '
-                  /^[[:space:]]*>/ { for (i = 3; i <= NF; i++) if ($i ~ /^(Low|Moderate|High|Critical)$/) {
-                    adv = $NF; sub(/.*\//, "", adv); print $2 "\t" $(i - 1) "\t" adv "\t" $i; break } }
-                ' | sort -u > "${vuln_rows}"
-                vuln_count="$(grep -c . "${vuln_rows}" || true)"
-                vuln_gated="$(awk -F'\t' -v gate="${VULN_FAIL_ON}" '
-                  (gate == "high" && ($4 == "High" || $4 == "Critical")) || (gate == "critical" && $4 == "Critical") { n++ }
-                  END { print n + 0 }' "${vuln_rows}")"
-                if [[ "${vuln_rc}" -ne 0 && "${vuln_count}" -eq 0 ]]; then
-                  echo '::warning title=Vulnerable-package scan::the scan did not complete (advisory feed unreachable or the command failed); no result is claimed'
-                  record vulnerable-packages warn 'scan did not complete; no result claimed'
-                elif [[ "${vuln_gated}" -gt 0 ]]; then
-                  echo "vulnerable-packages: failed (${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate)" >&2
-                  record vulnerable-packages FAIL "${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate"; any_failed=1
-                elif [[ "${vuln_count}" -gt 0 ]]; then
-                  awk -F'\t' '{ printf "::warning title=Vulnerable package::%s %s (%s, %s)\n", $1, $2, $3, $4 }' "${vuln_rows}" | awk 'NR <= 50'
-                  record vulnerable-packages warn "${vuln_count} advisory(ies); warn-only (gate: ${VULN_FAIL_ON})"
-                else
-                  record vulnerable-packages pass 'none reported'
-                fi
-                # SBOM: a pinned CycloneDX release, its package hash checked before it is unpacked
-                # (no NuGet resolution), run over the restored solution. The BOM never leaves the
-                # runner: only the component count, licence tallies and denied licences are published.
-                sbom_generate() {
-                  local tool="${RUNNER_TEMP}/cyclonedx"
-                  mkdir -p "${tool}" "${RUNNER_TEMP}/sbom"
-                  curl --fail --silent --show-error --location --retry 3 -o "${tool}/tool.nupkg" \
-                    "https://api.nuget.org/v3-flatcontainer/cyclonedx/${CDX_VERSION}/cyclonedx.${CDX_VERSION}.nupkg" || return 1
-                  echo "${CDX_SHA256}  ${tool}/tool.nupkg" | sha256sum --check --status || return 2
-                  unzip -q "${tool}/tool.nupkg" 'tools/net10.0/any/*' -d "${tool}" || return 1
-                  dotnet "${tool}/tools/net10.0/any/CycloneDX.dll" KeelDock.Cloud.slnx -o "${RUNNER_TEMP}/sbom" -fn bom.json \
-                    -F Json -ed -t -dpr -ns || return 1
-                  [[ "$(jq '.components | length' "${RUNNER_TEMP}/sbom/bom.json")" -gt 0 ]] || return 3
-                }
-                reason_sbom() { echo 'SBOM generation failed (download, hash check, tool run, or an empty BOM)'; }
-                sub_step sbom-generate reason_sbom sbom_generate
-                if passed sbom-generate; then
-                  # A component is denied when any licence entry matches the denied list. An OR
-                  # expression is denied only when every alternative is (a dual licence has a way out).
-                  sbom_rows="${RUNNER_TEMP}/sbom.tsv"
-                  if jq -r --arg deny "${SBOM_DENIED_LICENSES}" '
-                    ($deny | split(",") | map(ascii_downcase)) as $d
-                    | def hit: ascii_downcase | . as $x | any($d[]; . as $p | if ($p | endswith("*")) then ($x | startswith($p | rtrimstr("*"))) else $x == $p end);
-                      def alt: split(" AND ") | any(.[]; gsub("[()]"; "") | split(" WITH ")[0] | gsub("^ +| +$"; "") | hit);
-                      def bad: split(" OR ") | all(.[]; alt);
-                    .components[] | ([.licenses[]? | (.license.id // .license.name // .expression)]) as $l
-                    | ["\(.name)@\(.version)", (if ($l | length) == 0 then "(none declared)" else ($l | join(" AND ")) end), (if any($l[]; bad) then 1 else 0 end)] | @tsv
-                  ' "${RUNNER_TEMP}/sbom/bom.json" > "${sbom_rows}" && [[ -s "${sbom_rows}" ]]; then
-                    denied="$(awk -F'\t' '$3 == 1 { n++ } END { print n + 0 }' "${sbom_rows}")"
-                    if [[ "${denied}" -gt 0 ]]; then
-                      echo "sbom-licences: failed (${denied} component(s) under a denied licence)" >&2
-                      record sbom-licences FAIL "${denied} component(s) under a denied licence (listed below)"; any_failed=1
-                    else
-                      record sbom-licences pass "no denied licence among $(grep -c . "${sbom_rows}") components"
-                    fi
-                  else
-                    record sbom-licences FAIL 'licence summary could not be computed'; any_failed=1
-                  fi
-                else
-                  skip_step sbom-licences 'SBOM was not generated'
-                fi
-              fi
-              ;;
-            apphost-cold-start)
-              # Bounded cold start: start the AppHost headless and wait up to ten minutes for "Distributed
-              # application started" or its dashboard answering HTTP, require a running container, stop it.
-              # None of its output is published.
-              apphost="$(find src -name '*AppHost*.csproj' -not -path '*/obj/*' | sort | head -n 1)"
-              if [[ -z "${apphost}" ]]; then
-                echo 'apphost-discovery: failed (no AppHost project found under src)' >&2
-                record apphost-discovery FAIL 'no AppHost project found under src'; any_failed=1
-              else
-                record apphost-discovery pass '-'
-                after restore apphost-build reason_diag dotnet build "${apphost}" --no-restore --nologo -v quiet --configuration Release
-                if passed apphost-build; then
-                  apphost_log="${RUNNER_TEMP}/apphost.log"
-                  export ASPNETCORE_ENVIRONMENT=Development ASPIRE_ALLOW_UNSECURED_TRANSPORT=true
-                  export ASPNETCORE_URLS=http://127.0.0.1:15888 ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL=http://127.0.0.1:16037
-                  export ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS=true
-                  dotnet run --project "${apphost}" --no-build --configuration Release >"${apphost_log}" 2>&1 &
-                  apphost_pid=$!
-                  started=0; containers=0
-                  for _ in $(seq 1 120); do
-                    kill -0 "${apphost_pid}" 2>/dev/null || break
-                    if grep -q 'Distributed application started' "${apphost_log}" 2>/dev/null; then started=1; break; fi
-                    code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 3 http://127.0.0.1:15888/ 2>/dev/null || true)"
-                    if [[ "${code}" == 200 || "${code}" == 302 ]]; then started=1; break; fi
-                    sleep 5
-                  done
-                  if [[ "${started}" -eq 1 ]]; then sleep 15; containers="$(docker ps -q | wc -l | tr -d ' ')"; fi
-                  kill "${apphost_pid}" 2>/dev/null || true
-                  wait "${apphost_pid}" 2>/dev/null || true
-                  docker ps -q | xargs -r docker rm -f >/dev/null 2>&1 || true
-                  if [[ "${started}" -eq 1 && "${containers}" -ge 1 ]]; then
-                    record apphost-start pass "${containers} container(s) running"
-                  else
-                    why='did not start within ten minutes, or exited early'
-                    [[ "${started}" -eq 1 ]] && why='started but no container was running'
-                    echo "apphost-start: failed (${why}; output withheld)" >&2
-                    record apphost-start FAIL "${why}"; any_failed=1
-                  fi
-                fi
-              fi
-              ;;
-            contracts-publish-smoke)
-              # Installed first: the generated TypeScript is verified only when node_modules exists.
-              sub_step typescript-install reason_diag npm --prefix tools/graphql-codegen ci
-              after typescript-install typescript-contract reason_typescript npm --prefix tools/graphql-codegen run verify --silent
-              for host in Api Worker Migrator; do
-                after restore "publish-${host}" reason_diag dotnet publish "src/Hosts/KeelDock.Cloud.${host}" \
-                  --no-restore --configuration Release --output "${RUNNER_TEMP}/publish/${host}"
-              done
-              # With no connection string the Migrator must fail loudly and by name: the cheapest check that
-              # the published artifact is the program we think it is.
-              migrator_smoke() {
-                local output rc
-                output="$(dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll" 2>&1)"
-                rc=$?
-                if [[ "${rc}" -eq 0 ]]; then return 10; fi
-                grep -q 'owner connection string' <<<"${output}" || return 11
-              }
-              after publish-Migrator migrator-smoke reason_smoke migrator_smoke
-              # The Migrator against a real PostgreSQL (Linux): migrate every module from empty, then run
-              # again (the same module count: idempotent). EF Core refuses to migrate past a pending model
-              # change, so the first run is also the model-drift check. The Migrator's refusals can quote
-              # SQL, so its output stays in the withheld log: only exit status, module counts and the ids
-              # of failing modules are published.
-              if [[ "${KD_PLATFORM}" == linux ]]; then
-                wait_postgres() {
-                  local _
-                  for _ in $(seq 1 60); do
-                    if docker exec kd-postgres pg_isready --username postgres --dbname keeldock; then return 0; fi
-                    sleep 1
-                  done
-                  return 1
-                }
-                # Development: the local database serves no certificate, and outside Development the
-                # Migrator demands SslMode=VerifyFull.
-                run_migrator() {
-                  env DOTNET_ENVIRONMENT=Development \
-                    "ConnectionStrings__keeldock-owner=Host=127.0.0.1;Port=5432;Database=keeldock;Username=postgres;Password=${KD_PG_PASSWORD:-}" \
-                    dotnet "${RUNNER_TEMP}/publish/Migrator/KeelDock.Cloud.Migrator.dll"
-                }
-                migrated_count() { grep -oE '^All [0-9]+ module migrations completed' "$1" | grep -oE '[0-9]+' | head -1; }
-                reason_migrate() {
-                  local ok failing
-                  ok="$(grep -c '^\[ok\]' "$1" || true)"
-                  failing="$(grep -oE '^\[FAIL\] [A-Za-z0-9_.-]+' "$1" | awk '{ print $2 }' | paste -sd, - || true)"
-                  echo "Migrator failed or reported no completion; ${ok} module(s) migrated; failing module ids: ${failing:-none}"
-                }
-                if ! passed publish-Migrator; then
-                  skip_all 'Migrator publish did not pass' postgres-ready migrator-migrate migrator-idempotent
-                else
-                  sub_step postgres-ready reason_text wait_postgres
-                  if ! passed postgres-ready; then
-                    skip_all 'PostgreSQL did not become ready' migrator-migrate migrator-idempotent
-                  else
-                    sub_step migrator-migrate reason_migrate run_migrator
-                    first_count="$(migrated_count "${RUNNER_TEMP}/migrator-migrate.log" || true)"
-                    if ! passed migrator-migrate; then
-                      skip_step migrator-idempotent 'first run failed'
-                    elif [[ -z "${first_count}" ]]; then
-                      override migrator-migrate FAIL 'exited 0 without the completion line'
-                      skip_step migrator-idempotent 'first run did not complete'
-                    else
-                      echo "migrator-migrate: ${first_count} module(s) migrated from empty and passed catalog invariants"
-                      sub_step migrator-idempotent reason_migrate run_migrator
-                      second_count="$(migrated_count "${RUNNER_TEMP}/migrator-idempotent.log" || true)"
-                      if passed migrator-idempotent && [[ "${second_count}" != "${first_count}" ]]; then
-                        override migrator-idempotent FAIL "second run reported ${second_count:-no} modules against ${first_count}"
-                        any_failed=1
-                      fi
-                    fi
-                  fi
-                fi
-              fi
-              ;;
-          esac
-          # Summary: sub-step table, per-suite totals and durations, slowest suites and tests, failing
-          # test names, vulnerable packages, SBOM tallies.
-          {
-            echo "### ${KD_CONCERN} sub-steps — ${KD_PLATFORM}"; echo
-            echo '| Sub-step | Result | Reason |'; echo '|---|---|---|'
-            awk -F'\t' '{ printf "| `%s` | %s | %s |\n", $1, $2, $3 }' "${results}"
-            if [[ -s "${suite_rows}" ]]; then
-              echo; echo "### Suites — ${KD_CONCERN} on ${KD_PLATFORM}"; echo
-              echo '| Suite | Result | Tests | Failed | Duration | Reason |'; echo '|---|---|---:|---:|---:|---|'
-              awk -F'\t' '{ printf "| `%s` | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, ($6 == "-" ? "-" : $6 "s"), $5 }' "${suite_rows}"
-              awk -F'\t' '$3 != "-" { t += $3; f += $4 } END { printf "\n**%d tests, %d failed.**\n", t, f }' "${suite_rows}"
-              if awk -F'\t' '$6 != "-" { f = 1 } END { exit !f }' "${suite_rows}"; then
-                echo; echo '**Slowest suites:**'; echo
-                awk -F'\t' '$6 != "-"' "${suite_rows}" | sort -t$'\t' -k6,6 -g -r | awk 'NR <= 5' | awk -F'\t' '{ printf "- `%s`: %ss\n", $1, $6 }'
-              fi
-            fi
-            if [[ -s "${test_times}" ]]; then
-              echo; echo '**Slowest tests (names only):**'; echo
-              sort -t$'\t' -k3,3 -g -r "${test_times}" | awk 'NR <= 5' | awk -F'\t' '{ printf "- `%s` (`%s`): %ss\n", $2, $1, $3 }'
-            fi
-            if [[ -s "${RUNNER_TEMP}/vulnerable.tsv" ]]; then
-              echo; echo '### Vulnerable packages (id, version, advisory, severity)'; echo
-              awk -F'\t' '{ printf "- `%s` %s: %s, %s\n", $1, $2, $3, $4 }' "${RUNNER_TEMP}/vulnerable.tsv"
-            fi
-            if [[ -s "${RUNNER_TEMP}/sbom.tsv" ]]; then
-              echo; echo '### SBOM (CycloneDX; summary only, the BOM is not published)'; echo
-              echo "**$(grep -c . "${RUNNER_TEMP}/sbom.tsv") components.** Denied licences: \`${SBOM_DENIED_LICENSES}\`."; echo
-              echo '| Licence | Components |'; echo '|---|---:|'
-              cut -f2 "${RUNNER_TEMP}/sbom.tsv" | sort | uniq -c | sort -rn | awk 'NR <= 15' | awk '{ c = $1; $1 = ""; sub(/^ /, ""); printf "| `%s` | %d |\n", $0, c }'
-              if awk -F'\t' '$3 == 1 { f = 1 } END { exit !f }' "${RUNNER_TEMP}/sbom.tsv"; then
-                echo; echo '**Denied:**'
-                awk -F'\t' '$3 == 1 { printf "- `%s`: %s\n", $1, $2 }' "${RUNNER_TEMP}/sbom.tsv"
-              fi
-            fi
-            if [[ -s "${failed_names}" ]]; then
-              echo; echo '### Failing tests (names only)'; echo
-              awk -F'\t' '{ printf "- `%s`: `%s`\n", $1, $2 }' "${failed_names}"
-            fi
-          } >> "${GITHUB_STEP_SUMMARY}"
-          if [[ "${any_failed}" -ne 0 ]]; then
-            echo "${KD_CONCERN}: failed (one or more sub-steps failed or were skipped; each is listed above)" >&2
-            exit 1
-          fi
+          vulnerability-gate: ${{ inputs.vulnerability_gate }}
+
+      - name: Cold start the Aspire AppHost
+        if: inputs.concern == 'apphost-cold-start'
+        uses: ./.github/actions/keeldock-apphost  # zizmor: ignore[self-repository]
+
+      - name: Check contracts, publish and run the Migrator
+        if: inputs.concern == 'contracts-publish-smoke'
+        uses: ./.github/actions/keeldock-contracts-publish  # zizmor: ignore[self-repository]
+        with:
+          platform: ${{ inputs.platform }}
+
+      - name: Publish the sub-step summary
+        uses: ./.github/actions/keeldock-summary  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+          platform: ${{ inputs.platform }}
 
       # Saved only from main, only on a miss (a key is written once) and only when the packages were verified.
       - name: Save verified NuGet packages
@@ -725,7 +294,7 @@ jobs:
         with:
           path: |
             ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json', 'Directory.Packages.props') }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json', 'src/Directory.Packages.props') }}
 
       # Cleanup is part of the proof: the container and its volume go even when an earlier step failed.
       - name: Remove the PostgreSQL container
@@ -735,58 +304,13 @@ jobs:
 
       - name: Publish sanitized validation proof
         if: always()
-        shell: bash
-        env:
-          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
-          KD_PLATFORM: ${{ inputs.platform }}
-          KD_CONCERN: ${{ inputs.concern }}
-        run: |
-          set -euo pipefail
-          checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
-          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
-          [[ "${checked_out_sha}" == "${requested_sha}" ]]
-          results="${RUNNER_TEMP}/substeps.tsv"
-          # A claim is printed only when the sub-step that proves it passed.
-          proved() { [[ -f "${results}" ]] && awk -F'\t' -v l="$1" '$1 == l && $2 == "pass" { f = 1 } END { exit !f }' "${results}"; }
-          {
-            echo "## KeelDock Cloud — ${KD_CONCERN} — ${KD_PLATFORM}"
-            echo
-            echo "- Source SHA: \`${checked_out_sha}\`"
-            echo "- Runner: \`${RUNNER_OS}\` / \`${RUNNER_ARCH}\`, image \`${ImageOS:-unknown} ${ImageVersion:-unknown}\`, .NET SDK \`$(dotnet --version 2>/dev/null || echo unknown)\`"
-            proved restore && echo '- Restore was locked.'
-            case "${KD_CONCERN}" in
-              build-format)
-                proved build && echo '- Whole-solution build was Release with warnings as errors.'
-                proved format && echo '- Formatting verified.'
-                proved suite-assignment && echo '- Every named structural suite exists and needs no container runtime.'
-                ;;
-              supply-chain)
-                grep -q $'^vulnerable-packages\t' "${results}" && echo "- Vulnerable-package scan: $(awk -F'\t' '$1 == "vulnerable-packages" { print $2 ": " $3 }' "${results}")."
-                proved sbom-generate && echo '- CycloneDX SBOM generated by a hash-pinned tool release; not published.'
-                proved sbom-licences && echo '- No component carries a denied licence.'
-                ;;
-              structural|unit|db-containers)
-                proved build && echo '- Suite projects built in Release.'
-                proved test-suites && echo "- Every ${KD_CONCERN} suite passed$([[ "${KD_CONCERN}" == db-containers ]] && echo ' against real PostgreSQL started through Testcontainers')."
-                proved contracts-committed && echo '- Generated contracts match what is committed.'
-                ;;
-              apphost-cold-start)
-                proved apphost-build && echo '- AppHost built in Release.'
-                proved apphost-start && echo '- AppHost cold start: the Aspire topology started headless and at least one container was running (bounded at ten minutes).'
-                ;;
-              contracts-publish-smoke)
-                proved typescript-contract && echo '- Generated TypeScript contract is current and typechecks.'
-                proved publish-Api && proved publish-Worker && proved publish-Migrator && echo '- API, Worker and Migrator published.'
-                proved migrator-smoke && echo '- Migrator smoke passed.'
-                proved migrator-migrate && echo '- The published Migrator migrated every module from an empty real PostgreSQL (digest-pinned image), passing the catalog invariants and EF Core refusal of pending model changes (the drift check).'
-                proved migrator-idempotent && echo '- A second Migrator run against the migrated database succeeded with the same module count.'
-                ;;
-            esac
-            echo '- Source token: revoked before any project code executed.'
-            echo '- Outputs: no source files, logs, reports or artifacts published; failing test names only.'
-          } >> "${GITHUB_STEP_SUMMARY}"
+        uses: ./.github/actions/keeldock-proof  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+          platform: ${{ inputs.platform }}
+          source-sha: ${{ inputs.source_sha }}
 
-      # Wall-clock time from the first step (a local composite is not usable here: the workspace holds the private source).
+      # Wall-clock time from the first step, excluding runner queue time.
       - name: Report concern duration
         if: ${{ always() }}
         shell: bash
