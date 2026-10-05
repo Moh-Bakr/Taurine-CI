@@ -24,6 +24,7 @@ check_action_references() {
       # Local composite actions are reviewed in this repository; each one is added
       # here deliberately and held to the composite rules below.
       ./.github/actions/source-checkout) ;;
+      ./.github/actions/environment-preflight) ;;
       ./.github/actions/sanitize) ;;
       ./.github/actions/concern-report) ;;
       ./.github/actions/timings) ;;

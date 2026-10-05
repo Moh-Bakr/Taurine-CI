@@ -64,6 +64,12 @@ jobs:
         shell: bash
         run: bash .github/policy/test-policy.sh
 
+      # The environment pre-flight composite, run against stub API answers: only custom branch
+      # policies of exactly main and untrusted pass.
+      - name: Test the environment pre-flight against stub endpoints
+        shell: bash
+        run: bash .github/policy/test-preflight.sh
+
       # Sanitizers and failure-detail extractors, run over path, token and message fixtures.
       - name: Test the sanitizer expressions against path and token fixtures
         shell: bash
