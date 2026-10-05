@@ -10,7 +10,8 @@ runs:
     - name: Generate the ephemeral iOS project
       shell: bash
       working-directory: ${{ github.workspace }}/src
-      run: |
+      # The only value written to the path file is the directory of the pinned, checksum-verified xcodegen.
+      run: |  # zizmor: ignore[github-env]
         set -euo pipefail
         source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
         source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"

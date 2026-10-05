@@ -10,7 +10,8 @@ runs:
     - name: Prepare Android SDK, JDK, and Rust targets
       shell: bash
       working-directory: ${{ github.workspace }}/src
-      run: |
+      # Only runner-image paths and pinned constants are written to the env and path files.
+      run: |  # zizmor: ignore[github-env]
         set -euo pipefail
         : "${ANDROID_HOME:?The hosted image Android SDK is required}"
         : "${JAVA_HOME_17_X64:?The hosted image JDK 17 installation is required}"
