@@ -42,6 +42,7 @@ check_action_references() {
       ./.github/actions/macos-concern-js) ;;
       ./.github/actions/vendor-fetch) ;;
       ./.github/actions/verify-cargo-cache) ;;
+      ./.github/actions/linux-test-identities) ;;
       ./.github/workflows/keeldock-validation-concern.yml) ;;
       ./.github/workflows/live-proof-arm.yml) ;;
       ./.github/actions/live-build) ;;
