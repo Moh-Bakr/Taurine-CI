@@ -45,8 +45,11 @@ runs:
             sort -t$'\t' -k3,3 -g -r "${test_times}" | awk 'NR <= 5' | awk -F'\t' '{ printf "- `%s` (`%s`): %ss\n", $2, $1, $3 }'
           fi
           if [[ -s "${RUNNER_TEMP}/vulnerable.tsv" ]]; then
-            echo; echo '### Vulnerable packages (id, version, advisory, severity)'; echo
-            awk -F'\t' '{ printf "- `%s` %s: %s, %s\n", $1, $2, $3, $4 }' "${RUNNER_TEMP}/vulnerable.tsv"
+            echo; echo '### Vulnerable packages (name hash, advisory, severity)'; echo
+            while IFS=$'\t' read -r vp_id vp_ver vp_adv vp_sev; do
+              printf -- '- `%s`: %s, %s\n' "$(printf '%s' "${vp_id}" | sha256sum | cut -c1-8)" "${vp_adv}" "${vp_sev}"
+            done < "${RUNNER_TEMP}/vulnerable.tsv"
+            echo; echo 'Names are hashed (8 hex of the SHA-256); run `dotnet list package --vulnerable --include-transitive` in the private checkout to see them.'
           fi
           if [[ -s "${RUNNER_TEMP}/sbom.tsv" ]]; then
             echo; echo '### SBOM (CycloneDX; summary only, the BOM is not published)'; echo
@@ -55,7 +58,11 @@ runs:
             cut -f2 "${RUNNER_TEMP}/sbom.tsv" | sort | uniq -c | sort -rn | awk 'NR <= 15' | awk '{ c = $1; $1 = ""; sub(/^ /, ""); printf "| `%s` | %d |\n", $0, c }'
             if awk -F'\t' '$3 == 1 { f = 1 } END { exit !f }' "${RUNNER_TEMP}/sbom.tsv"; then
               echo; echo '**Denied:**'
-              awk -F'\t' '$3 == 1 { printf "- `%s`: %s\n", $1, $2 }' "${RUNNER_TEMP}/sbom.tsv"
+              while IFS=$'\t' read -r sb_name sb_lic sb_denied; do
+                [[ "${sb_denied}" == 1 ]] || continue
+                printf -- '- `%s`: %s\n' "$(printf '%s' "${sb_name%@*}" | sha256sum | cut -c1-8)" "${sb_lic}"
+              done < "${RUNNER_TEMP}/sbom.tsv"
+              echo; echo 'Component names are hashed (8 hex of the SHA-256); run the SBOM tool in the private checkout to see them.'
             fi
           fi
           if [[ -s "${failed_names}" ]]; then
