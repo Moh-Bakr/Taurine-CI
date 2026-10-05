@@ -70,6 +70,9 @@ check_action_references() {
       ./.github/actions/keeldock-proof) ;;
       ./.github/actions/keeldock-nuget-verify) ;;
       ./.github/actions/egress-audit) ;;
+      # Finding H2: root-needing setup, then the removal of root, before project code.
+      ./.github/actions/root-setup) ;;
+      ./.github/actions/drop-root) ;;
       '') ;;
       *)
         echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2

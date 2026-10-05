@@ -82,6 +82,12 @@ jobs:
           fetch-depth: '0'
           filter: blob:none
 
+      # Defence in depth (finding H2): no project code runs in this job, but the rule is
+      # uniform, so root goes before anything reads the checkout.
+      - name: Remove root before project code
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+
       - name: Compute the selection
         id: selection
         # Kept as ./ : the policy matches this exact form for local actions.

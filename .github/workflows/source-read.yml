@@ -77,6 +77,12 @@ jobs:
           repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
 
+      # Defence in depth (finding H2): no project code runs in this job, but the rule is
+      # uniform, so root goes before anything reads the checkout.
+      - name: Remove root before project code
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+
       - name: Publish sanitized checkout proof
         shell: bash
         env:

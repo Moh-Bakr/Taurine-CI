@@ -13,6 +13,14 @@ check_revocation_order() {
   ruby .github/policy/revocation-order.rb "$1"
 }
 
+# Root removal ordering (finding H2), checked structurally like the revocation order: every
+# source-read job calls the drop-root composite once, after the revoke; only reviewed
+# root-needing steps sit between the two, and nothing after drop-root calls sudo (or Docker,
+# unless that job keeps Docker). See drop-root-order.rb for the exact rules.
+check_drop_root_order() {
+  ruby .github/policy/drop-root-order.rb "$1"
+}
+
 
 # Local composite actions. Held to the same rules as workflows where they
 # apply (the Action allow-list and SHA pins run for every file below), plus:

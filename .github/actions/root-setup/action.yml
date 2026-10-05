@@ -1,0 +1,171 @@
+name: Privileged setup before root is removed
+description: >
+  Every step of a source-bearing job that needs root, gathered in one place so it can run
+  before the drop-root composite removes passwordless sudo and before any project code runs:
+  the Ubuntu archive packages a concern links or launches against, the scratch-disk target
+  directory, the KVM device rule for the Android emulator, the macOS disk reclaim and the
+  macOS Xcode selection. Nothing here reads or runs the private source: every choice is made
+  from the concern name alone, and every package comes from the runner image's own Ubuntu
+  archive. Call it after the source-checkout composite and the egress audit start, and
+  immediately before drop-root.
+
+inputs:
+  concern:
+    description: The concern being set up (the Linux, macOS or Android concern name)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install the Ubuntu packages and prepare the scratch disk (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        CONCERN: ${{ inputs.concern }}
+      run: |
+        set -euo pipefail
+        packages=()
+        rust_concern="${CONCERN}"
+        # The clippy scan compiles the workspace, so it takes the rust-app system libraries.
+        [[ "${rust_concern}" == scan-security ]] && rust_concern=rust-app
+        # The Rust concerns' libraries, one line per concern. Each line's reason is
+        # recorded beside the toolchain setup (.github/actions/rust-toolchain), which used
+        # to install them itself after the source was checked out.
+        case "${rust_concern}" in
+          taurine-cli) packages=(clang libclang-dev) ;;
+          rust-domain) packages=(clang libclang-dev libdbus-1-dev pkg-config) ;;
+          rust-net) packages=(clang libclang-dev libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev libssl-dev pkg-config) ;;
+          rust-app|rust-app-1|rust-app-2|rust-packaging) packages=(clang libclang-dev libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
+          rust-dbx) packages=(clang libclang-dev libfontconfig1-dev libfreetype-dev libssl-dev pkg-config) ;;
+          rust-tls-openssl) packages=(clang libclang-dev libssl-dev pkg-config) ;;
+          rust-*) packages=(clang libclang-dev) ;;
+          # The Android builds: rquickjs's bindgen loads libclang at build-script runtime.
+          android-native|android-rust) packages=(clang libclang-dev) ;;
+          # Playwright's own Chromium host dependencies for Ubuntu 24.04 (the `tools` and
+          # `chromium` lists of playwright-core 1.62.0, registry/nativeDeps.ts), which
+          # `playwright install --with-deps chromium` used to install as root after the
+          # dependency install. Installed here, from this fixed list, so the locked
+          # Playwright CLI runs without root. When the locked Playwright moves to a release
+          # whose list differs, update this list in the same change; a missing library
+          # fails the browser launch loudly, it never passes silently.
+          e2e-visual) ;;
+          e2e-*) packages=(xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6 \
+              xfonts-cyrillic xfonts-scalable fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei \
+              fonts-tlwg-loma-otf fonts-freefont-ttf libasound2t64 libatk-bridge2.0-0t64 \
+              libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 \
+              libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 \
+              libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2) ;;
+        esac
+        # lld, for the crate-test concerns only (selected later through RUSTFLAGS).
+        [[ "${rust_concern}" == rust-* ]] && packages+=(lld)
+        if (( ${#packages[@]} )); then
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}" >/dev/null
+          echo "root-setup: installed ${#packages[@]} Ubuntu archive packages"
+        fi
+        # Hosted Ubuntu runners mount a larger scratch disk at /mnt; the crate-test concerns
+        # put their target directory there. Created and handed to the job user here, so the
+        # toolchain setup only has to find it.
+        if [[ "${rust_concern}" == rust-* ]] && mountpoint -q /mnt; then
+          sudo mkdir -p /mnt/cargo-target
+          sudo chown "$(id -u):$(id -g)" /mnt/cargo-target
+          echo 'root-setup: /mnt/cargo-target prepared'
+        fi
+        # Hosted Ubuntu runners expose /dev/kvm to the kvm group only; open it for the job so the
+        # emulator, which runs as the job user, can use it.
+        if [[ "${CONCERN}" == android-rust ]]; then
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          echo 'root-setup: KVM opened for the job user'
+        fi
+
+    - name: Start the disk reclaim and select Xcode (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        CONCERN: ${{ inputs.concern }}
+      run: |
+        set -euo pipefail
+        # Disk. A hosted macOS runner has well under 100 GiB free, and the heavy concerns
+        # (rust-app above all) have run it down to under 1 GiB mid-link, so for rust-app and
+        # rust-db the space is reclaimed up front from things no Rust concern reads: the
+        # Android SDK, every Xcode but the selected one, simulator devices and runtimes. It
+        # runs in the background (about five minutes) while the setup continues; the macOS
+        # Rust concern joins it before the first cargo command.
+        #
+        # Two halves. The root half (the other Xcodes and the simulator runtimes) is one
+        # `sudo bash -c` whose whole script is the argument below, so it is in memory before
+        # root is removed and no file the job user can write is ever read by root. The job
+        # user's half (the Android SDK, `simctl delete all`, the user's simulator data) runs
+        # from a script under RUNNER_TEMP; it waits for the root half, then writes the marker
+        # the join waits for.
+        free_gib() { df -g "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}'; }
+        if [[ "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ]]; then
+          echo "disk before reclaim: $(free_gib) GiB free"
+          df -h "${GITHUB_WORKSPACE}"
+          selected_xcode="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer.*##')"
+          root_marker="${RUNNER_TEMP}/taurine-reclaim-root.done"
+          rm -f "${RUNNER_TEMP}/taurine-reclaim.done" "${RUNNER_TEMP}/taurine-reclaim.pid" "${root_marker}"
+          # shellcheck disable=SC2016
+          sudo -n nohup bash -c '
+            selected_xcode="$1"; marker="$2"
+            for xcode in /Applications/Xcode*.app; do
+              [[ -d "${xcode}" && "${xcode}" != "${selected_xcode}" ]] || continue
+              rm -rf "${xcode}" 2>/dev/null &
+            done
+            rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null &
+            wait
+            touch "${marker}"
+          ' taurine-reclaim-root "${selected_xcode}" "${root_marker}" >/dev/null 2>&1 </dev/null &
+          reclaim_script="${RUNNER_TEMP}/taurine-reclaim.sh"
+          cat > "${reclaim_script}" <<'TCI_RECLAIM'
+        #!/usr/bin/env bash
+        # Usage: taurine-reclaim.sh <root half's done marker> <done marker>
+        root_marker="$1"
+        marker="$2"
+        started="$(date +%s)"
+        rm -rf "${HOME}/Library/Android" 2>/dev/null &
+        (
+          xcrun simctl delete all >/dev/null 2>&1 || true
+          rm -rf "${HOME}/Library/Developer/CoreSimulator" 2>/dev/null || true
+        ) &
+        wait
+        # The root half: bounded, so a root process that never finishes cannot hold the join.
+        for _ in $(seq 1 900); do [[ -f "${root_marker}" ]] && break; sleep 1; done
+        [[ -f "${root_marker}" ]] || echo 'disk reclaim: the root half did not finish within 15 minutes'
+        echo "disk reclaim finished after $(( $(date +%s) - started )) s"
+        touch "${marker}"
+        TCI_RECLAIM
+          nohup bash "${reclaim_script}" "${root_marker}" "${RUNNER_TEMP}/taurine-reclaim.done" >"${RUNNER_TEMP}/taurine-reclaim.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/taurine-reclaim.pid"
+          disown || true
+          echo 'disk reclaim: started in the background'
+        fi
+
+        # openvpn3-core is C++20 and its Homebrew dependencies are current releases, so
+        # rust-ovpn and rust-net need a current Apple libc++: select the newest *working* Xcode
+        # the image ships. Candidates are tried newest first, betas skipped, and the first
+        # whose `xcodebuild -version` runs is kept (on macos-15 the newest install once
+        # aborted on `xcodebuild -version`); when none does, the image default stays. The
+        # toolchain setup prints the selected versions.
+        if [[ "${CONCERN}" == rust-ovpn || "${CONCERN}" == rust-net ]]; then
+          default_developer_dir="$(xcode-select -p)"
+          selected_xcode=''
+          while IFS= read -r candidate; do
+            [[ -d "${candidate}" ]] || continue
+            case "${candidate}" in *[Bb]eta*) continue ;; esac
+            if DEVELOPER_DIR="${candidate}/Contents/Developer" xcodebuild -version >/dev/null 2>&1; then
+              selected_xcode="${candidate}"
+              break
+            fi
+            echo "Xcode candidate skipped (xcodebuild -version failed): ${candidate##*/}"
+          done < <(printf '%s\n' /Applications/Xcode_*.app | sort -rV)
+          if [[ -n "${selected_xcode}" ]]; then
+            sudo xcode-select -s "${selected_xcode}/Contents/Developer"
+          else
+            echo "No working Xcode_*.app candidate; keeping the image default (${default_developer_dir})"
+          fi
+        fi

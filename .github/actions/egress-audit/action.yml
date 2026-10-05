@@ -7,9 +7,11 @@ description: >
   called last under always(), which publishes the allow-listed host names (any
   other name only as a SHA-256 prefix) and destination ports to the job log and
   summary. Audit only: it never blocks a
-  connection and never fails the job. Project code runs with sudo, so a hostile
-  dependency could tamper with what this records; it is evidence for building an
-  allow-list, not a control.
+  connection and never fails the job. The recorders start as root before the
+  drop-root composite removes sudo, and keep running as root; project code no
+  longer has root on Linux or macOS, but it can still write the runner-owned
+  record files and has administrator rights on Windows, so this is evidence for
+  building an allow-list, not a control.
 
   Coverage per runner: Linux records every DNS answer from systemd-resolved
   (resolvectl monitor) and logs every new outbound connection from the host and
@@ -131,6 +133,9 @@ runs:
         coverage="$(cat "${state}/coverage" 2>/dev/null || echo unknown)"
         names="${state}/names.txt"; conns="${state}/conns.txt"; map="${state}/map.txt"
         : > "${names}"; : > "${conns}"; : > "${map}"
+        # Best effort: once drop-root has removed sudo the root recorders cannot be signalled,
+        # so they run on until the runner is discarded and their line-buffered files are read
+        # as they stand.
         for pidfile in "${state}/dns.pid" "${state}/tcpdump.pid"; do
           [[ -f "${pidfile}" ]] || continue
           sudo -n kill -INT "$(cat "${pidfile}")" 2>/dev/null || true
@@ -152,8 +157,12 @@ runs:
               (.. | objects | select(has("name") and has("type") and (.name | type) == "string") | "\(.name)\t-")
             ' "${state}/dns.jsonl" 2>/dev/null | sed -E 's/\.(\t)/\1/' | sort -u > "${map}" || true
           fi
-          # The kernel LOG lines, from the journal or, failing that, the ring buffer.
-          { sudo -n journalctl -k -o cat --no-pager --since "@${started}" 2>/dev/null | grep 'egress-audit: ' \
+          # The kernel LOG lines, from the journal or, failing that, the ring buffer. Root is gone
+          # by now (drop-root), so the journal is read as the job user, which the hosted image
+          # puts in the systemd-journal and adm groups; sudo stays as the fallback for a job
+          # that still has it.
+          { journalctl -k -o cat --no-pager --since "@${started}" 2>/dev/null | grep 'egress-audit: ' \
+            || sudo -n journalctl -k -o cat --no-pager --since "@${started}" 2>/dev/null | grep 'egress-audit: ' \
             || sudo -n dmesg 2>/dev/null | grep 'egress-audit: '; } \
             | sed -nE 's/.* DST=([^ ]+) .* PROTO=([A-Z0-9]+).* DPT=([0-9]+).*/\1 \2 \3/p' > "${conns}" || true
         else

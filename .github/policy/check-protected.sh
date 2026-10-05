@@ -5,6 +5,7 @@ check_protected_source() {
   local workflow="$1" reusable_protected reusable_workflow uses_source_checkout secret_reference variable_reference
 
   check_revocation_order "$workflow" || { echo "Token revocation ordering violated: $workflow" >&2; exit 1; }
+  check_drop_root_order "$workflow" || { echo "Root removal ordering violated: $workflow" >&2; exit 1; }
   reusable_protected=0
   for reusable_workflow in "${reusable_protected_workflows[@]}"; do
     if [[ "$workflow" == "$reusable_workflow" || "$workflow" == "./$reusable_workflow" ]]; then

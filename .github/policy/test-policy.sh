@@ -203,3 +203,35 @@ nuget_expect_fail 'NuGet save without protected ancestry' 'protected-ancestry an
 nuget_expect_fail 'NuGet save key after project code' 'cache-primary-key' \
   's/key: \$\{\{ steps\.nuget-packages\.outputs\.cache-primary-key \}\}/key: nuget-\$\{\{ runner.os \}\}-\$\{\{ hashFiles(\x27**\/packages.lock.json\x27) \}\}/'
 echo 'cache policy fixtures: the NuGet guards reject a re-enabled cache, an unprotected save and a late save key'
+
+# Root removal (finding H2): the reviewed protected workflows pass, and each drop-root rule
+# rejects the one mutation it exists for. The fixture sits in a tree whose composites are this
+# repository's own, so the composite sudo scan reads the real actions.
+drop_root="${base}/drop-root"
+mkdir -p "${drop_root}/.github/workflows"
+ln -s "${PWD}/.github/actions" "${drop_root}/.github/actions"
+drop_expect_fail() {
+  local label="$1" source="$2" needle="$3" expr="$4"
+  perl -0pe "${expr}" "${source}" > "${drop_root}/.github/workflows/fixture.yml"
+  if ruby "${policy}/drop-root-order.rb" "${drop_root}/.github/workflows/fixture.yml" >/dev/null 2>"${base}/err"; then
+    echo "drop-root fixture '${label}' should fail but passed" >&2
+    exit 1
+  fi
+  grep -qF -- "${needle}" "${base}/err" || { echo "drop-root fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+ruby "${policy}/drop-root-order.rb" .github/workflows/linux-validation-concern.yml || { echo 'the reviewed Linux concern should pass the drop-root rules' >&2; exit 1; }
+drop_expect_fail 'no drop-root step' .github/workflows/ios-validation.yml 'exactly once' \
+  's/        uses: \.\/\.github\/actions\/drop-root[^\n]*\n//'
+drop_expect_fail 'a project command before drop-root' .github/workflows/ios-validation.yml 'project command before drop-root' \
+  's/(      - name: Remove root before project code\n)/      - name: Early install\n        shell: bash\n        run: npm ci\n\n$1/'
+drop_expect_fail 'an unreviewed composite before drop-root' .github/workflows/ios-validation.yml 'only reviewed pre-root steps' \
+  's/(      - name: Remove root before project code\n)/      - name: Early setup\n        uses: .\/.github\/actions\/node-setup\n\n$1/'
+drop_expect_fail 'a scanner before drop-root' .github/workflows/linux-validation-concern.yml 'only scanner: semgrep-container' \
+  's/scanner: semgrep-container/scanner: all/'
+drop_expect_fail 'sudo after drop-root' .github/workflows/ios-validation.yml 'calls sudo after drop-root' \
+  's/(          rustup target add aarch64-apple-ios-sim\n)/$1          sudo true\n/'
+drop_expect_fail 'docker after drop-root' .github/workflows/live-proof-arm.yml 'calls Docker after drop-root' \
+  's/(          echo .vendor-fetch: passed.\n)/$1          docker ps\n/'
+drop_expect_fail 'a sudo composite after drop-root' .github/workflows/android-validation.yml 'contains sudo and is called after drop-root' \
+  's/(      - name: Remove root before project code\n        # Kept as \.\/ : the policy matches this exact form for local actions\.\n        uses: \.\/\.github\/actions\/drop-root[^\n]*\n)/$1\n      - name: Late privileged setup\n        uses: .\/.github\/actions\/root-setup\n        with:\n          concern: x\n/'
+echo 'drop-root fixtures: a missing drop, project code or a setup composite before it, and sudo or Docker after it are rejected'

@@ -1,11 +1,13 @@
 name: Rust toolchain and native dependencies
 description: >
   Per-OS setup for the Rust concerns: the runner's own rustup components, the
-  libclang that bindgen needs, the system libraries each concern links (Ubuntu
-  archive, Homebrew bottles or the runner image's vcpkg and LLVM), the cargo
-  environment (no incremental state, no test debug info, target directory) and the
-  linker choice. Installs only from the runner image's own sources, the Ubuntu
-  archive, homebrew-core and one pinned Chocolatey fallback.
+  libclang that bindgen needs, the system libraries each concern links (Homebrew
+  bottles or the runner image's vcpkg and LLVM; the Ubuntu archive packages are
+  installed earlier, as root, by the root-setup composite), the cargo environment
+  (no incremental state, no test debug info, target directory) and the linker
+  choice. Runs after root is removed from the job (drop-root) and needs no root
+  itself. Installs only from the runner image's own sources, homebrew-core and one
+  pinned Chocolatey fallback.
 
 inputs:
   concern:
@@ -133,22 +135,14 @@ runs:
         #   prerequisites less the tray indicator, which nothing enables.
         # - fontconfig/freetype/openssl: dbx-core's default `system-fonts`
         #   feature (font-kit) and its tokio-openssl transport.
-        extra_packages=()
-        case "${CONCERN}" in
-          rust-domain) extra_packages=(libdbus-1-dev pkg-config) ;;
-          rust-net) extra_packages=(libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev libssl-dev pkg-config) ;;
-          rust-app|rust-app-1|rust-app-2|rust-packaging) extra_packages=(libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
-          rust-dbx) extra_packages=(libfontconfig1-dev libfreetype-dev libssl-dev pkg-config) ;;
-          rust-tls-openssl) extra_packages=(libssl-dev pkg-config) ;;
-        esac
-        # lld, from the same Ubuntu archive, for the crate-test concerns only: they
-        # link over a hundred test binaries (rust-app alone), and the GNU linker is
-        # the slowest part of that. Selected below through RUSTFLAGS.
-        if [[ "${CONCERN}" == rust-* ]]; then
-          extra_packages+=(lld)
-        fi
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends clang libclang-dev "${extra_packages[@]}"
+        # - lld, for the crate-test concerns only: they link over a hundred test
+        #   binaries (rust-app alone), and the GNU linker is the slowest part of
+        #   that. Selected below through RUSTFLAGS.
+        #
+        # The packages themselves (the per-concern list) are installed by the root-setup
+        # composite, before root is removed from the job and before any project code runs;
+        # this step only finds what it installed.
+
         # Debian/Ubuntu commonly expose this as libclang-18.so.1 rather than an
         # unversioned libclang.so symlink.
         libclang_file="$(find /usr/lib -type f \( -name 'libclang.so*' -o -name 'libclang-*.so*' \) -print -quit)"
@@ -193,9 +187,8 @@ runs:
             ld.lld --version | head -n 1
             echo 'linker: lld (RUSTFLAGS=-C link-arg=-fuse-ld=lld)'
           fi
-          if mountpoint -q /mnt; then
-            sudo mkdir -p /mnt/cargo-target
-            sudo chown "$(id -u):$(id -g)" /mnt/cargo-target
+          # root-setup created it and handed it to the job user when /mnt is mounted.
+          if [[ -d /mnt/cargo-target && -w /mnt/cargo-target ]]; then
             echo 'CARGO_TARGET_DIR=/mnt/cargo-target' >> "${GITHUB_ENV}"
           fi
           df -h / /mnt 2>/dev/null || df -h /
@@ -221,52 +214,11 @@ runs:
         rustc --version
         cargo --version
 
-        # Disk. A hosted macOS runner has well under 100 GiB free, and the heavy concerns
-        # (rust-app above all: over a hundred test binaries, each linking the whole command
-        # tier) have run it down to under 1 GiB mid-link. So for those two concerns the
-        # space is reclaimed up front, always, from things no Rust concern reads: the
-        # Android SDK, every Xcode but the selected one, simulator devices and runtimes.
-        # Deleting those is the slowest part of this setup (measured: about five minutes per
-        # job, against under one for a concern that skips it), so it runs in the background
-        # from here, each removal in parallel, while the toolchain below installs and while
-        # the vendor fetch and the crate-source cache restore run. The macOS concern runner
-        # joins it before the first cargo command (and runs it in the foreground itself if
-        # the background process did not survive), so the disk is the same by the time
-        # anything compiles. Each removal is best effort: a path that is absent or busy
-        # never fails the setup. Package-manager and user caches are cleared below, after
-        # the installs that use them.
-        free_gib() { df -g "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}'; }
-        echo "disk before reclaim: $(free_gib) GiB free"
-        df -h "${GITHUB_WORKSPACE}"
-        reclaim_script="${RUNNER_TEMP}/taurine-reclaim.sh"
-        if [[ "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ]]; then
-          cat > "${reclaim_script}" <<'TCI_RECLAIM'
-        #!/usr/bin/env bash
-        # Usage: taurine-reclaim.sh <selected Xcode app> <done marker>
-        selected_xcode="$1"
-        marker="$2"
-        started="$(date +%s)"
-        rm -rf "${HOME}/Library/Android" 2>/dev/null &
-        for xcode in /Applications/Xcode*.app; do
-          [[ -d "${xcode}" && "${xcode}" != "${selected_xcode}" ]] || continue
-          sudo rm -rf "${xcode}" 2>/dev/null &
-        done
-        (
-          xcrun simctl delete all >/dev/null 2>&1 || true
-          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
-          rm -rf "${HOME}/Library/Developer/CoreSimulator" 2>/dev/null || true
-        ) &
-        wait
-        echo "disk reclaim finished after $(( $(date +%s) - started )) s"
-        touch "${marker}"
-        TCI_RECLAIM
-          rm -f "${RUNNER_TEMP}/taurine-reclaim.done" "${RUNNER_TEMP}/taurine-reclaim.pid"
-          selected_xcode="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer.*##')"
-          nohup bash "${reclaim_script}" "${selected_xcode}" "${RUNNER_TEMP}/taurine-reclaim.done" >"${RUNNER_TEMP}/taurine-reclaim.log" 2>&1 &
-          echo "$!" > "${RUNNER_TEMP}/taurine-reclaim.pid"
-          disown || true
-          echo 'disk reclaim: started in the background'
-        fi
+        # Disk. For rust-app and rust-db the root-setup composite has already started the
+        # disk reclaim in the background (the Android SDK, every Xcode but the selected one,
+        # simulator devices and runtimes), before root was removed from the job; the macOS
+        # Rust concern joins it before the first cargo command. Package-manager and user
+        # caches are cleared below, after the installs that use them.
 
         # taurine-scripting's rquickjs `bindgen` feature needs the standalone libclang
         # dylib at build-script runtime, the same reason ios-validation installs llvm.
@@ -289,33 +241,11 @@ runs:
         if [[ "${CONCERN}" == rust-ovpn || "${CONCERN}" == rust-net ]]; then
           brew install asio fmt jsoncpp lz4 xxhash
 
-          # openvpn3-core is C++20 and the formulae above are current releases, so it
-          # needs a current Apple libc++ too. The macos-14 image's default Xcode is
-          # older than the libc++ those headers have been built against, so select the
-          # newest *working* Xcode the image ships, for this concern only. On macos-15
-          # the newest install (a beta or a release for a newer macOS) aborted on
-          # `xcodebuild -version` (Abort trap: 6), so candidates are tried newest first,
-          # betas skipped, and the first whose `xcodebuild -version` runs is kept; when
-          # none does, the image default stays selected. The toolchain versions are
-          # printed (public tool and formula versions, nothing from the private source)
-          # so a failure here is attributable to a compiler or a formula version from
-          # the run summary alone.
-          default_developer_dir="$(xcode-select -p)"
-          selected_xcode=''
-          while IFS= read -r candidate; do
-            [[ -d "${candidate}" ]] || continue
-            case "${candidate}" in *[Bb]eta*) continue ;; esac
-            if DEVELOPER_DIR="${candidate}/Contents/Developer" xcodebuild -version >/dev/null 2>&1; then
-              selected_xcode="${candidate}"
-              break
-            fi
-            echo "Xcode candidate skipped (xcodebuild -version failed): ${candidate##*/}"
-          done < <(printf '%s\n' /Applications/Xcode_*.app | sort -rV)
-          if [[ -n "${selected_xcode}" ]]; then
-            sudo xcode-select -s "${selected_xcode}/Contents/Developer"
-          else
-            echo "No working Xcode_*.app candidate; keeping the image default (${default_developer_dir})"
-          fi
+          # openvpn3-core is C++20 and needs a current Apple libc++: the root-setup composite
+          # selected the newest working Xcode, before root was removed from the job. The
+          # toolchain versions are printed (public tool and formula versions, nothing from
+          # the private source) so a failure here is attributable to a compiler or a
+          # formula version from the run summary alone.
           xcodebuild -version | head -n 1
           xcrun clang++ --version | head -n 1
           brew list --versions asio fmt jsoncpp lz4 xxhash openssl@3
@@ -333,7 +263,7 @@ runs:
         } >> "${GITHUB_ENV}"
 
         # Package-manager and user caches, now that the installs above are done with them;
-        # the background reclaim started at the top handles the large trees.
+        # the background reclaim root-setup started handles the large trees.
         if [[ "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ]]; then
           rm -rf "${HOME}/Library/Caches"/* 2>/dev/null || true
           brew_cache="$(brew --cache 2>/dev/null || true)"

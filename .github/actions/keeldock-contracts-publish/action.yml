@@ -47,10 +47,12 @@ runs:
         # SQL, so its output stays in the withheld log: only exit status, module counts and the ids
         # of failing modules are published.
         if [[ "${KD_PLATFORM}" == linux ]]; then
+          # The workflow waited for pg_isready before root (and Docker) left the job; this
+          # only confirms the published loopback port still accepts connections.
           wait_postgres() {
             local _
             for _ in $(seq 1 60); do
-              if docker exec kd-postgres pg_isready --username postgres --dbname keeldock; then return 0; fi
+              if (exec 3<>/dev/tcp/127.0.0.1/5432) 2>/dev/null; then return 0; fi
               sleep 1
             done
             return 1
