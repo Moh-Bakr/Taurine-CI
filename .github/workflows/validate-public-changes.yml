@@ -933,17 +933,21 @@ jobs:
                 echo "The protected dispatcher must require a full source SHA: $workflow" >&2
                 exit 1
               fi
+              # Every protected dispatcher passes exactly one secret, the source-reader App key,
+              # by name, to each workflow it calls; none inherits secrets. KeelDock's dedicated
+              # environment may name its key differently (a reviewed set) and names its
+              # environment once.
+              if grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit' "$workflow"; then
+                echo "A protected dispatcher must not inherit secrets: $workflow" >&2
+                exit 1
+              fi
+              calls="$(grep -cE '^    uses:' "$workflow")"
+              if [[ "$(grep -cE '^      [A-Z_]+:[[:space:]]+\$\{\{ secrets\.' "$workflow")" != "${calls}" ]]; then
+                echo "Every workflow a protected dispatcher calls must receive exactly one secret, the App private key: $workflow" >&2
+                exit 1
+              fi
               if [[ "$workflow" == ".github/workflows/keeldock-validation.yml" ]]; then
-                # KeelDock's dispatcher passes ONE secret by name (the App key; the first attempt to read it from the environment failed because it is a repository secret), no inheritance: the concern job reads its credential
-                # from its own environment, so no repository secret reaches the called workflow.
-                # It names the environment in exactly one place, from a reviewed set; switching
-                # to the dedicated environment is a change of that one value.
-                if grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit' "$workflow"; then
-                  echo "The KeelDock dispatcher must not inherit secrets: $workflow" >&2
-                  exit 1
-                fi
-                if [[ "$(grep -cE '^      [A-Z_]+:[[:space:]]+\$\{\{ secrets\.' "$workflow")" != 1 ]] \
-                  || ! grep -qE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.(SOURCE_READER_PRIVATE_KEY|KEELDOCK_SOURCE_READER_PRIVATE_KEY) \}\}[[:space:]]*$' "$workflow"; then
+                if ! grep -qE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.(SOURCE_READER_PRIVATE_KEY|KEELDOCK_SOURCE_READER_PRIVATE_KEY) \}\}[[:space:]]*$' "$workflow"; then
                   echo "The KeelDock dispatcher must pass exactly the App private key, by a reviewed name: $workflow" >&2
                   exit 1
                 fi
@@ -951,8 +955,8 @@ jobs:
                   echo "The KeelDock dispatcher must name its environment once, as source-read or keeldock-source-read: $workflow" >&2
                   exit 1
                 fi
-              elif ! grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit[[:space:]]*(#.*)?$' "$workflow"; then
-                echo "The protected dispatcher must explicitly pass reviewed secrets to the concern workflow: $workflow" >&2
+              elif [[ "$(grep -cE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.SOURCE_READER_PRIVATE_KEY \}\}[[:space:]]*$' "$workflow")" != "${calls}" ]]; then
+                echo "The protected dispatcher must pass secrets.SOURCE_READER_PRIVATE_KEY by name to each called workflow: $workflow" >&2
                 exit 1
               fi
               if [[ "$workflow" == ".github/workflows/windows-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/windows-validation-concern\.yml' "$workflow"; then
