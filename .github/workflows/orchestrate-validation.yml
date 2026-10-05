@@ -89,6 +89,10 @@ jobs:
         with:
           phase: start
 
+      - name: Remove root before project code
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+
       - name: Set up the pinned Node.js release
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]

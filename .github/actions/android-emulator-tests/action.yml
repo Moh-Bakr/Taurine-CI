@@ -1,7 +1,8 @@
 name: Android emulator tests
 description: >
-  Runs the mobile crate's Rust tests on an x86_64 Android emulator. Phase `boot` enables KVM,
-  installs the pinned emulator and system image and starts the emulator in the background; phase
+  Runs the mobile crate's Rust tests on an x86_64 Android emulator. Phase `boot` checks KVM
+  (opened by root-setup), installs the pinned emulator and system image and starts the emulator
+  in the background; phase
   `run` builds the x86_64-linux-android test binaries, waits for the boot, pushes each binary with
   adb, executes it and publishes counts only. A test failure, a binary that ends without a result
   or zero executed tests fails the step. Runs from the private source after the token is revoked.
@@ -19,10 +20,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # Hosted ubuntu runners expose /dev/kvm to the kvm group only; open it for the job.
-        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
-        sudo udevadm control --reload-rules
-        sudo udevadm trigger --name-match=kvm
+        # Hosted ubuntu runners expose /dev/kvm to the kvm group only; the root-setup composite
+        # opened it for the job before root was removed.
         [[ -c /dev/kvm && -w /dev/kvm ]] || { echo 'KVM is unavailable on this runner; the emulator cannot be accelerated' >&2; exit 1; }
         # Tooling comes from the command-line tools the android-sdk-setup action pinned by
         # SHA-256. The system image is pinned by API level, ABI and variant; Google publishes

@@ -2,7 +2,8 @@ name: Android SDK, JDK and Rust targets
 description: >
   Pins and installs everything an Android build needs on the hosted runner (command-line tools by
   SHA-256, SDK platform, build-tools and NDK by exact version, the libclang bindgen needs and the
-  Rust target) and exports the build environment. Runs after the source token is revoked.
+  Rust target) and exports the build environment. Runs after the source token is revoked and
+  after root is removed from the job; the libclang package comes from root-setup.
 
 runs:
   using: composite
@@ -78,8 +79,8 @@ runs:
         # hosted Ubuntu image has clang, but not always the libclang shared
         # library that bindgen loads at runtime; missing it surfaces only as
         # the unhelpful `No such file or directory` from Cargo's build script.
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends clang libclang-dev
+        # clang and libclang-dev are installed by the root-setup composite, as
+        # root, before root is removed from the job; this step only finds them.
         # Debian/Ubuntu package revisions commonly expose this as
         # libclang-18.so.1 rather than the unversioned libclang.so symlink.
         libclang_file="$(find /usr/lib -type f \( -name 'libclang.so*' -o -name 'libclang-*.so*' \) -print -quit)"

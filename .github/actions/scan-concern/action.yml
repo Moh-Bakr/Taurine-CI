@@ -12,7 +12,10 @@ description: >
 
 inputs:
   scanner:
-    description: all (every scanner, each as its own step), or one of gitleaks, npm-audit, deny, clippy, semgrep
+    description: >
+      all (every scanner, each as its own step), or one of gitleaks, npm-audit, deny, clippy,
+      semgrep; or semgrep-container, which only runs the Semgrep container (called before
+      drop-root closes Docker) for a later all or semgrep call to report
     required: true
   path:
     description: Directory, relative to the workspace, holding the private source
@@ -192,28 +195,47 @@ runs:
     - name: Run Semgrep Community Edition offline (ERROR severity enforced)
       id: scan-semgrep
       continue-on-error: ${{ inputs.scanner == 'all' }}
-      if: ${{ inputs.scanner == 'semgrep' || inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'semgrep' || inputs.scanner == 'all' || inputs.scanner == 'semgrep-container' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        SCANNER: ${{ inputs.scanner }}
       run: |
         set -euo pipefail
-        trap 'echo "$?" > "${RUNNER_TEMP}/scan-semgrep.exit"' EXIT
+        [[ "${SCANNER}" == semgrep-container ]] || trap 'echo "$?" > "${RUNNER_TEMP}/scan-semgrep.exit"' EXIT
         if [[ ! -d .semgrep/rules ]]; then
+          [[ "${SCANNER}" == semgrep-container ]] && exit 0
           echo '- semgrep: no .semgrep/rules in the source; skipped' | tee -a "${GITHUB_STEP_SUMMARY}"
           exit 0
         fi
         # .semgrepignore is read from the scan root automatically; there is no flag for it.
         report="${RUNNER_TEMP}/semgrep.json"
+        container_status="${RUNNER_TEMP}/semgrep-container.status"
         # The official image, pinned by digest (version 1.140.0), run with no network: the
         # rules are the source's own, metrics and version checks are off, and nothing is
         # uploaded. The raw report stays on the runner.
-        image='semgrep/semgrep@sha256:4372a1de903521f9f10f877b6caf15d150d17e1ca592582682c8d02b77cbd4f6'
-        docker pull --quiet "${image}" >/dev/null
-        set +e
-        docker run --rm --network none -v "${PWD}":/src:ro -v "${RUNNER_TEMP}":/out -w /src "${image}" \
-          semgrep scan --config .semgrep/rules --metrics=off --disable-version-check --json --output /out/semgrep.json --quiet . >"${RUNNER_TEMP}/semgrep.log" 2>&1
-        status=$?
-        set -e
+        #
+        # The container needs the Docker daemon, which is root-equivalent and is closed by the
+        # drop-root composite before any project code runs. So the protected workflow calls
+        # this action once with scanner semgrep-container, before drop-root, to run only the
+        # container and record its exit status; the semgrep or all call then reads that report.
+        # A call with no recorded status runs the container itself (Docker still open).
+        if [[ "${SCANNER}" == semgrep-container || ! -f "${container_status}" ]]; then
+          image='semgrep/semgrep@sha256:4372a1de903521f9f10f877b6caf15d150d17e1ca592582682c8d02b77cbd4f6'
+          set +e
+          docker pull --quiet "${image}" >/dev/null \
+            && docker run --rm --network none -v "${PWD}":/src:ro -v "${RUNNER_TEMP}":/out -w /src "${image}" \
+              semgrep scan --config .semgrep/rules --metrics=off --disable-version-check --json --output /out/semgrep.json --quiet . >"${RUNNER_TEMP}/semgrep.log" 2>&1
+          status=$?
+          set -e
+          if [[ "${SCANNER}" == semgrep-container ]]; then
+            echo "${status}" > "${container_status}"
+            echo "semgrep: container scan finished before root was removed (exit ${status})"
+            exit 0
+          fi
+        else
+          status="$(cat "${container_status}")"
+        fi
         if [[ ! -s "${report}" ]]; then
           echo "semgrep: produced no report (exit ${status}; detailed output withheld)" >&2
           exit 1

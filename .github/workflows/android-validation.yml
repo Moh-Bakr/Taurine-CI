@@ -132,6 +132,18 @@ jobs:
         with:
           phase: start
 
+      # Every step that needs root runs here, before root is removed and before any project
+      # code (finding H2; see the root-setup and drop-root composites).
+      - name: Run the privileged setup
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/root-setup  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ matrix.concern }}
+
+      - name: Remove root before project code
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+
       - name: Install the shared sanitizers
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]

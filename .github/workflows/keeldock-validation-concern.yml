@@ -275,7 +275,8 @@ jobs:
       # The Migrator proof runs the published program against a real PostgreSQL, the image and digest
       # the repository's own Testcontainers fixtures use (17.6, about 160 MB, under the 2 GB cap). Started
       # with `docker run` (a job-level `services:` block cannot be per concern), bound to loopback, with a
-      # masked random one-run password.
+      # masked random one-run password. It is not removed at the end: Docker is closed to the job by
+      # then (drop-root), and the hosted runner, container and volume included, is discarded with the job.
       - name: Start the pinned PostgreSQL for the Migrator proof
         if: inputs.platform == 'linux' && inputs.concern == 'contracts-publish-smoke'
         shell: bash
@@ -288,13 +289,34 @@ jobs:
             --publish 127.0.0.1:5432:5432 \
             --env POSTGRES_PASSWORD="${password}" --env POSTGRES_DB=keeldock \
             'postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929' >/dev/null
-          echo 'postgres: started (pinned by digest)'
+          # Ready over TCP (the image's init-time server listens on its socket only), waited for
+          # here because Docker closes at drop-root below; the Migrator later reaches it on the
+          # published loopback port.
+          for _ in $(seq 1 60); do
+            if docker exec kd-postgres pg_isready --host 127.0.0.1 --username postgres --dbname keeldock >/dev/null 2>&1; then
+              echo 'postgres: started and ready (pinned by digest)'
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'postgres: not ready after 60 s' >&2
+          exit 1
 
       # The sub-steps below are one logical step per concern, split by responsibility. Each runs
       # regardless of the others (one that needs an earlier one is reported as skipped, never dropped);
       # full output stays in files under RUNNER_TEMP, and only a fixed reason per sub-step, the runner's
       # own per-suite totals and failing test names are published. Assertion text, stack traces and
       # source excerpts never leave the runner. The summary step fails the concern at the end.
+      # Root goes here (finding H2), before the first project command (the solution restore runs
+      # MSBuild over the private source). Docker goes with it, except for the two concerns whose
+      # project code starts containers itself (Testcontainers, the Aspire AppHost): Docker access
+      # is root-equivalent, so for those the summary records that root stays reachable.
+      - name: Remove root before project code
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+        with:
+          keep-docker: ${{ inputs.concern == 'db-containers' || inputs.concern == 'apphost-cold-start' }}
+
       - name: Restore the solution and install the sub-step library
         uses: ./.github/actions/keeldock-restore  # zizmor: ignore[self-repository]
         with:
@@ -345,12 +367,6 @@ jobs:
           path: |
             ~/.nuget/packages
           key: ${{ steps.nuget-packages.outputs.cache-primary-key }}
-
-      # Cleanup is part of the proof: the container and its volume go even when an earlier step failed.
-      - name: Remove the PostgreSQL container
-        if: always() && inputs.platform == 'linux' && inputs.concern == 'contracts-publish-smoke'
-        shell: bash
-        run: docker rm --force --volumes kd-postgres >/dev/null 2>&1 || true
 
       - name: Publish sanitized validation proof
         if: always()

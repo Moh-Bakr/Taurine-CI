@@ -142,24 +142,6 @@ jobs:
           docker image prune -af >/dev/null 2>&1 || true
           df -h / | tail -1
 
-      - name: Set up the Rust toolchain and pinned vendored sources
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The runner's own rustup, not a third-party action: this control
-          # plane adds no action it does not have to.
-          rustup --version >/dev/null
-          # `[patch.crates-io]` in the workspace root points at `vendor/`
-          # by path, and cargo refuses to load a manifest that is not there —
-          # so *every* cargo command in this repository fails on a fresh
-          # checkout until the script has run. `fetch` verifies each download
-          # against the sha256 pinned in vendor.lock.
-          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
-            echo 'vendor-fetch: failed (detailed output withheld)' >&2
-            exit 1
-          fi
-          echo 'vendor-fetch: passed'
-
       - name: Install native build packages (bastion proof only)
         if: ${{ inputs.engine == 'bastion' }}
         shell: bash
@@ -172,10 +154,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang libclang-dev \
             libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config >/dev/null
           echo 'native-packages: installed'
-
-      - name: Build the engine's proof test binary
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/live-build  # zizmor: ignore[self-repository]
 
       # Every engine starts its documented single-node container, waits for the
       # server's own readiness signal (not a fixed sleep), records the server
@@ -230,6 +208,36 @@ jobs:
             docker inspect --format '{{.Name}} {{.Config.Image}}' "${c}"
           done | sed 's#^/##' > "${RUNNER_TEMP}/proof-images.txt"
           cat "${RUNNER_TEMP}/proof-images.txt"
+
+      # Root goes here (finding H2): after the server containers are up and recorded, before
+      # the vendor fetch, the build and the suite. Docker goes with it: the suite reaches the
+      # servers only over their published loopback ports, so the job user no longer needs the
+      # daemon (which is root-equivalent).
+      - name: Remove root before project code
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+
+      - name: Set up the Rust toolchain and pinned vendored sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The runner's own rustup, not a third-party action: this control
+          # plane adds no action it does not have to.
+          rustup --version >/dev/null
+          # `[patch.crates-io]` in the workspace root points at `vendor/`
+          # by path, and cargo refuses to load a manifest that is not there —
+          # so *every* cargo command in this repository fails on a fresh
+          # checkout until the script has run. `fetch` verifies each download
+          # against the sha256 pinned in vendor.lock.
+          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
+            echo 'vendor-fetch: failed (detailed output withheld)' >&2
+            exit 1
+          fi
+          echo 'vendor-fetch: passed'
+
+      - name: Build the engine's proof test binary
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/live-build  # zizmor: ignore[self-repository]
 
       - name: Run the engine's live proof
         uses: ./.github/actions/live-run  # zizmor: ignore[self-repository]

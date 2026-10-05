@@ -133,6 +133,31 @@ jobs:
         with:
           phase: start
 
+      # Semgrep runs from its digest-pinned image and so needs the Docker daemon, which is
+      # root-equivalent and closes at drop-root. Only the container runs here, over the fresh
+      # checkout and before any project code; the scanner step below reads its report.
+      - name: Run the Semgrep container before root is removed
+        if: inputs.concern == 'scan-security'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
+        with:
+          scanner: semgrep-container
+
+      # Every step that needs root runs here, before root is removed and before any project
+      # code (finding H2; see the root-setup and drop-root composites).
+      - name: Run the privileged setup
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/root-setup  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+
+      - name: Remove root before project code
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+        with:
+          # The opt-in visual tier runs in a job container as root; recorded, not dropped.
+          container-root: ${{ inputs.concern == 'e2e-visual' }}
+
       - name: Install the shared sanitizers
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
@@ -302,8 +327,10 @@ jobs:
           # --no-install keeps the CLI resolving from the locked devDependency
           # rather than fetching a floating one from the registry; the browser
           # build it then downloads is the one that version pins. Only Chromium:
-          # every Playwright project in the suite uses Desktop Chrome.
-          if ! (cd taurine-desktop && npx --no-install playwright install --with-deps chromium) \
+          # every Playwright project in the suite uses Desktop Chrome. No
+          # --with-deps: that would need root, which is gone by now; root-setup
+          # installed the same Chromium host libraries before drop-root.
+          if ! (cd taurine-desktop && npx --no-install playwright install chromium) \
             >"${RUNNER_TEMP}/playwright-install.log" 2>&1; then
             echo 'playwright-install: failed (detailed output withheld)' >&2
             exit 1

@@ -1,0 +1,175 @@
+name: Remove root from the job before project code
+description: >
+  Finding H2: the job's secrets live in the runner's memory for the whole job, and a hosted
+  Linux or macOS runner gives every step passwordless sudo, so project code (an npm or cargo
+  build script, a test) could read them as root. This composite takes root away for the rest
+  of the job, before the first step that runs project code: it replaces the sudoers policy
+  with one that grants nothing to the job user, closes the Docker socket (Docker access is
+  root-equivalent), locks /usr/local/bin (on root's default PATH and writable by the job user on
+  both images), and on macOS turns developer mode off and takes the job user out of the
+  admin and _developer groups. A separate step then verifies, fail-closed, that `sudo -n true`
+  is refused, that the job is not root, that Docker is closed and that the job user cannot
+  attach a debugger to the runner. Windows cannot drop administrator rights; the residual risk
+  is written to the summary and documented in docs/how-ci-works.md. Every step that needs root
+  (the root-setup composite, container start-up) must run before this one.
+
+inputs:
+  keep-docker:
+    description: >
+      'true' only for a concern whose project code itself drives Docker (the Keel Dock
+      db-containers and apphost-cold-start concerns, which start containers through
+      Testcontainers and Aspire). Docker access is root-equivalent, so the summary records that
+      root stays reachable through Docker for that job.
+    required: false
+    default: 'false'
+  container-root:
+    description: >
+      'true' only for a job that runs inside a job container as root (the opt-in Linux visual
+      tier). Such a job cannot drop root and also sees the host Docker socket; the summary
+      records the residual risk instead of failing.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Remove passwordless sudo and Docker access (Linux, macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        KEEP_DOCKER: ${{ inputs.keep-docker }}
+        CONTAINER_ROOT: ${{ inputs.container-root }}
+      run: |
+        set -euo pipefail
+        if [[ -f /.dockerenv && "$(id -u)" == 0 ]]; then
+          if [[ "${CONTAINER_ROOT}" == true ]]; then
+            echo 'drop-root: job container running as root; root cannot be removed here (recorded as residual risk)'
+            exit 0
+          fi
+          echo 'drop-root: this job runs as root inside a job container; refusing to run project code' >&2
+          exit 1
+        fi
+        if ! sudo -n true 2>/dev/null; then
+          echo 'drop-root: no passwordless sudo to remove'
+          exit 0
+        fi
+        user="$(id -un)"
+        # A policy that lets only root use sudo, validated before it replaces anything. Every
+        # file under sudoers.d goes too: on these images they are where the job user's
+        # NOPASSWD rule lives (and macOS also grants %admin NOPASSWD in /etc/sudoers).
+        policy="$(mktemp)"
+        printf 'Defaults env_reset\nroot ALL=(ALL) ALL\n' > "${policy}"
+        sudo -n visudo -c -q -f "${policy}"
+        if [[ "${RUNNER_OS}" == Linux ]]; then
+          # Docker. Group removal alone does not help: the job's processes keep the docker
+          # group they started with, so the socket itself becomes root-only. Containers that
+          # are already running (live-proof servers) keep running and stay reachable on their
+          # published ports.
+          if [[ "${KEEP_DOCKER}" != true ]]; then
+            for socket in /var/run/docker.sock /run/docker.sock; do
+              [[ -S "${socket}" ]] || continue
+              sudo -n chown root:root "${socket}"
+              sudo -n chmod 0600 "${socket}"
+            done
+            sudo -n gpasswd -d "${user}" docker >/dev/null 2>&1 || true
+          fi
+        else
+          # Developer mode lets an _developer member attach a debugger to any of its own
+          # processes, the runner's included, without a password. Off, and the job user out of
+          # _developer and admin (admin is what the stock /etc/sudoers trusts).
+          sudo -n DevToolsSecurity -disable >/dev/null 2>&1 || true
+          for group in _developer admin; do
+            sudo -n dseditgroup -o edit -d "${user}" -t user "${group}" >/dev/null 2>&1 || true
+          done
+        fi
+        # /usr/local/bin is on root's default PATH (first, for systemd services) and both
+        # images leave it writable by the job user: a command planted there would run as root
+        # the next time a root service, timer or launchd job called it by name. Symbolic links
+        # are re-owned, not followed.
+        if [[ -d /usr/local/bin ]]; then
+          sudo -n chown -hR "root:$(id -gn root)" /usr/local/bin
+          sudo -n chmod -R go-w /usr/local/bin
+        fi
+        # Last, as one sudo call, so nothing runs between the policy swap and the removal of
+        # the old rules.
+        sudo -n sh -c 'install -m 0440 -o root -g "$1" "$2" /etc/sudoers && rm -f /etc/sudoers.d/*' \
+          drop-root "$(id -gn root)" "${policy}"
+        rm -f "${policy}"
+        sudo -k 2>/dev/null || true
+        echo 'drop-root: sudo policy replaced'
+
+    # A separate process from the one that dropped root, so the check sees exactly what the next
+    # step will see. Fails the job before any project code when root is still reachable.
+    - name: Verify root is gone (fail closed)
+      if: runner.os != 'Windows'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        KEEP_DOCKER: ${{ inputs.keep-docker }}
+        CONTAINER_ROOT: ${{ inputs.container-root }}
+      run: |
+        set -euo pipefail
+        summary() { printf '%s\n' "$@" >> "${GITHUB_STEP_SUMMARY}"; }
+        summary '### Root before project code' ''
+        if [[ -f /.dockerenv && "$(id -u)" == 0 && "${CONTAINER_ROOT}" == true ]]; then
+          summary '- drop-root: **not possible** (job container running as root, with the host Docker socket); residual risk accepted for this opt-in tier'
+          echo 'drop-root: residual risk recorded (job container as root)'
+          exit 0
+        fi
+        failed=0
+        if [[ "$(id -u)" == 0 ]]; then
+          echo 'drop-root: the job user is root; refusing to run project code' >&2
+          failed=1
+        fi
+        if sudo -n true 2>/dev/null; then
+          echo 'drop-root: passwordless sudo is still available; refusing to run project code' >&2
+          failed=1
+        fi
+        docker_line='- Docker: no daemon on this runner'
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+          if [[ "${KEEP_DOCKER}" == true ]]; then
+            docker_line='- Docker: **kept open** for this concern (its project code drives Docker); Docker access is root-equivalent'
+          else
+            echo 'drop-root: the Docker daemon is still reachable; refusing to run project code' >&2
+            failed=1
+          fi
+        elif [[ -S /var/run/docker.sock ]]; then
+          docker_line='- Docker: socket closed to the job user'
+        fi
+        debugger_line=''
+        if [[ "${RUNNER_OS}" == Linux ]]; then
+          # Yama 1 or more: a process may attach only to its own descendants, never to the
+          # runner that started it.
+          scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)"
+          if [[ "${scope}" -lt 1 ]]; then
+            echo "drop-root: kernel.yama.ptrace_scope is ${scope}; the job could attach to the runner" >&2
+            failed=1
+          fi
+          debugger_line="- Debugger attach to the runner: blocked (kernel.yama.ptrace_scope=${scope})"
+        else
+          devtools="$(DevToolsSecurity -status 2>/dev/null || true)"
+          if [[ "${devtools}" != *'currently disabled'* ]]; then
+            echo 'drop-root: developer mode is still enabled; the job could attach to the runner' >&2
+            failed=1
+          fi
+          debugger_line='- Debugger attach to the runner: developer mode off'
+        fi
+        if [[ -w /usr/local/bin ]]; then
+          echo 'drop-root: /usr/local/bin is still writable by the job user' >&2
+          failed=1
+        fi
+        (( failed == 0 )) || exit 1
+        summary '- `sudo -n true`: refused (passwordless sudo removed)' "${docker_line}" "${debugger_line}"
+        echo 'drop-root: passed (sudo -n true refused)'
+
+    - name: Record the Windows residual risk
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        {
+          echo '### Root before project code'
+          echo
+          echo '- drop-root: **not possible on Windows**: the hosted job user is an administrator and cannot be demoted within the job. The source token is still revoked before project code; see docs/how-ci-works.md for the residual risk.'
+        } >> "${GITHUB_STEP_SUMMARY}"
+        echo 'drop-root: Windows administrator rights cannot be removed (residual risk recorded)'

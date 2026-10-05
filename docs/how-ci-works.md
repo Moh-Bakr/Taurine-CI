@@ -41,6 +41,107 @@ project script runs before the revoking step, or if that step is not under `alwa
 Linux and Windows concerns therefore only install dependencies, run `npm ci`, `cargo` or
 `xcodebuild` after the token is dead.
 
+## Root before project code
+
+Revoking the source token is not enough on its own. The App private key that mints it
+(`SOURCE_READER_PRIVATE_KEY`) is a job secret, and the runner keeps job secrets in memory for
+the whole job. A hosted Linux or macOS runner also gives every step passwordless `sudo`, and
+root can read any process's memory. So, before this change, project code (an npm or cargo build
+script, a test) could in principle have read the key as root (finding H2).
+
+The fix is to take root away before project code runs, not to test whether memory can be read.
+Every source-bearing job does three things, in this order, straight after the token is revoked:
+
+1. **Privileged setup** (`.github/actions/root-setup`, plus the live-proof and Keel Dock
+   container start-up). Everything that needs root happens here: the Ubuntu archive packages a
+   concern links against, the scratch-disk target directory, Playwright's Chromium host
+   libraries (a fixed list, so the locked Playwright CLI no longer runs `--with-deps` as root),
+   the KVM device rule for the Android emulator, the macOS disk reclaim and Xcode selection,
+   the Semgrep container scan, and the database containers. None of it runs project code.
+2. **Drop root** (`.github/actions/drop-root`). It replaces the sudoers policy with one that
+   lets only root use `sudo` (this removes the job user's `NOPASSWD` rule, and on macOS the
+   `%admin NOPASSWD` rule too), makes the Docker socket root-only, makes `/usr/local/bin`
+   root-owned (it is on root's default `PATH` and the images leave it writable by the job
+   user), and on macOS turns developer mode off and takes the job user out of the `admin` and
+   `_developer` groups.
+3. **Verify, fail-closed.** A separate step checks that `sudo -n true` is refused, that the job
+   user is not root, that Docker is closed (unless the concern keeps it, below), that
+   `/usr/local/bin` is not writable, and that the job cannot attach a debugger to the runner
+   (Linux: `kernel.yama.ptrace_scope` is at least 1; macOS: developer mode is off). Any failure
+   stops the job before project code. The job summary has a "Root before project code" block
+   showing the result.
+
+The policy workflow enforces the order (`.github/policy/drop-root-order.rb`): every
+source-read job calls `drop-root` exactly once, after the revoke; only reviewed root-needing
+steps may sit between the two; and no step after it may call `sudo`, or Docker unless that job
+keeps Docker. A composite called after `drop-root` may not contain `sudo` (the egress audit's
+best-effort `sudo -n` fallbacks are the one exception).
+
+The feasibility probe (a scratch workflow with no secrets, no environment and no private
+source, run on 2026-10-05 and then deleted) showed, on `ubuntu-24.04`, `ubuntu-latest`,
+`macos-15` and `macos-latest`, that a later step gets `sudo: a password is required` from
+`sudo -n true` once the sudoers files are replaced. Removing the user from the `docker` group
+does **not** work on its own, because running processes keep the group they started with;
+making the socket root-only does. Later `uses:` actions (`setup-node` with an uncached
+release, `setup-dotnet`) still work, because they install into directories the job user owns.
+Containers started before the drop keep running and stay reachable on their published ports.
+
+### Residual risk, per operating system
+
+**Linux (`ubuntu-24.04`).** Passwordless `sudo` and the Docker socket are gone before project
+code. What remains:
+
+- The job user is the same user as the runner process. With `kernel.yama.ptrace_scope=1` it
+  cannot attach a debugger to the runner or read its memory, but it can still read the
+  runner's `/proc/<pid>/environ` and the environment of Actions it starts. That is how the
+  runtime token for the Actions cache can be read, which is why caches stay off until unprotected
+  SHAs run from a separate ref (see the cache notes below).
+- Processes started as root before the drop keep running as root with fixed commands: the
+  egress-audit recorders. The job user cannot signal them, so they run until the runner is
+  discarded.
+- Live-proof database containers start before the drop. Some run the source's own lab init
+  scripts inside the container (Postgres, MySQL and SQL Server seeds, the TLS entrypoint), one
+  builds the bastion image from the source's Dockerfile, and the SQL Server init uses the host
+  network. None of these containers can see host processes. Db2 and Informix run privileged
+  but from digest-pinned vendor images with no source mounted.
+- **Keel Dock `db-containers` and `apphost-cold-start` keep Docker**, because their project
+  code starts containers itself (Testcontainers, the Aspire AppHost). Docker access is
+  root-equivalent, so in those two concerns project code can still reach root through Docker.
+  `sudo` is still removed. The job summary says "Docker: kept open" for these.
+- **The opt-in `e2e-visual` tier** runs inside a job container as root, and GitHub mounts the
+  host Docker socket into job containers. Root cannot be removed there. The summary records it;
+  leave the tier off unless the run needs it.
+- A kernel privilege-escalation bug would bypass all of this. That is outside what the
+  workflow can control.
+
+**macOS (`macos-15`).** Passwordless `sudo` is gone, including the `%admin NOPASSWD` rule in
+`/etc/sudoers`. Developer mode is off, so the job cannot attach a debugger to the runner
+without an authorisation it can no longer grant itself. What remains:
+
+- The job user is out of `admin` and `_developer`, but it is still the same user as the
+  runner process. Reading the runner's memory would need either root or a debugger
+  authorisation; neither is available to the job any more. This was not tested by trying to
+  read memory, by design: the probe only proved that `sudo`, developer mode and the group
+  memberships are gone, and that the iOS simulator, Homebrew installs, a throwaway keychain,
+  `xcodebuild`, `setup-node` and `setup-dotnet` still work afterwards.
+- An authorisation prompt (for example `osascript ... with administrator privileges`) cannot
+  be answered on a headless runner; the probe showed it simply waits.
+- The job user still owns Homebrew (`/opt/homebrew`) and its own home directory. No root
+  service runs anything from them during a job (the image's one root launch daemon that names
+  a job-writable path, `change_hostname.plist`, runs only at boot; its script in
+  `/usr/local/bin` is now root-owned).
+- The root half of the disk reclaim (removing the other Xcode installs and the simulator
+  runtimes) is started before the drop as one `sudo bash -c`, with its whole script in memory,
+  and keeps running as root after it. It reads no file the job user can write.
+
+**Windows (`windows-2022`, `windows-2025`).** Root cannot be dropped: the hosted job user is
+an administrator, and there is no supported way to demote it within a job. Project code can
+therefore read the runner's memory, and with it the App private key. The mitigations are the
+ones that applied before: the token is minted, used and revoked before any project code (the
+same `source-checkout` order, enforced by the policy), the App can only read the two source
+repositories, and the key can be rotated (`docs/source-reader-key-rotation.md`). The job
+summary records the residual risk on every Windows job.
+
 ## Per-platform concerns
 
 | Workflow | Concerns |

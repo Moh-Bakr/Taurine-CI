@@ -28,13 +28,14 @@ runs:
         source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
         source "${RUNNER_TEMP}/taurine-ci/report.sh"
 
-        # Join the background disk reclaim that the toolchain setup started (rust-app and
-        # rust-db only; every other concern never wrote the script, so this is a no-op). It
-        # has been running since the start of the setup, through the toolchain installs, the
-        # vendor fetch and the crate-source cache restore, so what is left to wait for is
-        # printed. If the background process did not survive the end of its step (no done
-        # marker and no live process), the same script runs here in the foreground, which is
-        # what the setup did before the reclaim moved to the background.
+        # Join the background disk reclaim that the root-setup composite started (rust-app
+        # and rust-db only; every other concern never wrote the script, so this is a no-op).
+        # It has been running since before root was removed from the job, through the
+        # toolchain installs, the vendor fetch and the crate-source cache restore, so what is
+        # left to wait for is printed. If the job user's half did not survive the end of its
+        # step (no done marker and no live process), it runs here in the foreground; the root
+        # half (the other Xcodes and the simulator runtimes) was started as its own process
+        # and is only waited for.
         reclaim_script="${RUNNER_TEMP}/taurine-reclaim.sh"
         reclaim_marker="${RUNNER_TEMP}/taurine-reclaim.done"
         if [[ -f "${reclaim_script}" ]]; then
@@ -43,8 +44,7 @@ runs:
           while [[ ! -f "${reclaim_marker}" ]]; do
             if ! kill -0 "${reclaim_pid}" 2>/dev/null && [[ ! -f "${reclaim_marker}" ]]; then
               echo 'disk reclaim: the background process is gone without finishing; running it here'
-              selected_xcode="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer.*##')"
-              bash "${reclaim_script}" "${selected_xcode}" "${reclaim_marker}" || true
+              bash "${reclaim_script}" "${RUNNER_TEMP}/taurine-reclaim-root.done" "${reclaim_marker}" || true
               break
             fi
             if [[ $((SECONDS - join_started)) -ge 1200 ]]; then
