@@ -541,9 +541,10 @@ jobs:
             echo 'Windows validation must remain app-only; orchestrate-skill is covered by Ubuntu/macOS workflows.' >&2
             exit 1
           fi
+          # The macOS smoke body lives in the macos-concern-js composite.
           for skill_workflow in \
             .github/workflows/orchestrate-validation.yml \
-            .github/workflows/macos-validation.yml; do
+            .github/actions/macos-concern-js/action.yml; do
             if ! grep -q 'skills/orchestrate/scripts/verify.mjs --json' "${skill_workflow}"; then
               echo "Required orchestrate skill coverage is missing from ${skill_workflow}." >&2
               exit 1
@@ -584,6 +585,11 @@ jobs:
                 ./.github/actions/linux-concern-js) ;;
                 ./.github/actions/linux-concern-e2e) ;;
                 ./.github/actions/linux-concern-rust) ;;
+                ./.github/actions/windows-concern-rust) ;;
+                ./.github/actions/macos-concern-rust) ;;
+                ./.github/actions/macos-concern-js) ;;
+                ./.github/actions/vendor-fetch) ;;
+                ./.github/actions/verify-cargo-cache) ;;
                 ./.github/workflows/keeldock-validation-concern.yml) ;;
                 '') ;;
                 *)

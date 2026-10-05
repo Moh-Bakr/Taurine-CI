@@ -1,0 +1,69 @@
+name: Verify restored Cargo crate archives
+description: |
+  Re-verifies every restored cargo `.crate` archive against the checksums in the private
+  Cargo.lock files (a mismatching or unknown archive is deleted) and reports the cache state.
+  The same reviewed script ran inline in the Linux, macOS and Windows concern workflows.
+
+inputs:
+  sources-dir:
+    description: Cargo home directory holding registry/cache (the cargo-home step output)
+    required: true
+  cache-hit:
+    description: The restore step cache-hit output
+    required: false
+    default: ''
+  os-label:
+    description: Label for the summary line
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Verify restored crate archives against Cargo.lock
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        CARGO_SOURCES_DIR: ${{ inputs.sources-dir }}
+        CACHE_HIT: ${{ inputs.cache-hit }}
+        OS_LABEL: ${{ inputs.os-label }}
+      run: |
+        set -euo pipefail
+        sha256_of() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum < "$1" | cut -d' ' -f1
+          else
+            shasum -a 256 < "$1" | cut -d' ' -f1
+          fi
+        }
+        expected="${RUNNER_TEMP}/crate-checksums.txt"
+        : > "${expected}"
+        while IFS= read -r lock; do
+          tr -d '\r' < "${lock}" | awk '
+            /^\[\[package\]\]/ { n = ""; v = ""; next }
+            /^name = /     { gsub(/"/, "", $3); n = $3 }
+            /^version = /  { gsub(/"/, "", $3); v = $3 }
+            /^checksum = / { gsub(/"/, "", $3); if (n != "" && v != "") print n "-" v ".crate " $3 }
+          ' >> "${expected}"
+        done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*')
+        kept=0
+        dropped=0
+        cache_dir="${CARGO_SOURCES_DIR}/registry/cache"
+        if [[ -d "${cache_dir}" ]]; then
+          find "${cache_dir}" -type f ! -name '*.crate' -delete
+          while IFS= read -r -d '' crate; do
+            want="$(awk -v f="$(basename "${crate}")" '$1 == f { print $2; exit }' "${expected}")"
+            if [[ -n "${want}" && "$(sha256_of "${crate}")" == "${want}" ]]; then
+              kept=$((kept + 1))
+            else
+              rm -f "${crate}"
+              dropped=$((dropped + 1))
+            fi
+          done < <(find "${cache_dir}" -type f -name '*.crate' -print0)
+        fi
+        case "${CACHE_HIT}" in
+          true) state='exact hit' ;;
+          false) state='restored from an earlier lockfile' ;;
+          *) state='miss' ;;
+        esac
+        echo "cargo-sources: ${state}; ${kept} archives verified, ${dropped} dropped"
+        echo "- ${OS_LABEL} Cargo source cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
