@@ -82,9 +82,9 @@ jobs:
             echo '## Windows Rust concerns'
             echo
             if [[ "${RUST_REQUESTED}" == true ]]; then
-              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app and rust-packaging run in the validate-rust jobs.'
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging run in the validate-rust jobs.'
             else
-              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
@@ -137,7 +137,8 @@ jobs:
           - rust-db
           - rust-net
           - rust-ovpn
-          - rust-app
+          - rust-app-1
+          - rust-app-2
           - rust-packaging
           - rust-tls-openssl
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
@@ -179,7 +180,7 @@ jobs:
         with:
           mode: table
           label: Windows
-          baseline-seconds: '{"rust-app":3553,"rust-db":1245,"rust-domain":1005,"rust-ovpn":644,"rust-net":622,"rust-packaging":1310,"rust-tls-openssl":52,"desktop-shard-1":1061,"desktop-shard-2":929,"desktop-quality":321,"mobile":287,"contracts":136,"bundle-budget":220}'
+          baseline-seconds: '{"rust-app-1":2740,"rust-app-2":2740,"rust-db":1245,"rust-domain":1005,"rust-ovpn":644,"rust-net":622,"rust-packaging":1310,"rust-tls-openssl":52,"desktop-shard-1":1061,"desktop-shard-2":929,"desktop-quality":321,"mobile":287,"contracts":136,"bundle-budget":220}'
           name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
           github-token: ${{ github.token }}
 
@@ -207,7 +208,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: Windows
-          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app","rust-packaging","rust-tls-openssl"]'
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           github-token: ${{ github.token }}

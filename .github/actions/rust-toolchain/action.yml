@@ -357,7 +357,7 @@ runs:
         # free, and print the free space before and after.
         free_gib() { df -BG /c | awk 'NR==2 {gsub("G", "", $4); print $4}'; }
         echo "disk before reclaim: $(free_gib) GiB free on C:"
-        if [[ ( "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ) && "$(free_gib)" -lt 40 ]]; then
+        if [[ ( "${CONCERN}" == rust-app* || "${CONCERN}" == rust-db ) && "$(free_gib)" -lt 40 ]]; then
           rm -rf /c/Android "/c/Program Files (x86)/Android" /c/Users/runneradmin/AppData/Local/Android 2>/dev/null || true
           rm -rf /c/ProgramData/chocolatey/lib/ghc* /c/ProgramData/chocolatey/lib/mingw 2>/dev/null || true
           rm -rf /c/hostedtoolcache/windows/Java_* /c/hostedtoolcache/windows/PyPy 2>/dev/null || true

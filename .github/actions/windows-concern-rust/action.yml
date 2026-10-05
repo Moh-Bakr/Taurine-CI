@@ -183,11 +183,21 @@ runs:
               deferred_results+=("rust-ovpn-tests|failed: not run (the vcpkg dependency install failed)")
             fi
             ;;
-          rust-app)
+          rust-app-1|rust-app-2)
+            # Two nextest partitions of the same package set, as on Linux: measured on
+            # Windows, the single concern's compile took 36 minutes and the test run 19, so
+            # each leg compiles in full and runs half the tests. `count:N/2` splits
+            # deterministically; no compiled output crosses between the jobs. Doctests ride
+            # with partition 1.
+            export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
             # The command tier both shells call and the two shells' own unit tests.
             # Tauri's `test` feature drives the commands through its mock runtime, so
             # no window or WebView2 process is started.
-            rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+            if [[ "${CONCERN}" == rust-app-1 ]]; then
+              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+            else
+              NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+            fi
             ;;
           rust-packaging)
             # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
