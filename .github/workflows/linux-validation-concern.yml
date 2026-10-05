@@ -91,6 +91,19 @@ jobs:
             exit 1
           fi
 
+      # The pinned Playwright image lacks jq (curl, git, bash and sha256sum are present), which
+      # the shared composites use. Installed from the image's own Ubuntu noble archive, as root,
+      # pinned to the 1.7.1 release line; it holds no source and runs before the checkout.
+      - name: Install jq in the visual container
+        if: inputs.concern == 'e2e-visual'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y --no-install-recommends 'jq=1.7.1-3ubuntu0.24.04.*'
+          jq --version
+
       - name: Check out the exact private source SHA
         id: verified-source
         # Kept as ./ : the policy matches this exact form for the private-source action.
