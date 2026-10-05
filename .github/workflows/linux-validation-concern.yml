@@ -302,7 +302,30 @@ jobs:
               # The flaky-test quarantine list must have no expired entry, and the third-party
               # notices must match the lockfiles; both are static checks of the source.
               run_deferred quarantine-check npm run check:quarantine
+              # The notices generator runs `cargo metadata --offline`, so every crate must already
+              # be downloaded: a developer machine has them, a fresh runner does not, which is
+              # why this passed locally and failed here. Fetch them (locked) first.
+              run_deferred notices-fetch cargo fetch --locked
               run_deferred notices-check npm run check:notices
+              if [[ "${deferred_results[*]}" == *"notices-check|failed"* ]]; then
+                # Say why: whether the graph could not be read at all, or which crate and
+                # licence lines differ (names, versions and licence expressions only: public
+                # registry facts; repository URLs and everything else are left out).
+                echo 'notices diagnostics:' >&2
+                if ! cargo metadata --format-version 1 --offline >/dev/null 2>"${RUNNER_TEMP}/notices-meta.err"; then
+                  echo '  cargo metadata --offline failed: the crates are not all downloaded (see notices-fetch)' >&2
+                else
+                  cp THIRD-PARTY-NOTICES "${RUNNER_TEMP}/notices.before" 2>/dev/null || : > "${RUNNER_TEMP}/notices.before"
+                  if node scripts/third-party-notices.mjs >/dev/null 2>&1; then
+                    diff <(grep -E '^- \*\*|^- [A-Za-z0-9@/_.-]+ [0-9]' "${RUNNER_TEMP}/notices.before" | sort) \
+                         <(grep -E '^- \*\*|^- [A-Za-z0-9@/_.-]+ [0-9]' THIRD-PARTY-NOTICES | sort) |
+                      grep -E '^[<>]' | sed -E 's/^< /  committed: /; s/^> /  generated: /' | cut -c1-160 | head -40 >&2 || true
+                    cp "${RUNNER_TEMP}/notices.before" THIRD-PARTY-NOTICES
+                  else
+                    echo '  the notices generator itself failed' >&2
+                  fi
+                fi
+              fi
               run_deferred packages-tests npm run test:packages -- \
                 --reporter=default --reporter=json \
                 --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"

@@ -207,6 +207,11 @@ runs:
                 echo 'failing specs (spec > title):' >&2
                 printf '%s\n' "${pw}" >&2
               fi
+              pwj="$(playwright_json_failures "${RUNNER_TEMP}/test-ids/${label}.json")"
+              if [[ -n "${pwj}" ]]; then
+                echo 'failing specs from the JSON report:' >&2
+                printf '%s\n' "${pwj}" >&2
+              fi
             fi
             if [[ "${label}" == bundle-budget || "${label}" == check-bundle ]]; then
               budget_report "${log}" >&2
