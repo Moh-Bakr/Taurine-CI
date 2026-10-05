@@ -24,9 +24,25 @@ runs:
         # "detailed output withheld".
 
         cargo_detail() {
-          cargo_sanitize "$1" |
-            grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^[[:space:]]*= note: .*(lint level|-D |-W |deny\(|warn\()|^Diff in |^test .* FAILED$|^test result: |^failures:$|^smoke: ' |
-            head -40 >&2 || true
+          # Same rule as cargo_test_detail (see the POLICY note in the sanitize library): an
+          # `error[Ennnn]` is its code and location only, an uncoded error its fixed shape or
+          # "(message withheld)"; lint-level notes, rustfmt diffs and smoke lines are fixed shapes.
+          cargo_sanitize "$1" | strip_excerpts | awk '
+            /^warning: / { block = "warning"; pending = ""; next }
+            /^error\[E[0-9]+\]: / { block = "error"; pending = ""; code = $1; sub(/\]:.*$/, "]", code); print code; next }
+            /^error: / {
+              block = "error"; pending = ""
+              if ($0 ~ /^error: (could not compile|aborting due to|test failed|[0-9]+ targets? failed|failed to run custom build command for|linking with |failed to (download|select|get|load|parse|fetch)|no matching package)/) print
+              else pending = "yes"
+              next
+            }
+            /^[[:space:]]*--> / {
+              if (block == "error") { if (pending != "") print "error: (message withheld)"; pending = ""; print }
+              next
+            }
+            /^[[:space:]]*= note: .*(lint level|-D |-W |deny\(|warn\()/ { print; next }
+            /^Diff in / || /^test .* FAILED$/ || /^test result: / || /^failures:$/ || /^smoke: / { print }
+          ' | head -40 >&2 || true
         }
 
         # One line saying which kind of failure it was, so the classification
