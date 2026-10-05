@@ -202,3 +202,51 @@ jobs:
               echo "- Drift check: linux-validation with base_sha \`${BASE_SHA}\` (the week's selective run); compare its Result with the full run's"
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  # Freshness of the pinned tools (.github/tool-pins.json): warn-only, like the openssl-src
+  # note. It reads that committed list and each tool's public release list; it uses no source
+  # token, checks out only this repository, and never fails the run.
+  tool-freshness:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Pinned tool freshness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Compare each pinned tool with its newest stable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## Pinned tool freshness'
+            echo
+            echo '| Tool | Pinned | Newest stable | State |'
+            echo '| --- | --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          behind=0
+          while IFS='|' read -r name repo prefix current; do
+            latest="$(gh api "repos/${repo}/releases?per_page=100" --jq ".[] | select(.prerelease == false and .draft == false) | .tag_name | select(startswith(\"${prefix}\")) | ltrimstr(\"${prefix}\")" 2>/dev/null \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+            if [[ -z "${latest}" ]]; then
+              state='lookup returned no release'
+            elif [[ "${latest}" == "${current}" ]]; then
+              state='current'
+            elif [[ "$(printf '%s\n%s\n' "${current}" "${latest}" | sort -V | head -n 1)" == "${current}" ]]; then
+              state='BEHIND'
+              behind=$((behind + 1))
+              echo "::warning title=pinned tool behind::${name} is pinned to ${current}; the newest stable release is ${latest}"
+            else
+              state='pin is newer than the newest stable release'
+            fi
+            echo "| ${name} | ${current} | ${latest:-unknown} | ${state} |" >> "${GITHUB_STEP_SUMMARY}"
+          done < <(jq -r '.tools[] | [.name, .repo, .tag_prefix, .current] | join("|")' .github/tool-pins.json)
+          echo "tools behind: ${behind}"
