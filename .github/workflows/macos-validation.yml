@@ -236,17 +236,17 @@ jobs:
           cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}
           os-label: macOS
 
-      # Compiled third-party dependencies of the rust-app build: only the debug profile's
-      # deps/, build/ and .fingerprint/ entries of crates.io and git crates, with every
-      # workspace, path and vendored crate (and every third-party crate that depends on
-      # one) stripped both after restore and before save, and a proof step that fails the
-      # job if a workspace crate name, a private-checkout path or an executable would be
-      # saved. One exact key (no fallback): OS, arch, image, build and feature set, exact
-      # rustc, Cargo.lock, every cargo manifest and config, the cargo/compiler
-      # environment, and the ISO week, so every entry expires within a week. Any SHA may
-      # restore; only a SHA on a protected private branch saves (see below). Cargo does not
-      # re-verify a compiled .rlib against Cargo.lock: the residual risk and its
-      # mitigations are recorded in the rust-target-cache composite.
+      # Compiled third-party dependency cache: DISABLED (2026-10-05, finding H1). Every
+      # restore and save step of it carries a literal `false &&` and the cache policy fails
+      # if one does not. Why: a cache write is authorised by the runner's own runtime token,
+      # which `permissions: {}` does not restrict, and project code has root on a hosted
+      # runner, so a build script of ANY dispatched SHA (protected or not) can read that
+      # token and write the exact key first. Every run here is on ref main, so the entry
+      # lands in main's scope and a protected run would restore it; cargo never re-verifies
+      # a compiled .rlib. The save-side ancestry gate cannot stop a write that bypasses the
+      # save step. It stays off until unprotected SHAs run from a separate ref whose cache
+      # writes main never reads. The locate step still runs: it only computes the key and
+      # keeps the target directory outside the private checkout.
       - name: Locate the compiled dependency cache
         id: cargo-target
         if: ${{ matrix.concern == 'rust-app' }}
@@ -260,7 +260,7 @@ jobs:
 
       - name: Restore compiled third-party dependencies
         id: cargo-target-cache
-        if: ${{ matrix.concern == 'rust-app' }}
+        if: ${{ false && matrix.concern == 'rust-app' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -270,7 +270,7 @@ jobs:
           key: ${{ steps.cargo-target.outputs.key }}
 
       - name: Strip workspace crates from the restored dependency cache
-        if: ${{ matrix.concern == 'rust-app' }}
+        if: ${{ false && matrix.concern == 'rust-app' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -327,12 +327,12 @@ jobs:
             ${{ steps.cargo-home.outputs.dir }}/git/db
           key: cargo-sources-v2-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
 
-      # Only the build that runs everything the key covers saves it, only on a miss, only
-      # for a protected source SHA and only after the concern passed; the strip-and-prove
-      # step must succeed first, so a failed proof leaves nothing saved.
+      # Disabled with the restore above (finding H1). When re-enabled: only the build that
+      # runs everything the key covers saves it, only on a miss, only for a protected source
+      # SHA, only after the concern passed and the strip-and-prove step succeeded.
       - name: Strip and prove the compiled dependency cache
         id: cargo-target-strip
-        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        if: ${{ false && github.ref == 'refs/heads/main' && matrix.concern == 'rust-app' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -341,7 +341,7 @@ jobs:
           os-label: macOS
 
       - name: Save compiled third-party dependencies
-        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        if: ${{ false && github.ref == 'refs/heads/main' && matrix.concern == 'rust-app' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

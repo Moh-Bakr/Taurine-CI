@@ -16,19 +16,32 @@ description: |
   sizes are printed, never crate names: the dependency inventory of the private lockfile is
   not published.
 
-  Residual risk, stated plainly. Cargo verifies a `.crate` download against Cargo.lock, but
-  it never re-verifies a compiled `.rlib`: a restored artefact is trusted as built. Whatever
-  ran in the saving job (the build scripts, proc macros and tests of the private SHA) could
-  have altered third-party artefacts before the save. Mitigations: saves only on main, only
-  for a SHA on a protected private branch (decided by the source checkout before any project
-  code ran), only after the concern passed and the strip proof held, never overwriting a key;
-  workspace crates are always rebuilt from source, never restored; the exact key changes with
-  the lockfile, manifests, toolchain and environment, and the ISO week in it retires every
-  entry within seven days. Code that executes in a job can still reach the job's cache
-  credentials directly, so the trust placed in a restored entry is the trust placed in the
-  protected branches' code; the same holds for the source and NuGet caches, whose contents
-  are additionally re-verified against their lock files. Entries are readable by any run in
-  this public repository, so they hold only third-party code.
+  STATUS: DISABLED in every workflow (2026-10-05, finding H1); the restore and save steps
+  carry a literal `false &&` and the cache policy (check-cache-policy.sh) fails if one does
+  not. This composite is kept for the day ref isolation exists.
+
+  Trust model, stated plainly. Cargo verifies a `.crate` download against Cargo.lock, but it
+  never re-verifies a compiled `.rlib`: a restored artefact is trusted as built. The save
+  step's conditions (main, protected private ancestry, concern passed, strip proof held, a
+  miss) only decide whether THIS workflow's save step runs; they do not decide who can write
+  the cache. A cache write is authorised by the runner's ACTIONS_RUNTIME_TOKEN, which
+  `permissions: {}` does not restrict, and project code on a hosted runner has sudo (admin on
+  Windows), so a build script, proc macro or test of ANY dispatched SHA, protected or not, can
+  read that token from the runner process and write any key itself, before or instead of
+  the save step. Every dispatch runs on ref main, so such a write lands in main's cache
+  scope; keys are first-writer-wins until evicted, and the exact key is computable from
+  public inputs plus the private lockfile the attacker's SHA already holds. The ISO week in
+  the key bounds an entry's life to seven days, it does not stop the planting. The strip and
+  proof steps keep private code out of an entry; they cannot detect a tampered third-party
+  `.rlib`. So the compiled cache is only as trustworthy as the least trusted SHA that can be
+  dispatched on main, which today is any SHA of the private repositories.
+
+  Re-enabling requires ref isolation: unprotected SHAs must run from a separate Taurine-CI
+  ref (their cache writes then land in that ref's scope, which main never reads), and only
+  protected-ancestry runs on main may restore and save. The cargo source cache shares the
+  same write exposure; it stays enabled because every restored `.crate` is re-hashed against
+  Cargo.lock before cargo runs (the NuGet cache is handled under finding M1). Entries are readable by any run in
+  this public repository, so they may only ever hold third-party code.
 
 inputs:
   mode:
