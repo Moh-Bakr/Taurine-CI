@@ -122,7 +122,8 @@ jobs:
           fi
           unset SOURCE_TOKEN
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
-          (( failed == 0 ))
+          # Explicit, not a bare (( )): errexit does not apply to (( )) in every bash.
+          if (( failed != 0 )); then exit 1; fi
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "base=${base}" >> "${GITHUB_OUTPUT}"
           echo "openssl_locked=${openssl_locked}" >> "${GITHUB_OUTPUT}"
