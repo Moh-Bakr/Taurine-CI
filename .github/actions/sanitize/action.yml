@@ -199,4 +199,23 @@ runs:
             printf '%s\n' "${clean}" | grep -E '^::error .*title=' | sed -E 's/^::error .*title=//; s/(,(file|line|col|endLine|endColumn)=.*|::.*)$//; s/^/FAIL /' | cut -c1-200
           } | awk '!seen[$0]++' | head -60
         }
+        # Failing specs from Playwright's JSON report (the console reporter is `github`, which
+        # prints nothing when the run dies before or outside a test). Prints only project, the
+        # repo-relative spec file:line and the test title, plus per-file counts of screenshot
+        # comparison failures (a count, never an image or its path). Reads the report on the
+        # runner; nothing from it is published other than these fields.
+        playwright_json_failures() {
+          local report="$1"
+          [[ -s "${report}" ]] || { echo '(no JSON report was written: the run ended before the test phase, for example a dev-server start failure)'; return 0; }
+          jq -r '
+            def specs: (.suites // [])[] | recurse(.suites[]?) | .specs[]? ;
+            [ specs as $s | $s.tests[]? as $t
+              | select(($t.status // "") != "expected" and ($t.status // "") != "skipped")
+              | { file: ($s.file // "?"), line: ($s.line // 0), title: ($s.title // "?"), project: ($t.projectName // "?"), status: ($t.status // "?"),
+                  visual: ([ $t.results[]?.error.message? // "" ] | map(select(test("Screenshot comparison failed|toHaveScreenshot|expect\\(.*\\)\\.toMatchSnapshot"))) | length) } ]
+            | (.[] | "FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))"),
+              ( group_by(.file) | map(select(any(.[]; .visual > 0))) | .[]
+                | "visual diffs: \(.[0].file): \(map(.visual) | add) screenshot mismatch(es) in \(length) test(s)" )
+          ' "${report}" 2>/dev/null | cut -c1-220 | awk '!seen[$0]++' | head -60
+        }
         TCI_SANITIZE_LIBRARY
