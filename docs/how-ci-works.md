@@ -78,8 +78,8 @@ keeps Docker. A composite called after `drop-root` may not contain `sudo` (the e
 best-effort `sudo -n` fallbacks are the one exception).
 
 The feasibility probe (a scratch workflow with no secrets, no environment and no private
-source, run on 2026-10-05 and then deleted) showed on `ubuntu-24.04`, `ubuntu-latest`,
-`macos-15` and `macos-latest` that a later step gets `sudo: a password is required` from
+source, run on 2026-10-05 and then deleted) showed, on `ubuntu-24.04`, `ubuntu-latest`,
+`macos-15` and `macos-latest`, that a later step gets `sudo: a password is required` from
 `sudo -n true` once the sudoers files are replaced. Removing the user from the `docker` group
 does **not** work on its own, because running processes keep the group they started with;
 making the socket root-only does. Later `uses:` actions (`setup-node` with an uncached
@@ -118,7 +118,14 @@ code. What remains:
 `/etc/sudoers`. Developer mode is off, so the job cannot attach a debugger to the runner
 without an authorisation it can no longer grant itself. What remains:
 
-- MACOS_RESIDUAL_PLACEHOLDER
+- The job user is out of `admin` and `_developer`, but it is still the same user as the
+  runner process. Reading the runner's memory would need either root or a debugger
+  authorisation; neither is available to the job any more. This was not tested by trying to
+  read memory, by design: the probe only proved that `sudo`, developer mode and the group
+  memberships are gone, and that the iOS simulator, Homebrew installs, a throwaway keychain,
+  `xcodebuild`, `setup-node` and `setup-dotnet` still work afterwards.
+- An authorisation prompt (for example `osascript ... with administrator privileges`) cannot
+  be answered on a headless runner; the probe showed it simply waits.
 - The job user still owns Homebrew (`/opt/homebrew`) and its own home directory. No root
   service runs anything from them during a job (the image's one root launch daemon that names
   a job-writable path, `change_hostname.plist`, runs only at boot; its script in
