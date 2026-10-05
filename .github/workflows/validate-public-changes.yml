@@ -73,6 +73,11 @@ jobs:
         shell: bash
         run: bash .github/policy/test-extractors.sh
 
+      # The Keel Dock vulnerable-package gate: clean, listed, expired, malformed and incomplete-scan fixtures.
+      - name: Test the Keel Dock vulnerability gate against fixtures
+        shell: bash
+        run: bash .github/policy/test-vuln-gate.sh
+
       # The concern table, the dispatcher's matrix and the result check agree.
       - name: Check the concern table against the dispatcher
         shell: bash

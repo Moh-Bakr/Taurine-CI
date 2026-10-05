@@ -1,7 +1,8 @@
 name: KeelDock supply-chain sub-steps
 description: >
-  The supply-chain concern (Linux): the vulnerable-package scan, warn-only unless the gate input
-  is high or critical, and the CycloneDX SBOM with its denied-licence gate. Runs after the locked
+  The supply-chain concern (Linux): the vulnerable-package scan, warn-only when the gate input is
+  none and fail-closed (an incomplete scan fails) when it is high or critical, with reviewed
+  advisory exceptions from .github/nuget-vulnerability-exceptions.txt in the private repo, and the CycloneDX SBOM with its denied-licence gate. Runs after the locked
   restore.
 
 inputs:
@@ -12,11 +13,101 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install the vulnerability-gate library
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${RUNNER_TEMP}/keeldock"
+        cat > "${RUNNER_TEMP}/keeldock/vuln-gate.sh" <<'KD_VULN_GATE_LIBRARY'
+        # shellcheck shell=bash
+        # The vulnerable-package gate (sourced): parse `dotnet list package --vulnerable` output into
+        # rows, read the optional exceptions file, and decide pass / warn / FAIL. Pure functions over
+        # files, so the policy fixtures run them without .NET. Nothing here prints a package name.
+        vg_parse() {
+          sed -E $'s/\033\\[[0-9;]*[[:alpha:]]//g' < "$1" | tr -d '\r' | awk '
+            /^[[:space:]]*>/ { for (i = 3; i <= NF; i++) if ($i ~ /^(Low|Moderate|High|Critical)$/) {
+              adv = $NF; sub(/.*\//, "", adv); print $2 "\t" $(i - 1) "\t" adv "\t" $i; break } }
+          ' | sort -u
+        }
+        # Exceptions file, one entry per line: `<GHSA-or-CVE-id>  <review-by YYYY-MM-DD>  # reason`.
+        # Blank lines and whole-line comments are skipped. An entry is honoured through its review-by
+        # date (inclusive) and no longer after it. A line that is not a well-formed entry with a real
+        # date and a non-empty reason is malformed. Sets vg_active and vg_expired (space-delimited,
+        # upper-case ids) and vg_malformed (the count) and vg_malformed_lines (line numbers).
+        vg_load_exceptions() {
+          local file="$1" today="$2" line n=0 id date re mo dy
+          vg_active=' '; vg_expired=' '; vg_malformed=0; vg_malformed_lines=''
+          [[ -f "${file}" ]] || return 0
+          re='^(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|CVE-[0-9]{4}-[0-9]{4,})[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]]+#[[:space:]]*[^[:space:]]'
+          shopt -s nocasematch
+          while IFS= read -r line || [[ -n "${line}" ]]; do
+            n=$((n + 1)); line="${line%$'\r'}"
+            [[ "${line}" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+            if [[ "${line}" =~ ${re} ]]; then
+              id="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"; date="${BASH_REMATCH[2]}"
+              mo="${date:5:2}"; dy="${date:8:2}"
+              if (( 10#${mo} >= 1 && 10#${mo} <= 12 && 10#${dy} >= 1 && 10#${dy} <= 31 )); then
+                if [[ ! "${date}" < "${today}" ]]; then vg_active+="${id} "; else vg_expired+="${id} "; fi
+                continue
+              fi
+            fi
+            vg_malformed=$((vg_malformed + 1)); vg_malformed_lines+="${vg_malformed_lines:+,}${n}"
+          done < "${file}"
+          shopt -u nocasematch
+          return 0
+        }
+        vg_join() { sort -u | awk 'NR <= 20 { printf "%s%s", (NR > 1 ? ", " : ""), $0 } NR == 21 { printf ", ..." }'; }
+        # vuln_gate_evaluate GATE ROWS LOG RC EXCEPTIONS_FILE TODAY
+        # Sets vg_status (pass, warn or FAIL) and vg_detail. With gate none it only reports. With high
+        # or critical it fails closed: an incomplete scan or a malformed exceptions file is a FAIL.
+        vuln_gate_evaluate() {
+          local gate="$1" rows="$2" log="$3" rc="$4" exc="$5" today="$6"
+          local total below=0 excepted=0 gated=0 sev adv ver id why='' failing='' excepted_ids='' expired_hits=''
+          total="$(grep -c . "${rows}" || true)"
+          if [[ "${rc}" -ne 0 ]]; then why="the command exited ${rc}"
+          elif grep -qE '(error|warning) NU190[0-9]' "${log}"; then why='the advisory feed could not be read (NU190x)'
+          elif ! grep -qE 'has no vulnerable packages|has the following vulnerable packages' "${log}"; then why='the output had no recognisable result'
+          elif grep -q 'has the following vulnerable packages' "${log}" && [[ "${total}" -eq 0 ]]; then why='the output listed vulnerable packages that could not be parsed'
+          fi
+          if [[ -n "${why}" ]]; then
+            if [[ "${gate}" == none ]]; then vg_status=warn; vg_detail="scan did not complete (${why}); no result claimed"
+            else vg_status=FAIL; vg_detail="scan did not complete (${why}); the ${gate} gate fails closed"; fi
+            return 0
+          fi
+          if [[ "${gate}" != none ]]; then
+            vg_load_exceptions "${exc}" "${today}"
+            if [[ "${vg_malformed}" -gt 0 ]]; then
+              vg_status=FAIL; vg_detail="${vg_malformed} malformed line(s) in the exceptions file (line ${vg_malformed_lines}); expected '<GHSA-or-CVE-id>  <review-by YYYY-MM-DD>  # reason'"
+              return 0
+            fi
+          else vg_active=' '; vg_expired=' '; fi
+          while IFS=$'\t' read -r _ ver adv sev; do
+            [[ -n "${adv}" ]] || continue
+            id="$(printf '%s' "${adv}" | tr '[:lower:]' '[:upper:]')"
+            if [[ ( "${gate}" == high && ( "${sev}" == High || "${sev}" == Critical ) ) || ( "${gate}" == critical && "${sev}" == Critical ) ]]; then
+              if [[ "${vg_active}" == *" ${id} "* ]]; then excepted=$((excepted + 1)); excepted_ids+="${id}"$'\n'
+              else gated=$((gated + 1)); failing+="${id}"$'\n'; [[ "${vg_expired}" == *" ${id} "* ]] && expired_hits+="${id}"$'\n'; fi
+            else below=$((below + 1)); fi
+          done < "${rows}"
+          if [[ "${gated}" -gt 0 ]]; then
+            vg_status=FAIL; vg_detail="${gated} advisory(ies) at or above the ${gate} gate: $(printf '%s' "${failing}" | vg_join)"
+            [[ -n "${expired_hits}" ]] && vg_detail+="; exception expired, review overdue: $(printf '%s' "${expired_hits}" | vg_join)"
+            [[ "${excepted}" -gt 0 ]] && vg_detail+="; ${excepted} excepted: $(printf '%s' "${excepted_ids}" | vg_join)"
+          elif [[ "${total}" -gt 0 ]]; then
+            vg_status=warn; vg_detail="${total} advisory(ies), none at or above the ${gate} gate that is not excepted (gate: ${gate})"
+            [[ "${excepted}" -gt 0 ]] && vg_detail+="; ${excepted} excepted until review: $(printf '%s' "${excepted_ids}" | vg_join)"
+            [[ "${below}" -gt 0 ]] && vg_detail+="; ${below} below the gate"
+            [[ "${gate}" == none ]] && vg_detail="${total} advisory(ies); warn-only (gate: none)"
+          else vg_status=pass; vg_detail='none reported'; fi
+          return 0
+        }
+        KD_VULN_GATE_LIBRARY
     - name: Scan packages and generate the SBOM
       shell: bash
       working-directory: ${{ github.workspace }}/src
       env:
         VULN_FAIL_ON: ${{ inputs.vulnerability-gate }}
+        VULN_EXCEPTIONS_FILE: .github/nuget-vulnerability-exceptions.txt
         CDX_VERSION: '6.2.0'
         CDX_SHA256: 3473525381eee02a649b75bbf5b4f0ffa66112f62917aff798fed196e290a884
       run: |
@@ -28,37 +119,30 @@ runs:
         # Vulnerable packages (direct and transitive, from the NuGet advisory feed) and the
         # CycloneDX SBOM; the locked package set is identical on every OS, so Linux alone runs
         # them. Published: a hash of the package id (no dependency name), advisory id (the last
-        # segment of the public advisory URL) and severity; warn-only unless VULN_FAIL_ON is
-        # high or critical.
+        # segment of the public advisory URL) and severity; warn-only when VULN_FAIL_ON is
+        # none; high or critical fail closed and honour the dated exceptions file.
         if ! passed restore; then
           skip_all 'restore did not pass' vulnerable-packages sbom-generate
         else
           vuln_log="${RUNNER_TEMP}/vulnerable.log"; vuln_rows="${RUNNER_TEMP}/vulnerable.tsv"
+          source "${RUNNER_TEMP}/keeldock/vuln-gate.sh"
           dotnet list KeelDock.Cloud.slnx package --vulnerable --include-transitive --no-restore >"${vuln_log}" 2>&1; vuln_rc=$?
-          strip_ansi < "${vuln_log}" | tr -d '\r' | awk '
-            /^[[:space:]]*>/ { for (i = 3; i <= NF; i++) if ($i ~ /^(Low|Moderate|High|Critical)$/) {
-              adv = $NF; sub(/.*\//, "", adv); print $2 "\t" $(i - 1) "\t" adv "\t" $i; break } }
-          ' | sort -u > "${vuln_rows}"
-          vuln_count="$(grep -c . "${vuln_rows}" || true)"
-          vuln_gated="$(awk -F'\t' -v gate="${VULN_FAIL_ON}" '
-            (gate == "high" && ($4 == "High" || $4 == "Critical")) || (gate == "critical" && $4 == "Critical") { n++ }
-            END { print n + 0 }' "${vuln_rows}")"
-          if [[ "${vuln_rc}" -ne 0 && "${vuln_count}" -eq 0 ]]; then
-            echo '::warning title=Vulnerable-package scan::the scan did not complete (advisory feed unreachable or the command failed); no result is claimed'
-            record vulnerable-packages warn 'scan did not complete; no result claimed'
-          elif [[ "${vuln_gated}" -gt 0 ]]; then
-            echo "vulnerable-packages: failed (${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate)" >&2
-            record vulnerable-packages FAIL "${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate"; any_failed=1
-          elif [[ "${vuln_count}" -gt 0 ]]; then
+          vg_parse "${vuln_log}" > "${vuln_rows}"
+          vuln_gate_evaluate "${VULN_FAIL_ON}" "${vuln_rows}" "${vuln_log}" "${vuln_rc}" "${VULN_EXCEPTIONS_FILE}" "$(date -u +%F)"
+          if [[ "${vg_status}" == FAIL ]]; then
+            echo "vulnerable-packages: failed (${vg_detail})" >&2
+            record vulnerable-packages FAIL "${vg_detail}"; any_failed=1
+          elif [[ "${vg_status}" == warn ]]; then
+            [[ -s "${vuln_rows}" ]] || echo "::warning title=Vulnerable-package scan::${vg_detail}"
             # Package ids are published as a name hash only (8 hex of the SHA-256), with the
             # advisory id and severity; run `dotnet list package --vulnerable --include-transitive`
             # in the private checkout to see the names.
             while IFS=$'\t' read -r vp_id vp_ver vp_adv vp_sev; do
               printf '::warning title=Vulnerable package::%s (%s, %s)\n' "$(printf '%s' "${vp_id}" | sha256sum | cut -c1-8)" "${vp_adv}" "${vp_sev}"
             done < "${vuln_rows}" | awk 'NR <= 50'
-            record vulnerable-packages warn "${vuln_count} advisory(ies); warn-only (gate: ${VULN_FAIL_ON})"
+            record vulnerable-packages warn "${vg_detail}"
           else
-            record vulnerable-packages pass 'none reported'
+            record vulnerable-packages pass "${vg_detail}"
           fi
           # SBOM: a pinned CycloneDX release, its package hash checked before it is unpacked
           # (no NuGet resolution), run over the restored solution. The BOM never leaves the

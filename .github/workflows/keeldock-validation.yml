@@ -20,10 +20,13 @@ name: KeelDock Cloud source validation (protected)
 # known-vulnerable or denied-licence package. The Aspire AppHost cold start (`apphost-cold-start`, a
 # fourteenth job) is opt-in: dispatch with `apphost: true`.
 #
-# **Making the vulnerable-package scan blocking.** It is warn-only by default. Dispatch with
-# `vulnerability_gate: high` (fail on High and Critical) or `critical` (Critical only); to change the
-# default, edit `default:` of that input below, in a reviewed commit. The denied-licence list is
-# `SBOM_DENIED_LICENSES` in keeldock-validation-concern.yml.
+# **The vulnerable-package gate is blocking by default** (`vulnerability_gate: high`: High and Critical
+# advisories fail supply-chain). It fails closed: if the scan cannot complete (feed unreachable, a non-zero
+# exit, unparseable output) the step fails rather than warns. `critical` fails on Critical only; `none` is
+# report-only and warns. A reviewed exception for an advisory with no fix lives in the private repository
+# at `.github/nuget-vulnerability-exceptions.txt`, one `<GHSA-or-CVE-id>  <review-by YYYY-MM-DD>  # reason`
+# per line; it is honoured through its review-by date and the gate fails again after it. The denied-licence
+# list is `SBOM_DENIED_LICENSES` in keeldock-validation-concern.yml.
 on:
   workflow_dispatch:
     inputs:
@@ -32,9 +35,9 @@ on:
         required: true
         type: string
       vulnerability_gate:
-        description: Vulnerable-package scan severity that fails the supply-chain concern (none = warn-only)
+        description: Vulnerable-package scan severity that fails the supply-chain concern (high = High and Critical, fail-closed; none = warn-only)
         required: false
-        default: none
+        default: high
         type: choice
         options: [none, high, critical]
       apphost:

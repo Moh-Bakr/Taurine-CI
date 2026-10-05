@@ -309,7 +309,28 @@ Only Linux uses `base_sha`; the other platforms always run their whole list.
 | `apphost` | Keel Dock | Adds the experimental Aspire apphost-cold-start concern |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
 | `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
-| `vulnerability_gate` | Keel Dock | `none` (warn-only), `high` or `critical`: the severity that fails supply-chain |
+| `vulnerability_gate` | Keel Dock | `high` (default), `critical` or `none` (warn-only): the severity that fails supply-chain; `high` and `critical` fail closed |
+
+### The Keel Dock vulnerability gate
+
+The `keeldock-supply-chain` composite runs `dotnet list package --vulnerable --include-transitive` after
+the locked restore. The gate is `high` by default, so any High or Critical advisory fails the
+`vulnerable-packages` sub-step and with it the concern.
+
+- **Fail closed.** With `high` or `critical`, a scan that cannot complete (a non-zero exit, an NU190x
+  feed error, no recognisable result, or output listing packages that cannot be parsed) is a FAIL, not a
+  warning. With `none` it stays a warning and no result is claimed.
+- **Exceptions.** An advisory with no fix, or one that does not apply, is recorded in the private
+  repository at `.github/nuget-vulnerability-exceptions.txt`, one entry per line:
+  `<GHSA-or-CVE-id>  <review-by YYYY-MM-DD>  # reason`. Blank lines and whole-line `#` comments are
+  allowed. An entry is honoured through its review-by date (inclusive), then the gate fails again
+  until the package is fixed or the entry is re-reviewed. A line without a valid id, a real date and a
+  non-empty reason is malformed and fails the gate even when nothing is vulnerable. The file is read
+  from the validated commit, so adding an entry is a reviewed private-repository change.
+- **Publication.** Only advisory ids, severities, counts and an 8-hex package-name hash are published.
+  Run the `dotnet list` command in the private checkout to see names.
+- **Tests.** `.github/policy/test-vuln-gate.sh` runs the library over fixtures (clean, unlisted,
+  listed in date, expired, malformed, incomplete scan) in the public-changes policy.
 
 ## The Result verdict
 

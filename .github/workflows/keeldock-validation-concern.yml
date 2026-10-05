@@ -46,9 +46,9 @@ on:
         required: true
         type: string
       vulnerability_gate:
-        description: none (warn-only), high (fail on High and Critical advisories) or critical (fail on Critical only)
+        description: none (warn-only), high (fail on High and Critical advisories; the default) or critical (fail on Critical only); high and critical fail closed when the scan cannot complete
         required: false
-        default: none
+        default: high
         type: string
       apphost:
         description: Whether the experimental apphost-cold-start concern may run (it is skipped otherwise)
