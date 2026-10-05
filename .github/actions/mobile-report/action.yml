@@ -82,4 +82,63 @@ runs:
           if declare -F mobile_extra_detail >/dev/null; then mobile_extra_detail "${label}" "${log}"; fi
           exit 1
         }
+        # ---- Test execution (device or simulator) -------------------------------------------
+        # Test binaries of the mobile crate for one target, as built by an earlier
+        # `cargo test --no-run`: one absolute path per line (runner-local, never published).
+        mobile_test_executables() {
+          cargo test --locked --no-run --package taurine-mobile --target "$1" --message-format=json 2>/dev/null |
+            jq -R -r 'fromjson? | select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' |
+            sort -u
+        }
+
+        # mobile_test_execute <label> <where> <runner> <binary>...
+        # Runs each test binary through <runner> (a function taking the binary path), sums the
+        # libtest `test result:` lines and publishes counts, binary names (hash removed), failing
+        # test names and classified panics. Fail-closed: a failure, a binary that ends without a
+        # result line (crash, missing library) or zero executed tests fails the concern. Ignored
+        # tests are reported as skipped and never count as executed.
+        mobile_test_execute() {
+          local label="$1" where="$2" runner="$3"; shift 3
+          local verdict bin name log rc counts p f ig n i=0 passed=0 failed=0 skipped=0 binaries=0 bad=0
+          local rows=''
+          if [[ "$#" -eq 0 ]]; then
+            echo "${label}: no test binaries were found (zero tests discovered is a failure)" >&2
+            exit 1
+          fi
+          for bin in "$@"; do
+            i=$((i + 1)); binaries=$((binaries + 1))
+            name="$(basename "${bin}")"; name="${name%-*}"
+            log="${RUNNER_TEMP}/${label}-${i}.log"; rc=0
+            "${runner}" "${bin}" >"${log}" 2>&1 || rc=$?
+            tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
+            counts="$(awk '/^test result: /{ for (k = 1; k <= NF; k++) { if ($k == "passed;") p += $(k-1); if ($k == "failed;") f += $(k-1); if ($k == "ignored;") g += $(k-1) } n++ } END { print p+0, f+0, g+0, n+0 }' "${log}")"
+            read -r p f ig n <<<"${counts}"
+            passed=$((passed + p)); failed=$((failed + f)); skipped=$((skipped + ig))
+            verdict=ok
+            if [[ "${n}" -eq 0 ]]; then verdict="FAILED (exit ${rc}, no result line)"
+            elif [[ "${rc}" -ne 0 ]]; then verdict="FAILED (exit ${rc})"; fi
+            rows+="| \`${name}\` | ${p} | ${f} | ${ig} | ${verdict} |"$'\n'
+            if [[ "${rc}" -ne 0 || "${n}" -eq 0 || "${f}" -gt 0 ]]; then
+              bad=$((bad + 1))
+              echo "${label}: ${name} failed (exit ${rc}; ${p} passed, ${f} failed, ${n} result line(s))" >&2
+              failed_test_names "${log}" | sed 's/^/  failed: /' >&2
+              panic_summary "${log}" >&2
+            fi
+          done
+          {
+            echo "### ${label}: tests executed on ${where}"
+            echo
+            echo "- Passed: ${passed}; failed: ${failed}; skipped (ignored): ${skipped}; executed: $((passed + failed)); test binaries: ${binaries}"
+            echo
+            echo '| Test binary | Passed | Failed | Skipped | Result |'
+            echo '| --- | ---: | ---: | ---: | --- |'
+            printf '%s' "${rows}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "${label}: ${passed} passed, ${failed} failed, ${skipped} skipped on ${where}"
+          if [[ "${bad}" -gt 0 || "${failed}" -gt 0 ]]; then exit 1; fi
+          if [[ "$((passed + failed))" -eq 0 ]]; then
+            echo "${label}: zero tests were executed (a run that discovers no tests is a failure)" >&2
+            exit 1
+          fi
+        }
         TCI_MOBILE_REPORT_LIBRARY

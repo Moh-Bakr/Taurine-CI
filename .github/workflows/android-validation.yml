@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       rust:
-        description: Run the mobile Rust test-target build
+        description: Build and run the mobile Rust tests (on an x86_64 emulator)
         required: false
         default: false
         type: boolean
@@ -31,7 +31,7 @@ env:
 
 jobs:
   # Builds the concern matrix from the `rust` input and reports the choice. It
-  # holds no source, token or environment. The mobile Rust test-target build is
+  # holds no source, token or environment. The mobile Rust test build-and-run concern is
   # opt-in, as the Rust concerns are on macOS and Windows: dispatch with
   # `-f rust=true` for plan tips, develop/uat/main tips and mobile-touching branches.
   plan:
@@ -75,11 +75,10 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      # android-rust (the mobile crate's test targets, compile-only) is added by the
-      # `plan` job when rust=true. The emulator-free hosted runner is x86_64, so the
-      # aarch64 test binaries are built and linked but cannot be executed here; the
-      # host-side Rust tests of the same crate run in the macOS and Linux rust-app
-      # concerns.
+      # android-rust is added by the `plan` job when rust=true. The aarch64 test targets
+      # are built and linked (compile-only); the x86_64 test binaries of the same crate
+      # are executed on a KVM-accelerated x86_64 emulator. The crate is cfg(mobile), so
+      # its tests exist only on an Android target and cannot run on the host.
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:
@@ -146,6 +145,13 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/android-sdk-setup  # zizmor: ignore[self-repository]
 
+      - name: Start the Android emulator in the background
+        if: matrix.concern == 'android-rust'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/android-emulator-tests  # zizmor: ignore[self-repository]
+        with:
+          phase: boot
+
       - name: Set up Node.js and install the locked JavaScript dependencies
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
@@ -188,8 +194,8 @@ jobs:
             android-rust)
               # Compile-only: build and link every test target of the mobile crate for
               # the Android triple, so the `cfg(target_os = "android")` code and its
-              # tests are type-checked and linked on a hosted runner. They are not
-              # executed (no device or emulator here).
+              # tests are type-checked and linked on a hosted runner. They are executed
+              # on the emulator in the next step, for x86_64.
               mobile_run android-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-linux-android
               ;;
             *)
@@ -197,6 +203,13 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Run the Rust tests on the emulator
+        if: matrix.concern == 'android-rust'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/android-emulator-tests  # zizmor: ignore[self-repository]
+        with:
+          phase: run
 
       - name: Publish sanitized validation proof
         shell: bash
