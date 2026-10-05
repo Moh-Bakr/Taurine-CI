@@ -260,16 +260,13 @@ jobs:
       # of their contents; one cache per OS serves every concern (all do the same locked restore). The
       # key is computed here, before project code, and the save reuses it (cache-primary-key).
       #
-      # DISABLED (2026-10-05, findings H1 and M1): a cache write is authorised by the runner's runtime
-      # token, which project code of ANY dispatched SHA can read (it has root on a hosted runner), and
-      # every run is on ref main, so an unprotected SHA can plant main's entry directly. Re-hashing the
-      # restored packages (below) defeats a tampered package, but not the archive itself: the cache action
-      # extracts with `tar -P` relative to the workspace, so a planted archive can write files outside
-      # the cached path. Restore and save carry a literal `false &&` (the cache policy enforces it) until
-      # unprotected SHAs run from a separate ref whose cache scope main never reads.
+      # Main only, for a protected source SHA (ref isolation, findings H1 and M1): a cache write
+      # needs only the runner's runtime token, so feature-branch SHAs run from the untrusted ref, whose
+      # cache scope main never reads, and main runs only protected-ancestry SHAs. Restore and save carry
+      # both top-level terms (github.ref == main, protected-ancestor == true); the cache policy enforces it.
       - name: Restore cached NuGet packages
         id: nuget-packages
-        if: ${{ false && steps.verified-source.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.verified-source.outcome == 'success' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -379,7 +376,7 @@ jobs:
       # is written once), only after the verification and the whole concern passed, and under the key
       # computed before project code, never a hashFiles evaluated after it.
       - name: Save verified NuGet packages
-        if: ${{ false && github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.nuget-packages.outputs.cache-hit != 'true' && steps.nuget-verify.outcome == 'success' && steps.concern-summary.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.nuget-packages.outputs.cache-hit != 'true' && steps.nuget-verify.outcome == 'success' && steps.concern-summary.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

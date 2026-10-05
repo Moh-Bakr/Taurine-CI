@@ -168,14 +168,15 @@ cache_expect_fail 'save without the proof' 'strip-and-prove step' \
   's/ && steps\.cargo-target-strip\.outcome == .success.//'
 cache_expect_fail 'a target path outside the reviewed three' 'Disallowed cache path line' \
   's#outputs\.dir \}\}/debug/build#outputs.dir }}/debug#'
-cache_expect_fail 'compiled cache restore re-enabled' 'disabled until ref isolation exists' \
-  's/if: \$\{\{ false && (startsWith\(inputs\.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
-cache_expect_fail 'compiled cache save re-enabled' 'disabled until ref isolation exists' \
-  's/if: \$\{\{ false && (github\.ref == .refs\/heads\/main. && inputs\.concern == .rust-app-2. && [^\n]*cargo-target-strip\.outcome)/if: \$\{\{ $1/'
-cache_expect_fail 'compiled cache gate re-opened by ||' 'disabled until ref isolation exists' \
-  's/(if: \$\{\{ false && startsWith\(inputs\.concern, .rust-app-.\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
-cache_expect_fail 'compiled cache strip re-enabled' 'strip steps are disabled' \
-  's/if: \$\{\{ false && (github\.ref == [^\n]*steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
+# Ref isolation: the compiled cache runs only on main for a protected source SHA.
+cache_expect_fail 'compiled cache restore without the main guard' 'runs only on main for a protected source SHA' \
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && startsWith\(inputs\.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
+cache_expect_fail 'compiled cache restore without protected ancestry' 'runs only on main for a protected source SHA' \
+  's/(if: \$\{\{ github\.ref == .refs\/heads\/main. && )steps\.verified-source\.outputs\.protected-ancestor == .true. && (startsWith\(inputs\.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/$1$2/'
+cache_expect_fail 'compiled cache gate re-opened by ||' 'runs only on main for a protected source SHA' \
+  's/(if: \$\{\{ github\.ref == [^\n]*startsWith\(inputs\.concern, .rust-app-.\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
+cache_expect_fail 'compiled cache strip without the main guard' 'strip step runs only on main' \
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (inputs\.concern == .rust-app-2. && [^\n]*steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
 # Findings L1-L3: the source cache holds only the verified archives, saves under the restore's
 # key, and the required save terms count only as exact top-level conjuncts.
 cache_expect_fail 'the unverified registry index' 'Disallowed cache path line' \
@@ -189,19 +190,17 @@ cache_expect_fail 'protected ancestry inside an always-true alternative' 'exact 
 cache_expect_fail 'protected ancestry negated' 'exact top-level term' \
   's/ && (steps\.verified-source\.outputs\.protected-ancestor == .true.) && steps\.cargo-sources/ \&\& !($1) \&\& steps.cargo-sources/g'
 cache_expect_fail 'the main guard inside an always-true alternative' 'main branch as a top-level term' \
-  's/if: \$\{\{ false && (github\.ref == .refs\/heads\/main.) && (\(inputs\.concern == .taurine-cli.)/if: \${{ false \&\& ($1 || true) \&\& $2/g'
-# Finding H1 extended: the cargo source cache restore, its completion step and its save are off,
-# and a setup action's built-in cache stays off.
-cache_expect_fail 'cargo source restore re-enabled' 'cargo source cache is disabled' \
-  's/if: \$\{\{ false && \((inputs\.concern == .taurine-cli.[^\n]*)\) \}\}(\n        uses: actions\/cache\/restore)/if: \$\{\{ $1 }}$2/'
-cache_expect_fail 'cargo source restore gate re-opened by ||' 'cargo source cache is disabled' \
-  's/(if: \$\{\{ false && \(inputs\.concern == .taurine-cli.[^\n]*\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
-cache_expect_fail 'cargo source save re-enabled' 'cargo source cache is disabled' \
-  's/false && (github\.ref == [^\n]*\n        uses: actions\/cache\/save\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0\n        with:\n          path: \|\n            \$\{\{ steps\.cargo-home)/$1/'
-cache_expect_fail 'cargo source completion step re-enabled' 'cargo source cache is disabled' \
-  's/false && (github\.ref == [^\n]*\n        shell: bash\n        run: \|\n          set -euo pipefail\n          while IFS= read -r lock)/$1/'
-cache_expect_fail 'cargo source restore with no condition' 'cargo source cache is disabled' \
-  's/\n        if: \$\{\{ false && \(inputs\.concern == .taurine-cli.[^\n]*\) \}\}(\n        uses: actions\/cache\/restore)/$1/'
+  's/if: \$\{\{ (github\.ref == .refs\/heads\/main.) && (\(inputs\.concern == .taurine-cli.)/if: \${{ ($1 || true) \&\& $2/g'
+# Ref isolation: the cargo source cache restore, its completion step and its save run only on
+# main for a protected source SHA, and a setup action's built-in cache stays off.
+cache_expect_fail 'cargo source restore without the main guard' 'cargo source cache runs only on main' \
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && \(inputs\.concern == .taurine-cli.[^\n]*\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
+cache_expect_fail 'cargo source restore gate re-opened by ||' 'cargo source cache runs only on main' \
+  's/(if: \$\{\{ github\.ref == [^\n]*\(inputs\.concern == .taurine-cli.[^\n]*\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
+cache_expect_fail 'cargo source completion step without the main guard' 'cargo source cache runs only on main' \
+  's/github\.ref == .refs\/heads\/main. && ([^\n]*\n        shell: bash\n        run: \|\n          set -euo pipefail\n          while IFS= read -r lock)/$1/'
+cache_expect_fail 'cargo source restore with no condition' 'cargo source cache runs only on main' \
+  's/\n        if: \$\{\{ github\.ref == [^\n]*\(inputs\.concern == .taurine-cli.[^\n]*\) \}\}(\n        uses: actions\/cache\/restore)/$1/'
 # A built-in setup cache: setup-node without the opt-out, or a `cache:` input.
 node_fixture="${base}/node-cache.yml"
 for mutation in 's/^( +)package-manager-cache: false\n//m' 's/^( +)package-manager-cache: false$/$1package-manager-cache: false\n$1cache: npm/m'; do
@@ -212,9 +211,9 @@ for mutation in 's/^( +)package-manager-cache: false\n//m' 's/^( +)package-manag
   fi
 done
 (source "${policy}/check-cache-policy.sh"; check_builtin_cache_off .github/actions/node-setup/action.yml) || { echo 'the reviewed setup-node step should pass' >&2; exit 1; }
-echo 'cache policy fixtures: the compiled-dependency guards reject restore-keys, an unguarded save, an unreviewed path and a re-enabled cache'
+echo 'cache policy fixtures: the cache guards reject restore-keys, an unguarded save, an unreviewed path and a cache step outside protected main'
 
-# The KeelDock NuGet cache: the reviewed concern passes; a re-enabled restore or save, a save
+# The KeelDock NuGet cache: the reviewed concern passes; a restore outside protected main, a save
 # without the protected-ancestry answer and a save key evaluated after project code fail. The
 # policy recognises the concern by its repository path, so each fixture is checked from its own
 # root under that path.
@@ -230,15 +229,15 @@ nuget_expect_fail() {
   grep -qF -- "${needle}" "${base}/err" || { echo "NuGet fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
 }
 (source "${policy}/check-cache-policy.sh"; check_cache_policy .github/workflows/keeldock-validation-concern.yml) || { echo 'the reviewed NuGet cache steps should pass' >&2; exit 1; }
-nuget_expect_fail 'NuGet restore re-enabled' 'NuGet cache is disabled' \
-  's/if: \$\{\{ false && (steps\.verified-source\.outcome)/if: \$\{\{ $1/'
-nuget_expect_fail 'NuGet save re-enabled' 'NuGet cache is disabled' \
-  's/if: \$\{\{ false && (github\.ref == .refs\/heads\/main. && steps\.verified-source\.outputs)/if: \$\{\{ $1/'
+nuget_expect_fail 'NuGet restore without the main guard' 'NuGet cache runs only on main' \
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && steps\.verified-source\.outcome)/if: \$\{\{ $1/'
+nuget_expect_fail 'NuGet restore gate re-opened by ||' 'NuGet cache runs only on main' \
+  's/(if: \$\{\{ github\.ref == [^\n]*steps\.verified-source\.outcome == .success.) \}\}/$1 || true }}/'
 nuget_expect_fail 'NuGet save without protected ancestry' 'protected-ancestry answer' \
-  's/ && steps\.verified-source\.outputs\.protected-ancestor == .true.//'
+  's/ && steps\.verified-source\.outputs\.protected-ancestor == .true.( && steps\.nuget-packages\.outputs\.cache-hit)/$1/'
 nuget_expect_fail 'NuGet save key after project code' 'cache-primary-key' \
   's/key: \$\{\{ steps\.nuget-packages\.outputs\.cache-primary-key \}\}/key: nuget-\$\{\{ runner.os \}\}-\$\{\{ hashFiles(\x27**\/packages.lock.json\x27) \}\}/'
-echo 'cache policy fixtures: the NuGet guards reject a re-enabled cache, an unprotected save and a late save key'
+echo 'cache policy fixtures: the NuGet guards reject a cache step outside protected main, an unprotected save and a late save key'
 
 # Root removal (finding H2): the reviewed protected workflows pass, and each drop-root rule
 # rejects the one mutation it exists for. The fixture sits in a tree whose composites are this

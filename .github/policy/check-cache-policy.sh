@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # The reviewed cargo and NuGet source cache policy (sourced).
 
-# Finding H1 (2026-10-05): the compiled-dependency cache stays off until unprotected SHAs
-# run from a Taurine-CI ref whose cache scope main never reads. A gated-off condition is
-# `if: ${{ false && ... }}` with no `||` outside parentheses (which would re-open it).
-compiled_cache_gated_off() {
-  local cond="$1" terms
-  [[ "$cond" =~ ^[[:space:]]*if:[[:space:]]*\$\{\{[[:space:]]*false[[:space:]]+\&\&[[:space:]] ]] || return 1
-  terms="$(cond_top_terms "$cond")" || return 1
-  [[ "$(head -n 1 <<<"$terms")" == false ]]
+# Finding H1 (2026-10-05), with ref isolation: unprotected SHAs run from the untrusted ref,
+# whose cache scope main never reads, and main runs only protected-ancestry SHAs. So the cargo
+# source, compiled-dependency and NuGet caches run only on main for a protected source SHA: every
+# restore, save and helper step of them has both exact top-level terms below, and no `||` at the
+# top level (which would re-open the gate). Defined after cond_top_terms, which it calls.
+cache_gated_to_protected_main() {
+  local cond="$1"
+  cond_requires "$cond" "github.ref == 'refs/heads/main'" \
+    && cond_requires "$cond" "steps.verified-source.outputs.protected-ancestor == 'true'"
 }
+GATE_RULE="runs only on main for a protected source SHA (ref isolation, finding H1): the step must have the top-level terms github.ref == 'refs/heads/main' and steps.verified-source.outputs.protected-ancestor == 'true', with no unparenthesised ||"
 
 # Built-in action caches (finding H1 extended, 2026-10-05). `setup-node` (v5 and later) and the
 # other `setup-*` actions restore the package manager's downloads from the same cache scope an
@@ -80,8 +82,8 @@ check_cache_policy() {
   # - cargo's downloaded third-party `.crate` archives (registry/cache under
   #   Cargo home), re-hashed against the private Cargo.lock checksums after
   #   every restore and saved before any project code runs;
-  # - compiled third-party crates (2026-10-05, approved; DISABLED the same
-  #   day, finding H1, see compiled_cache_gated_off): the deps/,
+  # - compiled third-party crates (2026-10-05, approved; main and protected
+  #   SHAs only, finding H1, see cache_gated_to_protected_main): the deps/,
   #   build/ and .fingerprint/ directories of the debug profile under the
   #   located target directory, which is always outside the private
   #   checkout. The rust-target-cache composite strips every workspace,
@@ -179,14 +181,13 @@ check_cache_policy() {
       /^[[:space:]]+key:/ { key = $0 }
       END { flush() }
     ' "$workflow")
-    # Finding H1, extended (2026-10-05): the cargo source cache is off too. actions/cache extracts
-    # with absolute paths and a cache write needs only the runner's runtime token, so any run's
-    # code can plant an entry in main's scope that a protected run would restore; re-hashing the
-    # `.crate` files afterwards cannot see a file written elsewhere. The restore, the completion
-    # step that only exists to feed the save, and the save each need a leading literal `false &&`.
+    # Finding H1, extended: actions/cache extracts with absolute paths and a cache write needs
+    # only the runner's runtime token, so an entry is only as trustworthy as whoever can write
+    # main's scope. The restore, the completion step that only exists to feed the save, and the
+    # save each run only on main for a protected source SHA (cache_gated_to_protected_main).
     while IFS= read -r cond; do
-      if ! compiled_cache_gated_off "$cond"; then
-        echo "The cargo source cache is disabled until ref isolation exists (finding H1): the restore, completion and save steps must be conditioned on a leading literal 'false &&' with no unparenthesised ||: $cond" >&2
+      if ! cache_gated_to_protected_main "$cond"; then
+        echo "The cargo source cache ${GATE_RULE}: $cond" >&2
         exit 1
       fi
     done < <(awk '
@@ -216,8 +217,8 @@ check_cache_policy() {
           echo "A compiled-dependency save must require the strip-and-prove step: $cond" >&2
           exit 1
         fi
-        if ! compiled_cache_gated_off "$cond"; then
-          echo "The compiled-dependency cache is disabled until ref isolation exists (finding H1): every restore and save must be conditioned on a leading literal 'false &&' with no unparenthesised ||: $cond" >&2
+        if ! cache_gated_to_protected_main "$cond"; then
+          echo "The compiled-dependency cache ${GATE_RULE}: $cond" >&2
           exit 1
         fi
       done < <(awk '
@@ -233,8 +234,8 @@ check_cache_policy() {
       ' "$workflow")
       # The restore-time and save-time strips of the composite are gated off with them.
       while IFS= read -r cond; do
-        if ! compiled_cache_gated_off "$cond"; then
-          echo "The compiled-dependency strip steps are disabled with the cache (finding H1): $cond" >&2
+        if ! cache_gated_to_protected_main "$cond"; then
+          echo "The compiled-dependency strip step ${GATE_RULE}: $cond" >&2
           exit 1
         fi
       done < <(awk '
@@ -262,8 +263,8 @@ check_cache_policy() {
       # save key is the restore step's primary key (computed before project
       # code), never a hashFiles evaluated after it.
       while IFS='|' read -r cond key; do
-        if ! compiled_cache_gated_off "$cond"; then
-          echo "The NuGet cache is disabled until ref isolation exists (findings H1/M1): every restore and save must be conditioned on a leading literal 'false &&': $cond" >&2
+        if ! cache_gated_to_protected_main "$cond"; then
+          echo "The NuGet cache ${GATE_RULE}: $cond" >&2
           exit 1
         fi
         if [[ -n "$key" && "$key" != *'key: ${{ steps.nuget-packages.outputs.cache-primary-key }}' ]]; then

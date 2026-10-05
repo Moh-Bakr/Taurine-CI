@@ -16,9 +16,9 @@ description: |
   sizes are printed, never crate names: the dependency inventory of the private lockfile is
   not published.
 
-  STATUS: DISABLED in every workflow (2026-10-05, finding H1); the restore and save steps
-  carry a literal `false &&` and the cache policy (check-cache-policy.sh) fails if one does
-  not. This composite is kept for the day ref isolation exists.
+  STATUS: enabled only on ref main for a protected source SHA (ref isolation, finding H1):
+  feature-branch SHAs run from the untrusted ref, whose cache scope main never reads, and the
+  cache policy (check-cache-policy.sh) requires both terms on every restore, strip and save.
 
   Trust model, stated plainly. Cargo verifies a `.crate` download against Cargo.lock, but it
   never re-verifies a compiled `.rlib`: a restored artefact is trusted as built. The save

@@ -220,16 +220,15 @@ jobs:
           fi
           echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
 
-      # Third-party crate source cache (restore, completion and save): DISABLED (2026-10-05, finding
-      # H1 extended). The runner's runtime token lets any dispatched SHA's code write main's cache
-      # scope directly, and the cache action extracts with absolute paths, so a planted entry could
-      # overwrite files outside the cached path in a later protected run; re-hashing the `.crate`
-      # archives afterwards cannot see that. Each of the three steps carries a literal `false &&`
-      # and the cache policy fails if one does not. They stay off until unprotected SHAs run from a
-      # separate ref whose cache scope main never reads.
+      # Third-party crate source cache (restore, completion and save): main only, for a protected
+      # source SHA (ref isolation, finding H1). A cache write needs only the runner's runtime token, so
+      # any run's code can write its own ref's scope; feature-branch SHAs therefore run from the
+      # untrusted ref, whose scope main never reads, and main runs only protected-ancestry SHAs (the
+      # source checkout refuses any other). Each of the three steps carries both top-level terms
+      # (github.ref == main, protected-ancestor == true) and the cache policy fails if one does not.
       - name: Restore cached third-party crate sources
         id: cargo-sources
-        if: ${{ false && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -261,7 +260,7 @@ jobs:
       # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
       # cargo verifies each download against the lock checksum and runs no build script.
       - name: Complete the third-party source set before saving
-        if: ${{ false && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -275,24 +274,19 @@ jobs:
           echo 'cargo-fetch: done'
 
       - name: Save verified third-party crate sources
-        if: ${{ false && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
           key: ${{ steps.cargo-sources.outputs.cache-primary-key }}
 
-      # Compiled third-party dependency cache: DISABLED (2026-10-05, finding H1). Every
-      # restore and save step of it carries a literal `false &&` and the cache policy fails
-      # if one does not. Why: a cache write is authorised by the runner's own runtime token,
-      # which `permissions: {}` does not restrict, and project code has root on a hosted
-      # runner, so a build script of ANY dispatched SHA (protected or not) can read that
-      # token and write the exact key first. Every run here is on ref main, so the entry
-      # lands in main's scope and a protected run would restore it; cargo never re-verifies
-      # a compiled .rlib. The save-side ancestry gate cannot stop a write that bypasses the
-      # save step. It stays off until unprotected SHAs run from a separate ref whose cache
-      # writes main never reads. The locate step still runs: it only computes the key and
-      # keeps the target directory outside the private checkout.
+      # Compiled third-party dependency cache: main only, for a protected source SHA (ref isolation,
+      # finding H1). cargo never re-verifies a compiled .rlib, so an entry is only as trustworthy as
+      # whoever could write main's scope: since main runs only protected-ancestry SHAs (feature SHAs run
+      # from the untrusted ref, whose scope main never reads), that is protected code only. Every
+      # restore, strip and save step carries both top-level terms and the cache policy enforces it. The
+      # locate step only computes the key and keeps the target directory outside the private checkout.
       - name: Locate the compiled dependency cache
         id: cargo-target
         if: ${{ startsWith(inputs.concern, 'rust-app-') }}
@@ -306,7 +300,7 @@ jobs:
 
       - name: Restore compiled third-party dependencies
         id: cargo-target-cache
-        if: ${{ false && startsWith(inputs.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-app-') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -316,7 +310,7 @@ jobs:
           key: ${{ steps.cargo-target.outputs.key }}
 
       - name: Strip workspace crates from the restored dependency cache
-        if: ${{ false && startsWith(inputs.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-app-') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -393,7 +387,7 @@ jobs:
       # SHA, only after the concern passed and the strip-and-prove step succeeded.
       - name: Strip and prove the compiled dependency cache
         id: cargo-target-strip
-        if: ${{ false && github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -402,7 +396,7 @@ jobs:
           os-label: Linux
 
       - name: Save compiled third-party dependencies
-        if: ${{ false && github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
