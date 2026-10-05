@@ -191,6 +191,14 @@ jobs:
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
           (( failed == 0 ))
 
+      - name: Start the egress audit
+        # Audit only: records outbound destinations, never blocks, never fails the job.
+        continue-on-error: true
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: start
+
       - name: Set up .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
@@ -317,3 +325,11 @@ jobs:
         run: |
           [[ -n "${CONCERN_STARTED_AT:-}" ]] || exit 0
           e=$(( $(date +%s) - CONCERN_STARTED_AT )); printf '### Concern duration\n\n%dm%02ds from the first step, excluding runner queue time.\n' $((e / 60)) $((e % 60)) >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Report observed egress
+        if: always()
+        continue-on-error: true
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: report
