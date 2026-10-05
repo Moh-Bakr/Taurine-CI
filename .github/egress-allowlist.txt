@@ -18,6 +18,13 @@
 # prefix; even so, they are the documented residual of block mode.
 #
 # Checked by .github/policy/check-egress-allowlist.sh.
+#
+# Evidence: the audit output of post-merge runs on main against the Taurine develop tip
+# 767a540654a1d5e27c88b2cf87b489e4364ed7c0 (keeldock-cloud main for Keel Dock): orchestrate
+# 37298764740 and 37303676822, Android 37301315538 and 37303668221, iOS 37303672199, macOS
+# 37303659178, Windows 37303663707, Keel Dock 37303687180, live proofs 37303681764. Names the
+# runs showed only as hashes were identified by hashing candidate public names; any name that
+# could not be identified stays unlisted (and so unpublished) until someone can name it.
 
 # --- GitHub and the Actions runner service -------------------------------------------
 all github.com                                  # public and private checkouts, release downloads
@@ -30,7 +37,7 @@ all *.githubapp.com                             # hosted compute orchestrator an
 all ghcr.io                                     # GitHub container registry (Homebrew bottles)
 all productionresultssa*.blob.core.windows.net  # Actions results storage (logs, summaries)
 all *.github.com                                # GitHub service subdomains (glb-*, uploads, pipelines)
-all blob.bn3prdstrz12a.trafficmanager.net       # Azure storage stamp behind the results storage
+all blob.*.trafficmanager.net                   # Azure storage stamps behind the results storage (two labels deep: Microsoft's, not a customer profile)
 
 # --- CDN names returned as CNAME targets of the hosts below (exact names only) ------------
 all dualstack.k.sni.global.fastly.net           # Fastly edge for crates.io, rust-lang.org and npm
@@ -40,6 +47,50 @@ all ubuntu-archive-asm.trafficmanager.net       # azure.archive.ubuntu.com CNAME
 all azurefd-critical-t-prod-stage2.trafficmanager.net  # packages.microsoft.com CNAME
 all pmc-prod-afd-endpoint-evdhh8f8byhsezfp.b01.azurefd.net  # packages.microsoft.com Front Door
 all repo.apache.maven.org.cdn.cloudflare.net    # repo.maven.apache.org CNAME
+all auth.docker.io.cdn.cloudflare.net           # auth.docker.io CNAME
+all crl.comodoca.com.cdn.cloudflare.net         # crl.comodoca.com CNAME
+all mpki-ocsp.digicert.com.cdn.cloudflare.net   # DigiCert OCSP CNAME
+all www.microsoft.com-c-3.edgekey.net           # www.microsoft.com (PKI) CNAME
+all e13678.dscb.akamaiedge.net                  # www.microsoft.com CNAME target
+all nugetapiprod.trafficmanager.net             # api.nuget.org CNAME
+all api.nuget.org.edgesuite.net                 # api.nuget.org CNAME
+all a2043.dscr.akamai.net                       # api.nuget.org CNAME target
+all nuget-prod-globalcdn.trafficmanager.net     # globalcdn.nuget.org CNAME
+all globalcdn.nuget.org.edgesuite.net           # globalcdn.nuget.org CNAME
+all a918.dscr.akamai.net                        # globalcdn.nuget.org CNAME target
+all dotnetcli.trafficmanager.net                # builds.dotnet.microsoft.com CNAME
+all builds.dotnet.microsoft.com.edgesuite.net   # builds.dotnet.microsoft.com CNAME
+all a441.dscd.akamai.net                        # builds.dotnet.microsoft.com CNAME target
+all mcr.trafficmanager.net                      # mcr.microsoft.com CNAME
+all mcr-0001.mcr-msedge.net                     # mcr.microsoft.com CNAME target
+all homebrew.github.io                          # formulae.brew.sh CNAME (exact: github.io is user-creatable)
+all h3.apis.apple.map.fastly.net                # Apple service edge on Fastly
+all gspe1-ssl.ls.apple.com.edgesuite.net        # Apple service CNAME
+all mesu.apple.com.edgekey.net                  # Apple software-update CNAME
+
+# --- Certificate revocation (OCSP/CRL), queried by TLS stacks on every runner ------------
+all *.digicert.com                              # DigiCert OCSP and CRL
+all *.sectigo.com                               # Sectigo OCSP and CRL
+all *.comodoca.com                              # Comodo (Sectigo) OCSP and CRL
+all *.usertrust.com                             # USERTrust (Sectigo) OCSP and CRL
+all *.globalsign.com                            # GlobalSign OCSP
+all *.lencr.org                                 # Let's Encrypt OCSP and CRL
+all *.pki.goog                                  # Google Trust Services OCSP and CRL
+all oneocsp.microsoft.com                       # Microsoft OCSP
+
+# --- Runner operating-system background traffic (not project code) ------------------------
+macos *.apple.com                               # macOS and Xcode services (OCSP, software update, gdmf)
+ios *.apple.com                                 # same image as macOS
+keeldock *.apple.com                            # Keel Dock macOS legs
+macos *.aaplimg.com                             # Apple CDN names
+ios *.aaplimg.com                               # Apple CDN names
+keeldock *.aaplimg.com                          # Apple CDN names
+macos updates.cdn-apple.com                     # Apple software-update CDN
+ios updates.cdn-apple.com                       # Apple software-update CDN
+windows *.microsoft.com                         # Windows Defender, telemetry and redirect services
+keeldock *.microsoft.com                        # Keel Dock Windows legs and .NET services
+windows incoming.telemetry.mozilla.org          # Firefox preinstalled on the Windows image
+ios rubygems.org                                # CocoaPods and XcodeGen tooling on the iOS image
 
 # --- Rust ------------------------------------------------------------------------------
 all static.rust-lang.org                        # rustup toolchains and components
