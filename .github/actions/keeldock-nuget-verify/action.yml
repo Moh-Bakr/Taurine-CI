@@ -1,0 +1,69 @@
+name: KeelDock NuGet cache verification
+description: >
+  Verifies every restored NuGet package folder against the content hash that packages.lock.json
+  records for that id and version, deleting any that does not match before restore runs. A record
+  check, not a re-hash.
+
+inputs:
+  cache-hit:
+    description: The cache-hit output of the restore step
+    required: false
+  platform:
+    description: linux, macos or windows
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Verify restored NuGet packages against the lock files
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        CACHE_HIT: ${{ inputs.cache-hit }}
+        KD_PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        pkgs="${HOME}/.nuget/packages"
+        if [[ ! -d "${pkgs}" ]]; then
+          echo "- ${KD_PLATFORM} NuGet package cache: miss" >> "${GITHUB_STEP_SUMMARY}"
+          exit 0
+        fi
+        # Lock files: id, resolved version and content hash per package, lower-cased as NuGet names folders.
+        expected="${RUNNER_TEMP}/nuget-expected.tsv"
+        : > "${expected}"
+        while IFS= read -r -d '' lock; do
+          jq -r '.dependencies[]? | to_entries[] | select(.value.contentHash != null) | [(.key | ascii_downcase), (.value.resolved | ascii_downcase), .value.contentHash] | @tsv' "${lock}" >> "${expected}"
+        done < <(find . -name packages.lock.json -not -path '*/node_modules/*' -print0)
+        sort -u "${expected}" -o "${expected}"
+        if [[ ! -s "${expected}" ]]; then
+          # Nothing to verify against: trust nothing and let the locked restore download everything.
+          find "${pkgs}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          exit 0
+        fi
+        meta="${RUNNER_TEMP}/nuget-cache-meta.tsv"
+        : > "${meta}"
+        cd "${pkgs}"
+        find . -mindepth 3 -maxdepth 3 -name '.nupkg.metadata' -print0 | xargs -0 -r jq -r '[input_filename, (.contentHash // "")] | @tsv' > "${meta}" || : > "${meta}"
+        awk -F'\t' '
+          FILENAME == ARGV[1] { want[$1 "\t" $2] = $3; next }
+          {
+            path = $1; sub(/^\.\//, "", path)
+            split(path, parts, "/")
+            w = want[tolower(parts[1]) "\t" tolower(parts[2])]
+            if (w != "" && $2 == w) print "./" parts[1] "/" parts[2]
+          }
+        ' "${expected}" "${meta}" | sort -u > "${RUNNER_TEMP}/nuget-keep.txt"
+        kept=0; dropped=0
+        while IFS= read -r -d '' dir; do
+          if grep -qxF "${dir}" "${RUNNER_TEMP}/nuget-keep.txt"; then
+            kept=$((kept + 1))
+          else
+            rm -rf "${dir}"
+            dropped=$((dropped + 1))
+          fi
+        done < <(find . -mindepth 2 -maxdepth 2 -type d -print0)
+        find . -mindepth 1 -maxdepth 1 -type f -delete
+        find . -mindepth 1 -maxdepth 1 -type d -empty -delete
+        case "${CACHE_HIT}" in true) state='exact hit' ;; false) state='restored from an earlier lock-file set' ;; *) state='miss' ;; esac
+        echo "nuget-packages: ${state}; ${kept} packages verified, ${dropped} dropped"
+        echo "- ${KD_PLATFORM} NuGet package cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
