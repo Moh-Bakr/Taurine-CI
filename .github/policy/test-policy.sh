@@ -272,3 +272,53 @@ drop_expect_fail 'docker after drop-root once keep-docker is gone' .github/workf
 drop_expect_fail 'a sudo composite after drop-root' .github/workflows/android-validation.yml 'contains sudo and is called after drop-root' \
   's/(      - name: Remove root before project code\n        # Kept as \.\/ : the policy matches this exact form for local actions\.\n        uses: \.\/\.github\/actions\/drop-root[^\n]*\n)/$1\n      - name: Late privileged setup\n        uses: .\/.github\/actions\/root-setup\n        with:\n          concern: x\n/'
 echo 'drop-root fixtures: a missing drop, project code or a setup composite before it, and sudo or Docker after it are rejected'
+
+# Ref isolation freshness guard: the reviewed guard (inline in the source-checkout composite and
+# in the KeelDock concern) is extracted and run against a stubbed compare API. identical and
+# behind are accepted (behind with a warning naming the sync command); ahead, diverged and an
+# unreadable answer are refused, and a run from main is not subject to the guard.
+fresh_dir="${base}/freshness"
+mkdir -p "${fresh_dir}/bin"
+cat > "${fresh_dir}/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+case "${FAKE_COMPARE_STATUS}" in
+  unreadable) exit 22 ;;
+  *) printf '{"status":"%s","ahead_by":%s,"behind_by":%s}\n' "${FAKE_COMPARE_STATUS}" "${FAKE_AHEAD_BY:-0}" "${FAKE_BEHIND_BY:-0}" ;;
+esac
+STUB
+chmod +x "${fresh_dir}/bin/curl"
+for guard_file in .github/actions/source-checkout/action.yml .github/workflows/keeldock-validation-concern.yml; do
+  ruby -ryaml -e '
+    doc = YAML.safe_load(File.read(ARGV[0]), aliases: false)
+    steps = doc.dig("runs", "steps") || doc["jobs"].values.flat_map { |j| j["steps"] || [] }
+    run = steps.map { |s| s["run"].to_s }.find { |r| r.include?("refs/heads/untrusted ]]") && r.include?("compare/main") }
+    abort "no freshness guard in #{ARGV[0]}" unless run
+    File.write(ARGV[1], run)' "${guard_file}" "${fresh_dir}/guard.sh"
+  freshness_run() {
+    local ref="$1" status="$2" ahead="${3:-0}" behind="${4:-0}"
+    : > "${fresh_dir}/summary"
+    set +e
+    PATH="${fresh_dir}/bin:${PATH}" GITHUB_REPOSITORY=Moh-Bakr/Taurine-CI GITHUB_REF="${ref}" \
+      GITHUB_SHA=1111111111111111111111111111111111111111 GITHUB_API_URL=https://api.invalid \
+      GITHUB_STEP_SUMMARY="${fresh_dir}/summary" CONTROL_PLANE_TOKEN=unused \
+      REQUESTED_SOURCE_SHA=2222222222222222222222222222222222222222 REQUESTED_PLATFORM=linux \
+      REQUESTED_CONCERN=unit REQUESTED_VULN_GATE=none \
+      FAKE_COMPARE_STATUS="${status}" FAKE_AHEAD_BY="${ahead}" FAKE_BEHIND_BY="${behind}" \
+      bash "${fresh_dir}/guard.sh" >"${fresh_dir}/out" 2>&1
+    freshness_rc=$?
+    set -e
+  }
+  freshness_run refs/heads/untrusted identical
+  [[ "${freshness_rc}" -eq 0 ]] || { echo "${guard_file}: an identical untrusted should be accepted" >&2; cat "${fresh_dir}/out" >&2; exit 1; }
+  freshness_run refs/heads/untrusted behind 0 3
+  [[ "${freshness_rc}" -eq 0 ]] || { echo "${guard_file}: a behind untrusted should be accepted" >&2; cat "${fresh_dir}/out" >&2; exit 1; }
+  grep -qF '3 commit(s) behind' "${fresh_dir}/summary" && grep -qF 'git push origin origin/main:refs/heads/untrusted' "${fresh_dir}/summary" \
+    || { echo "${guard_file}: a behind untrusted should warn with the count and the sync command" >&2; cat "${fresh_dir}/summary" >&2; exit 1; }
+  for refused in ahead diverged unreadable; do
+    freshness_run refs/heads/untrusted "${refused}" 2 1
+    [[ "${freshness_rc}" -ne 0 ]] || { echo "${guard_file}: a ${refused} untrusted should be refused" >&2; exit 1; }
+  done
+  freshness_run refs/heads/main ahead
+  [[ "${freshness_rc}" -eq 0 ]] || { echo "${guard_file}: the guard must not apply to a run from main" >&2; cat "${fresh_dir}/out" >&2; exit 1; }
+done
+echo 'freshness fixtures: untrusted behind or identical to main is accepted (behind warns); ahead, diverged and unreadable are refused'

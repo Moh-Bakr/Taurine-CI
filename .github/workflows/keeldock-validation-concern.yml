@@ -100,7 +100,7 @@ jobs:
           REQUESTED_PLATFORM: ${{ inputs.platform }}
           REQUESTED_CONCERN: ${{ inputs.concern }}
           REQUESTED_VULN_GATE: ${{ inputs.vulnerability_gate }}
-          # This repository's own read-only job token, used only to read main's tip below.
+          # This repository's own read-only job token, used only to compare against main below.
           CONTROL_PLANE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -124,15 +124,33 @@ jobs:
             *) echo "Unsupported concern: ${REQUESTED_CONCERN}" >&2; exit 1 ;;
           esac
           case "${REQUESTED_VULN_GATE}" in none|high|critical) ;; *) echo 'vulnerability_gate must be none, high or critical' >&2; exit 1 ;; esac
-          # Ref isolation (the source-checkout composite's rule, inline as the KeelDock policy
-          # requires): a run from untrusted must be running exactly main's reviewed workflows.
+          # Ref isolation (the source-checkout composite's rule, inline as the KeelDock policy requires): feature-branch SHAs run from the untrusted ref, whose cache writes
+          # main never reads, so the workflows that run there must be ones main already reviewed.
+          # untrusted is admin-only and fast-forward-only (ruleset 24500573) and is only ever synced
+          # from main, so any commit it points at was once main's tip. A run is accepted when that
+          # commit is main's tip (identical) or an ancestor of it (behind); ahead and diverged are
+          # refused. All of this runs before any token is minted.
           if [[ "${GITHUB_REF}" == refs/heads/untrusted ]]; then
-            main_sha="$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/main" | jq -er '.sha')" \
-              || { echo 'untrusted ref: the tip of main could not be read; refusing to continue' >&2; exit 1; }
-            if [[ "${main_sha}" != "${GITHUB_SHA}" ]]; then
-              echo "untrusted ref: this run's workflows (${GITHUB_SHA}) are not main's tip (${main_sha}); fast-forward untrusted to main, then dispatch again" >&2
-              exit 1
-            fi
+            compare="$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors \
+              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" \
+              | jq -er '[.status, (.behind_by // 0)] | @tsv')" \
+              || { echo 'untrusted ref: could not compare this run with main; refusing to continue' >&2; exit 1; }
+            IFS=$'\t' read -r freshness behind_by <<<"${compare}"
+            case "${freshness}" in
+              identical) ;;
+              behind)
+                echo "::warning::untrusted is ${behind_by} commit(s) behind main; this run uses an older, previously reviewed main commit. Sync it with: git push origin origin/main:refs/heads/untrusted"
+                if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+                  printf '%s\n' "**Warning:** \`untrusted\` is ${behind_by} commit(s) behind \`main\`. This run used an older, previously reviewed \`main\` commit (\`${GITHUB_SHA}\`). Sync it with \`git push origin origin/main:refs/heads/untrusted\`." >> "${GITHUB_STEP_SUMMARY}"
+                fi
+                ;;
+              *)
+                echo "untrusted ref: this run's workflows (${GITHUB_SHA}) are '${freshness}' relative to main, not identical to it or an ancestor of it; refusing to continue." >&2
+                echo 'Reset untrusted by an admin fast-forward from main (docs/how-ci-works.md, "Ref isolation"), then dispatch again.' >&2
+                exit 1
+                ;;
+            esac
           fi
 
       - name: Mint read-only private-source token
