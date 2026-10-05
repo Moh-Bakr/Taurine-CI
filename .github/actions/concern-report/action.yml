@@ -138,6 +138,14 @@ runs:
           ts_diagnostics "${log}"
           tauri_version_mismatch "${log}" >&2 || true
           if [[ "${reason}" == 'Tauri package version mismatch' ]]; then tauri_versions_inventory >&2 || true; fi
+          if [[ "${reason}" == 'Tauri package version mismatch' ]]; then
+            # The tool's own mismatch lines (the real pair is there), through the shared path
+            # and token scrubbing and a charset allow-list: package names, versions and
+            # punctuation only. The pattern is broad, so this also shows what matched.
+            echo 'lines naming a mismatch (charset-restricted):' >&2
+            sanitize_stream <"${log}" | grep -iE -B1 -A6 'mismatch' | grep -E '^[[:space:]]*[A-Za-z0-9@/_.() :+*>-]+$' | sed -E 's/^[[:space:]]+//' | cut -c1-160 | awk '!seen[$0]++' | head -24 >&2 || true
+            echo "tauri CLI versions seen by the desktop install: $(cd taurine-desktop && npx --no-install tauri --version 2>&1 | head -1 | cut -c1-80)" >&2 || true
+          fi
         }
 
         # Installed `@tauri-apps/*` npm package versions per install root, and the locked
@@ -159,6 +167,58 @@ runs:
           awk '/^name = "tauri(-[a-z0-9-]+)?"$/ { n = $3; gsub(/"/, "", n); getline v; gsub(/[^0-9a-zA-Z.+-]/, "", v); sub(/^version/, "", v); print "  " n " " v }' Cargo.lock 2>/dev/null | head -40
           echo "global tauri CLI on PATH: $(command -v tauri >/dev/null 2>&1 && echo yes || echo no)"
           echo "npm global @tauri-apps packages: $(npm ls -g --depth=0 2>/dev/null | grep -c '@tauri-apps' || true)"
+        }
+
+        # A test binary that cannot start: name it (crate name without the hash) and the DLLs
+        # it imports that cannot be found. The import list comes from llvm-objdump (Windows) on
+        # the built test executables; only file names of public libraries are published, as
+        # fixed classes: "missing import" (not in system32, the binary's directory or PATH).
+        loader_detail() {
+          local log="$1" dir exe base dll found line
+          echo 'test binary load failure detail (binary: missing imports; names only):'
+          # Binaries named in the log, hashes stripped.
+          tr -d '\r' <"${log}" | grep -oE '[A-Za-z0-9_-]+-[0-9a-f]{16}\.exe' | sed -E 's/-[0-9a-f]{16}\.exe$//' | sort -u | head -10 | sed 's/^/  named in log: /' || true
+          dir="${CARGO_TARGET_DIR:-}"
+          [[ -n "${dir}" ]] || return 0
+          local objdump=''
+          for c in llvm-objdump "/c/Program Files/LLVM/bin/llvm-objdump.exe"; do
+            if command -v "${c}" >/dev/null 2>&1 || [[ -x "${c}" ]]; then objdump="${c}"; break; fi
+          done
+          if [[ -z "${objdump}" ]]; then echo '  llvm-objdump unavailable: import list not read'; return 0; fi
+          local seen="${RUNNER_TEMP}/loader-missing.txt"
+          : >"${seen}"
+          : >"${RUNNER_TEMP}/loader-path.txt"
+          for exe in "$(cygpath -u "${dir}" 2>/dev/null || echo "${dir}")"/debug/deps/*.exe; do
+            [[ -f "${exe}" ]] || continue
+            base="$(basename "${exe}" .exe | sed -E 's/-[0-9a-f]{16}$//')"
+            while IFS= read -r dll; do
+              case "${dll}" in api-ms-win-*|ext-ms-win-*) continue ;; esac
+              found=0
+              if [[ -f "/c/Windows/System32/${dll}" || -f "$(dirname "${exe}")/${dll}" ]]; then found=1
+              elif command -v "${dll}" >/dev/null 2>&1; then found=1
+              elif cmd //c "where ${dll}" >/dev/null 2>&1; then
+                found=1
+                # Resolved from PATH rather than System32: record where (a runner tool
+                # directory, public image paths) because a shadowing copy of the wrong
+                # version is the usual cause of an entry-point failure.
+                echo "${dll}|PATH:$(cmd //c "where ${dll}" 2>/dev/null | head -1 | tr -d '\r' | sed -E 's#\\[^\\]*$##; s#^[A-Za-z]:\\Users\\[^\\]*#<user>#' | cut -c1-80)" >>"${RUNNER_TEMP}/loader-path.txt"
+              fi
+              if [[ "${found}" == 0 ]]; then echo "${dll}|${base}" >>"${seen}"; fi
+            done < <("${objdump}" -p "${exe}" 2>/dev/null | sed -n 's/^[[:space:]]*DLL Name: \([A-Za-z0-9_.-]*\.dll\)$/\1/p' | sort -u)
+          done
+          if [[ -s "${seen}" ]]; then
+            echo '  imports not found (DLL: binaries needing it, up to 4):'
+            cut -d'|' -f1 "${seen}" | sort -u | while IFS= read -r dll; do
+              echo "    ${dll}: $(grep -F "${dll}|" "${seen}" | cut -d'|' -f2 | sort -u | head -4 | tr '\n' ' ')"
+            done | head -20
+          fi
+          if [[ -s "${RUNNER_TEMP}/loader-path.txt" ]]; then
+            echo '  imports resolved from PATH, not System32 (DLL: first directory):'
+            sort -u "${RUNNER_TEMP}/loader-path.txt" | sed -E 's/^([^|]*)\|PATH:/    \1: /' | head -20
+          fi
+          if [[ ! -s "${seen}" ]]; then
+            echo '  every imported DLL resolves from the runner; the failure is an entry point (a DLL version mismatch), not a missing file'
+          fi
         }
 
         run_quiet() {
@@ -204,14 +264,17 @@ runs:
                 packaging_detail "${log}"
               fi
               # cargo-nextest: the failing tests, signals, timeouts and flaky retries by name.
-              nextest_lines="$(nextest_failures "${log}")"
+              nextest_lines="$(nextest_failures "${log}" || true)"
               if [[ -n "${nextest_lines}" ]]; then
                 echo 'nextest failures (status, test binary and name):' >&2
                 printf '%s\n' "${nextest_lines}" >&2
                 nextest_summary "${log}" >&2 || true
               fi
+              if grep -qE '0xc0000139|STATUS_ENTRYPOINT_NOT_FOUND|0xc0000135|STATUS_DLL_NOT_FOUND|Library not loaded|error while loading shared libraries' "${log}"; then
+                loader_detail "${log}" >&2 || true
+              fi
               # The panicking tests with a fixed class of each panic and its file:line.
-              panics="$(panic_summary "${log}")"
+              panics="$(panic_summary "${log}" || true)"
               if [[ -n "${panics}" ]]; then
                 echo 'panics (test, file:line, class; messages withheld):' >&2
                 printf '%s\n' "${panics}" >&2
@@ -240,12 +303,12 @@ runs:
             fi
             if [[ "${label}" == e2e-* ]]; then
               # The failing specs by name (list reporter lines and annotation titles).
-              pw="$(playwright_failures "${log}")"
+              pw="$(playwright_failures "${log}" || true)"
               if [[ -n "${pw}" ]]; then
                 echo 'failing specs (spec > title):' >&2
                 printf '%s\n' "${pw}" >&2
               fi
-              pwj="$(playwright_json_failures "${RUNNER_TEMP}/test-ids/${label}.json")"
+              pwj="$(playwright_json_failures "${RUNNER_TEMP}/test-ids/${label}.json" || true)"
               if [[ -n "${pwj}" ]]; then
                 echo 'failing specs from the JSON report:' >&2
                 printf '%s\n' "${pwj}" >&2
