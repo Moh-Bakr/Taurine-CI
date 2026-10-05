@@ -36,7 +36,7 @@ runs:
       # The only value written is the current epoch time from date, never input.
       run: |  # zizmor: ignore[github-env]
         echo "CONCERN_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
-        echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
+        echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS:-unknown} ${RUNNER_ARCH:-unknown}, runner ${RUNNER_ENVIRONMENT:-unknown})" >> "${GITHUB_STEP_SUMMARY}"
 
     - name: Report concern duration
       if: ${{ inputs.mode == 'report' }}

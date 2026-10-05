@@ -1,0 +1,57 @@
+name: Build the live proof test binaries
+description: >
+  Builds the cargo test binaries for one live-proof arm, from the arm's definition
+  that the arm workflow wrote to the runner's temp directory. A multi-suite arm
+  lists its suites in suites.txt, which live-run reads too, so build and run cannot
+  drift. Output goes to a runner-local log and only sanitized error excerpts are
+  printed; nothing is published.
+
+runs:
+  using: composite
+  steps:
+    - name: Build the engine's proof test binary
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      run: |
+        set -euo pipefail
+        cargo_sanitize() {
+          sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
+            sed -E "s#${GITHUB_WORKSPACE}/src/##g" |
+            sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
+            cut -c1-200
+        }
+        cargo_detail() {
+          cargo_sanitize "$1" |
+            grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^test result: |^failures:$' |
+            head -40 >&2 || true
+        }
+        # Multi-suite arms run several cargo suites each, the ones
+        # scripts/check-db.sh in the private repository lists for that engine.
+        # One line per suite, from the arm definition:
+        #   <package> <test targets, comma separated> [test-name filter]
+        # A single-target arm has no suites and one conformance test target.
+        arm="${RUNNER_TEMP}/live-arm.json"
+        suites="${RUNNER_TEMP}/suites.txt"
+        jq -r '(.suites // [])[]' "${arm}" > "${suites}"
+        if [[ -s "${suites}" ]]; then
+          while read -r pkg targets _; do
+            build_args=()
+            IFS=, read -ra tl <<< "${targets}"
+            for t in "${tl[@]}"; do build_args+=(--test "${t}"); done
+            if ! cargo test -p "${pkg}" "${build_args[@]}" --no-run \
+              </dev/null >>"${RUNNER_TEMP}/build.log" 2>&1; then
+              echo "proof-build: failed for ${pkg}; sanitized detail below" >&2
+              cargo_detail "${RUNNER_TEMP}/build.log"
+              exit 1
+            fi
+          done < "${suites}"
+        else
+          target="$(jq -er '.target' "${arm}")"
+          if ! cargo test -p taurine-db-conformance --test "${target}" --no-run \
+            >"${RUNNER_TEMP}/build.log" 2>&1; then
+            echo 'proof-build: failed; sanitized detail below' >&2
+            cargo_detail "${RUNNER_TEMP}/build.log"
+            exit 1
+          fi
+        fi
+        echo 'proof-build: passed'

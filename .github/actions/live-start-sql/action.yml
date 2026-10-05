@@ -1,0 +1,114 @@
+name: Start the MySQL and SQL Server live servers
+description: >
+  Starts MySQL 8.4 or SQL Server 2022, seeded from the checked-out lab fixtures.
+  Every server image is pinned by digest. Credentials are per-run throwaways for a
+  loopback container that dies with the runner, masked before first use and handed
+  to the suite only through GITHUB_ENV. Reads the private source only through the
+  checked-out tree and publishes nothing.
+
+inputs:
+  engine:
+    description: Arm to start (mysql, mssql)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Start the mysql, mssql server and wait for readiness
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        ENGINE: ${{ inputs.engine }}
+      run: |
+          set -euo pipefail
+          ready=0
+
+          case "${ENGINE}" in
+            mysql)
+              # MySQL 8.4 (the lab's `mysql` service), pinned by index digest
+              # (tag 8.4, resolved 2026-10-04; amd64 compressed 0.24 GB). The
+              # server generates its own TLS material at first start, which is
+              # exactly what the TLS regression history here needs: the
+              # engine's `live_mysql_tls` dials with TLS on. The root password
+              # is exported too, because MySQL refuses CREATE TRIGGER to an
+              # ordinary user while binary logging is on (two suites need it).
+              # Both passwords are per-run throwaways, masked first.
+              [[ -s "${GITHUB_WORKSPACE}/src/tools/db-lab/mysql/init/01-payments.sql" ]] || { echo 'mysql: the lab seed is missing from the source checkout' >&2; exit 1; }
+              my_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              my_root="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${my_pass}"
+              echo "::add-mask::${my_root}"
+              docker run -d --name dbx-mysql \
+                -e MYSQL_ROOT_PASSWORD="${my_root}" -e MYSQL_USER=taurine \
+                -e MYSQL_PASSWORD="${my_pass}" -e MYSQL_DATABASE=payments \
+                -p 127.0.0.1:13306:3306 \
+                -v "${GITHUB_WORKSPACE}/src/tools/db-lab/mysql/init:/docker-entrypoint-initdb.d:ro" \
+                mysql@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
+              for _ in $(seq 1 90); do
+                if docker exec -e MYSQL_PWD="${my_pass}" dbx-mysql mysql -h127.0.0.1 -P3306 -utaurine -Dpayments -e 'select 1' >/dev/null 2>&1; then
+                  ready=1
+                  break
+                fi
+                sleep 3
+              done
+              if (( ready == 0 )); then
+                echo 'mysql: no authenticated TCP answer after 4.5 minutes; log tail below' >&2
+                docker logs dbx-mysql 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              version="$(docker exec -e MYSQL_PWD="${my_pass}" dbx-mysql mysql -h127.0.0.1 -P3306 -utaurine -N -e 'select version()' 2>/dev/null | head -1)"
+              {
+                echo "TAURINE_TEST_MYSQL=127.0.0.1:13306"
+                echo "TAURINE_TEST_MYSQL_PASSWORD=${my_pass}"
+                echo "TAURINE_TEST_MYSQL_ROOT_PASSWORD=${my_root}"
+                echo "PROOF_SERVER_VERSION=MySQL ${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            mssql)
+              # SQL Server 2022, the engine users actually run: mssql/server
+              # 2022-latest pinned by digest (amd64, about 0.63 GB compressed,
+              # under the per-engine image cap). It replaces azure-sql-edge,
+              # which the lab used but which is not SQL Server proper. The
+              # lab's own `mssql-init` sidecar (mssql-tools, pinned by digest,
+              # 0.10 GB) stays the readiness gate:
+              # it logs in, creates `payments` and seeds it from the checked-out
+              # source, exiting 0 only once all of that happened. The SA
+              # password is a per-run throwaway that meets SQL Server's
+              # complexity rules (upper, lower, digit, symbol), masked first.
+              [[ -s "${GITHUB_WORKSPACE}/src/tools/db-lab/mssql/init.sh" ]] || { echo 'mssql: the lab init script is missing from the source checkout' >&2; exit 1; }
+              ms_pass="Aa1!$(head -c 14 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${ms_pass}"
+              export MSSQL_SA_PASSWORD="${ms_pass}"
+              docker run -d --name dbx-mssql \
+                -e ACCEPT_EULA=1 -e MSSQL_PID=Developer -e MSSQL_SA_PASSWORD \
+                -p 127.0.0.1:11433:1433 \
+                mcr.microsoft.com/mssql/server:2022-latest@sha256:4402d880dd4c34bfa7d8705e56a86cd6c88da80a1f6bbbe741f999e76264a090
+              if docker run --rm --network host --platform linux/amd64 \
+                -e MSSQL_HOST='127.0.0.1,11433' -e MSSQL_SA_PASSWORD -e MSSQL_DATABASE=payments \
+                -v "${GITHUB_WORKSPACE}/src/tools/db-lab/mssql:/init:ro" \
+                --entrypoint /bin/bash \
+                mcr.microsoft.com/mssql-tools@sha256:62556500522072535cb3df2bb5965333dded9be47000473e9e0f84118e248642 \
+                /init/init.sh; then
+                ready=1
+              fi
+              if (( ready == 0 )); then
+                echo 'mssql: the init sidecar never got a login and a seeded database; log tail below' >&2
+                docker logs dbx-mssql 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              version="$(docker run --rm --network host --platform linux/amd64 -e MSSQL_SA_PASSWORD --entrypoint /bin/bash \
+                mcr.microsoft.com/mssql-tools@sha256:62556500522072535cb3df2bb5965333dded9be47000473e9e0f84118e248642 \
+                -c '/opt/mssql-tools/bin/sqlcmd -S 127.0.0.1,11433 -U sa -P "$MSSQL_SA_PASSWORD" -h -1 -W -Q "SET NOCOUNT ON; SELECT @@VERSION"' 2>/dev/null | head -1 | cut -c1-100 || true)"
+              {
+                echo "TAURINE_TEST_MSSQL=127.0.0.1:11433"
+                echo "TAURINE_TEST_MSSQL_PASSWORD=${ms_pass}"
+                echo "PROOF_SERVER_VERSION=${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            *)
+              echo "Unsupported engine for this composite: ${ENGINE}" >&2
+              exit 2
+              ;;
+          esac

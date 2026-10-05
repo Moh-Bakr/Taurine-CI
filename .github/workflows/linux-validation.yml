@@ -173,8 +173,9 @@ jobs:
     needs: [validate-input, plan]
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/select-concerns.yml  # zizmor: ignore[self-repository]
-    # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected callers.
-    secrets: inherit  # zizmor: ignore[secrets-inherit]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
       base_sha: ${{ inputs.base_sha }}
@@ -190,8 +191,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix) }}
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]
-    # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected dispatchers.
-    secrets: inherit  # zizmor: ignore[secrets-inherit]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
@@ -225,7 +227,7 @@ jobs:
         with:
           mode: table
           label: Linux
-          baseline-seconds: '{"rust-app":2820,"rust-db":840,"rust-dbx":420,"rust-domain":180,"rust-net":120,"taurine-cli":180,"desktop-shard-1":600,"desktop-shard-2":660,"desktop-quality":120,"mobile-quality":120,"frontend-build-budget":120,"contracts":60,"e2e-critical":600,"e2e-a11y":300,"e2e-regression-1":600,"e2e-regression-2":600,"e2e-regression-3":660,"e2e-regression-4":900}'
+          baseline-seconds: '{"rust-app-1":900,"rust-app-2":900,"rust-db":840,"rust-dbx":420,"rust-domain":180,"rust-net":120,"taurine-cli":180,"desktop-shard-1":600,"desktop-shard-2":660,"desktop-quality":120,"mobile-quality":120,"frontend-build-budget":120,"contracts":60,"e2e-critical":600,"e2e-a11y":300,"e2e-regression-1":600,"e2e-regression-2":600,"e2e-regression-3":660,"e2e-regression-4":900}'
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           github-token: ${{ github.token }}
 

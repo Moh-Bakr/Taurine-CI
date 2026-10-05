@@ -1,0 +1,71 @@
+name: macOS JavaScript concern runner
+description: |
+  Runs the macOS JavaScript concerns (desktop shards and quality, mobile, bundle budget, orchestrate
+  skill smoke) inside the protected concern job, after the source is checked out and the token
+  revoked. The reviewed case body of macos-validation.yml, moved here by responsibility.
+
+inputs:
+  concern:
+    description: The macOS validation concern being run
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run the macOS JavaScript concern
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        CONCERN: ${{ inputs.concern }}
+        OS_LABEL: macOS
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        source "${RUNNER_TEMP}/taurine-ci/report.sh"
+        case "${CONCERN}" in
+          desktop-shard-1)
+            run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --no-file-parallelism \
+              --reporter=default --reporter=json \
+              --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-1.json"
+            ;;
+          desktop-shard-2)
+            run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --no-file-parallelism \
+              --reporter=default --reporter=json \
+              --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-2.json"
+            ;;
+          desktop-quality)
+            run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
+            run_quiet vite-native-preflight bash -c 'cd taurine-desktop && node -e '\''require("vite"); require("rollup"); require("rollup/dist/native.js"); require("@tailwindcss/oxide")'\'''
+            run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
+            run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
+            run_quiet desktop-lint npm --prefix taurine-desktop run lint
+            ;;
+          mobile)
+            run_quiet mobile-build npm --prefix taurine-mobile run build
+            run_quiet mobile-tests npm --prefix taurine-mobile run test -- --no-file-parallelism \
+              --reporter=default --reporter=json \
+              --outputFile.json="${RUNNER_TEMP}/test-ids/mobile.json"
+            run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
+            run_quiet mobile-lint npm --prefix taurine-mobile run lint
+            ;;
+          bundle-budget)
+            # The checker compares both frontend dist trees. Build them on
+            # this isolated runner instead of passing private artifacts.
+            run_quiet desktop-vite-build bash -c 'cd taurine-desktop && NODE_OPTIONS=--max-old-space-size=8192 node ./node_modules/vite/bin/vite.js build'
+            run_quiet mobile-build npm --prefix taurine-mobile run build
+            run_quiet bundle-budget npm run check:bundle
+            ;;
+          orchestrate-skill)
+            run_quiet contracts npm run check:contracts
+            run_quiet wire npm run check:wire
+            run_quiet packages-tests npm run test:packages -- \
+              --reporter=default --reporter=json \
+              --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"
+            run_quiet dashboard-contracts node --test --test-concurrency=1 skills/orchestrate/scripts/__tests__/dashboard.test.mjs
+            run_quiet orchestrate-verification node skills/orchestrate/scripts/verify.mjs --json
+            ;;
+          *)
+            echo "Unknown macOS validation concern: ${CONCERN}" >&2
+            exit 1
+            ;;
+        esac

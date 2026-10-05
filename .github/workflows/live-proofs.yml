@@ -4,19 +4,22 @@ name: Live database proofs (protected)
 # requests never enter this workflow and therefore never receive the
 # source-read environment secret.
 #
-# What it does: against one engine's real single-node Docker server, run the
-# env-gated conformance/live suite the private repository carries for that
-# engine, at an exact private commit. These are the runs the private repo's
+# What it does: against each selected engine's real single-node Docker server,
+# run the env-gated conformance/live suite the private repository carries for
+# that engine, at an exact private commit. These are the runs the private repo's
 # `live_servers.rs` and the IBM live tests describe as owed: the servers are
 # too large for the local lab's disk cap, but fit a hosted runner. The runs
 # exist to find real driver defects; a red run here is the lane working.
 #
-# Per-engine quirks are recorded beside each engine's start step below.
+# This file is only the dispatcher: input validation, the arm roster (one
+# definition per arm, below) and one call of live-proof-arm.yml per selected arm.
+# The arm workflow owns the private checkout; the .github/actions/live-* composites
+# own the servers (digest pins, ports, readiness) and the build, run and summary.
 on:
   workflow_dispatch:
     inputs:
       engine:
-        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris | postgres | mysql | mssql | pgtls | bastion)
+        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris | postgres | mysql | mssql | pgtls | bastion), a comma-separated list of them, or all
         required: true
         type: string
       source_sha:
@@ -26,1054 +29,129 @@ on:
 
 permissions: {}
 
-# One engine per group, so two engines can prove concurrently without
-# colliding, and a re-dispatch of the same engine queues behind the running
+# One selection per group, so two selections can prove concurrently without
+# colliding, and a re-dispatch of the same selection queues behind the running
 # one instead of cancelling a proof half-done. Proof runs are never cancelled
 # automatically: the whole point is to let a slow server finish.
 concurrency:
   group: live-proofs-${{ inputs.engine }}
   cancel-in-progress: false
 
-env:
-  SOURCE_REPOSITORY_ID: '1330267721'
-  SOURCE_REPOSITORY_OWNER: Moh-Bakr
-  SOURCE_REPOSITORY_NAME: Taurine
-
 jobs:
-  prove:
-    permissions:
-      contents: read
+  plan:
+    permissions: {}
     # workflow_dispatch can be selected on another branch in the UI. Fail
     # closed unless this exact workflow came from the protected default branch.
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    name: Live proof — ${{ inputs.engine }}
-    environment: source-read
+    name: Plan the live proofs
     runs-on: ubuntu-24.04
-    # Generous by design: the engine servers are slow guests. The Db2 image
-    # needs up to ~20 minutes on first boot alone; the Doris BE registers and
-    # reports tablets for minutes after its container starts; the Rust test
-    # binary builds cold (this control plane caches nothing).
-    timeout-minutes: 120
-    defaults:
-      run:
-        working-directory: src
+    timeout-minutes: 5
+    outputs:
+      arms: ${{ steps.select.outputs.arms }}
+      roster: ${{ steps.select.outputs.roster }}
     steps:
-      - name: Check out public control plane
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Start the concern timer
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
-        with:
-          mode: start
-
-      - name: Validate protected dispatch input
+      - name: Validate the dispatch input and select the arms
+        id: select
         shell: bash
-        working-directory: ${{ github.workspace }}
         env:
           REQUESTED_ENGINE: ${{ inputs.engine }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
-            echo 'live-proofs must run only from the protected main branch' >&2
-            exit 1
-          fi
-          case "${REQUESTED_ENGINE}" in
-            doris|starrocks|db2|informix|rocketmq|iris|postgres|mysql|mssql|pgtls|bastion) ;;
-            *) echo "engine must be one of: doris, starrocks, db2, informix, rocketmq, iris, postgres, mysql, mssql, pgtls, bastion" >&2; exit 1 ;;
-          esac
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
             exit 1
           fi
-          printf 'Requested engine: %s\nRequested source SHA: %s\n' "${REQUESTED_ENGINE}" "${REQUESTED_SOURCE_SHA,,}"
-
-      - name: Check out the exact private source SHA
-        id: verified-source
-        # Kept as ./ : the policy matches this exact form for the private-source action.
-        uses: ./.github/actions/source-checkout  # zizmor: ignore[self-repository]
-        with:
-          source-sha: ${{ inputs.source_sha }}
-          app-client-id: ${{ vars.SOURCE_READER_APP_ID }}
-          app-private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
-          repository-id: ${{ env.SOURCE_REPOSITORY_ID }}
-          repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
-          repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
-
-      - name: Install the shared sanitizers
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
-
-      - name: Free disk for the server image
-        shell: bash
-        run: |
-          set -euo pipefail
-          df -h / | tail -1
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift \
-            /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
-          docker image prune -af >/dev/null 2>&1 || true
-          df -h / | tail -1
-
-      - name: Set up the Rust toolchain and pinned vendored sources
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The runner's own rustup, not a third-party action: this control
-          # plane adds no action it does not have to.
-          rustup --version >/dev/null
-          # `[patch.crates-io]` in the workspace root points at `vendor/`
-          # by path, and cargo refuses to load a manifest that is not there —
-          # so *every* cargo command in this repository fails on a fresh
-          # checkout until the script has run. `fetch` verifies each download
-          # against the sha256 pinned in vendor.lock.
-          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
-            echo 'vendor-fetch: failed (detailed output withheld)' >&2
+          # The roster: one definition per arm, in the order the arms are
+          # listed. `suites` (multi-suite arms) are the cargo suites the private
+          # repository's scripts/check-db.sh lists for that engine, one per
+          # entry: "<package> <test targets, comma separated> [test-name filter]".
+          # An arm without suites runs one conformance test `target`, narrowed by
+          # `filter` (none for rocketmq: both tests in its file are the proof).
+          # `report` says the arm's suite prints the conformance report whose
+          # header the verdict reads. `blurb` is the image line the summary shows.
+          cat > "${RUNNER_TEMP}/roster.json" <<'TCI_LIVE_ROSTER'
+          [
+            {"engine": "doris", "target": "live_servers", "filter": "doris_passes_every_check", "report": true,
+             "blurb": "Images: apache/doris:fe-2.1.8 + apache/doris:be-2.1.8 (single fe + single be; digest-pinned, see resolved images)"},
+            {"engine": "starrocks", "target": "live_servers", "filter": "starrocks_passes_every_check", "report": true,
+             "blurb": "Image: starrocks/allin1-ubuntu 3.2.3 (all-in-one fe + be)"},
+            {"engine": "db2", "target": "db2_live", "filter": "db2_passes_every_check_against_a_live_server", "report": true,
+             "blurb": "Image: icr.io/db2_community/db2:11.5.9.0 (privileged, amd64)"},
+            {"engine": "informix", "target": "informix_live", "filter": "informix_passes_every_check_against_a_live_server", "report": true,
+             "blurb": "Image: ibmcom/informix-developer-database:14.10.FC7W1DE (privileged, amd64)"},
+            {"engine": "rocketmq", "target": "rocketmq_live", "filter": "", "report": true,
+             "blurb": "Images: apache/rocketmq:5.3.2 (NameServer + broker, brokerIP1 pinned to 127.0.0.1)"},
+            {"engine": "iris", "target": "live_servers", "filter": "iris_passes_every_check", "report": true,
+             "blurb": "Image: containers.intersystems.com/intersystems/iris-community:2025.3 (pinned by digest, amd64; Atelier REST on the private web server)"},
+            {"engine": "postgres", "report": true,
+             "suites": ["taurine-db-conformance live_servers postgres_passes_every_check",
+                        "taurine-db-postgres live_catalog,live_blob,live_ddl,live_depth,live_explain,live_notices,cancel",
+                        "taurine-db-engine live_postgres"],
+             "blurb": "Image: postgres 17-alpine (pinned by digest); suites: conformance + taurine-db-postgres live + engine live_postgres"},
+            {"engine": "mysql", "report": true,
+             "suites": ["taurine-db-conformance live_servers mysql_passes_every_check",
+                        "taurine-db-mysql live_blob,live_cancel,live_depth,live_explain,live_notices,live_param_types,live_reset",
+                        "taurine-db-engine live_mysql_tls"],
+             "blurb": "Image: mysql 8.4 (pinned by digest); suites: conformance + taurine-db-mysql live + engine live_mysql_tls"},
+            {"engine": "mssql", "report": true,
+             "suites": ["taurine-db-conformance live_servers sql_server_passes_every_check",
+                        "taurine-db-mssql live_blob,live_ddl,live_depth,live_explain,live_notices,live_reset,cancel,udt"],
+             "blurb": "Image: mssql/server 2022-latest (pinned by digest); suites: conformance + taurine-db-mssql live"},
+            {"engine": "pgtls", "report": false,
+             "suites": ["taurine-db-postgres live_tls"],
+             "blurb": "Images: postgres 17-alpine x2 (pinned by digest): ssl=on with a per-run certificate, and ssl=off"},
+            {"engine": "bastion", "report": false,
+             "suites": ["taurine-app dbx_connect_live"],
+             "blurb": "Images: postgres 17-alpine and the lab bastion (alpine 3.20 base pinned by digest; apk openssh-server unpinned); suite: taurine-app dbx_connect_live"}
+          ]
+          TCI_LIVE_ROSTER
+          names="$(jq -r 'map(.engine) | join(", ")' "${RUNNER_TEMP}/roster.json")"
+          requested="$(printf '%s' "${REQUESTED_ENGINE}" | tr -d '[:space:]')"
+          if [[ "${requested}" == "all" ]]; then
+            wanted="$(jq -c 'map(.engine)' "${RUNNER_TEMP}/roster.json")"
+          else
+            wanted="$(printf '%s' "${requested}" | jq -Rc 'split(",") | map(select(. != ""))')"
+          fi
+          if ! jq -en --argjson wanted "${wanted}" --slurpfile roster "${RUNNER_TEMP}/roster.json" \
+            '($wanted | length) > 0 and ($wanted | all(. as $w | $roster[0] | any(.engine == $w)))' >/dev/null; then
+            echo "engine must be one of: ${names}; a comma-separated list of them, or all" >&2
             exit 1
           fi
-          echo 'vendor-fetch: passed'
+          # Selected arms, in roster order and without duplicates.
+          arms="$(jq -nc --argjson wanted "${wanted}" --slurpfile roster "${RUNNER_TEMP}/roster.json" \
+            '[$roster[0][] | select(.engine as $e | $wanted | index($e)) | .engine]')"
+          echo "arms=${arms}" >> "${GITHUB_OUTPUT}"
+          echo "roster=$(jq -c 'map({(.engine): .}) | add' "${RUNNER_TEMP}/roster.json")" >> "${GITHUB_OUTPUT}"
+          printf 'Requested engine: %s\nSelected arms: %s\nRequested source SHA: %s\n' \
+            "${REQUESTED_ENGINE}" "${arms}" "${REQUESTED_SOURCE_SHA,,}"
 
-      - name: Install native build packages (bastion proof only)
-        if: ${{ inputs.engine == 'bastion' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The bastion proof is a `taurine-app` integration test, and that
-          # crate links Tauri: the same Ubuntu archive packages the hosted
-          # rust-app concern installs (.github/actions/rust-toolchain).
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends clang libclang-dev \
-            libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config >/dev/null
-          echo 'native-packages: installed'
+  prove:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    needs: [plan]
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: ${{ fromJSON(needs.plan.outputs.arms) }}
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.
+    uses: ./.github/workflows/live-proof-arm.yml  # zizmor: ignore[self-repository]
+    # Exactly one secret, the source-reader App key, passed by name: the policy
+    # requires this for every protected dispatcher and forbids secrets: inherit.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      engine: ${{ matrix.arm }}
+      config: ${{ toJSON(fromJSON(needs.plan.outputs.roster)[matrix.arm]) }}
 
-      - name: Build the engine's proof test binary
-        shell: bash
-        env:
-          ENGINE: ${{ inputs.engine }}
-        run: |
-          set -euo pipefail
-          cargo_sanitize() {
-            sed -E $'s/\033\[[0-9;]*[[:alpha:]]//g' "$1" |
-              sed -E "s#${GITHUB_WORKSPACE}/src/##g" |
-              sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
-              cut -c1-200
-          }
-          cargo_detail() {
-            cargo_sanitize "$1" |
-              grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^test result: |^failures:$' |
-              head -40 >&2 || true
-          }
-          # The main-engine arms (postgres, mysql, mssql, pgtls, bastion) run
-          # several cargo suites each, the ones scripts/check-db.sh in the
-          # private repository lists for that engine. One line per suite:
-          #   <package> <test targets, comma separated> [test-name filter]
-          # The run step reads the same file, so build and run cannot drift.
-          suites="${RUNNER_TEMP}/suites.txt"
-          : > "${suites}"
-          case "${ENGINE}" in
-            doris|starrocks|iris) target_args=(--test live_servers) ;;
-            db2)             target_args=(--test db2_live) ;;
-            informix)        target_args=(--test informix_live) ;;
-            rocketmq)        target_args=(--test rocketmq_live) ;;
-            postgres)
-              printf '%s\n' \
-                'taurine-db-conformance live_servers postgres_passes_every_check' \
-                'taurine-db-postgres live_catalog,live_blob,live_ddl,live_depth,live_explain,live_notices,cancel' \
-                'taurine-db-engine live_postgres' > "${suites}" ;;
-            mysql)
-              printf '%s\n' \
-                'taurine-db-conformance live_servers mysql_passes_every_check' \
-                'taurine-db-mysql live_blob,live_cancel,live_depth,live_explain,live_notices,live_param_types,live_reset' \
-                'taurine-db-engine live_mysql_tls' > "${suites}" ;;
-            mssql)
-              printf '%s\n' \
-                'taurine-db-conformance live_servers sql_server_passes_every_check' \
-                'taurine-db-mssql live_blob,live_ddl,live_depth,live_explain,live_notices,live_reset,cancel,udt' > "${suites}" ;;
-            pgtls)
-              printf '%s\n' 'taurine-db-postgres live_tls' > "${suites}" ;;
-            bastion)
-              printf '%s\n' 'taurine-app dbx_connect_live' > "${suites}" ;;
-            *) echo "Unsupported engine: ${ENGINE}" >&2; exit 2 ;;
-          esac
-          if [[ -s "${suites}" ]]; then
-            while read -r pkg targets _; do
-              build_args=()
-              IFS=, read -ra tl <<< "${targets}"
-              for t in "${tl[@]}"; do build_args+=(--test "${t}"); done
-              if ! cargo test -p "${pkg}" "${build_args[@]}" --no-run \
-                </dev/null >>"${RUNNER_TEMP}/build.log" 2>&1; then
-                echo "proof-build: failed for ${pkg}; sanitized detail below" >&2
-                cargo_detail "${RUNNER_TEMP}/build.log"
-                exit 1
-              fi
-            done < "${suites}"
-          elif ! cargo test -p taurine-db-conformance "${target_args[@]}" --no-run \
-            >"${RUNNER_TEMP}/build.log" 2>&1; then
-            echo 'proof-build: failed; sanitized detail below' >&2
-            cargo_detail "${RUNNER_TEMP}/build.log"
-            exit 1
-          fi
-          echo 'proof-build: passed'
-
-      # ── Per-engine servers ────────────────────────────────────────────────
-      #
-      # Every engine below starts its documented single-node container, waits
-      # for the server's own readiness signal (not a fixed sleep), records the
-      # server version, and exports the exact environment variables the
-      # private suite's gates read. Credentials are throwaways for a loopback
-      # container that dies with the runner; the Db2 password is generated at
-      # run time so nothing credential-shaped is committed here.
-      - name: Start the engine server and wait for readiness
-        shell: bash
-        env:
-          ENGINE: ${{ inputs.engine }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends mysql-client >/dev/null
-          ready=0
-
-          case "${ENGINE}" in
-            doris)
-              # Images pinned by index digest (tags fe-2.1.8 / be-2.1.8, resolved
-              # 2026-10-04; amd64 compressed 1.26 GB fe, 2.14 GB be — the be alone
-              # is over the 2 GB per-engine cap, recorded rather than hidden).
-              # Apache Doris fe + be, the pair the official quick-start
-              # compose brings up (FE keeps the MySQL wire on 9030; the BE is
-              # reached by the FE over the docker network, never from the
-              # host). fe+be are ~3.9 GB compressed. The BE needs minutes to
-              # register and report its tablets after its container starts —
-              # the wait below polls the FE for a live backend and allows
-              # 15 minutes before giving up. Root ships with an empty
-              # password.
-              docker network create --subnet=172.20.80.0/24 dbx-doris-net
-              docker run -d --name dbx-doris-fe --hostname fe \
-                --network dbx-doris-net --ip 172.20.80.2 \
-                -e FE_SERVERS=fe1:172.20.80.2:9010 -e FE_ID=1 \
-                -p 127.0.0.1:9030:9030 \
-                apache/doris@sha256:3e225c86c64ad2a2d45652abe5dea0d482c2c257551e17f323613dcfb6ebf7a8
-              docker run -d --name dbx-doris-be --hostname be \
-                --network dbx-doris-net --ip 172.20.80.3 \
-                -e FE_SERVERS=fe1:172.20.80.2:9010 -e BE_ADDR=172.20.80.3:9050 \
-                apache/doris@sha256:c272e0406d26af1bc2579e49e250858926d7ced28910e7a9df55c01626ea2664
-              for _ in $(seq 1 60); do
-                if mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\G' 2>/dev/null | grep -q 'Alive: true'; then
-                  ready=1
-                  break
-                fi
-                sleep 15
-              done
-              if (( ready == 0 )); then
-                echo 'doris: no live backend after 15 minutes; fe log tail below' >&2
-                docker logs dbx-doris-fe 2>&1 | tail -20 >&2 || true
-                docker logs dbx-doris-be 2>&1 | tail -20 >&2 || true
-                exit 1
-              fi
-              # Two lab facts a fresh single-BE cluster needs pinned, the way
-              # db-lab creates `payments` and sets compatibility knobs for
-              # the engines it hosts: modern Doris ships no `default`
-              # database, and a table's default replication of 3 cannot be
-              # satisfied by one backend. Both are measured, not assumed.
-              mysql -h127.0.0.1 -P9030 -uroot -e 'CREATE DATABASE IF NOT EXISTS `default`'
-              mysql -h127.0.0.1 -P9030 -uroot -e 'ADMIN SET FRONTEND CONFIG ("force_olap_table_replication_num" = "1")'
-              version="$(mysql -h127.0.0.1 -P9030 -uroot -N -e 'select version()' 2>/dev/null | head -1)"
-              {
-                echo "TAURINE_TEST_DORIS=127.0.0.1:9030"
-                echo "PROOF_SERVER_VERSION=${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            starrocks)
-              # Pinned by index digest (tag 3.2.3, resolved 2026-10-04; amd64
-              # compressed 3.62 GB — over the 2 GB per-engine cap, recorded).
-              # StarRocks all-in-one (FE + BE in one container, supervisord).
-              # The image is ~3.6 GB compressed and the docs ask for at least
-              # 4 GB of RAM for Docker; the hosted runner provides more. Same
-              # readiness shape as Doris: poll the FE's MySQL wire on 9030
-              # for a live backend, 20 minutes budget. Root ships with an
-              # empty password. A fresh cluster has no `default` database
-              # (neither engine ships one any more), so create it — the
-              # suite's flavour qualifies table paths by database.
-              docker run -d --name dbx-starrocks --hostname dbx-sr \
-                -p 127.0.0.1:9030:9030 \
-                starrocks/allin1-ubuntu@sha256:f31f55cd091bf623ed8112391fbfc3c9a09c1441113fac714d2fb7ae952aca66
-              for _ in $(seq 1 80); do
-                if mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\G' 2>/dev/null | grep -q 'Alive: true'; then
-                  ready=1
-                  break
-                fi
-                sleep 15
-              done
-              if (( ready == 0 )); then
-                echo 'starrocks: no live backend after 20 minutes; log tail below' >&2
-                docker logs dbx-starrocks 2>&1 | tail -30 >&2 || true
-                exit 1
-              fi
-              mysql -h127.0.0.1 -P9030 -uroot -e 'CREATE DATABASE IF NOT EXISTS `default`' 2>/dev/null
-              version="$(mysql -h127.0.0.1 -P9030 -uroot -N -e 'select version()' 2>/dev/null | head -1)"
-              {
-                echo "TAURINE_TEST_STARROCKS=127.0.0.1:9030"
-                echo "PROOF_SERVER_VERSION=${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            db2)
-              # Pinned by index digest (tag 11.5.9.0, resolved 2026-10-04; amd64
-              # compressed 1.58 GB).
-              # IBM Db2 Community on the amd64-only icr.io image. Requires a
-              # privileged container and ~10 minutes on first boot while the
-              # instance and the DBNAME database are created; IBM's own docs
-              # say readiness is the "Setup has completed" line in the
-              # container log. Database names are limited to 8 bytes, hence
-              # `taurine`. The instance password is generated at run time and
-              # handed to the suite through the environment — never printed.
-              db2_pass="ci-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-              docker run -d --name dbx-db2 --privileged \
-                -p 127.0.0.1:50000:50000 \
-                -e LICENSE=accept -e DB2INST1_PASSWORD="${db2_pass}" -e DBNAME=taurine \
-                icr.io/db2_community/db2@sha256:77095d4e04cf4448c0257086afcb2c166193d718dc33441da3b949f97e21efd5
-              for _ in $(seq 1 90); do
-                if docker logs dbx-db2 2>&1 | grep -q 'Setup has completed'; then
-                  ready=1
-                  break
-                fi
-                sleep 15
-              done
-              if (( ready == 0 )); then
-                echo 'db2: setup did not complete in 22 minutes; log tail below' >&2
-                docker logs dbx-db2 2>&1 | tail -20 >&2 || true
-                exit 1
-              fi
-              for _ in $(seq 1 12); do
-                if (exec 3<>/dev/tcp/127.0.0.1/50000) 2>/dev/null; then
-                  ready=2
-                  break
-                fi
-                sleep 5
-              done
-              if (( ready != 2 )); then
-                echo 'db2: setup reported completion but port 50000 never opened' >&2
-                exit 1
-              fi
-              version="$(docker exec dbx-db2 su - db2inst1 -c db2level 2>/dev/null | grep -m1 'DB2 v' || true)"
-              {
-                echo "TAURINE_TEST_DB2=127.0.0.1:50000"
-                echo "TAURINE_TEST_DB2_DB=taurine"
-                echo "TAURINE_TEST_DB2_USER=db2inst1"
-                echo "TAURINE_TEST_DB2_PASS=${db2_pass}"
-                echo "PROOF_SERVER_VERSION=${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            informix)
-              # Pinned by manifest digest (tag 14.10.FC7W1DE, resolved 2026-10-04;
-              # single-platform image, compressed 0.87 GB).
-              # IBM Informix Developer Edition, the amd64-only community
-              # image (the icr.io community repository needs IBM
-              # entitlement; this Docker Hub image is the anonymously
-              # pullable one the driver's descriptor names). Privileged, and
-              # run with a TTY as its documentation recommends. Readiness is
-              # the server's own onstat reporting the engine online — run by
-              # binary path with the environment spelled out, because `su -
-              # informix` demands a password this image's account cannot
-              # answer (measured: every readiness probe silently failed
-              # auth while the server had been online for twenty minutes).
-              # The developer image ships no empty application database, so
-              # the lane creates a logged database for the suite, the way
-              # the local lab creates `payments` for other engines. The
-              # password is the image's published default for user
-              # `informix`.
-              # onstat/dbaccess need three variables the image's own layout
-              # implies and no login profile exports to `docker exec`.
-              docker run -d -t --name dbx-informix --hostname dbx-ifx --privileged \
-                -p 127.0.0.1:9088:9088 -p 127.0.0.1:9089:9089 \
-                -e LICENSE=accept \
-                ibmcom/informix-developer-database@sha256:069febf6b08d72866ad8d7b06c1caf190df423f7b407de1ce18e3d89a8f8803d
-              # Two readiness signals, either of which proves the server is
-              # open for business: the engine's own onstat by binary path,
-              # and the SQLI listener dialled **inside the container** — the
-              # host-mapped port is useless here, because docker's userland
-              # proxy accepts a connection the moment the mapping exists,
-              # before the server listens (measured: a 250-millisecond-old
-              # container "passed" that probe and the lane sailed past a
-              # server that had not finished init). The listener probe
-              # exists because the exec probe failed for twenty minutes on
-              # one runner while the container log showed the server online
-              # since minute one — the probe, not the server, was the
-              # suspect, and a single signal makes a twenty-minute round
-              # trip the only way to learn that.
-              # `onstat` exits non-zero as a status bitmask even while the
-              # server is On-Line (exit 5 measured on 14.10.FC7W1DE), so the
-              # answer is what it prints, never what it returns — and with
-              # `pipefail` its exit code must not reach the probe. The same
-              # bitmask killed the version capture below through `set -e`:
-              # the server came up, the database was created, and the step
-              # died mid-assignment without a word.
-              informix_online=""
-              for _ in $(seq 1 90); do
-                informix_online="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -E -- '-- On-?Line' || true)"
-                if [[ -n "${informix_online}" ]]; then
-                  ready=1
-                  break
-                fi
-                if docker exec dbx-informix bash -c 'exec 3<>/dev/tcp/127.0.0.1/9088' 2>/dev/null; then
-                  echo 'informix: onstat did not answer but the SQLI listener is accepting (in-container)'
-                  ready=2
-                  break
-                fi
-                sleep 20
-              done
-              if (( ready == 0 )); then
-                echo 'informix: not online after 30 minutes' >&2
-                echo 'the onstat probe said:' >&2
-                docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>&1 | tail -5 >&2 || echo '  (the probe itself could not run)' >&2
-                docker exec dbx-informix bash -c 'echo exec-alive' 2>&1 | tail -1 >&2 || echo '  (docker exec itself failed)' >&2
-                echo 'container log tail:' >&2
-                docker logs dbx-informix 2>&1 | tail -30 >&2 || true
-                exit 1
-              fi
-              if ! printf 'create database taurine with log;\n' |
-                docker exec -i dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/dbaccess -' >/dev/null 2>&1; then
-                echo 'informix: creating the proof database failed; dbaccess output below' >&2
-                printf 'create database taurine with log;\n' |
-                  docker exec -i dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/dbaccess -' 2>&1 | tail -10 >&2 || true
-                exit 1
-              fi
-              version="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -m1 'IBM Informix' || true)"
-              {
-                echo "TAURINE_TEST_INFORMIX=127.0.0.1:9088"
-                echo "TAURINE_TEST_INFORMIX_DB=taurine"
-                echo "TAURINE_TEST_INFORMIX_USER=informix"
-                echo "TAURINE_TEST_INFORMIX_PASS=in4mix"
-                echo "PROOF_SERVER_VERSION=${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            rocketmq)
-              # Pinned by index digest (tag 5.3.2, resolved 2026-10-04; amd64
-              # compressed 0.20 GB).
-              # Apache RocketMQ 5.3.2, the NameServer-plus-broker pair the
-              # official quick start describes, on a docker network (the
-              # image is a few hundred MB compressed — the smallest guest
-              # this workflow hosts). The one RocketMQ quirk a loopback lab
-              # has is the broker's *advertised* address: what the broker
-              # registers with the NameServer is the address the client
-              # dials next, so it must be one the host can reach — hence the
-              # mounted broker.conf pinning brokerIP1 to 127.0.0.1 with the
-              # broker port published beside it. Readiness is the admin
-              # conversation itself (mqadmin clusterList answering with the
-              # broker), 10 minutes budget. The lane pre-creates the two
-              # fixtures the suite names — a topic and a consumer group —
-              # because a pristine broker legitimately answers an empty
-              # group table, and a run that cannot tell "empty because
-              # fresh" from "folder answered with real content" proves
-              # nothing about the folder.
-              docker network create dbx-rocketmq-net
-              printf '%s\n' \
-                'brokerClusterName = DefaultCluster' \
-                'brokerName = broker-a' \
-                'brokerId = 0' \
-                'brokerRole = ASYNC_MASTER' \
-                'flushDiskType = ASYNC_FLUSH' \
-                'brokerIP1 = 127.0.0.1' \
-                'listenPort = 10911' \
-                'autoCreateTopicEnable = false' \
-                > "${RUNNER_TEMP}/broker.conf"
-              docker run -d --name dbx-rocketmq-namesrv --hostname namesrv \
-                --network dbx-rocketmq-net \
-                -p 127.0.0.1:9876:9876 \
-                -e JAVA_OPT_EXT="-Xms256m -Xmx256m" \
-                apache/rocketmq@sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587 sh mqnamesrv
-              docker run -d --name dbx-rocketmq-broker --hostname broker \
-                --network dbx-rocketmq-net \
-                -p 127.0.0.1:10911:10911 -p 127.0.0.1:10909:10909 \
-                -v "${RUNNER_TEMP}/broker.conf:/home/rocketmq/conf/broker.conf" \
-                -e JAVA_OPT_EXT="-Xms512m -Xmx512m" \
-                apache/rocketmq@sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587 sh mqbroker -n namesrv:9876 -c /home/rocketmq/conf/broker.conf
-              for _ in $(seq 1 30); do
-                if docker exec dbx-rocketmq-broker sh mqadmin clusterList -n namesrv:9876 2>/dev/null | grep -q 'broker-a'; then
-                  ready=1
-                  break
-                fi
-                sleep 20
-              done
-              if (( ready == 0 )); then
-                echo 'rocketmq: no live broker after 10 minutes; log tails below' >&2
-                docker logs dbx-rocketmq-namesrv 2>&1 | tail -20 >&2 || true
-                docker logs dbx-rocketmq-broker 2>&1 | tail -30 >&2 || true
-                exit 1
-              fi
-              docker exec dbx-rocketmq-broker sh mqadmin updateTopic -n namesrv:9876 -c DefaultCluster -t taurine_proof_topic >/dev/null
-              docker exec dbx-rocketmq-broker sh mqadmin updateSubGroup -n namesrv:9876 -c DefaultCluster -g taurine_proof_group >/dev/null
-              version="$(docker exec dbx-rocketmq-broker sh mqadmin clusterList -n namesrv:9876 2>/dev/null | awk 'NR>1 && $2 == "broker-a" {print $5; exit}')"
-              {
-                echo "TAURINE_TEST_ROCKETMQ=127.0.0.1:9876"
-                echo "TAURINE_TEST_ROCKETMQ_TOPIC=taurine_proof_topic"
-                echo "TAURINE_TEST_ROCKETMQ_GROUP=taurine_proof_group"
-                echo "PROOF_SERVER_VERSION=Apache RocketMQ ${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            iris)
-              # InterSystems IRIS Community from InterSystems' own registry
-              # (anonymous pull), pinned by the multi-arch index digest of
-              # tag 2025.3 (amd64 layers measured 1.15 GB compressed from the
-              # registry manifest, inside the 2 GB per-engine cap). The driver
-              # speaks Atelier REST (/api/atelier/v1) on the image's private
-              # web server, port 52773, plain HTTP; the superserver is not
-              # published because nothing here uses it. A fresh image forces a
-              # password change for its predefined accounts, so the lane hands
-              # the entrypoint a throwaway generated per run through its
-              # documented `--password-file` flag (the instance consumes the
-              # file at first start). The password is masked before it is
-              # written anywhere and reaches the suite only through the
-              # environment. Readiness is the endpoint the driver's connect
-              # probe uses — an authenticated namespace read answering 200 —
-              # not a fixed sleep, 10 minutes budget.
-              iris_pass="ci$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-              echo "::add-mask::${iris_pass}"
-              printf '%s\n' "${iris_pass}" > "${RUNNER_TEMP}/iris-password.txt"
-              chmod 644 "${RUNNER_TEMP}/iris-password.txt"
-              docker run -d --name dbx-iris \
-                -p 127.0.0.1:52773:52773 \
-                -v "${RUNNER_TEMP}/iris-password.txt:/tmp/iris-password.txt" \
-                containers.intersystems.com/intersystems/iris-community@sha256:00a19ce756e96775c3f04514f8a6f0636122d25bdc22a53e01b57eef12dcaed9 \
-                --password-file /tmp/iris-password.txt
-              iris_code=000
-              for _ in $(seq 1 60); do
-                iris_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
-                  -u "SuperUser:${iris_pass}" http://127.0.0.1:52773/api/atelier/v1/USER 2>/dev/null || true)"
-                if [[ "${iris_code}" == "200" ]]; then
-                  ready=1
-                  break
-                fi
-                sleep 10
-              done
-              if (( ready == 0 )); then
-                echo "iris: Atelier namespace read never answered 200 in 10 minutes (last HTTP ${iris_code}); log tail below" >&2
-                docker logs dbx-iris 2>&1 | tail -30 >&2 || true
-                exit 1
-              fi
-              version="$(curl --silent --max-time 10 -u "SuperUser:${iris_pass}" http://127.0.0.1:52773/api/atelier/ 2>/dev/null | jq -r '.result.content.version // empty' 2>/dev/null || true)"
-              {
-                echo "TAURINE_TEST_IRIS=127.0.0.1:52773"
-                echo "TAURINE_TEST_IRIS_PASSWORD=${iris_pass}"
-                echo "PROOF_SERVER_VERSION=${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            postgres)
-              # PostgreSQL 17 (tools/db-lab's `postgres` service), pinned by
-              # index digest (tag 17-alpine, resolved 2026-10-04; amd64
-              # compressed 0.12 GB). User and database names are the ones the
-              # suites hard-code (`taurine` / `payments`); the password is a
-              # throwaway generated per run and masked before any use. The
-              # lab's seed SQL is mounted from the checked-out source so the
-              # fixtures cannot drift from the tests that read them. Ready =
-              # a real query over TCP as the real user (the init phase's
-              # temporary server listens on the socket only, so a TCP answer
-              # means the final server is up).
-              [[ -s "${GITHUB_WORKSPACE}/src/tools/db-lab/postgres/init/01-payments.sql" ]] || { echo 'postgres: the lab seed is missing from the source checkout' >&2; exit 1; }
-              pg_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-              echo "::add-mask::${pg_pass}"
-              docker run -d --name dbx-postgres \
-                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
-                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
-                -p 127.0.0.1:15432:5432 \
-                -v "${GITHUB_WORKSPACE}/src/tools/db-lab/postgres/init:/docker-entrypoint-initdb.d:ro" \
-                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-              for _ in $(seq 1 60); do
-                if docker exec dbx-postgres psql -h 127.0.0.1 -U taurine -d payments -c 'select 1' >/dev/null 2>&1; then
-                  ready=1
-                  break
-                fi
-                sleep 3
-              done
-              if (( ready == 0 )); then
-                echo 'postgres: no authenticated TCP answer after 3 minutes; log tail below' >&2
-                docker logs dbx-postgres 2>&1 | tail -30 >&2 || true
-                exit 1
-              fi
-              version="$(docker exec dbx-postgres psql -h 127.0.0.1 -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
-              {
-                echo "TAURINE_TEST_PG=127.0.0.1:15432"
-                echo "TAURINE_TEST_PG_PASSWORD=${pg_pass}"
-                echo "PROOF_SERVER_VERSION=PostgreSQL ${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            mysql)
-              # MySQL 8.4 (the lab's `mysql` service), pinned by index digest
-              # (tag 8.4, resolved 2026-10-04; amd64 compressed 0.24 GB). The
-              # server generates its own TLS material at first start, which is
-              # exactly what the TLS regression history here needs: the
-              # engine's `live_mysql_tls` dials with TLS on. The root password
-              # is exported too, because MySQL refuses CREATE TRIGGER to an
-              # ordinary user while binary logging is on (two suites need it).
-              # Both passwords are per-run throwaways, masked first.
-              [[ -s "${GITHUB_WORKSPACE}/src/tools/db-lab/mysql/init/01-payments.sql" ]] || { echo 'mysql: the lab seed is missing from the source checkout' >&2; exit 1; }
-              my_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-              my_root="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-              echo "::add-mask::${my_pass}"
-              echo "::add-mask::${my_root}"
-              docker run -d --name dbx-mysql \
-                -e MYSQL_ROOT_PASSWORD="${my_root}" -e MYSQL_USER=taurine \
-                -e MYSQL_PASSWORD="${my_pass}" -e MYSQL_DATABASE=payments \
-                -p 127.0.0.1:13306:3306 \
-                -v "${GITHUB_WORKSPACE}/src/tools/db-lab/mysql/init:/docker-entrypoint-initdb.d:ro" \
-                mysql@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
-              for _ in $(seq 1 90); do
-                if docker exec -e MYSQL_PWD="${my_pass}" dbx-mysql mysql -h127.0.0.1 -P3306 -utaurine -Dpayments -e 'select 1' >/dev/null 2>&1; then
-                  ready=1
-                  break
-                fi
-                sleep 3
-              done
-              if (( ready == 0 )); then
-                echo 'mysql: no authenticated TCP answer after 4.5 minutes; log tail below' >&2
-                docker logs dbx-mysql 2>&1 | tail -30 >&2 || true
-                exit 1
-              fi
-              version="$(docker exec -e MYSQL_PWD="${my_pass}" dbx-mysql mysql -h127.0.0.1 -P3306 -utaurine -N -e 'select version()' 2>/dev/null | head -1)"
-              {
-                echo "TAURINE_TEST_MYSQL=127.0.0.1:13306"
-                echo "TAURINE_TEST_MYSQL_PASSWORD=${my_pass}"
-                echo "TAURINE_TEST_MYSQL_ROOT_PASSWORD=${my_root}"
-                echo "PROOF_SERVER_VERSION=MySQL ${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            mssql)
-              # SQL Server 2022, the engine users actually run: mssql/server
-              # 2022-latest pinned by digest (amd64, about 0.63 GB compressed,
-              # under the per-engine image cap). It replaces azure-sql-edge,
-              # which the lab used but which is not SQL Server proper. The
-              # lab's own `mssql-init` sidecar (mssql-tools, pinned by digest,
-              # 0.10 GB) stays the readiness gate:
-              # it logs in, creates `payments` and seeds it from the checked-out
-              # source, exiting 0 only once all of that happened. The SA
-              # password is a per-run throwaway that meets SQL Server's
-              # complexity rules (upper, lower, digit, symbol), masked first.
-              [[ -s "${GITHUB_WORKSPACE}/src/tools/db-lab/mssql/init.sh" ]] || { echo 'mssql: the lab init script is missing from the source checkout' >&2; exit 1; }
-              ms_pass="Aa1!$(head -c 14 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-              echo "::add-mask::${ms_pass}"
-              export MSSQL_SA_PASSWORD="${ms_pass}"
-              docker run -d --name dbx-mssql \
-                -e ACCEPT_EULA=1 -e MSSQL_PID=Developer -e MSSQL_SA_PASSWORD \
-                -p 127.0.0.1:11433:1433 \
-                mcr.microsoft.com/mssql/server:2022-latest@sha256:4402d880dd4c34bfa7d8705e56a86cd6c88da80a1f6bbbe741f999e76264a090
-              if docker run --rm --network host --platform linux/amd64 \
-                -e MSSQL_HOST='127.0.0.1,11433' -e MSSQL_SA_PASSWORD -e MSSQL_DATABASE=payments \
-                -v "${GITHUB_WORKSPACE}/src/tools/db-lab/mssql:/init:ro" \
-                --entrypoint /bin/bash \
-                mcr.microsoft.com/mssql-tools@sha256:62556500522072535cb3df2bb5965333dded9be47000473e9e0f84118e248642 \
-                /init/init.sh; then
-                ready=1
-              fi
-              if (( ready == 0 )); then
-                echo 'mssql: the init sidecar never got a login and a seeded database; log tail below' >&2
-                docker logs dbx-mssql 2>&1 | tail -30 >&2 || true
-                exit 1
-              fi
-              version="$(docker run --rm --network host --platform linux/amd64 -e MSSQL_SA_PASSWORD --entrypoint /bin/bash \
-                mcr.microsoft.com/mssql-tools@sha256:62556500522072535cb3df2bb5965333dded9be47000473e9e0f84118e248642 \
-                -c '/opt/mssql-tools/bin/sqlcmd -S 127.0.0.1,11433 -U sa -P "$MSSQL_SA_PASSWORD" -h -1 -W -Q "SET NOCOUNT ON; SELECT @@VERSION"' 2>/dev/null | head -1 | cut -c1-100 || true)"
-              {
-                echo "TAURINE_TEST_MSSQL=127.0.0.1:11433"
-                echo "TAURINE_TEST_MSSQL_PASSWORD=${ms_pass}"
-                echo "PROOF_SERVER_VERSION=${version}"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            pgtls)
-              # The two PostgreSQL servers `taurine-db-postgres/tests/live_tls.rs`
-              # needs at once (the lab's `postgres-tls` and `postgres-plain`):
-              # one presenting a certificate for pg.taurine.test, one with
-              # ssl=off. Both from the same pinned image (postgres 17-alpine,
-              # index digest, 0.12 GB compressed). The certificate material
-              # (CA, leaf, a rogue CA) is minted per run by the source's own
-              # tools/db-lab/pgtls/generate.sh into the runner's checkout —
-              # git-ignored there, never committed, gone with the runner — and
-              # that script verifies the leaf chains to the CA, carries the
-              # SAN and EKU, and does not chain to the rogue CA. The lab's
-              # entrypoint copies the key into the container with the right
-              # ownership. Ready = a TLS session proven by pg_stat_ssl, and a
-              # plaintext session proven by `show ssl`.
-              lab="${GITHUB_WORKSPACE}/src/tools/db-lab/pgtls"
-              [[ -s "${lab}/generate.sh" && -s "${lab}/entrypoint.sh" ]] || { echo 'pgtls: the lab scripts are missing from the source checkout' >&2; exit 1; }
-              bash "${lab}/generate.sh" >/dev/null
-              for f in ca.crt rogue-ca.crt server.crt server.key; do
-                [[ -s "${lab}/${f}" ]] || { echo "pgtls: generate.sh did not produce ${f}" >&2; exit 1; }
-              done
-              pg_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-              echo "::add-mask::${pg_pass}"
-              docker run -d --name dbx-pgtls \
-                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
-                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
-                -p 127.0.0.1:15433:5432 \
-                -v "${lab}:/pgtls-src:ro" \
-                --entrypoint /bin/sh \
-                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 \
-                /pgtls-src/entrypoint.sh -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
-              docker run -d --name dbx-pgplain \
-                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
-                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
-                -p 127.0.0.1:15434:5432 \
-                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 \
-                -c ssl=off
-              tls_ok=0
-              plain_ok=0
-              for _ in $(seq 1 60); do
-                if (( tls_ok == 0 )) && docker exec dbx-pgtls psql 'host=127.0.0.1 port=5432 user=taurine dbname=payments sslmode=require' -tAc 'select ssl from pg_stat_ssl where pid = pg_backend_pid()' 2>/dev/null | grep -qx t; then
-                  tls_ok=1
-                fi
-                if (( plain_ok == 0 )) && docker exec dbx-pgplain psql -h 127.0.0.1 -U taurine -d payments -tAc 'show ssl' 2>/dev/null | grep -qx off; then
-                  plain_ok=1
-                fi
-                if (( tls_ok == 1 && plain_ok == 1 )); then
-                  ready=1
-                  break
-                fi
-                sleep 3
-              done
-              if (( ready == 0 )); then
-                echo "pgtls: not ready after 3 minutes (tls=${tls_ok} plain=${plain_ok}); log tails below" >&2
-                docker logs dbx-pgtls 2>&1 | tail -20 >&2 || true
-                docker logs dbx-pgplain 2>&1 | tail -20 >&2 || true
-                exit 1
-              fi
-              version="$(docker exec dbx-pgtls psql -h 127.0.0.1 -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
-              {
-                echo "TAURINE_TEST_PG_TLS=127.0.0.1:15433"
-                echo "TAURINE_TEST_PG_PLAIN=127.0.0.1:15434"
-                echo "TAURINE_TEST_PG_TLS_CA=${lab}/ca.crt"
-                echo "TAURINE_TEST_PG_TLS_ROGUE_CA=${lab}/rogue-ca.crt"
-                echo "TAURINE_TEST_PG_PASSWORD=${pg_pass}"
-                echo "PROOF_SERVER_VERSION=PostgreSQL ${version} (tls + plain)"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            bastion)
-              # The SSH-tunnel proof: `taurine-app/tests/dbx_connect_live.rs`
-              # dials a PostgreSQL through the lab's key-only bastion. Three
-              # fixed facts the test hard-codes, reproduced here: the bastion
-              # listens on 127.0.0.1:14222, the database is the container named
-              # `taurine-db-lab-postgres-1` (its IP on the shared network is the
-              # tunnel target — unroutable from the host, so an answer proves
-              # the dial went through the bastion), and the client key and host
-              # public key are exported to tools/db-lab/bastion-keys/ in the
-              # checkout (git-ignored; minted per run by the lab's own init.sh,
-              # never committed). The bastion image is the lab's Dockerfile
-              # with its base pinned by digest (alpine 3.20, index digest,
-              # 3.6 MB compressed) and the lab's init.sh taken from the
-              # checked-out source; `apk add openssh-server` comes from Alpine's
-              # own package repository, the one unpinned input — recorded, not
-              # hidden. PostgreSQL is the same pinned image as the postgres arm.
-              lab="${GITHUB_WORKSPACE}/src/tools/db-lab"
-              [[ -s "${lab}/bastion/init.sh" ]] || { echo 'bastion: the lab init script is missing from the source checkout' >&2; exit 1; }
-              pg_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-              echo "::add-mask::${pg_pass}"
-              docker network create dbx-lab-net
-              docker run -d --name taurine-db-lab-postgres-1 --network dbx-lab-net \
-                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
-                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
-                -p 127.0.0.1:15432:5432 \
-                -v "${lab}/postgres/init:/docker-entrypoint-initdb.d:ro" \
-                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-              ctx="${RUNNER_TEMP}/bastion-ctx"
-              mkdir -p "${ctx}"
-              cp "${lab}/bastion/Dockerfile" "${lab}/bastion/init.sh" "${ctx}/"
-              # The lab's own Dockerfile, with only its base image swapped for
-              # the digest-pinned one; fail if the base line was not the one
-              # expected, so the pin cannot silently stop applying.
-              sed -E -i 's#^FROM alpine:3\.20$#FROM alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc#' "${ctx}/Dockerfile"
-              grep -q '^FROM alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc$' "${ctx}/Dockerfile" \
-                || { echo 'bastion: the lab Dockerfile base is no longer alpine:3.20; re-resolve and re-pin it' >&2; exit 1; }
-              docker build -q -t dbx-lab-bastion "${ctx}"
-              docker volume create dbx-lab-bastion-keys >/dev/null
-              docker run -d --name dbx-lab-bastion --network dbx-lab-net \
-                -p 127.0.0.1:14222:22 \
-                -v dbx-lab-bastion-keys:/keys \
-                dbx-lab-bastion
-              for _ in $(seq 1 60); do
-                if docker exec dbx-lab-bastion sh -c 'test -s /keys/client_ed25519 && test -s /keys/bastion_host_ed25519.pub' 2>/dev/null \
-                  && docker exec taurine-db-lab-postgres-1 psql -h 127.0.0.1 -U taurine -d payments -c 'select 1' >/dev/null 2>&1 \
-                  && docker exec dbx-lab-bastion sh -c 'nc -z 127.0.0.1 22' 2>/dev/null; then
-                  ready=1
-                  break
-                fi
-                sleep 3
-              done
-              if (( ready == 0 )); then
-                echo 'bastion: keys, sshd and the database were not all ready after 3 minutes; log tails below' >&2
-                docker logs dbx-lab-bastion 2>&1 | tail -20 >&2 || true
-                docker logs taurine-db-lab-postgres-1 2>&1 | tail -20 >&2 || true
-                exit 1
-              fi
-              # Export the key material where the test reads it, owned by the
-              # runner user (the key is generated as root inside the container).
-              mkdir -p "${lab}/bastion-keys"
-              docker cp dbx-lab-bastion:/keys/client_ed25519 "${lab}/bastion-keys/client_ed25519"
-              docker cp dbx-lab-bastion:/keys/client_ed25519.pub "${lab}/bastion-keys/client_ed25519.pub"
-              docker cp dbx-lab-bastion:/keys/bastion_host_ed25519.pub "${lab}/bastion-keys/bastion_host_ed25519.pub"
-              sudo chown -R "$(id -u):$(id -g)" "${lab}/bastion-keys"
-              chmod 600 "${lab}/bastion-keys/client_ed25519"
-              version="$(docker exec taurine-db-lab-postgres-1 psql -h 127.0.0.1 -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
-              {
-                echo "TAURINE_TEST_PG=127.0.0.1:15432"
-                echo "TAURINE_TEST_PG_PASSWORD=${pg_pass}"
-                echo "PROOF_SERVER_VERSION=PostgreSQL ${version} behind an OpenSSH bastion (key-only)"
-              } >> "${GITHUB_ENV}"
-              ;;
-
-            *)
-              echo "Unsupported engine: ${ENGINE}" >&2
-              exit 2
-              ;;
-          esac
-
-          docker ps --format '{{.Names}} {{.Status}}'
-          # What actually ran, as the references the containers were created
-          # from (digest-pinned): published in the summary as the proof's
-          # image identity. Names and image references only.
-          docker ps --format '{{.Names}}' | while read -r c; do
-            docker inspect --format '{{.Name}} {{.Config.Image}}' "${c}"
-          done | sed 's#^/##' > "${RUNNER_TEMP}/proof-images.txt"
-          cat "${RUNNER_TEMP}/proof-images.txt"
-
-      # The suite output goes to a runner-local log, and only the sanitized
-      # inventory below is ever published: the report's header line, each
-      # check's outcome label and title, and cargo's own result line. The
-      # detail lines a FAIL carries (expected-versus-got of the driver's
-      # answer) and the raw log never leave the runner.
-      - name: Run the engine's live proof
-        shell: bash
-        env:
-          ENGINE: ${{ inputs.engine }}
-        run: |
-          set -euo pipefail
-          case "${ENGINE}" in
-            doris)     target=live_servers;   filter=doris_passes_every_check ;;
-            starrocks) target=live_servers;   filter=starrocks_passes_every_check ;;
-            iris)      target=live_servers;   filter=iris_passes_every_check ;;
-            db2)       target=db2_live;       filter=db2_passes_every_check_against_a_live_server ;;
-            informix)  target=informix_live;  filter=informix_passes_every_check_against_a_live_server ;;
-            # Both tests in the file are the proof: the admin-surface run and
-            # the refusal run, so no filter — the whole file runs.
-            rocketmq)  target=rocketmq_live;  filter="" ;;
-            postgres|mysql|mssql|pgtls|bastion) target=""; filter="" ;;
-            *) echo "Unsupported engine: ${ENGINE}" >&2; exit 2 ;;
-          esac
-          log="${RUNNER_TEMP}/live-proof.log"
-          if [[ -z "${target}" ]]; then
-            # Main-engine arms: every suite in suites.txt, all of them run even
-            # after a failure so one report shows the whole picture. Two ways
-            # to fail, both final: a non-zero cargo exit, and — the rule
-            # scripts/check-db.sh exists for — any SKIPPED line. A gated
-            # driver test returns early and cargo counts it as passed, so a
-            # skip is an unrun test, not a proof.
-            : > "${log}"
-            : > "${RUNNER_TEMP}/suite-results.txt"
-            overall=0
-            while read -r pkg targets name; do
-              args=()
-              IFS=, read -ra tl <<< "${targets}"
-              for t in "${tl[@]}"; do args+=(--test "${t}"); done
-              [[ -n "${name:-}" ]] && args+=("${name}")
-              suite_log="${RUNNER_TEMP}/suite.log"
-              set +e
-              cargo test -p "${pkg}" "${args[@]}" -- --nocapture --test-threads=1 </dev/null >"${suite_log}" 2>&1
-              code=$?
-              set -e
-              {
-                echo "== ${pkg} ${targets} ${name:-}"
-                cat "${suite_log}"
-              } >> "${log}"
-              skips="$(grep -c 'SKIPPED' "${suite_log}" || true)"
-              passed="$(grep -E '^test result: ok\. [0-9]+ passed' "${suite_log}" | awk '{s+=$4} END{print s+0}')"
-              verdict=pass
-              if (( code != 0 )); then verdict="FAIL(exit ${code})"; overall=1; fi
-              if (( skips > 0 )); then verdict="FAIL(${skips} SKIPPED)"; overall=1; fi
-              if (( code == 0 && passed == 0 )); then verdict='FAIL(no test passed)'; overall=1; fi
-              echo "${verdict}: ${pkg} [${targets}] ${name:-} passed=${passed} skipped=${skips}" | tee -a "${RUNNER_TEMP}/suite-results.txt"
-              if (( code != 0 )); then
-                # Name the failure in the log right here, not only in the summary: the failed
-                # tests and one fixed-format line per panic (test, file:line, class; the
-                # assertion text and values are never published).
-                source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-                echo "FAILED in ${pkg} [${targets}] ${name:-}: failed tests:" >&2
-                failed_test_names "${suite_log}" | sed 's/^/  /' >&2 || true
-                echo "panics (test, file:line, class):" >&2
-                panic_summary "${suite_log}" >&2 || true
-              fi
-              if (( skips > 0 )); then
-                echo "REFUSED: ${pkg} reported SKIPPED — an unrun test is not a pass; the lines were:" >&2
-                grep 'SKIPPED' "${suite_log}" | cut -c1-200 | head -10 >&2 || true
-              fi
-            done < "${RUNNER_TEMP}/suites.txt"
-            echo "${overall}" > "${RUNNER_TEMP}/lab-overall.txt"
-            exit "${overall}"
-          fi
-          set +e
-          filter_args=()
-          [[ -n "${filter}" ]] && filter_args=("${filter}")
-          cargo test -p taurine-db-conformance --test "${target}" "${filter_args[@]}" -- --nocapture \
-            >"${log}" 2>&1
-          status=$?
-          set -e
-          echo "cargo test exited ${status}; sanitized report follows in the summary step"
-          if [[ "${status}" -ne 0 ]]; then
-            source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-            echo 'failed tests:' >&2
-            failed_test_names "${log}" | sed 's/^/  /' >&2 || true
-            echo 'panics (test, file:line, class):' >&2
-            panic_summary "${log}" >&2 || true
-          fi
-          exit "${status}"
-
-      - name: Publish sanitized live-proof summary
-        if: always()
-        shell: bash
-        env:
-          ENGINE: ${{ inputs.engine }}
-          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          set -euo pipefail
-          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          log="${RUNNER_TEMP}/live-proof.log"
-          checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"
-          echo "engine=${ENGINE} log_exists=$(test -f "${log}" && echo yes || echo no) sha=${checked_out_sha}"
-          if [[ ! -f "${log}" ]]; then
-            echo 'No proof log was produced; the run step did not execute' >&2
-            exit 1
-          fi
-          header="$(grep -E '^[a-z0-9]+.*[0-9]+ checks: [0-9]+ passed' "${log}" | tail -1 || true)"
-          # A FAIL or INVL carries a detail line under its title — the
-          # expected-versus-got that names the driver defect, or the setup
-          # step that proved nothing. Published beside the label: the content
-          # is the suite's own synthetic constants and server error strings,
-          # never credentials or captured data. Paths are redacted below.
-          outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  |^        ' "${log}" | sed -E 's/[[:space:]]+$//' | sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' | cut -c1-200 || true)"
-          result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
-          test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 || true)"
-          # The panic block carries the assertion that named the failure: the
-          # connect outcome, the suite's report header, the sign-off's counts.
-          # Paths are redacted and lines cut before anything is published; the
-          # content is server error strings and the suite's own synthetic
-          # constants, never credentials or captured data.
-          # Superseded: the failure detail is now the fixed-format panic summary and the failed
-          # test names below, which publish no assertion text and no values.
-          failed_names="$(failed_test_names "${log}" || true)"
-          panic_lines="$(panic_summary "${log}" || true)"
-          {
-            echo "## Live proof — ${ENGINE}"
-            echo
-            echo "- Source SHA: \`${checked_out_sha}\`"
-            echo "- Server: ${PROOF_SERVER_VERSION:-version unavailable}"
-            case "${ENGINE}" in
-              doris)     echo '- Images: apache/doris:fe-2.1.8 + apache/doris:be-2.1.8 (single fe + single be; digest-pinned, see resolved images)' ;;
-              starrocks) echo '- Image: starrocks/allin1-ubuntu 3.2.3 (all-in-one fe + be)' ;;
-              db2)       echo '- Image: icr.io/db2_community/db2:11.5.9.0 (privileged, amd64)' ;;
-              informix)  echo '- Image: ibmcom/informix-developer-database:14.10.FC7W1DE (privileged, amd64)' ;;
-              rocketmq)  echo '- Images: apache/rocketmq:5.3.2 (NameServer + broker, brokerIP1 pinned to 127.0.0.1)' ;;
-              iris)      echo '- Image: containers.intersystems.com/intersystems/iris-community:2025.3 (pinned by digest, amd64; Atelier REST on the private web server)' ;;
-              postgres)  echo '- Image: postgres 17-alpine (pinned by digest); suites: conformance + taurine-db-postgres live + engine live_postgres' ;;
-              mysql)     echo '- Image: mysql 8.4 (pinned by digest); suites: conformance + taurine-db-mysql live + engine live_mysql_tls' ;;
-              mssql)     echo '- Image: mssql/server 2022-latest (pinned by digest); suites: conformance + taurine-db-mssql live' ;;
-              pgtls)     echo '- Images: postgres 17-alpine x2 (pinned by digest): ssl=on with a per-run certificate, and ssl=off' ;;
-              bastion)   echo '- Images: postgres 17-alpine and the lab bastion (alpine 3.20 base pinned by digest; apk openssh-server unpinned); suite: taurine-app dbx_connect_live' ;;
-            esac
-            echo "- Source token: revoked before any project command"
-            if [[ -s "${RUNNER_TEMP}/suite-results.txt" ]]; then
-              echo '- Suites (a SKIPPED line fails the arm):'
-              sed 's/^/  - /' "${RUNNER_TEMP}/suite-results.txt"
-            fi
-            if [[ -s "${RUNNER_TEMP}/proof-images.txt" ]]; then
-              echo '- Resolved images (container, digest-pinned reference):'
-              sed 's/^/  - /' "${RUNNER_TEMP}/proof-images.txt"
-            fi
-            echo "- Runner: $(nproc) vCPU, $(free -m | awk '/^Mem:/{print $2}') MB RAM, $(df -BG --output=avail / | tail -1 | tr -d ' ') GB disk free after the run"
-            echo
-            if [[ -z "${header}" && "${ENGINE}" != "pgtls" && "${ENGINE}" != "bastion" ]]; then
-              echo '**The suite produced no report** — the proof is not evidence either way.'
-              echo
-            elif [[ -n "${header}" ]]; then
-              echo "Suite report (sanitized — check titles only, never data values):"
-              echo
-              echo '```'
-              echo "${header}"
-              echo "${outcomes}"
-              echo '```'
-              echo
-            fi
-            if [[ -n "${test_line}" ]]; then
-              echo '```'
-              echo "${test_line}"
-              echo "${result}"
-              echo '```'
-            fi
-            if [[ -n "${failed_names}" ]]; then
-              echo 'Failed tests:'
-              echo
-              echo '```'
-              printf '%s\n' "${failed_names}"
-              echo '```'
-            fi
-            if [[ -n "${panic_lines}" ]]; then
-              echo 'Panics (test, file:line, class; the message text is never published):'
-              echo
-              echo '```'
-              printf '%s\n' "${panic_lines}"
-              echo '```'
-            fi
-          } >> "${GITHUB_STEP_SUMMARY}"
-          # The greppable copy, so the published identities are visible in the
-          # log alongside the summary.
-          {
-            echo "live-proof header: ${header}"
-            echo "${outcomes}"
-            echo "live-proof ${test_line}"
-            echo "live-proof ${result}"
-            if [[ -n "${failed_names}" ]]; then
-              echo 'live-proof failed tests:'
-              printf '%s\n' "${failed_names}" | sed 's/^/  /'
-            fi
-            if [[ -n "${panic_lines}" ]]; then
-              echo 'live-proof panics (test, file:line, class):'
-              printf '%s\n' "${panic_lines}"
-            fi
-          } || true
-          # Fail closed: a log without a report line proves nothing, exactly
-          # like a report of nothing but skips.
-          case "${ENGINE}" in
-            pgtls|bastion)
-              # No conformance report here: the arm is the cargo suites
-              # themselves, judged by the run step's per-suite verdicts.
-              [[ "$(cat "${RUNNER_TEMP}/lab-overall.txt" 2>/dev/null || echo 1)" == "0" ]]
-              ;;
-            postgres|mysql|mssql)
-              # The conformance report must exist and be clean, and every
-              # suite must have passed with nothing skipped.
-              [[ -n "${header}" && "${header}" == *", 0 failed, "* && "${header}" == *", 0 invalid"* ]] \
-                && [[ "$(cat "${RUNNER_TEMP}/lab-overall.txt" 2>/dev/null || echo 1)" == "0" ]]
-              ;;
-            *)
-              [[ -n "${header}" && "${header}" == *", 0 failed, "* && "${header}" == *", 0 invalid"* ]]
-              ;;
-          esac
-
-      # The job's own wall-clock time, shown next to its result; the timings job
-      # tabulates it against a committed baseline.
-      - name: Report concern duration
-        if: ${{ always() }}
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
-        with:
-          mode: report
-
+  # Tabulates every arm's duration and conclusion for this run and warns when an
+  # arm took more than 25% (and more than two minutes) longer than the committed
+  # baseline below, in seconds, taken from recent hosted runs. Warning only: it
+  # never fails the run, calls no service beyond this repository's own run API
+  # with the run's read-only token, and publishes no artifact. An arm with no
+  # baseline is listed without a comparison.
   timings:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
     needs: [prove]
@@ -1097,5 +175,5 @@ jobs:
           mode: table
           label: Live proof
           baseline-seconds: '{"iris":944,"rocketmq":1023,"informix":826,"db2":981,"starrocks":836,"doris":941}'
-          name-pattern: '^Live proof — (?<concern>.+)$'
+          name-pattern: '^prove \(.+\) / Live proof — (?<concern>.+)$'
           github-token: ${{ github.token }}

@@ -1,0 +1,69 @@
+name: Fetch the pinned vendored sources
+description: |
+  Runs scripts/vendor-openvpn3.sh fetch (checksum-verified downloads plus the reviewed boringtun
+  patch) up to three times and reports a failure as a fixed one-line reason; the raw output stays
+  withheld. With patch-diagnostics, a patch that does not apply also prints counts and the rejected
+  hunk locations of the public crate. Callers set any GIT_CONFIG_* variables on the calling step.
+
+inputs:
+  patch-diagnostics:
+    description: Print the patch rejection detail (Windows line-ending diagnosis)
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch pinned vendored sources
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        PATCH_DIAGNOSTICS: ${{ inputs.patch-diagnostics }}
+      run: |
+        set -euo pipefail
+        # `fetch` verifies each download against the sha256 pinned in vendor.lock and
+        # applies the reviewed boringtun zeroize patch, so this is a supply-chain check
+        # as much as a prerequisite. The environment below keeps the vendored trees
+        # byte-identical to what upstream ships: Git for Windows would otherwise check
+        # openvpn3-core and tap-windows out with CRLF line endings, which no test and
+        # no pinned patch was written against.
+        # Up to three attempts: the fetch is idempotent (a partial tree is removed and
+        # boringtun is built in a temporary directory), and the four Rust concerns fetch
+        # the same three public sources at the same moment, so a throttled or reset
+        # download is transient. A failure after the last attempt is classified into a
+        # fixed one-line reason; the raw output stays withheld.
+        vendor_ok=0
+        for attempt in 1 2 3; do
+          if bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
+            vendor_ok=1
+            break
+          fi
+          echo "vendor-fetch: attempt ${attempt} failed" >&2
+          sleep $((attempt * 10))
+        done
+        if [[ "${vendor_ok}" != 1 ]]; then
+          if grep -qE 'could not download' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun download failed'
+          elif grep -qE 'has sha256' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun checksum mismatch'
+          elif grep -qE 'could not extract' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun extraction failed'
+          elif grep -qE 'does not apply' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun patch did not apply'
+          elif grep -qE 'crossbeam-epoch' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun lock refresh failed'
+          elif grep -qE '^fatal:|^error: RPC|unable to access' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='git fetch of a pinned source failed'
+          else reason='unclassified'
+          fi
+          if [[ "${PATCH_DIAGNOSTICS}" == true && "${reason}" == 'boringtun patch did not apply' ]]; then
+            # Counts and the crate-relative path of each rejected hunk only: the crate
+            # is public third-party source, and nothing from the private tree is printed.
+            echo "vendor-fetch: patch file carriage returns: $(grep -c $'\r' scripts/patches/boringtun-zeroize.patch || true)" >&2
+            diag="$(mktemp -d)"
+            if curl -fsSL "$(awk -F' *= *' '/^boringtun_url/ {gsub(/"/,"",$2); print $2}' vendor.lock)" -o "${diag}/c.tgz" \
+              && mkdir "${diag}/src" && tar xzf "${diag}/c.tgz" -C "${diag}/src" --strip-components 1; then
+              echo "vendor-fetch: crate files with carriage returns: $(grep -rlI $'\r' "${diag}/src" | wc -l | tr -d ' ')" >&2
+              (cd "${diag}/src" && git apply --check -p1 "${GITHUB_WORKSPACE}/src/scripts/patches/boringtun-zeroize.patch" 2>&1 \
+                | grep -E '^error: (patch failed|[A-Za-z0-9_./-]+: (patch does not apply|No such file))' | head -n 5 >&2) || true
+            fi
+            rm -rf "${diag}"
+          fi
+          echo "vendor-fetch: failed after 3 attempts (${reason}; detailed output withheld)" >&2
+          exit 1
+        fi
+        echo 'vendor-fetch: passed'

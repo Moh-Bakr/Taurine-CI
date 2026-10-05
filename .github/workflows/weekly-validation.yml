@@ -8,10 +8,19 @@ name: Weekly develop validation (scheduled)
 # dispatches the three protected validation workflows for that exact SHA with
 # the run's own token. The dispatched workflows do all the source-bearing work
 # under their own protections.
+#
+# Missed-run check. No other workflow in this repository runs on a frequent schedule (the
+# policy workflow runs on pull requests and pushes only), so there is no watchdog job; check by
+# hand instead: `gh run list --repo Moh-Bakr/Taurine-CI --workflow weekly-validation.yml
+# --event schedule --limit 3` should show a run each Monday after 05:23 UTC. If Monday's is
+# missing, dispatch this workflow by hand from the Actions tab or the gh CLI on main (a manual
+# dispatch uses the same jobs; set dry_run to only resolve and summarise). A repository with no
+# activity for 60 days has its schedules disabled by GitHub; re-enable them under Actions.
 on:
   schedule:
-    # Monday 05:00 UTC.
-    - cron: '0 5 * * 1'
+    # Monday 05:23 UTC. Off the top of the hour on purpose: GitHub delays or drops scheduled
+    # runs at :00 under load.
+    - cron: '23 5 * * 1'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -157,6 +166,10 @@ jobs:
             fi
             gh workflow run macos-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
             gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+            # The Windows 2025 image, every week, alongside (never instead of) the baseline run.
+            # It does not gate anything; two consecutive green weeks switch the default
+            # (see the header of windows-validation.yml).
+            gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true -f windows_image=windows-2025
           fi
           # openssl-src freshness: warn when a private lock is behind the newest 300.5.x
           # release on crates.io (the OpenSSL 3.5 line the production plan targets). The
@@ -192,9 +205,55 @@ jobs:
             if [[ "${DRY_RUN}" == true ]]; then
               echo '- Dry run: nothing was dispatched'
             else
-              echo '- Dispatched: linux-validation (full), macos-validation (rust=true), windows-validation (rust=true)'
+              echo '- Dispatched: linux-validation (full), macos-validation (rust=true), windows-validation (rust=true), windows-validation on windows-2025 (rust=true, non-gating)'
             fi
             if [[ -n "${BASE_SHA}" && "${DRY_RUN}" != true ]]; then
               echo "- Drift check: linux-validation with base_sha \`${BASE_SHA}\` (the week's selective run); compare its Result with the full run's"
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  # Freshness of the pinned tools (.github/tool-pins.json): warn-only, like the openssl-src
+  # note. It reads that committed list and each tool's public release list; it uses no source
+  # token, checks nothing out, and never fails the run.
+  tool-freshness:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Pinned tool freshness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Compare each pinned tool with its newest stable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PINS_REF: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # The pin list is read from this repository at the run's commit; nothing is checked out.
+          pins="$(gh api -H 'Accept: application/vnd.github.raw+json' "repos/${GH_REPO}/contents/.github/tool-pins.json?ref=${PINS_REF}")"
+          {
+            echo '## Pinned tool freshness'
+            echo
+            echo '| Tool | Pinned | Newest stable | State |'
+            echo '| --- | --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          behind=0
+          while IFS='|' read -r name repo prefix current; do
+            latest="$(gh api "repos/${repo}/releases?per_page=100" --jq ".[] | select(.prerelease == false and .draft == false) | .tag_name | select(startswith(\"${prefix}\")) | ltrimstr(\"${prefix}\")" 2>/dev/null \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+            if [[ -z "${latest}" ]]; then
+              state='lookup returned no release'
+            elif [[ "${latest}" == "${current}" ]]; then
+              state='current'
+            elif [[ "$(printf '%s\n%s\n' "${current}" "${latest}" | sort -V | head -n 1)" == "${current}" ]]; then
+              state='BEHIND'
+              behind=$((behind + 1))
+              echo "::warning title=pinned tool behind::${name} is pinned to ${current}; the newest stable release is ${latest}"
+            else
+              state='pin is newer than the newest stable release'
+            fi
+            echo "| ${name} | ${current} | ${latest:-unknown} | ${state} |" >> "${GITHUB_STEP_SUMMARY}"
+          done < <(jq -r '.tools[] | [.name, .repo, .tag_prefix, .current] | join("|")' <<<"${pins}")
+          echo "tools behind: ${behind}"

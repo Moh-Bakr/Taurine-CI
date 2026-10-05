@@ -1,0 +1,134 @@
+name: Publish the live proof summary
+description: >
+  Publishes the sanitized live-proof summary and returns the arm's verdict. Only a
+  fixed inventory is published: the report's header line, each check's outcome label
+  and title, cargo's result line, the failed test names and one fixed-format line
+  per panic (never assertion text or values). The raw log never leaves the runner.
+  Fails closed: a log without a clean report or a passed suite proves nothing.
+
+inputs:
+  engine:
+    description: Arm being proved
+    required: true
+  source-sha:
+    description: Exact 40-character private commit SHA requested
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Publish sanitized live-proof summary
+      if: always()
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        ENGINE: ${{ inputs.engine }}
+        REQUESTED_SOURCE_SHA: ${{ inputs.source-sha }}
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        log="${RUNNER_TEMP}/live-proof.log"
+        has_report="$(jq -r '.report' "${RUNNER_TEMP}/live-arm.json")"
+        checked_out_sha="$(git rev-parse --verify HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+        echo "engine=${ENGINE} log_exists=$(test -f "${log}" && echo yes || echo no) sha=${checked_out_sha}"
+        if [[ ! -f "${log}" ]]; then
+          echo 'No proof log was produced; the run step did not execute' >&2
+          exit 1
+        fi
+        header="$(grep -E '^[a-z0-9]+.*[0-9]+ checks: [0-9]+ passed' "${log}" | tail -1 || true)"
+        # A FAIL or INVL carries a detail line under its title — the
+        # expected-versus-got that names the driver defect, or the setup
+        # step that proved nothing. Published beside the label: the content
+        # is the suite's own synthetic constants and server error strings,
+        # never credentials or captured data. Paths are redacted below.
+        outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  |^        ' "${log}" | sed -E 's/[[:space:]]+$//' | sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' | cut -c1-200 || true)"
+        result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
+        test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 || true)"
+        # The panic block carries the assertion that named the failure: the
+        # connect outcome, the suite's report header, the sign-off's counts.
+        # Paths are redacted and lines cut before anything is published; the
+        # content is server error strings and the suite's own synthetic
+        # constants, never credentials or captured data.
+        # Superseded: the failure detail is now the fixed-format panic summary and the failed
+        # test names below, which publish no assertion text and no values.
+        failed_names="$(failed_test_names "${log}" || true)"
+        panic_lines="$(panic_summary "${log}" || true)"
+        {
+          echo "## Live proof — ${ENGINE}"
+          echo
+          echo "- Source SHA: \`${checked_out_sha}\`"
+          echo "- Server: ${PROOF_SERVER_VERSION:-version unavailable}"
+          echo "- $(jq -r '.blurb' "${RUNNER_TEMP}/live-arm.json")"
+          echo "- Source token: revoked before any project command"
+          if [[ -s "${RUNNER_TEMP}/suite-results.txt" ]]; then
+            echo '- Suites (a SKIPPED line fails the arm):'
+            sed 's/^/  - /' "${RUNNER_TEMP}/suite-results.txt"
+          fi
+          if [[ -s "${RUNNER_TEMP}/proof-images.txt" ]]; then
+            echo '- Resolved images (container, digest-pinned reference):'
+            sed 's/^/  - /' "${RUNNER_TEMP}/proof-images.txt"
+          fi
+          echo "- Runner: $(nproc) vCPU, $(free -m | awk '/^Mem:/{print $2}') MB RAM, $(df -BG --output=avail / | tail -1 | tr -d ' ') GB disk free after the run"
+          echo
+          if [[ -z "${header}" && "${has_report}" == "true" ]]; then
+            echo '**The suite produced no report** — the proof is not evidence either way.'
+            echo
+          elif [[ -n "${header}" ]]; then
+            echo "Suite report (sanitized — check titles only, never data values):"
+            echo
+            echo '```'
+            echo "${header}"
+            echo "${outcomes}"
+            echo '```'
+            echo
+          fi
+          if [[ -n "${test_line}" ]]; then
+            echo '```'
+            echo "${test_line}"
+            echo "${result}"
+            echo '```'
+          fi
+          if [[ -n "${failed_names}" ]]; then
+            echo 'Failed tests:'
+            echo
+            echo '```'
+            printf '%s\n' "${failed_names}"
+            echo '```'
+          fi
+          if [[ -n "${panic_lines}" ]]; then
+            echo 'Panics (test, file:line, class; the message text is never published):'
+            echo
+            echo '```'
+            printf '%s\n' "${panic_lines}"
+            echo '```'
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+        # The greppable copy, so the published identities are visible in the
+        # log alongside the summary.
+        {
+          echo "live-proof header: ${header}"
+          echo "${outcomes}"
+          echo "live-proof ${test_line}"
+          echo "live-proof ${result}"
+          if [[ -n "${failed_names}" ]]; then
+            echo 'live-proof failed tests:'
+            printf '%s\n' "${failed_names}" | sed 's/^/  /'
+          fi
+          if [[ -n "${panic_lines}" ]]; then
+            echo 'live-proof panics (test, file:line, class):'
+            printf '%s\n' "${panic_lines}"
+          fi
+        } || true
+        # Fail closed: a log without a report line proves nothing, exactly
+        # like a report of nothing but skips. The arm definition says what the
+        # verdict needs: a clean conformance report (every arm but pgtls and
+        # bastion), and/or every cargo suite passed with nothing skipped
+        # (the multi-suite arms: postgres, mysql, mssql, pgtls, bastion).
+        ok=1
+        if [[ "${has_report}" == "true" ]]; then
+          [[ -n "${header}" && "${header}" == *", 0 failed, "* && "${header}" == *", 0 invalid"* ]] || ok=0
+        fi
+        if [[ -s "${RUNNER_TEMP}/suites.txt" ]]; then
+          [[ "$(cat "${RUNNER_TEMP}/lab-overall.txt" 2>/dev/null || echo 1)" == "0" ]] || ok=0
+        fi
+        [[ "${ok}" == "1" ]]
