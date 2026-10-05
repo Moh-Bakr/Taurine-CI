@@ -303,7 +303,7 @@ runs:
         lock_index=0
         for manifest in Cargo.toml taurine-backend/dbx-core/Cargo.toml taurine-backend/dbx-mongo-shell/Cargo.toml; do
           [[ -f "${manifest}" ]] || continue
-          out="${RUNNER_TEMP}/deny-$(echo "${lock_label}" | tr '/' '_').jsonl"
+          out="${RUNNER_TEMP}/deny-$(echo "${manifest}" | tr '/' '_').jsonl"
           # cargo-deny writes its diagnostics as JSON lines on stderr. Only the advisory id
           # (no crate, no title) and, for policy findings, a name hash are published; the
           # manifest appears as its index in this list, never its path.
@@ -334,7 +334,7 @@ runs:
           # (the deny.toml allow-list) and sources (registries and git origins). Same published
           # shape as above: severity, lint code, crate name and version; a diagnostic's message
           # and labels (which can quote a source URL) are never published.
-          policy_out="${RUNNER_TEMP}/deny-policy-$(echo "${lock_label}" | tr '/' '_').jsonl"
+          policy_out="${RUNNER_TEMP}/deny-policy-$(echo "${manifest}" | tr '/' '_').jsonl"
           policy_status=0
           "${RUNNER_TEMP}/scan-bin/cargo-deny" --manifest-path "${manifest}" --format json --config deny.toml check bans licenses sources >/dev/null 2>"${policy_out}" || policy_status=$?
           if [[ "${policy_status}" -gt 1 ]]; then
