@@ -63,7 +63,8 @@ then `scripts/vendor-openvpn3.sh fetch`, which verifies the vendored sources aga
 
 ## How the files are split
 
-No workflow or composite is over 400 lines (the policy warns above 400 and fails above 800). Files are
+The policy warns on any workflow or composite above 400 lines and fails above 800. Every file is under
+400 except the `concern-report` composite, which is one cohesive reporting library and is kept whole. Files are
 split by responsibility: a workflow keeps everything that must run before project code (input
 validation, the token mint, the exact-SHA checkout and the revoke) plus the job wiring, and the work
 that runs after the revoke lives in composites under `.github/actions/`.
