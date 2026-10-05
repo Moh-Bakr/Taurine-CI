@@ -105,8 +105,9 @@ jobs:
           - bundle-budget
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
-    # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected dispatchers.
-    secrets: inherit  # zizmor: ignore[secrets-inherit]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
@@ -141,8 +142,9 @@ jobs:
           - rust-tls-openssl
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
-    # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected dispatchers.
-    secrets: inherit  # zizmor: ignore[secrets-inherit]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
