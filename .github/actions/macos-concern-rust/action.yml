@@ -175,6 +175,8 @@ runs:
             # The flavour is a closed set: dev and uat add the same `--config` override that
             # `npm run build:dev|build:uat` use, and the produced bundle identifier is read
             # back from the built app and compared with the expected one.
+            # bash 3.2 (macOS) treats an empty array expansion as unbound under `set -u`, so the
+            # expansion below uses the `+` form, which yields nothing for the prod flavour.
             flavor_args=()
             case "${FLAVOR}" in
               prod) expected_identifier=co.tangent.taurine ;;
@@ -186,7 +188,7 @@ runs:
             esac
             run_deferred rust-packaging-smoke \
               env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" \
-              npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci "${flavor_args[@]}"
+              npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
             packaging_identifier_check() {
               local plist found=''
               plist="$(find . -path '*/bundle/macos/*.app/Contents/Info.plist' -not -path './node_modules/*' 2>/dev/null | head -n 1)"
