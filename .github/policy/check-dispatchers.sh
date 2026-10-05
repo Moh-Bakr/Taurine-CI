@@ -17,6 +17,15 @@ check_dispatcher() {
       echo "Unsafe trigger, artifact/cache path, OIDC grant, or Actions secret found in public policy workflows: $workflow" >&2
       exit 1
     fi
+    # The cache prune: no checkout or other action, no environment, and no permission but
+    # actions: write (listing and deleting cache entries).
+    if [[ "$workflow" == *.github/workflows/cache-prune.yml ]]; then
+      if grep -nE '^[[:space:]]+(-[[:space:]]+)?uses:|^[[:space:]]+environment:' "$workflow" \
+        || grep -nE '^[[:space:]]+[a-z-]+:[[:space:]]+(read|write)[[:space:]]*$' "$workflow" | grep -vE ':[[:space:]]+actions:[[:space:]]+write[[:space:]]*$'; then
+        echo "The cache prune may use no action, no environment and only actions: write: $workflow" >&2
+        exit 1
+      fi
+    fi
     return 0
   fi
   if ! grep -qE '^on:[[:space:]]*$' "$workflow" || ! grep -qE '^[[:space:]]+workflow_dispatch:[[:space:]]*$' "$workflow"; then

@@ -2,7 +2,7 @@ name: Verify restored Cargo crate archives
 description: |
   Re-verifies every restored cargo `.crate` archive against the checksums in the private
   Cargo.lock files (a mismatching or unknown archive is deleted) and reports the cache state.
-  The same reviewed script ran inline in the Linux, macOS and Windows concern workflows.
+  The one copy of this check: the Linux, macOS and Windows concern workflows all call it.
 
 inputs:
   sources-dir:
@@ -28,13 +28,10 @@ runs:
         OS_LABEL: ${{ inputs.os-label }}
       run: |
         set -euo pipefail
-        sha256_of() {
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum < "$1" | cut -d' ' -f1
-          else
-            shasum -a 256 < "$1" | cut -d' ' -f1
-          fi
-        }
+        # One pass: every checksum in every private Cargo.lock goes into a single list, one
+        # awk join pairs each restored archive with its expected checksum, and one checksum
+        # run checks them all. An archive that is in no lock, or whose hash differs, is
+        # deleted, exactly as before; only the per-file process spawning is gone.
         expected="${RUNNER_TEMP}/crate-checksums.txt"
         : > "${expected}"
         while IFS= read -r lock; do
@@ -50,15 +47,30 @@ runs:
         cache_dir="${CARGO_SOURCES_DIR}/registry/cache"
         if [[ -d "${cache_dir}" ]]; then
           find "${cache_dir}" -type f ! -name '*.crate' -delete
-          while IFS= read -r -d '' crate; do
-            want="$(awk -v f="$(basename "${crate}")" '$1 == f { print $2; exit }' "${expected}")"
-            if [[ -n "${want}" && "$(sha256_of "${crate}")" == "${want}" ]]; then
-              kept=$((kept + 1))
-            else
-              rm -f "${crate}"
-              dropped=$((dropped + 1))
-            fi
-          done < <(find "${cache_dir}" -type f -name '*.crate' -print0)
+          # A POSIX path on every runner (Git Bash tools are given no drive-letter form).
+          work="$(cygpath -u "${RUNNER_TEMP}" 2>/dev/null || printf '%s' "${RUNNER_TEMP}")/crate-verify"
+          rm -rf "${work}"
+          mkdir -p "${work}"
+          (cd "${cache_dir}" && find . -type f -name '*.crate' -print) > "${work}/restored.txt"
+          # The first checksum recorded for a file name wins, as the earlier per-file lookup did.
+          awk -v unknown="${work}/unknown.txt" '
+            NR == FNR { if (!($1 in want)) want[$1] = $2; next }
+            { n = split($0, p, "/"); f = p[n]; if (f in want) print want[f] "  " $0; else print $0 > unknown }
+          ' "${expected}" "${work}/restored.txt" > "${work}/check.txt"
+          touch "${work}/unknown.txt"
+          if command -v sha256sum >/dev/null 2>&1; then sum=(sha256sum); else sum=(shasum -a 256); fi
+          (cd "${cache_dir}" && "${sum[@]}" -c "${work}/check.txt" 2>/dev/null || true) > "${work}/result.txt"
+          kept="$(grep -c ': OK$' "${work}/result.txt" || true)"
+          # Anything the checksum run did not report OK (mismatch, unreadable, missing line).
+          awk -v result="${work}/result.txt" '
+            BEGIN { while ((getline l < result) > 0) if (l ~ /: OK$/) { sub(/: OK$/, "", l); ok[l] = 1 } }
+            { p = substr($0, index($0, "  ") + 2); if (!(p in ok)) print p }
+          ' "${work}/check.txt" > "${work}/failed.txt"
+          cat "${work}/unknown.txt" "${work}/failed.txt" > "${work}/drop.txt"
+          while IFS= read -r crate; do
+            if [[ -n "${crate}" ]]; then rm -f -- "${cache_dir}/${crate}"; fi
+          done < "${work}/drop.txt"
+          dropped="$(wc -l < "${work}/drop.txt" | tr -d ' ')"
         fi
         case "${CACHE_HIT}" in
           true) state='exact hit' ;;

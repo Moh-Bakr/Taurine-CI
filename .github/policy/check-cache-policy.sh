@@ -7,15 +7,23 @@ check_cache_policy() {
   # Cache policy (a deliberate, narrow exception). Source-bearing
   # jobs may use ONLY actions/cache/restore and actions/cache/save
   # (never the combined actions/cache, whose implicit post-step save
-  # cannot be conditioned or audited), and ONLY for cargo's
-  # downloaded third-party sources: the registry index, the registry
-  # `.crate` archives and the git dependency databases under Cargo
-  # home. Compiled output (target/), extracted sources and anything
-  # under the checked-out private source must never be cached: a
-  # cache entry is readable by later runs, and compiled private code
-  # must not leave the runner. Third-party archives are re-verified
-  # against the private Cargo.lock checksums after every restore
-  # (the verify step below), and the save step is limited to main.
+  # cannot be conditioned or audited), and ONLY for:
+  # - cargo's downloaded third-party sources: the registry index, the
+  #   registry `.crate` archives and the git dependency databases under
+  #   Cargo home, re-verified against the private Cargo.lock checksums
+  #   after every restore;
+  # - compiled third-party crates (2026-10-05, approved): the deps/,
+  #   build/ and .fingerprint/ directories of the debug profile under the
+  #   located target directory, which is always outside the private
+  #   checkout. The rust-target-cache composite strips every workspace,
+  #   path and vendored crate after restore and before save, and a proof
+  #   step fails the job if a workspace crate name, a private path or an
+  #   executable would be saved. One exact key, no restore-keys.
+  # Compiled private code, extracted sources and anything under the
+  # checked-out private source must never be cached: a cache entry is
+  # readable by later runs. Every save is limited to main, to a miss,
+  # and to a source SHA on a protected private branch (the
+  # source-checkout ancestry answer, fixed before project code runs).
   if grep -nE 'actions/cache([^/]|$)|actions/cache/(restore|save)@' "$workflow" | grep -vE 'actions/cache/(restore|save)@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$'; then
     echo "Only the reviewed pinned actions/cache/restore and actions/cache/save are allowed in source-bearing workflows: $workflow" >&2
     exit 1
@@ -32,6 +40,7 @@ check_cache_policy() {
     while IFS= read -r cache_line; do
       case "$cache_line" in
         *'steps.cargo-home.outputs.dir }}/registry/index'|*'steps.cargo-home.outputs.dir }}/registry/cache'|*'steps.cargo-home.outputs.dir }}/git/db') ;;
+        '${{ steps.cargo-target.outputs.dir }}/debug/deps'|'${{ steps.cargo-target.outputs.dir }}/debug/build'|'${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint') ;;
         # The KeelDock concern caches only NuGet's downloaded third-party
         # package folder (restored packages, their .nupkg archives and
         # metadata): never bin/, obj/, publish output or anything under the
@@ -53,7 +62,7 @@ check_cache_policy() {
       in_cache && in_path && NF { sub(/^[[:space:]]+/, ""); print "            " $0 }
     ' "$workflow" | sed -E 's/^ +//')
     if (( ! cache_paths_ok )); then
-      echo "Cache steps may only name registry/index, registry/cache and git/db under the located Cargo home: $workflow" >&2
+      echo "Cache steps may only name registry/index, registry/cache and git/db under the located Cargo home, or debug/deps, debug/build and debug/.fingerprint under the located target directory: $workflow" >&2
       exit 1
     fi
     if grep -nE 'enableCrossOsArchive|fail-on-cache-miss|lookup-only' "$workflow"; then
@@ -79,6 +88,51 @@ check_cache_policy() {
         exit 1
       fi
     done < <(awk '/^      - name:/ { cond = "" } /^[[:space:]]+if:/ { cond = $0 } /uses:[[:space:]]*actions\/cache\/save@/ { print cond }' "$workflow")
+    # Every cargo cache save also requires the protected-ancestry answer of the
+    # source checkout (KeelDock's NuGet cache has its own inline checkout).
+    if [[ "$workflow" != *keeldock-validation-concern.yml ]]; then
+      while IFS= read -r save_if; do
+        if [[ "$save_if" != *"steps.verified-source.outputs.protected-ancestor == 'true'"* ]]; then
+          echo "A cargo cache save must require the protected-ancestry answer: $save_if" >&2
+          exit 1
+        fi
+      done < <(awk '/^      - name:/ { cond = "" } /^[[:space:]]+if:/ { cond = $0 } /uses:[[:space:]]*actions\/cache\/save@/ { print cond }' "$workflow")
+    fi
+    # The compiled-dependency cache: one exact key from the locate step and no
+    # restore-keys; every save follows a successful strip-and-prove step; the
+    # restore is followed by the restore-time strip.
+    if grep -qF 'steps.cargo-target.outputs.dir' "$workflow"; then
+      while IFS='|' read -r kind restore_keys key cond; do
+        if [[ "$restore_keys" != 0 ]]; then
+          echo "The compiled-dependency cache must not have restore-keys: $workflow" >&2
+          exit 1
+        fi
+        if [[ "$key" != *'key: ${{ steps.cargo-target.outputs.key }}' ]]; then
+          echo "The compiled-dependency cache key must be the locate step's exact key: $key" >&2
+          exit 1
+        fi
+        if [[ "$kind" == save && "$cond" != *"steps.cargo-target-strip.outcome == 'success'"* ]]; then
+          echo "A compiled-dependency save must require the strip-and-prove step: $cond" >&2
+          exit 1
+        fi
+      done < <(awk '
+        function flush() { if (cache && target) print kind "|" rk "|" key "|" cond; cache = 0; target = 0; rk = 0; key = ""; cond = ""; kind = "" }
+        /^      - name:/ { flush() }
+        /^[[:space:]]+if:/ { cond = $0 }
+        /uses:[[:space:]]*actions\/cache\/save@/ { cache = 1; kind = "save" }
+        /uses:[[:space:]]*actions\/cache\/restore@/ { cache = 1; kind = "restore" }
+        /steps\.cargo-target\.outputs\.dir/ { target = 1 }
+        /^[[:space:]]+restore-keys:/ { rk = 1 }
+        /^[[:space:]]+key:/ { key = $0 }
+        END { flush() }
+      ' "$workflow")
+      for required in 'Strip workspace crates from the restored dependency cache' 'Strip and prove the compiled dependency cache'; do
+        if ! grep -qF "name: ${required}" "$workflow"; then
+          echo "A compiled-dependency cache needs the step '${required}': $workflow" >&2
+          exit 1
+        fi
+      done
+    fi
     if [[ "$workflow" == ".github/workflows/keeldock-validation-concern.yml" || "$workflow" == "./.github/workflows/keeldock-validation-concern.yml" ]]; then
       if ! grep -q 'Verify restored NuGet packages against the lock files' "$workflow"; then
         echo "A restored NuGet cache must be verified against packages.lock.json before use: $workflow" >&2

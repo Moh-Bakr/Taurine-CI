@@ -43,6 +43,7 @@ check_action_references() {
       ./.github/actions/vendor-fetch) ;;
       ./.github/actions/verify-cargo-cache) ;;
       ./.github/actions/linux-test-identities) ;;
+      ./.github/actions/rust-target-cache) ;;
       ./.github/workflows/keeldock-validation-concern.yml) ;;
       ./.github/workflows/live-proof-arm.yml) ;;
       ./.github/actions/mobile-report) ;;

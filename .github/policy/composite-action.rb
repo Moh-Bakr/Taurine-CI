@@ -20,7 +20,19 @@ if file == '.github/actions/source-checkout/action.yml'
     failures << "#{file}: the revoking step must run under always()" unless steps[revoke]['if'].to_s.include?('always()')
     failures << "#{file}: the mint step must set skip-token-revoke: true" unless steps[mint].dig('with', 'skip-token-revoke') == true
   end
-  failures << "#{file}: must not declare outputs" if doc.key?('outputs')
+  # One output only: the protected-ancestry answer, taken from the revoking step, which
+  # writes nothing to its outputs but the literal true or false after clearing them.
+  outputs = doc['outputs'] || {}
+  unless outputs.empty? || (outputs.keys == ['protected-ancestor'] && outputs['protected-ancestor'].is_a?(Hash) && outputs['protected-ancestor']['value'] == '$' + '{{ steps.verify.outputs.protected-ancestor }}')
+    failures << "#{file}: may declare only the protected-ancestor output, from the verify step"
+  end
+  if revoke
+    writes = steps[revoke]['run'].to_s.lines.grep(/GITHUB_OUTPUT/)
+    unless writes.all? { |l| l =~ /\A\s*echo 'protected-ancestor=(true|false)' >> "\$\{GITHUB_OUTPUT\}"\s*\z/ }
+      failures << "#{file}: the revoking step may write only protected-ancestor=true|false to its outputs"
+    end
+    failures << "#{file}: the revoking step must have id verify" unless steps[revoke]['id'] == 'verify'
+  end
   steps.each do |st|
     st['run'].to_s.each_line do |line|
       failures << "#{file}: project command in the source-checkout action: #{line.strip[0, 50]}" if line =~ /^\s*(npm|npx|cargo|dotnet|xcodebuild|gradle|make|pip|brew|bash\s+scripts\/)(\s|$)/
