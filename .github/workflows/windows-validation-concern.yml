@@ -148,7 +148,8 @@ jobs:
 
       - name: Fetch pinned vendored sources
         if: ${{ startsWith(inputs.concern, 'rust-') }}
-        shell: bash
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/vendor-fetch  # zizmor: ignore[self-repository]
         env:
           GIT_CONFIG_COUNT: '3'
           GIT_CONFIG_KEY_0: core.autocrlf
@@ -162,54 +163,8 @@ jobs:
           # own added lines are still what lands, and Linux applies it byte-exact.
           GIT_CONFIG_KEY_2: apply.ignoreWhitespace
           GIT_CONFIG_VALUE_2: change
-        run: |
-          set -euo pipefail
-          # `fetch` verifies each download against the sha256 pinned in vendor.lock and
-          # applies the reviewed boringtun zeroize patch, so this is a supply-chain check
-          # as much as a prerequisite. The environment below keeps the vendored trees
-          # byte-identical to what upstream ships: Git for Windows would otherwise check
-          # openvpn3-core and tap-windows out with CRLF line endings, which no test and
-          # no pinned patch was written against.
-          # Up to three attempts: the fetch is idempotent (a partial tree is removed and
-          # boringtun is built in a temporary directory), and the four Rust concerns fetch
-          # the same three public sources at the same moment, so a throttled or reset
-          # download is transient. A failure after the last attempt is classified into a
-          # fixed one-line reason; the raw output stays withheld.
-          vendor_ok=0
-          for attempt in 1 2 3; do
-            if bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
-              vendor_ok=1
-              break
-            fi
-            echo "vendor-fetch: attempt ${attempt} failed" >&2
-            sleep $((attempt * 10))
-          done
-          if [[ "${vendor_ok}" != 1 ]]; then
-            if grep -qE 'could not download' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun download failed'
-            elif grep -qE 'has sha256' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun checksum mismatch'
-            elif grep -qE 'could not extract' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun extraction failed'
-            elif grep -qE 'does not apply' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun patch did not apply'
-            elif grep -qE 'crossbeam-epoch' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='boringtun lock refresh failed'
-            elif grep -qE '^fatal:|^error: RPC|unable to access' "${RUNNER_TEMP}/vendor-fetch.log"; then reason='git fetch of a pinned source failed'
-            else reason='unclassified'
-            fi
-            if [[ "${reason}" == 'boringtun patch did not apply' ]]; then
-              # Counts and the crate-relative path of each rejected hunk only: the crate
-              # is public third-party source, and nothing from the private tree is printed.
-              echo "vendor-fetch: patch file carriage returns: $(grep -c $'\r' scripts/patches/boringtun-zeroize.patch || true)" >&2
-              diag="$(mktemp -d)"
-              if curl -fsSL "$(awk -F' *= *' '/^boringtun_url/ {gsub(/"/,"",$2); print $2}' vendor.lock)" -o "${diag}/c.tgz" \
-                && mkdir "${diag}/src" && tar xzf "${diag}/c.tgz" -C "${diag}/src" --strip-components 1; then
-                echo "vendor-fetch: crate files with carriage returns: $(grep -rlI $'\r' "${diag}/src" | wc -l | tr -d ' ')" >&2
-                (cd "${diag}/src" && git apply --check -p1 "${GITHUB_WORKSPACE}/src/scripts/patches/boringtun-zeroize.patch" 2>&1 \
-                  | grep -E '^error: (patch failed|[A-Za-z0-9_./-]+: (patch does not apply|No such file))' | head -n 5 >&2) || true
-              fi
-              rm -rf "${diag}"
-            fi
-            echo "vendor-fetch: failed after 3 attempts (${reason}; detailed output withheld)" >&2
-            exit 1
-          fi
-          echo 'vendor-fetch: passed'
+        with:
+          patch-diagnostics: 'true'
 
       # Third-party crate sources only: cargo's registry index, the downloaded
       # `.crate` archives and the git dependency databases. Never `target/`, never
@@ -248,52 +203,12 @@ jobs:
       # all, is deleted before cargo runs. Only counts are printed.
       - name: Verify restored crate archives against Cargo.lock
         if: ${{ startsWith(inputs.concern, 'rust-') }}
-        shell: bash
-        env:
-          CARGO_SOURCES_DIR: ${{ steps.cargo-home.outputs.dir }}
-          CACHE_HIT: ${{ steps.cargo-sources.outputs.cache-hit }}
-          OS_LABEL: Windows
-        run: |
-          set -euo pipefail
-          sha256_of() {
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum < "$1" | cut -d' ' -f1
-            else
-              shasum -a 256 < "$1" | cut -d' ' -f1
-            fi
-          }
-          expected="${RUNNER_TEMP}/crate-checksums.txt"
-          : > "${expected}"
-          while IFS= read -r lock; do
-            tr -d '\r' < "${lock}" | awk '
-              /^\[\[package\]\]/ { n = ""; v = ""; next }
-              /^name = /     { gsub(/"/, "", $3); n = $3 }
-              /^version = /  { gsub(/"/, "", $3); v = $3 }
-              /^checksum = / { gsub(/"/, "", $3); if (n != "" && v != "") print n "-" v ".crate " $3 }
-            ' >> "${expected}"
-          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*')
-          kept=0
-          dropped=0
-          cache_dir="${CARGO_SOURCES_DIR}/registry/cache"
-          if [[ -d "${cache_dir}" ]]; then
-            find "${cache_dir}" -type f ! -name '*.crate' -delete
-            while IFS= read -r -d '' crate; do
-              want="$(awk -v f="$(basename "${crate}")" '$1 == f { print $2; exit }' "${expected}")"
-              if [[ -n "${want}" && "$(sha256_of "${crate}")" == "${want}" ]]; then
-                kept=$((kept + 1))
-              else
-                rm -f "${crate}"
-                dropped=$((dropped + 1))
-              fi
-            done < <(find "${cache_dir}" -type f -name '*.crate' -print0)
-          fi
-          case "${CACHE_HIT}" in
-            true) state='exact hit' ;;
-            false) state='restored from an earlier lockfile' ;;
-            *) state='miss' ;;
-          esac
-          echo "cargo-sources: ${state}; ${kept} archives verified, ${dropped} dropped"
-          echo "- ${OS_LABEL} Cargo source cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
+        with:
+          sources-dir: ${{ steps.cargo-home.outputs.dir }}
+          cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}
+          os-label: Windows
 
       - name: Run isolated validation concern
         id: concern-validation
@@ -361,211 +276,10 @@ jobs:
 
       - name: Run isolated Windows Rust concern
         if: ${{ startsWith(inputs.concern, 'rust-') }}
-        shell: bash
-        env:
-          CONCERN: ${{ inputs.concern }}
-          OS_LABEL: Windows
-        run: |
-          set -euo pipefail
-          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          source "${RUNNER_TEMP}/taurine-ci/report.sh"
-
-          # The helpers below are the Linux `rust-*` concerns' own (see
-          # linux-validation-concern.yml, which is where the reasoning for each lives),
-          # with the changes a macOS or Windows runner needs and nothing else:
-          # - carriage returns are stripped before any pattern runs, because Windows
-          #   tools end lines with CRLF and the anchored patterns below would never match;
-          # - the path rules also cover a Windows drive path, the `\\?\` prefix and the
-          #   registry checkout of a dependency, so no absolute runner path is published;
-          # - the failure classes a Windows or macOS test binary can add (a missing entry
-          #   point or DLL, a stack overflow, a dynamic library that would not load) and a
-          #   vcpkg port build failure get their own fixed one-line classification.
-          # Everything else, including what is and is not published, is unchanged: only
-          # failing test names, `error[Ennnn]` headers with their location, and cargo's
-          # own fixed failure shapes leave this runner.
-
-
-
-          # Which workspace crates each Rust concern tests on this OS. Every member of the
-          # private workspace belongs to a concern, and `rust_coverage_check` (run by
-          # `rust-domain`) fails when a member is in none of them, so a crate added later
-          # cannot go untested by omission. The database family needs no list: `rust-db`
-          # selects it with cargo's own `taurine-db*` package glob.
-          rust_domain_packages=(
-            taurine-model taurine-atomic taurine-auth taurine-crypt taurine-store
-            taurine-repo taurine-replicate taurine-sync taurine-notes taurine-core
-            taurine-exec taurine-scripting taurine-mock taurine-git
-            taurine-transport-fs taurine-transport-git taurine-transport-wifi
-            taurine-cli
-          )
-
-          rust_net_packages=(taurine-peer-sys taurine-net taurine-net-conformance)
-          rust_ovpn_packages=(taurine-ovpn-sys)
-          rust_app_packages=(taurine-app taurine-desktop taurine-mobile)
-
-          rust_coverage_check() {
-            local members member missing=0
-            if ! members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort -u)" || [[ -z "${members}" ]]; then
-              echo 'error: failed to load the workspace member list' >&2
-              return 1
-            fi
-            while IFS= read -r member; do
-              case " ${rust_domain_packages[*]} ${rust_net_packages[*]} ${rust_ovpn_packages[*]} ${rust_app_packages[*]} " in
-                *" ${member} "*) continue ;;
-              esac
-              [[ "${member}" == taurine-db* ]] && continue
-              echo "error: workspace member ${member} is tested by no ${OS_LABEL} Rust concern" >&2
-              missing=1
-            done <<<"${members}"
-            return "${missing}"
-          }
-
-          # vcpkg reads openvpn3's own `vcpkg.json`, which arrives with the pinned tree,
-          # so this runs after the vendor fetch. The static-md triplet is the one
-          # `taurine-ovpn-sys`'s build script prefers: a dynamic triplet would leave
-          # OpenSSL's and jsoncpp's DLLs in vcpkg's own `bin/`, which is on nobody's PATH,
-          # so every test binary would compile, link and then fail to start.
-          windows_ovpn_dependencies() {
-            local vcpkg_bin
-            if command -v vcpkg >/dev/null 2>&1; then
-              vcpkg_bin=vcpkg
-            elif [[ -x "${VCPKG_INSTALLATION_ROOT:-}/vcpkg.exe" ]]; then
-              vcpkg_bin="${VCPKG_INSTALLATION_ROOT}/vcpkg.exe"
-            else
-              echo 'error: vcpkg is not available on this runner image' >&2
-              return 1
-            fi
-            cd vendor/openvpn3-core
-            "${vcpkg_bin}" install --triplet x64-windows-static-md --disable-metrics
-          }
-
-          # `--locked`: the committed Cargo.lock is what was reviewed and what the Linux
-          # contracts concern's advisory sweep audits. `--no-fail-fast`: every failing
-          # target is reported in one dispatch. No `--features`: each crate is tested as
-          # its manifest builds it, as on Linux. Env-gated live suites print SKIPPED and
-          # pass when their variable is unset; the live servers belong to live-proofs.yml.
-          case "${CONCERN}" in
-            rust-domain)
-              # The same crates as Linux, plus taurine-cli, whose exit codes and paths
-              # are the part a user on this OS can observe. taurine-crypt links the real
-              # Windows Credential Manager here (its default `keychain` feature,
-              # windows-native), then is tested again without the feature, which is the
-              # build a machine with no keychain gets.
-              run_deferred rust-coverage rust_coverage_check
-              run_deferred rust-crypt-no-keychain-tests \
-                cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
-              run_deferred rust-domain-tests \
-                cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
-              # dbx-core has `cfg(windows)` code (the reparse-point-safe key-file open and the
-              # windows-native credential backend behind `os-keyring`) that no hosted job
-              # compiles. This is a non-test library check of the minimal feature set that
-              # still holds the storage and secret-codec modules: `sqlite-bundled` (rusqlite
-              # needs its bundled SQLite to build on Windows) plus `os-keyring`, without the
-              # default DynamoDB, MQ admin and system-fonts features. It covers those two
-              # modules' Windows paths and their dependency closure, not the dropped
-              # features. dbx-core's `openssl` dependency is unconditionally vendored, so this
-              # builds OpenSSL from source with the runner image's Perl and NASM; if the image
-              # lacks either the sub-step fails with a build-script classification and the rest
-              # of the concern is unaffected.
-              # The first hosted run failed in openssl-sys's build script, which is where the
-              # vendored OpenSSL is built from source. That build needs a Perl with the
-              # Win32 modules (Strawberry Perl, not Git's msys perl) and NASM on PATH; both
-              # are installed on the image but not on the bash step's PATH. Put them first for
-              # this one command, and print which perl and nasm it will find (public paths of
-              # image tools, scrubbed like any path) so a further failure is attributable.
-              keyring_path="/c/Strawberry/perl/bin:/c/Program Files/NASM:${PATH}"
-              echo "keyring-check perl: $(PATH="${keyring_path}" command -v perl 2>/dev/null | sanitize_stream || echo none)"
-              echo "keyring-check nasm: $(PATH="${keyring_path}" command -v nasm 2>/dev/null | sanitize_stream || echo none)"
-              run_deferred rust-dbx-core-keyring-check \
-                env PATH="${keyring_path}" cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --no-default-features --features sqlite-bundled,os-keyring
-              # If the vendored OpenSSL build still fails, name the missing tool: the lines
-              # published are fixed tool names (perl, nasm, nmake) with a fixed missing class;
-              # no diagnostic text is republished.
-              if [[ -s "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" ]] && grep -q 'openssl-sys' "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" && grep -q 'error: failed to run custom build command' "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log"; then
-                echo 'keyring-check build-tool diagnostics:' >&2
-                # Allow-list: only a fixed tool name next to a fixed "missing" class is
-                # published, never the diagnostic line itself.
-                for tool in nasm perl nmake; do
-                  if grep -iE "${tool}" "${RUNNER_TEMP}/rust-dbx-core-keyring-check.log" | grep -qiE "can't locate|is not recognized|not found|no such file"; then
-                    echo "  missing build tool: ${tool}" >&2
-                  fi
-                done
-              fi
-              ;;
-            rust-db)
-              # Every `taurine-db*` crate, which on Windows includes the `#[cfg(windows)]`
-              # integrated-authentication arm of taurine-db-mssql (tiberius' `winauth`
-              # feature) that no other platform compiles.
-              db_packages=()
-              while IFS= read -r db_package; do
-                db_packages+=("--package=${db_package}")
-              done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
-              rust_tests rust-db-tests "${db_packages[@]}"
-              ;;
-            rust-net)
-              # The dialer, the egress verifier, the userspace WireGuard conformance
-              # suites and taurine-peer-sys, whose Win32 half (GetExtendedTcpTable and
-              # the owning process's token) can only execute here. The openvpn3 shim is
-              # its own concern, `rust-ovpn`. taurine-net-conformance depends on
-              # taurine-ovpn-sys, so this concern compiles that C++ shim too and needs
-              # the same vcpkg ports before cargo runs; the install is repeated here
-              # rather than shared, because each concern has its own runner.
-              run_deferred rust-net-vcpkg windows_ovpn_dependencies
-              if [[ "${deferred_failed}" -eq 0 ]]; then
-                run_deferred rust-net-tests \
-                  cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
-              else
-                deferred_results+=("rust-net-tests|failed: not run (the vcpkg dependency install failed)")
-              fi
-              ;;
-            rust-ovpn)
-              # The vendored openvpn3-core shim, compiled with MSVC against vcpkg's
-              # static-md ports. A build and its unit tests only: no tunnel has carried
-              # traffic on Windows, and this concern does not claim one has.
-              run_deferred rust-ovpn-vcpkg windows_ovpn_dependencies
-              if [[ "${deferred_failed}" -eq 0 ]]; then
-                run_deferred rust-ovpn-tests \
-                  cargo test --locked --no-fail-fast "${rust_ovpn_packages[@]/#/--package=}"
-              else
-                deferred_results+=("rust-ovpn-tests|failed: not run (the vcpkg dependency install failed)")
-              fi
-              ;;
-            rust-app)
-              # The command tier both shells call and the two shells' own unit tests.
-              # Tauri's `test` feature drives the commands through its mock runtime, so
-              # no window or WebView2 process is started.
-              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
-              ;;
-            rust-packaging)
-              # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
-              # CLI (no installer: NSIS and WiX download their own tools, which this control
-              # plane does not fetch), to prove the app still builds as a Tauri binary on
-              # Windows. Nothing is signed or uploaded; the output stays on the runner.
-              run_deferred rust-packaging-smoke \
-                npm --prefix taurine-desktop run tauri -- build --debug --no-bundle --ci
-              ;;
-            rust-tls-openssl)
-              # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
-              # one). Present only on sources that carry it; otherwise a note and a pass,
-              # not a silent skip of a concern the source never had.
-              tls_manifest=taurine-backend/taurine-tls-openssl/Cargo.toml
-              if [[ -f "${tls_manifest}" ]]; then
-                # The OpenSSL build here is vendored: Strawberry Perl and NASM must come
-                # before Git's own perl on PATH (both ship on the image).
-                tls_path="/c/Strawberry/perl/bin:/c/Program Files/NASM:${PATH}"
-                run_deferred rust-tls-openssl-tests \
-                  env PATH="${tls_path}" cargo test --locked --manifest-path "${tls_manifest}"
-              else
-                echo "rust-tls-openssl: the source has no ${tls_manifest}; nothing to build"
-                run_deferred rust-tls-openssl-absent true
-              fi
-              ;;
-            *)
-              echo "Unsupported Windows Rust concern: ${CONCERN}" >&2
-              exit 2
-              ;;
-          esac
-          finish_deferred
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/windows-concern-rust  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
 
       # Saved only from the protected main branch (every job here already refuses to
       # run elsewhere; the condition repeats it so the write permission is explicit)
