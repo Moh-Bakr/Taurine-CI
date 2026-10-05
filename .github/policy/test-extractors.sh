@@ -85,4 +85,31 @@ bash -c '
   grep -qF "RUSTSEC-2099-0001" <<<"${out}"
   if grep -qE "secretcrate|Flaw|1\.2\.3" <<<"${out}"; then echo "a crate name leaked (cargo audit)" >&2; exit 1; fi
 ' _ "${dir}"
+# The compile step of a nextest sub-step must not carry the run-only options, which nextest rejects
+# with --no-run (a clap usage error). A fake cargo rejects them as clap does.
+mkdir -p "${dir}/fakebin"
+cat > "${dir}/fakebin/cargo" <<'FAKE'
+#!/bin/bash
+if [[ "$2" == nextest ]]; then
+  for a in "$@"; do
+    case "$a" in
+      --status-level|--final-status-level|--partition|--no-fail-fast|--profile) echo "error: unexpected argument $a with --no-run" >&2; exit 2 ;;
+    esac
+  done
+fi
+exit 0
+FAKE
+chmod +x "${dir}/fakebin/cargo"
+bash -c '
+  set -euo pipefail
+  export PATH="$1/fakebin:${PATH}" RUNNER_TEMP="$1" OS_LABEL=Linux CONCERN=rust-x
+  source "$1/lib.sh"
+  source "$1/report.sh"
+  rust_build_command cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail --partition count:1/2 --package a --package b
+  [[ "${rust_build_cmd[*]}" == "cargo nextest run --no-run --locked --package a --package b" ]]
+  rust_build_command cargo test --locked --no-fail-fast --package a
+  [[ "${rust_build_cmd[*]}" == "cargo test --locked --no-fail-fast --package a --no-run" ]]
+  run_deferred rust-a-tests cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail --partition count:1/2 --package a >/dev/null 2>&1 || true
+  [[ "${deferred_results[0]}" == "rust-a-build|passed" ]]
+' _ "${dir}"
 echo 'failure-detail extractor fixtures: ok'

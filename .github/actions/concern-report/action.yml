@@ -385,6 +385,32 @@ runs:
           done
           return 0
         }
+        # The command that only builds a crate-test sub-step's binaries (result in rust_build_cmd).
+        # `cargo test` takes its own arguments plus `--no-run`. `cargo nextest run --no-run`
+        # rejects the run-only options (a clap usage error, exit 2), so for nextest only the
+        # build-selecting arguments are kept (--locked, packages, features, manifest path) and the
+        # reporter, partition, fail-fast and profile options and their values are dropped. The
+        # real run keeps every option.
+        rust_build_cmd=()
+        rust_build_command() {
+          local arg
+          rust_build_cmd=()
+          if [[ "${2:-}" != nextest ]]; then
+            rust_build_cmd=("$@" --no-run)
+            return 0
+          fi
+          rust_build_cmd=(cargo nextest run --no-run)
+          shift 3
+          while [[ "$#" -gt 0 ]]; do
+            arg="$1"; shift
+            case "${arg}" in
+              --no-fail-fast | --fail-fast) ;;
+              --status-level | --final-status-level | --partition | --profile) shift ;;
+              --status-level=* | --final-status-level=* | --partition=* | --profile=*) ;;
+              *) rust_build_cmd+=("${arg}") ;;
+            esac
+          done
+        }
         # One "label seconds" line per sub-step that ran, for the summary's time column and the
         # compile and test totals. A text variable, not an associative array, so it also works
         # on the macOS runners' older bash.
@@ -405,7 +431,8 @@ runs:
             if [[ "${build_label}" == "${label}" ]]; then build_label="${label}-build"; fi
             started="${SECONDS}"
             set +e
-            ( set -e; run_quiet "${build_label}" "$@" --no-run )
+            rust_build_command "$@"
+            ( set -e; run_quiet "${build_label}" "${rust_build_cmd[@]}" )
             status=$?
             set -e
             deferred_timing+="${build_label} $((SECONDS - started))"$'\n'
