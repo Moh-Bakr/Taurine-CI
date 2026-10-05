@@ -22,7 +22,8 @@
 # Evidence: the audit output of post-merge runs on main against the Taurine develop tip
 # 767a540654a1d5e27c88b2cf87b489e4364ed7c0 (keeldock-cloud main for Keel Dock): orchestrate
 # 37298764740 and 37303676822, Android 37301315538 and 37303668221, iOS 37303672199, macOS
-# 37303659178, Windows 37303663707, Keel Dock 37303687180, live proofs 37303681764. Names the
+# 37303659178, Windows 37303663707, Keel Dock 37303687180, live proofs 37303681764, Linux
+# 37303679989 and 37307007382. Names the
 # runs showed only as hashes were identified by hashing candidate public names; any name that
 # could not be identified stays unlisted (and so unpublished) until someone can name it.
 
@@ -105,6 +106,12 @@ all nodejs.org                                  # setup-node fallback download
 linux playwright.azureedge.net                  # Playwright browser download
 linux cdn.playwright.dev                        # Playwright browser download
 linux playwright.download.prss.microsoft.com    # Playwright browser download
+linux star.download.prss.microsoft.com.delivery.microsoft.com  # Playwright download CNAME
+linux sundry-f-net.trafficmanager.net           # Playwright download CNAME
+linux download.prss.microsoft.com.akamaized.net # Playwright download CNAME
+linux playwright-bkakghazbfe7grc5.z01.azurefd.net  # cdn.playwright.dev Front Door
+linux mr-z01.tm-azurefd.net                     # cdn.playwright.dev CNAME
+all fg.microsoft.map.fastly.net                 # Microsoft edge on Fastly (Linux and Keel Dock)
 
 # --- Operating-system packages ---------------------------------------------------------
 all azure.archive.ubuntu.com                    # apt on hosted Ubuntu (Linux, Android, live)
