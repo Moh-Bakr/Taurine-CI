@@ -103,7 +103,7 @@ runs:
         # from a script under RUNNER_TEMP; it waits for the root half, then writes the marker
         # the join waits for.
         free_gib() { df -g "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}'; }
-        if [[ "${CONCERN}" == rust-app || "${CONCERN}" == rust-db ]]; then
+        if [[ "${CONCERN}" == rust-app* || "${CONCERN}" == rust-db ]]; then
           echo "disk before reclaim: $(free_gib) GiB free"
           df -h "${GITHUB_WORKSPACE}"
           selected_xcode="$(xcode-select -p 2>/dev/null | sed 's#/Contents/Developer.*##')"

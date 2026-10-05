@@ -159,12 +159,17 @@ runs:
             run_deferred rust-ovpn-tests \
               cargo test --locked --no-fail-fast "${rust_ovpn_packages[@]/#/--package=}"
             ;;
-          rust-app)
-            # The command tier both shells call and the two shells' own unit tests.
-            # Tauri's `test` feature drives the commands through its mock runtime, so
-            # no window or WebView process is started; AppKit and WKWebView are what
-            # the crates link.
-            rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+          rust-app-1|rust-app-2)
+            # Two nextest partitions of the same package set, as on Linux and Windows: measured
+            # on macOS, the single concern compiled for 34 minutes and ran tests for 16, so each
+            # leg compiles in full and runs half the tests. `count:N/2` splits deterministically;
+            # no compiled output crosses between the jobs. Doctests ride with partition 1.
+            export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
+            if [[ "${CONCERN}" == rust-app-1 ]]; then
+              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+            else
+              NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+            fi
             ;;
           rust-packaging)
             # Packaging smoke: an unsigned debug build of the desktop app through the Tauri

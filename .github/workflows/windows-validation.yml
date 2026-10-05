@@ -180,7 +180,7 @@ jobs:
         with:
           mode: table
           label: Windows
-          baseline-seconds: '{"rust-app-1":2740,"rust-app-2":2740,"rust-db":1245,"rust-domain":1005,"rust-ovpn":644,"rust-net":622,"rust-packaging":1310,"rust-tls-openssl":52,"desktop-shard-1":1061,"desktop-shard-2":929,"desktop-quality":321,"mobile":287,"contracts":136,"bundle-budget":220}'
+          baseline-seconds: '{"rust-app-1":2740,"rust-app-2":2740,"rust-db":1165,"rust-domain":874,"rust-ovpn":759,"rust-net":595,"rust-packaging":1213,"rust-tls-openssl":58,"desktop-shard-1":1061,"desktop-shard-2":929,"desktop-quality":321,"mobile":287,"contracts":136,"bundle-budget":220}'
           name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
           github-token: ${{ github.token }}
 
