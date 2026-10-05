@@ -1,0 +1,105 @@
+name: Rust fmt and clippy enforcement
+description: >
+  Runs `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked
+  -- -D warnings` over the Taurine-owned workspace and fails the job on any finding. The
+  workspace's own `exclude` list already keeps the vendored and adopted trees (vendor/*,
+  dbx-core, dbx-mongo-shell, dbx-sqlite-worker) out of `--workspace`; the two crates that need
+  the native OpenVPN3 toolchain are excluded exactly as the warning-only clippy scan does.
+  Published: counts, lint codes and repository-relative path:line only. Never rendered
+  messages, source excerpts or suggestions.
+
+inputs:
+  path:
+    description: Directory, relative to the workspace, holding the private source
+    required: false
+    default: src
+  fail:
+    description: Whether a finding fails the job. True (the default) enforces; false reports only.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Check formatting with cargo fmt
+      id: fmt
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        FAIL: ${{ inputs.fail }}
+      run: |
+        set -euo pipefail
+        status=0
+        cargo fmt --all -- --check >"${RUNNER_TEMP}/fmt.out" 2>"${RUNNER_TEMP}/fmt.err" || status=$?
+        # Only the number of files with differences is published (rustfmt prints one
+        # "Diff in <path>:<line>" header per hunk); never the diff body.
+        files="$(grep -E '^Diff in ' "${RUNNER_TEMP}/fmt.out" | sed -E 's/^Diff in (.*):[0-9]+:?$/\1/' | sort -u | wc -l | tr -d ' ' || true)"
+        {
+          echo '## Rust formatting (cargo fmt --check)'
+          echo
+          if [[ "${status}" -eq 0 ]]; then
+            echo '- No formatting differences.'
+          else
+            echo "- Exit ${status}; files with differences: ${files}"
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+        if [[ "${status}" -ne 0 ]]; then
+          echo "fmt: ${files} file(s) differ from rustfmt output (exit ${status}); run cargo fmt --all in the private checkout"
+          [[ "${FAIL}" == true ]] || exit 0
+          exit 1
+        fi
+        echo 'fmt: passed'
+
+    - name: Enforce clippy with warnings denied
+      id: clippy
+      # Runs even when fmt failed so both reports appear; the job still fails on either.
+      if: ${{ always() }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      env:
+        FAIL: ${{ inputs.fail }}
+      run: |
+        set -euo pipefail
+        raw="${RUNNER_TEMP}/clippy-enforce.jsonl"
+        cargo clippy --workspace --exclude taurine-ovpn-sys --exclude taurine-net-conformance \
+          --all-targets --locked --message-format=json -- -D warnings \
+          >"${raw}" 2>"${RUNNER_TEMP}/clippy-enforce.err" || true
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        if ! jq -e 'select(.reason == "build-finished")' "${raw}" >/dev/null 2>&1; then
+          echo "clippy: the build did not finish ($(cargo_test_reason "${RUNNER_TEMP}/clippy-enforce.err"); sanitized detail below)" >&2
+          cargo_test_detail "${RUNNER_TEMP}/clippy-enforce.err" >&2 || true
+          echo '- clippy: the build did not finish (detail withheld)' >> "${GITHUB_STEP_SUMMARY}"
+          exit 1
+        fi
+        # Real compile errors carry an E0000 code; lint findings carry a lint name.
+        findings="${RUNNER_TEMP}/clippy-enforce-findings.jsonl"
+        jq -c 'select(.reason == "compiler-message") | .message
+          | select(.code != null) | select(.spans | length > 0)
+          | {code: .code.code, level: .level, path: (.spans[0].file_name | sub("^/.*/work/[^/]+/[^/]+/src/"; "")), line: .spans[0].line_start}' "${raw}" >"${findings}" || true
+        compile_errors="$(jq -s '[.[] | select(.code | test("^E[0-9]{4}$"))] | length' "${findings}")"
+        lint_total="$(jq -s '[.[] | select(.code | test("^E[0-9]{4}$") | not)] | length' "${findings}")"
+        build_ok="$(jq -r 'select(.reason == "build-finished") | .success' "${raw}" | tail -n 1)"
+        {
+          echo '## Clippy (warnings denied, workspace, all targets)'
+          echo
+          echo "- Lint findings: ${lint_total}"
+          echo "- Compile errors: ${compile_errors}"
+          if [[ "${lint_total}" -gt 0 ]]; then
+            echo
+            echo '| Lint | Findings |'
+            echo '| --- | --- |'
+            jq -rs '[.[] | select(.code | test("^E[0-9]{4}$") | not)] | group_by(.code) | map("| \(.[0].code) | \(length) |") | .[]' "${findings}"
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+        if [[ "${lint_total}" -gt 0 ]]; then
+          echo 'clippy per-lint counts:'
+          jq -rs '[.[] | select(.code | test("^E[0-9]{4}$") | not)] | group_by(.code) | map("  \(.[0].code): \(length)") | .[]' "${findings}"
+          echo 'clippy findings (code level path:line), first 40:'
+          jq -r 'select(.code | test("^E[0-9]{4}$") | not) | "  \(.code) \(.level) \(.path):\(.line)"' "${findings}" | sanitize_stream | head -40
+        fi
+        if [[ "${lint_total}" -gt 0 || "${build_ok}" != true ]]; then
+          echo "clippy: ${lint_total} lint finding(s), build success=${build_ok}"
+          [[ "${FAIL}" == true ]] || exit 0
+          exit 1
+        fi
+        echo 'clippy: no findings'

@@ -348,6 +348,13 @@ jobs:
         with:
           scanner: all
 
+      # Enforcing fmt and clippy over the whole owned workspace (the scanner above reports
+      # the security lints only). Runs after the scanner so both reports appear.
+      - name: Enforce rustfmt and clippy over the owned workspace
+        if: ${{ always() && !cancelled() && inputs.concern == 'scan-security' && steps.verified-source.outcome == 'success' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]
+
       - name: Run the isolated Linux JavaScript concern
         id: concern-js
         if: ${{ contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) }}
