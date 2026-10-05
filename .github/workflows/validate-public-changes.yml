@@ -86,3 +86,8 @@ jobs:
       - name: Check the tool pin list and Dependabot coverage
         shell: bash
         run: bash .github/policy/check-tools.sh
+
+      # Every egress allow-list entry has a known scope, a host pattern and a reason.
+      - name: Check the egress allow-list
+        shell: bash
+        run: bash .github/policy/check-egress-allowlist.sh

@@ -49,9 +49,8 @@ runs:
             run_deferred notices-fetch cargo fetch --locked
             run_deferred notices-check npm run check:notices
             if [[ "${deferred_results[*]}" == *"notices-check|failed"* ]]; then
-              # Say why: whether the graph could not be read at all, or which crate and
-              # licence lines differ (names, versions and licence expressions only: public
-              # registry facts; repository URLs and everything else are left out).
+              # Say why: whether the graph could not be read at all, or how many crate and
+              # licence lines differ, each as a hash (dependency names are not published).
               echo 'notices diagnostics:' >&2
               if ! cargo metadata --format-version 1 --offline >/dev/null 2>"${RUNNER_TEMP}/notices-meta.err"; then
                 echo '  cargo metadata --offline failed: the crates are not all downloaded (see notices-fetch)' >&2
@@ -60,7 +59,11 @@ runs:
                 if node scripts/third-party-notices.mjs >/dev/null 2>&1; then
                   diff <(grep -E '^- \*\*|^- [A-Za-z0-9@/_.-]+ [0-9]' "${RUNNER_TEMP}/notices.before" | sort) \
                        <(grep -E '^- \*\*|^- [A-Za-z0-9@/_.-]+ [0-9]' THIRD-PARTY-NOTICES | sort) |
-                    grep -E '^[<>]' | sed -E 's/^< /  committed: /; s/^> /  generated: /' | cut -c1-160 | head -40 >&2 || true
+                    grep -E '^[<>]' | while IFS= read -r diff_line; do
+                      if [[ "${diff_line:0:1}" == '<' ]]; then side=committed; else side=generated; fi
+                      echo "  ${side} $(name_hash "${diff_line:2}")"
+                    done | head -40 >&2 || true
+                  echo '  entries are hashed (8 hex of the line SHA-256); run `npm run check:notices` in the private checkout to see them' >&2
                   cp "${RUNNER_TEMP}/notices.before" THIRD-PARTY-NOTICES
                 else
                   echo '  the notices generator itself failed' >&2
@@ -132,11 +135,13 @@ runs:
               set -euo pipefail
               audit_bin="${RUNNER_TEMP}/cargo-audit-bin/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit"
               failed=0
+              lock_index=0
               while IFS= read -r lock; do
+                lock_index=$((lock_index + 1))
                 if "${audit_bin}" audit --file "${lock}"; then
-                  echo "cargo-audit: ${lock}: passed"
+                  echo "cargo-audit: lock #${lock_index}: passed"
                 else
-                  echo "error: unaccepted advisory findings in ${lock}" >&2
+                  echo "error: unaccepted advisory findings in lock #${lock_index}" >&2
                   failed=1
                 fi
               done < <(find . -name Cargo.lock -not -path "*/target/*" -not -path "*/node_modules/*" | sort)
@@ -179,8 +184,13 @@ runs:
                 # dependency names; paths are repository-relative already (the tool is run
                 # from the source root) and pass through the shared scrubbing regardless.
                 machete_count="$(grep -cE '^[[:space:]]+[A-Za-z0-9_-]+$' "${RUNNER_TEMP}/cargo-machete.out" || true)"
-                echo "cargo-machete: ${machete_count} unused dependency finding(s):"
-                sanitize_stream <"${RUNNER_TEMP}/cargo-machete.out" | grep -E '^[[:space:]]+[A-Za-z0-9_-]+$|^[A-Za-z0-9_./-]+ -- ' | head -80 || true
+                # No dependency name and no manifest path are published: each finding is the
+                # manifest's index in the sorted manifest list and the dependency's name hash.
+                find . -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' | sed 's#^\./##' | sort > "${RUNNER_TEMP}/cargo-manifests.txt"
+                echo "cargo-machete: ${machete_count} unused dependency finding(s) (manifest index, name hash):"
+                machete_detail "${RUNNER_TEMP}/cargo-machete.out" "${RUNNER_TEMP}/cargo-manifests.txt" || true
+                echo 'cargo-machete: names are hashed (8 hex of the name SHA-256); run `cargo machete` in the private checkout to see them'
+                echo '- cargo-machete: names are hashed (8 hex of the name SHA-256). Run `cargo machete` in the private checkout to see them.' >> "${GITHUB_STEP_SUMMARY}"
                 if [[ "${MACHETE_FAIL}" == true ]]; then
                   deferred_results+=("cargo-machete|failed: ${machete_count} unused dependency finding(s) (listed above; exit 1)")
                   deferred_failed=1

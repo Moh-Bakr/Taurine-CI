@@ -64,16 +64,16 @@ runs:
           fi
         }
 
-        # On failure the advisory findings are published: the RUSTSEC/CVE
-        # id, the crate, and the locked version are public registry facts
-        # that name the finding — the same rule the Rust concern follows,
-        # publish what names the failure, never what the failure was in.
-        # Everything cargo-audit prints around them (the dependency-graph
-        # context, the advisory-db fetch log, local paths) stays withheld.
+        # On failure the advisory ids are published: the RUSTSEC/CVE id does not encode a
+        # crate name. The crate, its locked version, the advisory title (which names the
+        # crate), the dependency-graph context, the advisory-db fetch log and local paths all
+        # stay withheld; read them locally with `cargo audit` in the private checkout, which
+        # picks up the same `.cargo/audit.toml`.
         cargo_audit_detail() {
           sanitize_stream <"$1" |
-            grep -E '^error: |^warning: |^Crate: |^Version: |^ID: |^Warning: |^Severity: |^URL: |RUSTSEC-[0-9]{4}-[0-9]{4,}|CVE-[0-9]{4}-[0-9]+' |
+            grep -E '^ID: |^Severity: |^error: [0-9]+ vulnerabilit|^warning: [0-9]+ (allowed )?warning|^Warning: (unmaintained|unsound|yanked|notice)' |
             head -40 >&2 || true
+          echo 'names withheld: run `cargo audit` in the private checkout to see the affected crates' >&2
         }
 
         # Fixed, source-free classification for the JavaScript and tool labels (the Rust ones
