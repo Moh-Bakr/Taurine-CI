@@ -9,7 +9,7 @@ name: Prune stale caches (scheduled)
 #   re-verified registry/cache archives);
 # - entries nobody has restored for seven days;
 # - every entry of a key family but the most recently used one (a family is the key
-#   without its lockfile or toolchain hashes: one per OS for the cargo sources and NuGet,
+#   without its lockfile or toolchain hashes: one per OS for the cargo sources,
 #   one per OS and build for the compiled dependencies).
 # Deleting a cache entry only costs the next run a cold restore; nothing else depends on it.
 on:
@@ -63,7 +63,7 @@ jobs:
             age=$(( now - $(date -u -d "${accessed}" +%s) ))
             case "${key}" in
               cargo-target-*) family="${ref} ${key%%-rustc*}" ;;
-              cargo-sources-v3-*|nuget-*) family="${ref} ${key%-*}" ;;
+              cargo-sources-v3-*) family="${ref} ${key%-*}" ;;
               cargo-sources-*) printf '%s\t%s\t%s\n' "${id}" "${size}" 'superseded key shape' >> "${plan}"; continue ;;
               *) family="${ref} ${key}" ;;
             esac

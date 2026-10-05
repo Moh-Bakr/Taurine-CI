@@ -3,8 +3,10 @@
 Every source-bearing job in this repository mints its short-lived checkout token from one
 credential: the private key of the source-reader GitHub App, stored only as the `source-read`
 **environment** secret `SOURCE_READER_PRIVATE_KEY` (the repository has no repository-level secrets). The App's client ID is the `SOURCE_READER_APP_ID` variable. The
-App is installed on the private source repositories (`Moh-Bakr/Taurine` and
-`Moh-Bakr/keeldock-cloud`) with contents read only.
+App is installed **only on `Moh-Bakr/Taurine`**, with contents read only. Keel Dock's CI now lives in
+`Keeldock/keeldock-ci`, so the App must no longer be installed on `Moh-Bakr/keeldock-cloud`. If it still
+is, remove that installation in GitHub settings (this repository's workflows and agents do not change
+App installations).
 
 The key is available to a job before the token is revoked, and that job later runs private
 project code with sudo. A hostile dependency could therefore copy the key out of the runner, so
@@ -63,16 +65,12 @@ the old one is deleted. Validation does not need to stop.
 
 ## Verifying a rotation
 
-Dispatch the cheapest protected workflow that reads each private repository, from `main`:
+Dispatch the cheapest protected workflow that reads the private repository, from `main`:
 
 ```bash
 # Taurine: the access-path smoke test (about a minute).
 sha="$(gh api repos/Moh-Bakr/Taurine/commits/develop -q .sha)"
 gh workflow run source-read.yml --repo Moh-Bakr/Taurine-CI --ref main -f source_sha="${sha}"
-
-# Keel Dock uses the same App. Its full dispatch is the only entry point.
-kd="$(gh api repos/Moh-Bakr/keeldock-cloud/commits/main -q .sha)"
-gh workflow run keeldock-validation.yml --repo Moh-Bakr/Taurine-CI --ref main -f source_sha="${kd}"
 ```
 
 A rotation is verified only when all of the following hold:

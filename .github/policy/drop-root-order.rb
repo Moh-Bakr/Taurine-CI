@@ -16,11 +16,11 @@ workflow = ARGV[0]
 doc = YAML.safe_load(File.read(workflow), aliases: false)
 DROP = './.github/actions/drop-root'
 PRE_DROP_USES = [
-  %r{\A\./\.github/actions/(egress-audit|timings|sanitize|concern-report|mobile-report|root-setup|keeldock-nuget-verify)\z},
+  %r{\A\./\.github/actions/(egress-audit|timings|sanitize|concern-report|mobile-report|root-setup)\z},
   %r{\A\./\.github/actions/live-start-[a-z]+\z},
   # Only the Semgrep container run (checked below): the scanners themselves come after.
   %r{\A\./\.github/actions/scan-concern\z},
-  %r{\Aactions/(setup-dotnet|setup-node|cache/restore)@[0-9a-f]{40}\z}
+  %r{\Aactions/(setup-node|cache/restore)@[0-9a-f]{40}\z}
 ].freeze
 PROJECT_COMMAND = /^\s*(sudo\s+)?(npm|npx|pnpm|yarn|node|cargo|rustup|rustc|dotnet|nuget|xcodebuild|xcrun|gradle|gradlew|make|cmake|pip|pip3|python|python3|ruby|brew|choco|vcpkg|bash\s+scripts\/|sh\s+scripts\/|\.\/scripts\/)(\s|$)/
 SUDO = /(^|[\s;&|(`])sudo(\s|$)/

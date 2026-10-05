@@ -16,9 +16,8 @@ description: >
 inputs:
   keep-docker:
     description: >
-      'true' only for a concern whose project code itself drives Docker (the Keel Dock
-      db-containers and apphost-cold-start concerns, which start containers through
-      Testcontainers and Aspire). Docker access is root-equivalent, so the summary records that
+      'true' only for a concern whose project code itself drives Docker (for example the live
+      proof arms, which start database containers). Docker access is root-equivalent, so the summary records that
       root stays reachable through Docker for that job.
     required: false
     default: 'false'

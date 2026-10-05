@@ -75,7 +75,7 @@ runs:
           logged=0
           for table in iptables ip6tables; do
             # One audit chain, entered from OUTPUT (the host) and DOCKER-USER (containers,
-            # such as live-proof servers and the Keel Dock PostgreSQL). Loopback and the
+            # such as live-proof servers). Loopback and the
             # Docker bridges are local traffic; only new connections that leave are logged.
             # iptables accepts one -o per rule, hence the RETURN rules.
             sudo -n "${table}" -w -N EGRESS_AUDIT 2>/dev/null || continue

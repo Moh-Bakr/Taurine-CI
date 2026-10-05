@@ -10,7 +10,7 @@
 #  5. Every job that enters the source-read environment calls the source-checkout composite,
 #     and nothing that runs project code precedes it: only the public checkout (needed to
 #     reach the local composites), the timer composite and plain-shell input validation may
-#     come first. The two reviewed exceptions are listed below with their reason.
+#     come first. The reviewed exception is listed below with their reason.
 require 'yaml'
 
 root = ARGV[0] || '.'
@@ -18,7 +18,6 @@ failures = []
 
 # job-level exceptions to rule 5: [workflow file, job id] => reason
 PROTECTED_JOB_EXEMPT = {
-  ['keeldock-validation-concern.yml', 'validate'] => 'second private source: inline mint with its own stricter checks (check-keeldock.sh)',
   ['weekly-validation.yml', 'resolve'] => 'scheduled resolver: mints, reads one API value and revokes; checks nothing out by design (check-weekly.sh)'
 }.freeze
 

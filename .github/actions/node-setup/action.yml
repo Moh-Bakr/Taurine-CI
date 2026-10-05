@@ -42,7 +42,7 @@ runs:
         node-version: ${{ inputs.node-version }}
         # setup-node 5 and later cache the package manager's downloads automatically when a
         # package.json declares `packageManager`. This control plane caches nothing but
-        # cargo's (and NuGet's) verified third-party sources, so the automatic cache is off.
+        # cargo's verified third-party sources, so the automatic cache is off.
         package-manager-cache: false
 
     - name: Install locked JavaScript dependencies
