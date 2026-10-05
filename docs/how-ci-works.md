@@ -149,6 +149,64 @@ same `source-checkout` order, enforced by the policy), the App can only read the
 repositories, and the key can be rotated (`docs/source-reader-key-rotation.md`). The job
 summary records the residual risk on every Windows job.
 
+## Egress: audit and block
+
+Every source-bearing job runs the `egress-audit` composite: `start` straight after the source
+checkout, `report` last. It records DNS answers and new outbound connections (Linux:
+`resolvectl monitor` and an iptables LOG chain; macOS: `tcpdump`; Windows: the DNS Client
+event log) and publishes only names on the reviewed allow-list (`.github/egress-allowlist.txt`);
+any other name appears as `unlisted:<12-hex SHA-256 prefix>`.
+
+**Block mode (Linux).** The composite takes `mode: audit|block`. A Linux concern's mode comes
+from `ci-matrix.json` (`egress`). In block mode the composite's `enforce` phase, which runs
+after `root-setup` and immediately before `drop-root`, calls the `egress-block` composite:
+
+- a filtering resolver (dnsmasq, `dnsmasq-base` pinned from the runner's Ubuntu archive, as its
+  own system user) forwards only names on the allow-list (scopes `all` and `linux`) to the
+  runner's Azure DNS and answers NXDOMAIN for everything else, so an unlisted name never leaves
+  the runner, not even as a DNS query;
+- every address it returns for an allowed name goes into an nftables set, and the output chain
+  drops by default: loopback, established flows, root's own traffic, the resolver's upstream
+  queries, the Azure wire server and metadata endpoints, the Docker bridges and that set are
+  accepted, everything else is logged and dropped;
+- a NAT rule sends every DNS packet not sent by the resolver (systemd-resolved's upstream
+  queries, or anything asking a public resolver directly) to the filtering resolver;
+- a self-test proves an allowed name resolves and is reachable, an unlisted public name does
+  not resolve, a direct query to a public resolver is filtered, and a literal unlisted address
+  is unreachable.
+
+It fails closed: if a package will not install, the configuration does not parse or the
+self-test fails, the job fails; it never falls back to audit. It is installed while root is
+still available and project code never gets root, so project code cannot undo it. A refused
+name or dropped connection does not fail the job by itself (the job fails only if the build
+does); the report lists them (hashed unless allow-listed) with counts, under "Egress (block
+mode)".
+
+The policy (`check-egress-modes.sh`, with fixtures in `test-policy.sh`) requires every Linux
+concern to name its mode, and an `audit` concern to carry `egress_audit_reason`: a concern
+cannot be switched back to audit without a written exception.
+
+Kept in audit, and why:
+
+- **Linux `e2e-visual`**: it runs inside a job container as root with the host Docker socket,
+  so a host firewall cannot bind it.
+- **Docker-kept jobs** (the live-proof `bastion` arm, Keel Dock `db-containers` and
+  `apphost-cold-start`): Docker access is root-equivalent, so project code could remove the
+  firewall; blocking there would be a claim the job cannot keep.
+- **macOS**: `tcpdump` records only. A `pf` anchor with a filtering resolver is technically
+  possible before `drop-root`, but macOS background services (software update, OCSP, Xcode
+  services) query a long, changing tail of Apple and Akamai names (over a hundred unidentified
+  hashes per run), so it stays in audit until that tail is identified.
+- **Windows**: the job user is an administrator and cannot be demoted, so any firewall rule is
+  removable by project code.
+
+Residual risk in block mode: an allowed name's addresses are often shared CDN or cloud-storage
+front ends (Fastly, Akamai, Azure Front Door, Azure Storage), so a client that connects to an
+allowed address with another host name in TLS SNI reaches whatever else that front end serves;
+a subdomain of an allowed name is forwarded to that operator's own DNS; and root processes
+(the runner's platform agents) are not filtered. The allow-list keeps wildcards to
+operator-owned names for this reason.
+
 ## Ref isolation: main and untrusted
 
 The Actions cache is scoped by ref. A run on `main` reads and writes main's cache scope; a run
