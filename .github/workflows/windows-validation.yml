@@ -17,6 +17,13 @@ name: Windows source validation (protected)
 # develop/uat/main tip, and for any branch that touches native or OS-specific
 # Rust. A dispatch without it runs the TypeScript concerns exactly as before
 # and reports the Rust concerns as "not requested", never as passed.
+#
+# Runner image. `windows_image` selects the hosted image: `windows-2022` (the default and
+# the supported baseline) or `windows-2025`. The weekly validation dispatches a windows-2025
+# run in addition to the default one; it runs alongside, never gating a merge. MIGRATION
+# CRITERION: switch this default to windows-2025 (and drop the 2022 weekly leg) once two
+# consecutive weekly windows-2025 runs are fully green. Until then a 2025 failure is a
+# finding to fix in the toolchain steps (LLVM, Strawberry Perl, NASM, vcpkg), not a blocker.
 on:
   workflow_dispatch:
     inputs:
@@ -29,11 +36,19 @@ on:
         required: false
         default: false
         type: boolean
+      windows_image:
+        description: Hosted Windows image to run on (windows-2022 is the baseline; windows-2025 is the migration target)
+        required: false
+        default: windows-2022
+        type: choice
+        options:
+          - windows-2022
+          - windows-2025
 
 permissions: {}
 
 concurrency:
-  group: windows-validation-${{ github.workflow }}-${{ inputs.source_sha }}
+  group: windows-validation-${{ github.workflow }}-${{ inputs.source_sha }}-${{ inputs.windows_image }}
   # Never cancel source-bearing jobs: cancellation can interrupt cleanup that
   # revokes a short-lived private-source token in one of the matrix jobs.
   cancel-in-progress: false
@@ -95,6 +110,7 @@ jobs:
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
+      windows_image: ${{ inputs.windows_image }}
 
   # The Rust crate-test concerns, each its own reusable-workflow job so a slow
   # one cannot hold the others back. Scheduled only when `rust=true`; a skipped
@@ -130,6 +146,7 @@ jobs:
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
+      windows_image: ${{ inputs.windows_image }}
 
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed

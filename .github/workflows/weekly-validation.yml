@@ -157,6 +157,10 @@ jobs:
             fi
             gh workflow run macos-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
             gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+            # The Windows 2025 image, every week, alongside (never instead of) the baseline run.
+            # It does not gate anything; two consecutive green weeks switch the default
+            # (see the header of windows-validation.yml).
+            gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true -f windows_image=windows-2025
           fi
           # openssl-src freshness: warn when a private lock is behind the newest 300.5.x
           # release on crates.io (the OpenSSL 3.5 line the production plan targets). The
@@ -192,7 +196,7 @@ jobs:
             if [[ "${DRY_RUN}" == true ]]; then
               echo '- Dry run: nothing was dispatched'
             else
-              echo '- Dispatched: linux-validation (full), macos-validation (rust=true), windows-validation (rust=true)'
+              echo '- Dispatched: linux-validation (full), macos-validation (rust=true), windows-validation (rust=true), windows-validation on windows-2025 (rust=true, non-gating)'
             fi
             if [[ -n "${BASE_SHA}" && "${DRY_RUN}" != true ]]; then
               echo "- Drift check: linux-validation with base_sha \`${BASE_SHA}\` (the week's selective run); compare its Result with the full run's"
