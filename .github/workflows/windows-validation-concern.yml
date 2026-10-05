@@ -202,12 +202,10 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ${{ steps.cargo-home.outputs.dir }}/registry/index
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
-            ${{ steps.cargo-home.outputs.dir }}/git/db
-          key: cargo-sources-v2-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
+          key: cargo-sources-v3-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
           restore-keys: |
-            cargo-sources-v2-${{ runner.os }}-
+            cargo-sources-v3-${{ runner.os }}-
 
       # Defence in depth: do not rely on cargo alone to notice a tampered archive.
       # Every restored `.crate` must hash to the checksum recorded for it in a
@@ -221,6 +219,37 @@ jobs:
           sources-dir: ${{ steps.cargo-home.outputs.dir }}
           cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}
           os-label: Windows
+
+      # Saved before any project code runs, so nothing the private SHA's build scripts, proc
+      # macros or tests do can reach what is saved: only from the protected main branch, only
+      # for a source SHA on a protected private branch (the source-checkout ancestry answer),
+      # only on a miss, and under the key the restore step computed (cache-primary-key), never
+      # a hashFiles evaluated later. Only registry/cache is cached: every `.crate` in it is
+      # re-hashed against Cargo.lock on restore, whereas the registry index and git databases
+      # could not be verified, so cargo rebuilds them. The entry is shared by every Rust concern
+      # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
+      # cargo verifies each download against the lock checksum and runs no build script.
+      - name: Complete the third-party source set before saving
+        if: ${{ github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r lock; do
+            manifest="$(dirname "${lock}")/Cargo.toml"
+            [[ -f "${manifest}" ]] || continue
+            if ! cargo fetch --locked --manifest-path "${manifest}" >"${RUNNER_TEMP}/cargo-fetch.log" 2>&1; then
+              echo 'cargo-fetch: one lockfile could not be fetched completely (detail withheld)'
+            fi
+          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*' | sort)
+          echo 'cargo-fetch: done'
+
+      - name: Save verified third-party crate sources
+        if: ${{ github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: ${{ steps.cargo-sources.outputs.cache-primary-key }}
 
       # Compiled third-party dependency cache: DISABLED (2026-10-05, finding H1). Every
       # restore and save step of it carries a literal `false &&` and the cache policy fails
@@ -336,37 +365,6 @@ jobs:
         uses: ./.github/actions/windows-concern-rust  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
-
-      # Saved only from the protected main branch (every job here already refuses to
-      # run elsewhere; the condition repeats it so the write permission is explicit),
-      # only for a source SHA on a protected private branch (the source-checkout
-      # ancestry answer, fixed before any project code ran), and only on a miss, so a
-      # key is written once and never overwritten. The entry is shared by every Rust
-      # concern on this OS, so the saver first fetches every crate each lockfile names
-      # (all platforms); cargo verifies each download against the lock checksum.
-      - name: Complete the third-party source set before saving
-        if: ${{ always() && github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r lock; do
-            manifest="$(dirname "${lock}")/Cargo.toml"
-            [[ -f "${manifest}" ]] || continue
-            if ! cargo fetch --locked --manifest-path "${manifest}" >"${RUNNER_TEMP}/cargo-fetch.log" 2>&1; then
-              echo 'cargo-fetch: one lockfile could not be fetched completely (detail withheld)'
-            fi
-          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*' | sort)
-          echo 'cargo-fetch: done'
-
-      - name: Save verified third-party crate sources
-        if: ${{ always() && github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ steps.cargo-home.outputs.dir }}/registry/index
-            ${{ steps.cargo-home.outputs.dir }}/registry/cache
-            ${{ steps.cargo-home.outputs.dir }}/git/db
-          key: cargo-sources-v2-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
 
       # Disabled with the restore above (finding H1). When re-enabled: only the build that
       # runs everything the key covers saves it, only on a miss, only for a protected source
