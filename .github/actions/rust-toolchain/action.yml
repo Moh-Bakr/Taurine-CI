@@ -355,7 +355,13 @@ runs:
         # floating install.
         llvm_bin='/c/Program Files/LLVM/bin'
         if [[ ! -f "${llvm_bin}/libclang.dll" ]]; then
-          choco install llvm --version=18.1.8 --no-progress -y
+          # The installer's SHA-256 is pinned here (LLVM-18.1.8-win64.exe, the digest the
+          # Chocolatey package's own install script carries) and Chocolatey is told to
+          # verify the download against it, so a changed package script or a replaced release
+          # asset fails the install instead of running.
+          choco install llvm --version=18.1.8 --no-progress -y \
+            --download-checksum-x64=94af030060d88cc17e9f00ef1663ebdc1126b35e16bebdfa1e807984b70abd8f \
+            --download-checksum-type-x64=sha256
         fi
         [[ -f "${llvm_bin}/libclang.dll" ]] || { echo 'libclang.dll is unavailable' >&2; exit 1; }
 
