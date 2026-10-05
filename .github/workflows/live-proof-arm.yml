@@ -210,12 +210,17 @@ jobs:
           cat "${RUNNER_TEMP}/proof-images.txt"
 
       # Root goes here (finding H2): after the server containers are up and recorded, before
-      # the vendor fetch, the build and the suite. Docker goes with it: the suite reaches the
+      # the vendor fetch, the build and the suite. Docker goes with it: the suites reach the
       # servers only over their published loopback ports, so the job user no longer needs the
-      # daemon (which is root-equivalent).
+      # daemon (which is root-equivalent). The one exception is the bastion arm: its tunnel
+      # test asks `docker inspect` for the lab postgres container's network address (an
+      # address only the bastion can route to), so that arm keeps Docker and its summary says
+      # so.
       - name: Remove root before project code
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+        with:
+          keep-docker: ${{ inputs.engine == 'bastion' }}
 
       - name: Set up the Rust toolchain and pinned vendored sources
         shell: bash
