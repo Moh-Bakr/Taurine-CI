@@ -1,0 +1,96 @@
+name: Start the RocketMQ live server
+description: >
+  Starts the Apache RocketMQ NameServer and broker and pre-creates the suite fixtures.
+  Every server image is pinned by digest. Credentials are per-run throwaways for a
+  loopback container that dies with the runner, masked before first use and handed
+  to the suite only through GITHUB_ENV. Reads the private source only through the
+  checked-out tree and publishes nothing.
+
+inputs:
+  engine:
+    description: Arm to start (rocketmq)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Start the rocketmq server and wait for readiness
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        ENGINE: ${{ inputs.engine }}
+      run: |
+          set -euo pipefail
+          ready=0
+
+          case "${ENGINE}" in
+            rocketmq)
+              # Pinned by index digest (tag 5.3.2, resolved 2026-10-04; amd64
+              # compressed 0.20 GB).
+              # Apache RocketMQ 5.3.2, the NameServer-plus-broker pair the
+              # official quick start describes, on a docker network (the
+              # image is a few hundred MB compressed — the smallest guest
+              # this workflow hosts). The one RocketMQ quirk a loopback lab
+              # has is the broker's *advertised* address: what the broker
+              # registers with the NameServer is the address the client
+              # dials next, so it must be one the host can reach — hence the
+              # mounted broker.conf pinning brokerIP1 to 127.0.0.1 with the
+              # broker port published beside it. Readiness is the admin
+              # conversation itself (mqadmin clusterList answering with the
+              # broker), 10 minutes budget. The lane pre-creates the two
+              # fixtures the suite names — a topic and a consumer group —
+              # because a pristine broker legitimately answers an empty
+              # group table, and a run that cannot tell "empty because
+              # fresh" from "folder answered with real content" proves
+              # nothing about the folder.
+              docker network create dbx-rocketmq-net
+              printf '%s\n' \
+                'brokerClusterName = DefaultCluster' \
+                'brokerName = broker-a' \
+                'brokerId = 0' \
+                'brokerRole = ASYNC_MASTER' \
+                'flushDiskType = ASYNC_FLUSH' \
+                'brokerIP1 = 127.0.0.1' \
+                'listenPort = 10911' \
+                'autoCreateTopicEnable = false' \
+                > "${RUNNER_TEMP}/broker.conf"
+              docker run -d --name dbx-rocketmq-namesrv --hostname namesrv \
+                --network dbx-rocketmq-net \
+                -p 127.0.0.1:9876:9876 \
+                -e JAVA_OPT_EXT="-Xms256m -Xmx256m" \
+                apache/rocketmq@sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587 sh mqnamesrv
+              docker run -d --name dbx-rocketmq-broker --hostname broker \
+                --network dbx-rocketmq-net \
+                -p 127.0.0.1:10911:10911 -p 127.0.0.1:10909:10909 \
+                -v "${RUNNER_TEMP}/broker.conf:/home/rocketmq/conf/broker.conf" \
+                -e JAVA_OPT_EXT="-Xms512m -Xmx512m" \
+                apache/rocketmq@sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587 sh mqbroker -n namesrv:9876 -c /home/rocketmq/conf/broker.conf
+              for _ in $(seq 1 30); do
+                if docker exec dbx-rocketmq-broker sh mqadmin clusterList -n namesrv:9876 2>/dev/null | grep -q 'broker-a'; then
+                  ready=1
+                  break
+                fi
+                sleep 20
+              done
+              if (( ready == 0 )); then
+                echo 'rocketmq: no live broker after 10 minutes; log tails below' >&2
+                docker logs dbx-rocketmq-namesrv 2>&1 | tail -20 >&2 || true
+                docker logs dbx-rocketmq-broker 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              docker exec dbx-rocketmq-broker sh mqadmin updateTopic -n namesrv:9876 -c DefaultCluster -t taurine_proof_topic >/dev/null
+              docker exec dbx-rocketmq-broker sh mqadmin updateSubGroup -n namesrv:9876 -c DefaultCluster -g taurine_proof_group >/dev/null
+              version="$(docker exec dbx-rocketmq-broker sh mqadmin clusterList -n namesrv:9876 2>/dev/null | awk 'NR>1 && $2 == "broker-a" {print $5; exit}')"
+              {
+                echo "TAURINE_TEST_ROCKETMQ=127.0.0.1:9876"
+                echo "TAURINE_TEST_ROCKETMQ_TOPIC=taurine_proof_topic"
+                echo "TAURINE_TEST_ROCKETMQ_GROUP=taurine_proof_group"
+                echo "PROOF_SERVER_VERSION=Apache RocketMQ ${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            *)
+              echo "Unsupported engine for this composite: ${ENGINE}" >&2
+              exit 2
+              ;;
+          esac

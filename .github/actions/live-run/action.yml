@@ -1,0 +1,91 @@
+name: Run the live proof
+description: >
+  Runs one live-proof arm's cargo suites against the running server, from the arm's
+  definition the arm workflow wrote to the runner's temp directory. The raw output
+  goes to a runner-local log and never leaves the runner; only fixed-format
+  failure classes are printed. Any SKIPPED line fails a multi-suite arm: a gated
+  driver test returns early and cargo counts it as passed, so a skip is an unrun
+  test, not a proof.
+
+runs:
+  using: composite
+  steps:
+    # The suite output goes to a runner-local log, and only the sanitized
+    # inventory live-summary builds is ever published: the report's header line,
+    # each check's outcome label and title, and cargo's own result line. The
+    # detail lines a FAIL carries (expected-versus-got of the driver's answer)
+    # and the raw log never leave the runner.
+    - name: Run the engine's live proof
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      run: |
+        set -euo pipefail
+        arm="${RUNNER_TEMP}/live-arm.json"
+        target="$(jq -r '.target // empty' "${arm}")"
+        filter="$(jq -r '.filter // empty' "${arm}")"
+        log="${RUNNER_TEMP}/live-proof.log"
+        if [[ -s "${RUNNER_TEMP}/suites.txt" ]]; then
+          # Main-engine arms: every suite in suites.txt, all of them run even
+          # after a failure so one report shows the whole picture. Two ways
+          # to fail, both final: a non-zero cargo exit, and — the rule
+          # scripts/check-db.sh exists for — any SKIPPED line. A gated
+          # driver test returns early and cargo counts it as passed, so a
+          # skip is an unrun test, not a proof.
+          : > "${log}"
+          : > "${RUNNER_TEMP}/suite-results.txt"
+          overall=0
+          while read -r pkg targets name; do
+            args=()
+            IFS=, read -ra tl <<< "${targets}"
+            for t in "${tl[@]}"; do args+=(--test "${t}"); done
+            [[ -n "${name:-}" ]] && args+=("${name}")
+            suite_log="${RUNNER_TEMP}/suite.log"
+            set +e
+            cargo test -p "${pkg}" "${args[@]}" -- --nocapture --test-threads=1 </dev/null >"${suite_log}" 2>&1
+            code=$?
+            set -e
+            {
+              echo "== ${pkg} ${targets} ${name:-}"
+              cat "${suite_log}"
+            } >> "${log}"
+            skips="$(grep -c 'SKIPPED' "${suite_log}" || true)"
+            passed="$(grep -E '^test result: ok\. [0-9]+ passed' "${suite_log}" | awk '{s+=$4} END{print s+0}')"
+            verdict=pass
+            if (( code != 0 )); then verdict="FAIL(exit ${code})"; overall=1; fi
+            if (( skips > 0 )); then verdict="FAIL(${skips} SKIPPED)"; overall=1; fi
+            if (( code == 0 && passed == 0 )); then verdict='FAIL(no test passed)'; overall=1; fi
+            echo "${verdict}: ${pkg} [${targets}] ${name:-} passed=${passed} skipped=${skips}" | tee -a "${RUNNER_TEMP}/suite-results.txt"
+            if (( code != 0 )); then
+              # Name the failure in the log right here, not only in the summary: the failed
+              # tests and one fixed-format line per panic (test, file:line, class; the
+              # assertion text and values are never published).
+              source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+              echo "FAILED in ${pkg} [${targets}] ${name:-}: failed tests:" >&2
+              failed_test_names "${suite_log}" | sed 's/^/  /' >&2 || true
+              echo "panics (test, file:line, class):" >&2
+              panic_summary "${suite_log}" >&2 || true
+            fi
+            if (( skips > 0 )); then
+              echo "REFUSED: ${pkg} reported SKIPPED — an unrun test is not a pass; the lines were:" >&2
+              grep 'SKIPPED' "${suite_log}" | cut -c1-200 | head -10 >&2 || true
+            fi
+          done < "${RUNNER_TEMP}/suites.txt"
+          echo "${overall}" > "${RUNNER_TEMP}/lab-overall.txt"
+          exit "${overall}"
+        fi
+        set +e
+        filter_args=()
+        [[ -n "${filter}" ]] && filter_args=("${filter}")
+        cargo test -p taurine-db-conformance --test "${target}" "${filter_args[@]}" -- --nocapture \
+          >"${log}" 2>&1
+        status=$?
+        set -e
+        echo "cargo test exited ${status}; sanitized report follows in the summary step"
+        if [[ "${status}" -ne 0 ]]; then
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+          echo 'failed tests:' >&2
+          failed_test_names "${log}" | sed 's/^/  /' >&2 || true
+          echo 'panics (test, file:line, class):' >&2
+          panic_summary "${log}" >&2 || true
+        fi
+        exit "${status}"

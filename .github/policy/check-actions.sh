@@ -43,6 +43,16 @@ check_action_references() {
       ./.github/actions/vendor-fetch) ;;
       ./.github/actions/verify-cargo-cache) ;;
       ./.github/workflows/keeldock-validation-concern.yml) ;;
+      ./.github/workflows/live-proof-arm.yml) ;;
+      ./.github/actions/live-build) ;;
+      ./.github/actions/live-run) ;;
+      ./.github/actions/live-summary) ;;
+      ./.github/actions/live-start-ibm) ;;
+      ./.github/actions/live-start-iris) ;;
+      ./.github/actions/live-start-mpp) ;;
+      ./.github/actions/live-start-pg) ;;
+      ./.github/actions/live-start-rocketmq) ;;
+      ./.github/actions/live-start-sql) ;;
       '') ;;
       *)
         echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2
