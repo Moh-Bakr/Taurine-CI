@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       rust:
-        description: Run the mobile Rust test-target build
+        description: Build and run the mobile Rust tests (on the iOS simulator)
         required: false
         default: false
         type: boolean
@@ -30,7 +30,7 @@ env:
 
 jobs:
   # Builds the concern matrix from the `rust` input and reports the choice. It
-  # holds no source, token or environment. The mobile Rust test-target build is
+  # holds no source, token or environment. The mobile Rust test build-and-run concern is
   # opt-in, as the Rust concerns are on macOS and Windows: dispatch with
   # `-f rust=true` for plan tips, develop/uat/main tips and mobile-touching branches.
   plan:
@@ -77,11 +77,10 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      # ios-rust (the mobile crate's test targets, compile-only) is added by the
-      # `plan` job when rust=true. The iOS simulator target's test binaries are
-      # built and linked but not executed: running them needs a booted simulator
-      # and a test runner such as cargo-dinghy, which this control plane does not
-      # install.
+      # ios-rust is added by the `plan` job when rust=true. The iOS simulator target's
+      # test binaries are built and linked, then executed on a booted simulator with
+      # `xcrun simctl spawn`. The crate is cfg(mobile), so its tests exist only on an
+      # iOS target and cannot run on the host.
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:
@@ -253,7 +252,8 @@ jobs:
             ios-rust)
               # Compile-only: build and link every test target of the mobile crate for
               # the iOS simulator triple, so the `cfg(target_os = "ios")` code and its
-              # tests are type-checked and linked on a hosted runner. Not executed.
+              # tests are type-checked and linked on a hosted runner; the next step
+              # executes them on the simulator.
               mobile_run ios-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-apple-ios-sim
               ;;
             *)
@@ -261,6 +261,11 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Run the Rust tests on the iOS simulator
+        if: matrix.concern == 'ios-rust'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/ios-simulator-tests  # zizmor: ignore[self-repository]
 
       - name: Publish sanitized validation proof
         shell: bash

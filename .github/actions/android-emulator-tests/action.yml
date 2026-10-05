@@ -1,0 +1,100 @@
+name: Android emulator tests
+description: >
+  Runs the mobile crate's Rust tests on an x86_64 Android emulator. Phase `boot` enables KVM,
+  installs the pinned emulator and system image and starts the emulator in the background; phase
+  `run` builds the x86_64-linux-android test binaries, waits for the boot, pushes each binary with
+  adb, executes it and publishes counts only. A test failure, a binary that ends without a result
+  or zero executed tests fails the step. Runs from the private source after the token is revoked.
+
+inputs:
+  phase:
+    description: boot (start the emulator) or run (build, execute and report).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Enable KVM and start the emulator
+      if: inputs.phase == 'boot'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Hosted ubuntu runners expose /dev/kvm to the kvm group only; open it for the job.
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        [[ -c /dev/kvm && -w /dev/kvm ]] || { echo 'KVM is unavailable on this runner; the emulator cannot be accelerated' >&2; exit 1; }
+        # Tooling comes from the command-line tools the android-sdk-setup action pinned by
+        # SHA-256. The system image is pinned by API level, ABI and variant; Google publishes
+        # no per-revision checksum for it, so its revision is the one the repository serves.
+        sdkmanager_bin="${RUNNER_TEMP}/android-cmdline-tools/cmdline-tools/bin/sdkmanager"
+        avdmanager_bin="${RUNNER_TEMP}/android-cmdline-tools/cmdline-tools/bin/avdmanager"
+        [[ -x "${sdkmanager_bin}" && -x "${avdmanager_bin}" ]] || { echo 'pinned Android command-line tools are unavailable' >&2; exit 1; }
+        image='system-images;android-34;default;x86_64'
+        "${sdkmanager_bin}" --sdk_root="${ANDROID_HOME}" platform-tools emulator "${image}" >"${RUNNER_TEMP}/sdkmanager-emulator.log" 2>&1 \
+          || { echo 'emulator package install failed' >&2; tail -n 5 "${RUNNER_TEMP}/sdkmanager-emulator.log" >&2; exit 1; }
+        export ANDROID_AVD_HOME="${RUNNER_TEMP}/avd"
+        mkdir -p "${ANDROID_AVD_HOME}"
+        echo no | "${avdmanager_bin}" create avd --name taurine-ci --package "${image}" --device pixel_5 --force >/dev/null
+        setsid nohup "${ANDROID_HOME}/emulator/emulator" -avd taurine-ci -no-window -no-audio -no-boot-anim \
+          -no-snapshot -no-metrics -accel on -gpu swiftshader_indirect -memory 3072 -cores 2 \
+          >"${RUNNER_TEMP}/emulator.log" 2>&1 &
+        echo 'emulator: started in the background (API 34, x86_64, KVM)'
+
+    - name: Build the x86_64 test binaries and run them on the emulator
+      if: inputs.phase == 'run'
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+        # The same pinned NDK as the aarch64 build (android-sdk-setup), targeting x86_64: a
+        # runner-local linker wrapper and the target-prefixed binutils aliases the build
+        # scripts ask PATH for. Exported for this step only.
+        ndk_bin="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        ndk_sysroot="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        [[ -x "${ndk_bin}/clang" && -d "${ndk_sysroot}" ]] || { echo 'required Android NDK is unavailable' >&2; exit 1; }
+        linker_wrapper="${RUNNER_TEMP}/x86_64-linux-android-linker"
+        printf '%s\n' '#!/usr/bin/env bash' \
+          "exec \"${ndk_bin}/clang\" --target=x86_64-linux-android24 --sysroot=\"${ndk_sysroot}\" \"\$@\"" \
+          >"${linker_wrapper}"
+        chmod 700 "${linker_wrapper}"
+        alias_bin="${RUNNER_TEMP}/android-bin-x86_64"
+        mkdir -p "${alias_bin}"
+        for tool in ar ranlib strip; do
+          ln -s "${ndk_bin}/llvm-${tool}" "${alias_bin}/x86_64-linux-android-${tool}"
+          ln -s "${ndk_bin}/llvm-${tool}" "${alias_bin}/x86_64-linux-android24-${tool}"
+        done
+        export PATH="${alias_bin}:${PATH}"
+        export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="${linker_wrapper}"
+        export CARGO_TARGET_X86_64_LINUX_ANDROID_AR="${alias_bin}/x86_64-linux-android-ar"
+        export CC_x86_64_linux_android="${linker_wrapper}"
+        export AR_x86_64_linux_android="${alias_bin}/x86_64-linux-android-ar"
+        export RANLIB_x86_64_linux_android="${alias_bin}/x86_64-linux-android-ranlib"
+        export STRIP_x86_64_linux_android="${alias_bin}/x86_64-linux-android-strip"
+        export BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android="--target=x86_64-linux-android24 --sysroot=${ndk_sysroot}"
+        rustup target add x86_64-linux-android
+        target=x86_64-linux-android
+        mobile_run android-x86_64-test-targets cargo test --locked --no-run --package taurine-mobile --target "${target}"
+        binaries=()
+        while IFS= read -r line; do [[ -n "${line}" ]] && binaries+=("${line}"); done < <(mobile_test_executables "${target}")
+
+        adb="${ANDROID_HOME}/platform-tools/adb"
+        "${adb}" start-server >/dev/null 2>&1
+        booted=false
+        for _ in $(seq 1 180); do
+          if [[ "$("${adb}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; then booted=true; break; fi
+          pgrep -f 'emulator.*taurine-ci' >/dev/null || { echo 'the emulator process exited before it booted' >&2; break; }
+          sleep 5
+        done
+        [[ "${booted}" == true ]] || { echo 'android-tests: the emulator did not finish booting' >&2; exit 1; }
+        device="$("${adb}" shell getprop ro.product.model | tr -d '\r')"
+        api="$("${adb}" shell getprop ro.build.version.sdk | tr -d '\r')"
+
+        android_run() {
+          local remote="/data/local/tmp/$(basename "$1")"
+          "${adb}" push "$1" "${remote}" >/dev/null
+          "${adb}" shell "chmod 755 ${remote} && cd /data/local/tmp && ${remote}"
+        }
+        mobile_test_execute android-tests "Android emulator (${device}, API ${api}, x86_64)" android_run "${binaries[@]}"

@@ -1,0 +1,35 @@
+name: iOS simulator tests
+description: >
+  Runs the mobile crate's Rust tests on the iOS simulator. Boots an available iPhone simulator,
+  executes each aarch64-apple-ios-sim test binary through `xcrun simctl spawn` and publishes
+  counts only. The binaries were built by the concern's earlier `cargo test --no-run`. A test
+  failure, a binary that ends without a result or zero executed tests fails the step. Runs from
+  the private source after the token is revoked.
+
+runs:
+  using: composite
+  steps:
+    - name: Boot the simulator and run the test binaries
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+        target=aarch64-apple-ios-sim
+        binaries=()
+        while IFS= read -r line; do [[ -n "${line}" ]] && binaries+=("${line}"); done < <(mobile_test_executables "${target}")
+
+        # The newest available iOS runtime's last iPhone: "udid<TAB>name<TAB>runtime".
+        picked="$(xcrun simctl list devices available -j | jq -r '
+          [.devices | to_entries | sort_by(.key)[] | select(.key | contains("iOS"))
+           | .key as $rt | .value[] | select(.name | startswith("iPhone"))
+           | "\(.udid)\t\(.name)\t\($rt | sub("^.*SimRuntime[.]"; ""))"] | last // empty')"
+        [[ -n "${picked}" ]] || { echo 'ios-tests: no available iPhone simulator on this runner image' >&2; exit 1; }
+        IFS=$'\t' read -r udid name runtime <<<"${picked}"
+        xcrun simctl boot "${udid}" || true
+        xcrun simctl bootstatus "${udid}" -b >/dev/null 2>&1 || { echo 'ios-tests: the simulator did not finish booting' >&2; exit 1; }
+
+        ios_run() { xcrun simctl spawn "${udid}" "$1"; }
+        mobile_test_execute ios-tests "iOS simulator (${name}, ${runtime})" ios_run "${binaries[@]}"
+        xcrun simctl shutdown "${udid}" >/dev/null 2>&1 || true
