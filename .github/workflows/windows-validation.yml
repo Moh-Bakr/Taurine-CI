@@ -56,7 +56,7 @@ concurrency:
 jobs:
   validate-input:
     permissions: {}
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -91,7 +91,7 @@ jobs:
   validate:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     needs: validate-input
     strategy:
       fail-fast: false
@@ -127,7 +127,7 @@ jobs:
   validate-rust:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.rust
     needs: validate-input
     strategy:
       fail-fast: false
@@ -158,7 +158,7 @@ jobs:
   # run's read-only token, and publishes no artifact. A concern with no baseline is
   # listed without a comparison; update the table when a run is a new normal.
   timings:
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
     needs: [validate, validate-rust]
     name: Timings
     runs-on: ubuntu-24.04
@@ -187,7 +187,7 @@ jobs:
   # run as "not selected" (never as passed), and the run fails if any concern that ran
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
     needs: [validate, validate-rust]
     name: Result
     runs-on: ubuntu-24.04

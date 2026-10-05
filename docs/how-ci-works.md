@@ -24,8 +24,10 @@ The `.github/actions/source-checkout` composite is the only way source-bearing j
 private repository. Jobs that use it run in the `source-read` environment, which holds the
 source-reader GitHub App (`SOURCE_READER_APP_ID` variable, `SOURCE_READER_PRIVATE_KEY` secret).
 
-1. **Guard.** The repository must be this one, the ref must be `refs/heads/main`, and the SHA
-   must match `^[0-9a-fA-F]{40}$`.
+1. **Guard.** The repository must be this one, the ref must be `refs/heads/main` or
+   `refs/heads/untrusted` (see [Ref isolation](#ref-isolation-main-and-untrusted)), and the SHA
+   must match `^[0-9a-fA-F]{40}$`. A run from `untrusted` must also be running exactly main's
+   tip, or it stops here.
 2. **Mint.** `actions/create-github-app-token` issues a short-lived token scoped to the one
    private repository with `contents: read` only. Its own end-of-job revoke is disabled
    (`skip-token-revoke`) because step 4 revokes explicitly.
@@ -34,7 +36,9 @@ source-reader GitHub App (`SOURCE_READER_APP_ID` variable, `SOURCE_READER_PRIVAT
 4. **Verify and revoke (`if: always()`).** The step confirms the repository ID, owner and name,
    that `HEAD` equals the requested SHA, and that the API resolves that SHA, then calls
    `DELETE /installation/token`, clears git credentials and empties step-output files. Any
-   failure fails the job before project code can run.
+   failure fails the job before project code can run. On `main` the step also refuses, after
+   the revoke and before project code, any SHA that is not on `develop`, `uat` or `main` of the
+   source repository.
 
 The policy workflow parses every source-read job and fails if a package manager, compiler or
 project script runs before the revoking step, or if that step is not under `always()`. Mobile,
@@ -141,6 +145,72 @@ ones that applied before: the token is minted, used and revoked before any proje
 same `source-checkout` order, enforced by the policy), the App can only read the two source
 repositories, and the key can be rotated (`docs/source-reader-key-rotation.md`). The job
 summary records the residual risk on every Windows job.
+
+## Ref isolation: main and untrusted
+
+The Actions cache is scoped by ref. A run on `main` reads and writes main's cache scope; a run
+on another branch writes only that branch's scope, and main never reads it. Project code can
+write a cache entry directly with the runner's runtime token (finding H1), so the only safe
+place for unreviewed code is a ref whose cache main never reads. Hence two refs:
+
+| Ref | Runs | Caches |
+| --- | --- | --- |
+| `main` | Only SHAs on `develop`, `uat` or `main` of the source repository (protected ancestry). Anything else is refused, fail-closed, after the token is revoked and before project code, with a message saying to use `untrusted`. | The only ref that may restore or save caches. |
+| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be identical to main's tip, or the run stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
+
+### Dispatching feature-branch validation
+
+Use `--ref untrusted`; everything else is unchanged:
+
+```bash
+sha=$(gh api repos/Moh-Bakr/Taurine/commits/<branch> -q .sha)
+gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted -f source_sha="$sha"
+gh workflow run macos-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted -f source_sha="$sha" -f rust=true
+```
+
+Protected tips (`develop`, `uat`, `main`, and the weekly run) keep dispatching from `main`.
+
+### Keeping untrusted in sync with main (manual, by design)
+
+`untrusted` runs with the `source-read` environment, so whoever can change it can change code
+that receives the App private key. A workflow that fast-forwards it would need `contents:
+write` and a bypass of untrusted's push restriction, which adds a second writer to a ref that
+holds the key. The safer option is to keep the owner as the only writer and sync by hand after
+each merge to main. The runs enforce it: a run from a stale or diverged `untrusted` fails at
+the guard with a message to sync. The command is a fast-forward only (`force=false` refuses
+anything else):
+
+```bash
+gh api -X PATCH repos/Moh-Bakr/Taurine-CI/git/refs/heads/untrusted \
+  -f sha="$(gh api repos/Moh-Bakr/Taurine-CI/commits/main -q .sha)" -F force=false
+```
+
+### Repository settings the owner applies (once)
+
+These must be in place **before** the ref-isolation pull request merges; otherwise every
+feature-branch validation fails (main refuses it, and `untrusted` cannot reach the secret).
+
+1. **Protect `untrusted`.** Settings → Rules → Rulesets → New branch ruleset. Name it
+   `untrusted`, enforcement Active, target branch `untrusted` (include by name). Turn on
+   "Restrict deletions", "Block force pushes" and "Restrict updates", with only the repository
+   owner in the bypass list (no GitHub Actions, no apps). Equivalent under Settings → Branches:
+   a branch protection rule for `untrusted` with "Restrict who can push" (owner only), force
+   pushes and deletions not allowed.
+2. **Let `source-read` deploy to `untrusted`.** Settings → Environments → `source-read` →
+   Deployment branches and tags → "Selected branches and tags" → Add rule → `untrusted`
+   (alongside the existing `main`). Do not add a wildcard.
+3. **Check both:**
+
+   ```bash
+   gh api repos/Moh-Bakr/Taurine-CI/environments/source-read/deployment-branch-policies \
+     -q '.branch_policies[] | [.name, .type] | @tsv'          # expect main and untrusted only
+   gh api repos/Moh-Bakr/Taurine-CI/rules/branches/untrusted \
+     -q '.[].type'                                             # expect deletion, non_fast_forward, update
+   gh api repos/Moh-Bakr/Taurine-CI/rulesets -q '.[] | [.id, .name, .enforcement] | @tsv'
+   ```
+
+   With branch protection instead of a ruleset, check it with
+   `gh api repos/Moh-Bakr/Taurine-CI/branches/untrusted/protection`.
 
 ## Per-platform concerns
 

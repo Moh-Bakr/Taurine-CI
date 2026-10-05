@@ -45,7 +45,7 @@ env:
 jobs:
   validate-input:
     permissions: {}
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -109,7 +109,7 @@ jobs:
   plan:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     needs: validate-input
     name: Plan the full concern list
     runs-on: ubuntu-24.04
@@ -169,7 +169,7 @@ jobs:
   select:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.base_sha != ''
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.base_sha != ''
     needs: [validate-input, plan]
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/select-concerns.yml  # zizmor: ignore[self-repository]
@@ -185,7 +185,7 @@ jobs:
   validate:
     permissions:
       contents: read
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}
     needs: [validate-input, plan, select]
     strategy:
       fail-fast: false
@@ -207,7 +207,7 @@ jobs:
   # run's read-only token, and publishes no artifact. A concern with no baseline is
   # listed without a comparison; update the table when a run is a new normal.
   timings:
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
     needs: [validate]
     name: Timings
     runs-on: ubuntu-24.04
@@ -236,7 +236,7 @@ jobs:
   # run as "not selected" (never as passed), and the run fails if any concern that ran
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
     needs: [plan, validate, select]
     name: Result
     runs-on: ubuntu-24.04
