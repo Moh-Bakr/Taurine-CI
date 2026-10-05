@@ -1,0 +1,99 @@
+name: KeelDock supply-chain sub-steps
+description: >
+  The supply-chain concern (Linux): the vulnerable-package scan, warn-only unless the gate input
+  is high or critical, and the CycloneDX SBOM with its denied-licence gate. Runs after the locked
+  restore.
+
+inputs:
+  vulnerability-gate:
+    description: none (warn-only), high or critical
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Scan packages and generate the SBOM
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        VULN_FAIL_ON: ${{ inputs.vulnerability-gate }}
+        CDX_VERSION: '6.2.0'
+        CDX_SHA256: 3473525381eee02a649b75bbf5b4f0ffa66112f62917aff798fed196e290a884
+      run: |
+        # CycloneDX 6.2.0, pinned by the SHA-256 of its nupkg (verified before unpacking).
+        # KD_PLATFORM / KD_CONCERN, never PLATFORM: MSBuild turns every environment variable into a
+        # property, and Platform=linux makes `dotnet restore` fail with MSB4126 in every child process.
+        set -uo pipefail
+        source "${RUNNER_TEMP}/keeldock/substeps.sh"
+        # Vulnerable packages (direct and transitive, from the NuGet advisory feed) and the
+        # CycloneDX SBOM; the locked package set is identical on every OS, so Linux alone runs
+        # them. Published: package id, resolved version, advisory id (the last segment of the
+        # public advisory URL) and severity; warn-only unless VULN_FAIL_ON is high or critical.
+        if ! passed restore; then
+          skip_all 'restore did not pass' vulnerable-packages sbom-generate
+        else
+          vuln_log="${RUNNER_TEMP}/vulnerable.log"; vuln_rows="${RUNNER_TEMP}/vulnerable.tsv"
+          dotnet list KeelDock.Cloud.slnx package --vulnerable --include-transitive --no-restore >"${vuln_log}" 2>&1; vuln_rc=$?
+          strip_ansi < "${vuln_log}" | tr -d '\r' | awk '
+            /^[[:space:]]*>/ { for (i = 3; i <= NF; i++) if ($i ~ /^(Low|Moderate|High|Critical)$/) {
+              adv = $NF; sub(/.*\//, "", adv); print $2 "\t" $(i - 1) "\t" adv "\t" $i; break } }
+          ' | sort -u > "${vuln_rows}"
+          vuln_count="$(grep -c . "${vuln_rows}" || true)"
+          vuln_gated="$(awk -F'\t' -v gate="${VULN_FAIL_ON}" '
+            (gate == "high" && ($4 == "High" || $4 == "Critical")) || (gate == "critical" && $4 == "Critical") { n++ }
+            END { print n + 0 }' "${vuln_rows}")"
+          if [[ "${vuln_rc}" -ne 0 && "${vuln_count}" -eq 0 ]]; then
+            echo '::warning title=Vulnerable-package scan::the scan did not complete (advisory feed unreachable or the command failed); no result is claimed'
+            record vulnerable-packages warn 'scan did not complete; no result claimed'
+          elif [[ "${vuln_gated}" -gt 0 ]]; then
+            echo "vulnerable-packages: failed (${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate)" >&2
+            record vulnerable-packages FAIL "${vuln_gated} advisory(ies) at or above the ${VULN_FAIL_ON} gate"; any_failed=1
+          elif [[ "${vuln_count}" -gt 0 ]]; then
+            awk -F'\t' '{ printf "::warning title=Vulnerable package::%s %s (%s, %s)\n", $1, $2, $3, $4 }' "${vuln_rows}" | awk 'NR <= 50'
+            record vulnerable-packages warn "${vuln_count} advisory(ies); warn-only (gate: ${VULN_FAIL_ON})"
+          else
+            record vulnerable-packages pass 'none reported'
+          fi
+          # SBOM: a pinned CycloneDX release, its package hash checked before it is unpacked
+          # (no NuGet resolution), run over the restored solution. The BOM never leaves the
+          # runner: only the component count, licence tallies and denied licences are published.
+          sbom_generate() {
+            local tool="${RUNNER_TEMP}/cyclonedx"
+            mkdir -p "${tool}" "${RUNNER_TEMP}/sbom"
+            curl --fail --silent --show-error --location --retry 3 -o "${tool}/tool.nupkg" \
+              "https://api.nuget.org/v3-flatcontainer/cyclonedx/${CDX_VERSION}/cyclonedx.${CDX_VERSION}.nupkg" || return 1
+            echo "${CDX_SHA256}  ${tool}/tool.nupkg" | sha256sum --check --status || return 2
+            unzip -q "${tool}/tool.nupkg" 'tools/net10.0/any/*' -d "${tool}" || return 1
+            dotnet "${tool}/tools/net10.0/any/CycloneDX.dll" KeelDock.Cloud.slnx -o "${RUNNER_TEMP}/sbom" -fn bom.json \
+              -F Json -ed -t -dpr -ns || return 1
+            [[ "$(jq '.components | length' "${RUNNER_TEMP}/sbom/bom.json")" -gt 0 ]] || return 3
+          }
+          reason_sbom() { echo 'SBOM generation failed (download, hash check, tool run, or an empty BOM)'; }
+          sub_step sbom-generate reason_sbom sbom_generate
+          if passed sbom-generate; then
+            # A component is denied when any licence entry matches the denied list. An OR
+            # expression is denied only when every alternative is (a dual licence has a way out).
+            sbom_rows="${RUNNER_TEMP}/sbom.tsv"
+            if jq -r --arg deny "${SBOM_DENIED_LICENSES}" '
+              ($deny | split(",") | map(ascii_downcase)) as $d
+              | def hit: ascii_downcase | . as $x | any($d[]; . as $p | if ($p | endswith("*")) then ($x | startswith($p | rtrimstr("*"))) else $x == $p end);
+                def alt: split(" AND ") | any(.[]; gsub("[()]"; "") | split(" WITH ")[0] | gsub("^ +| +$"; "") | hit);
+                def bad: split(" OR ") | all(.[]; alt);
+              .components[] | ([.licenses[]? | (.license.id // .license.name // .expression)]) as $l
+              | ["\(.name)@\(.version)", (if ($l | length) == 0 then "(none declared)" else ($l | join(" AND ")) end), (if any($l[]; bad) then 1 else 0 end)] | @tsv
+            ' "${RUNNER_TEMP}/sbom/bom.json" > "${sbom_rows}" && [[ -s "${sbom_rows}" ]]; then
+              denied="$(awk -F'\t' '$3 == 1 { n++ } END { print n + 0 }' "${sbom_rows}")"
+              if [[ "${denied}" -gt 0 ]]; then
+                echo "sbom-licences: failed (${denied} component(s) under a denied licence)" >&2
+                record sbom-licences FAIL "${denied} component(s) under a denied licence (listed below)"; any_failed=1
+              else
+                record sbom-licences pass "no denied licence among $(grep -c . "${sbom_rows}") components"
+              fi
+            else
+              record sbom-licences FAIL 'licence summary could not be computed'; any_failed=1
+            fi
+          else
+            skip_step sbom-licences 'SBOM was not generated'
+          fi
+        fi
+        exit 0

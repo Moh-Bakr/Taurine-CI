@@ -1,0 +1,22 @@
+name: KeelDock build and format sub-steps
+description: >
+  The build-format concern: Release build with warnings as errors, the format check and the
+  structural-suite presence check. Runs after the locked restore; records each sub-step and never
+  fails by itself.
+
+runs:
+  using: composite
+  steps:
+    - name: Build, verify formatting and check the suite assignment
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      run: |
+        # KD_PLATFORM / KD_CONCERN, never PLATFORM: MSBuild turns every environment variable into a
+        # property, and Platform=linux makes `dotnet restore` fail with MSB4126 in every child process.
+        set -uo pipefail
+        source "${RUNNER_TEMP}/keeldock/substeps.sh"
+        reason_format() { echo 'formatting drift (run dotnet format) or the formatter could not run'; }
+        after restore build reason_diag dotnet build KeelDock.Cloud.slnx --no-restore --nologo -v quiet --configuration Release
+        after build format reason_format dotnet format KeelDock.Cloud.slnx --verify-no-changes --no-restore
+        sub_step suite-assignment reason_text structural_present
+        exit 0

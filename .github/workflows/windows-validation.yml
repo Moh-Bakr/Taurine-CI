@@ -152,7 +152,8 @@ jobs:
 
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed
-  # baseline below, in minutes, taken from recent hosted runs. Warning only: it never
+  # baseline below, in seconds: the median of the last several successful jobs (re-based
+  # 2026-10-05, before the compiled-dependency cache; re-base again once it lands). Warning only: it never
   # fails the run, calls no service beyond this repository's own run API with the
   # run's read-only token, and publishes no artifact. A concern with no baseline is
   # listed without a comparison; update the table when a run is a new normal.
@@ -178,7 +179,7 @@ jobs:
         with:
           mode: table
           label: Windows
-          baseline-seconds: '{"desktop-shard-1":1055,"desktop-shard-2":1187,"desktop-quality":203,"mobile":293,"contracts":142,"bundle-budget":228,"rust-ovpn":506,"rust-net":697,"rust-domain":165,"rust-db":1235,"rust-app":847}'
+          baseline-seconds: '{"rust-app":3553,"rust-db":1245,"rust-domain":1005,"rust-ovpn":644,"rust-net":622,"rust-packaging":1310,"rust-tls-openssl":52,"desktop-shard-1":1061,"desktop-shard-2":929,"desktop-quality":321,"mobile":287,"contracts":136,"bundle-budget":220}'
           name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
           github-token: ${{ github.token }}
 
