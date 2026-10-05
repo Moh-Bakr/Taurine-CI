@@ -54,6 +54,7 @@ jobs:
           {
             echo '## Android Rust concern'
             echo
+            echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS} ${RUNNER_ARCH})"
             if [[ "${RUST_REQUESTED}" == true ]]; then
               echo "matrix={\"concern\":[${base},\"android-rust\"]}" >> "${GITHUB_OUTPUT}"
               echo '- Requested (rust=true): android-rust is scheduled.'
@@ -96,6 +97,18 @@ jobs:
         with:
           mode: start
 
+      - name: Record the runner image
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          {
+            echo '### Runner'
+            echo
+            echo "- Image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- Runner: ${RUNNER_OS} ${RUNNER_ARCH}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Validate protected dispatch input
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -128,6 +141,83 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
 
+      - name: Install the mobile failure reporter
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/taurine-ci/mobile-report.sh" <<'TCI_MOBILE_REPORT_LIBRARY'
+          # shellcheck shell=bash
+          # Mobile failure reporting. Sourced after the shared sanitize library. A failed command
+          # publishes one fixed classification, its exit status, and (for Rust errors) the error
+          # code with its repository-relative file:line. Message text, source excerpts, symbol
+          # names and tool output are never published.
+
+          mobile_reason() {
+            local log="$1" reason
+            reason="$(cargo_test_reason "${log}")"
+            if [[ "${reason}" != 'command returned non-zero' ]]; then echo "${reason}"
+            elif grep -qE 'SDK location not found|No version of NDK matched' "${log}"; then echo 'Android SDK or NDK not found'
+            elif grep -qE 'Could not (resolve|download|GET)|UnknownHostException|Connection (reset|timed out)' "${log}"; then echo 'dependency download failure (network)'
+            elif grep -qE '^> Task [^[:space:]]+ FAILED$|^FAILURE: Build failed' "${log}"; then echo 'Gradle build failure'
+            elif grep -qE 'Undefined symbols for architecture' "${log}"; then echo 'link failure: undefined symbols'
+            elif grep -qiE 'no such module' "${log}"; then echo 'Swift module not found'
+            elif grep -qiE 'code ?sign|provisioning profile' "${log}"; then echo 'code signing or provisioning failure'
+            elif grep -qE '[*][*] (BUILD|ARCHIVE) FAILED [*][*]' "${log}"; then echo 'xcodebuild build failure'
+            elif grep -qiE 'ETIMEDOUT|ECONNRESET|EAI_AGAIN' "${log}"; then echo 'network failure'
+            else echo 'command returned non-zero'
+            fi
+          }
+
+          # `error[Ennnn]` as the code, with the repository-relative file:line of its `-->` location.
+          mobile_error_sites() {
+            local sites
+            sites="$(sanitize_stream <"$1" | strip_excerpts | awk '
+              match($0, /error\[E[0-9][0-9]*\]/) { code = substr($0, RSTART + 6, RLENGTH - 7); next }
+              match($0, /--> [^ ]*:[0-9][0-9]*:[0-9][0-9]*/) {
+                if (code != "") {
+                  n = split(substr($0, RSTART + 4, RLENGTH - 4), a, ":")
+                  print "  " code " " a[1] ":" a[2]
+                  code = ""
+                }
+              }
+            ' | awk '!seen[$0]++' | head -30)"
+            if [[ -n "${sites}" ]]; then
+              echo 'Rust errors (code and file:line; messages withheld):' >&2
+              printf '%s\n' "${sites}" >&2
+            fi
+          }
+
+          # Gradle names the failed task on a fixed shape of line; task names are build structure.
+          mobile_failed_tasks() {
+            local tasks
+            tasks="$(tr -d '\r' <"$1" | grep -E '^> Task [^[:space:]]+ FAILED$' | head -10 || true)"
+            if [[ -n "${tasks}" ]]; then
+              echo 'Gradle tasks that failed:' >&2
+              printf '%s\n' "${tasks}" >&2
+            fi
+          }
+
+          # One command, one published line. Output stays in a runner-local log. A caller may define
+          # mobile_extra_detail <label> <log> for fixed, count-only diagnostics of one label.
+          mobile_run() {
+            local label="$1"; shift
+            local log="${RUNNER_TEMP}/${label}.log" rc=0
+            "$@" >"${log}" 2>&1 || rc=$?
+            if [[ "${rc}" -eq 0 ]]; then
+              echo "${label}: passed"
+              return 0
+            fi
+            tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
+            echo "${label}: failed ($(mobile_reason "${log}"); exit ${rc}; sanitized detail below)" >&2
+            mobile_error_sites "${log}"
+            mobile_failed_tasks "${log}"
+            # Tauri refuses mismatched npm/crate pairs; package names and versions only.
+            tauri_version_mismatch "${log}" >&2 || true
+            if declare -F mobile_extra_detail >/dev/null; then mobile_extra_detail "${label}" "${log}"; fi
+            exit 1
+          }
+          TCI_MOBILE_REPORT_LIBRARY
+
       - name: Prepare Android SDK, JDK, and Rust targets
         if: matrix.concern == 'android-native' || matrix.concern == 'android-rust'
         shell: bash
@@ -137,11 +227,19 @@ jobs:
           : "${JAVA_HOME_17_X64:?The hosted image JDK 17 installation is required}"
           export JAVA_HOME="${JAVA_HOME_17_X64}"
           echo "JAVA_HOME=${JAVA_HOME}" >> "${GITHUB_ENV}"
-          sdkmanager_bin="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
-          if [[ ! -x "${sdkmanager_bin}" ]]; then
-            sdkmanager_bin="$(command -v sdkmanager || true)"
-          fi
-          [[ -n "${sdkmanager_bin}" && -x "${sdkmanager_bin}" ]] || { echo 'sdkmanager is unavailable' >&2; exit 1; }
+          # Every Android build input is pinned: the command-line tools archive by
+          # SHA-256 (the checksum Google publishes beside the download), and the SDK
+          # platform, build-tools and NDK by exact version. Nothing is taken from
+          # `cmdline-tools/latest` or the image's preinstalled revisions.
+          cmdline_tools_build='15859902'
+          cmdline_tools_sha256='4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583'
+          cmdline_tools_zip="${RUNNER_TEMP}/commandlinetools.zip"
+          curl --fail --silent --show-error --location --retry 3 -o "${cmdline_tools_zip}" \
+            "https://dl.google.com/android/repository/commandlinetools-linux-${cmdline_tools_build}_latest.zip"
+          echo "${cmdline_tools_sha256}  ${cmdline_tools_zip}" | sha256sum --check --status
+          unzip -q "${cmdline_tools_zip}" -d "${RUNNER_TEMP}/android-cmdline-tools"
+          sdkmanager_bin="${RUNNER_TEMP}/android-cmdline-tools/cmdline-tools/bin/sdkmanager"
+          [[ -x "${sdkmanager_bin}" ]] || { echo 'pinned sdkmanager is unavailable' >&2; exit 1; }
           yes | "${sdkmanager_bin}" --sdk_root="${ANDROID_HOME}" --licenses >/dev/null || true
           # Tauri 2's Android Gradle plugin and bindgen are validated against
           # NDK r27c.  Do not rely on whichever NDK happens to be preinstalled
@@ -149,7 +247,7 @@ jobs:
           # layout underneath a source-bearing run.
           local_ndk_version='27.2.12479018'
           "${sdkmanager_bin}" --sdk_root="${ANDROID_HOME}" \
-            'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' "ndk;${local_ndk_version}" >/dev/null
+            'platforms;android-36' 'build-tools;36.0.0' "ndk;${local_ndk_version}" >/dev/null
           export NDK_HOME="${ANDROID_HOME}/ndk/${local_ndk_version}"
           ndk_bin="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           ndk_sysroot="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
@@ -218,8 +316,9 @@ jobs:
           # runner rather than trusting a developer's absolute path.
           cd taurine-mobile
           rm -f src-tauri/gen/android/tauri.settings.gradle
-          run_quiet() { local label="$1"; shift; local log="${RUNNER_TEMP}/${label}.log"; if "$@" >"${log}" 2>&1; then echo "${label}: passed"; else echo "${label}: failed" >&2; exit 1; fi; }
-          run_quiet android-init npm run android:init -- --ci --skip-targets-install
+          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+          source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+          mobile_run android-init npm run android:init -- --ci --skip-targets-install
           if grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle; then
             echo 'Android metadata contains a developer-local path' >&2
             exit 1
@@ -232,41 +331,17 @@ jobs:
         run: |
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          run_quiet() {
-            local label="$1"; shift
-            local log="${RUNNER_TEMP}/${label}.log"
-            if "$@" >"${log}" 2>&1; then
-              echo "${label}: passed"
-            else
-              echo "${label}: failed" >&2
-              sanitize_stream <"${log}" |
-                strip_excerpts |
-                grep -Ei '(^|[[:space:]])(error|fatal|failed|caused by|no such file|not found|linker|cargo|clang|target)' |
-                tail -40 >&2 || true
-              # Tauri refuses mismatched npm/crate pairs; name them (package names and versions only).
-              tauri_version_mismatch "${log}" >&2 || true
-              if [[ "${label}" == android-debug-build ]]; then
-                # Rust's primary error can be far above the final Cargo
-                # summary. Keep only error codes and locations so the public
-                # control plane never publishes private source excerpts.
-                sanitize_stream <"${log}" |
-                  strip_excerpts |
-                  grep -E 'error\[E[0-9]+\]|--> [^ ]+:[0-9]+:[0-9]+' |
-                  head -30 >&2 || true
-              fi
-              exit 1
-            fi
-          }
+          source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
           case "${CONCERN}" in
             android-native)
-              run_quiet android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
+              mobile_run android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
               ;;
             android-rust)
               # Compile-only: build and link every test target of the mobile crate for
               # the Android triple, so the `cfg(target_os = "android")` code and its
               # tests are type-checked and linked on a hosted runner. They are not
               # executed (no device or emulator here).
-              run_quiet android-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-linux-android
+              mobile_run android-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-linux-android
               ;;
             *)
               echo "Unknown Android validation concern: ${CONCERN}" >&2
@@ -288,6 +363,11 @@ jobs:
             echo "## Android ${CONCERN} validation"
             echo
             echo "- Source SHA: \`${checked_out_sha}\`"
+            echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS} ${RUNNER_ARCH})"
+            echo "- JDK: $("${JAVA_HOME}/bin/java" -version 2>&1 | head -n 1)"
+            echo "- Android NDK: $(sed -n 's/^Pkg.Revision *= *//p' "${NDK_HOME}/source.properties")"
+            echo "- Android build-tools: $(find "${ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -printf '%f ' | xargs -n1 | sort -V | xargs)"
+            echo "- Node.js: $(node --version); Rust: $(rustc --version)"
             echo '- Isolated concern passed; no private artifacts were shared between runners'
             echo '- Source token: revoked before dependency installation and project commands'
             echo '- Outputs: no source files, logs, reports, or artifacts published'
@@ -318,6 +398,17 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Record the runner image
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '### Runner'
+            echo
+            echo "- Image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- Runner: ${RUNNER_OS} ${RUNNER_ARCH}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Tabulate timings against the baseline
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
@@ -346,6 +437,17 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Record the runner image
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '### Runner'
+            echo
+            echo "- Image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- Runner: ${RUNNER_OS} ${RUNNER_ARCH}"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Write the run verdict
         # Kept as ./ : the policy matches this exact form for local actions.
