@@ -182,7 +182,11 @@ are published.
 Source-bearing output is public, so it is treated as hostile:
 
 - No artifacts, no source-bearing caches. Composites may not use `actions/upload-artifact`,
-  `download-artifact` or caches; the only reviewed cache is for verified third-party crate sources.
+  `download-artifact` or caches. The reviewed caches hold only third-party downloads: crate
+  sources (re-hashed against Cargo.lock on restore) and Keel Dock's NuGet packages. The compiled
+  third-party dependency cache (`rust-target-cache`) is disabled: any dispatched SHA's project
+  code can write main's cache scope directly with the runner's runtime token, and cargo never
+  re-verifies a compiled `.rlib`, so it stays off until unprotected SHAs run from a separate ref.
 - Commands run through `run_quiet` (or the mobile `mobile_run`): output stays in a runner-local
   log and only a fixed one-line classification, the exit status and allow-listed detail are printed.
 - The `sanitize` composite installs the shared library: it strips ANSI codes, workspace and

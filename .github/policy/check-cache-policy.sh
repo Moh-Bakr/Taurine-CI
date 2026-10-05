@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # The reviewed cargo and NuGet source cache policy (sourced).
 
+# Finding H1 (2026-10-05): the compiled-dependency cache stays off until unprotected SHAs
+# run from a Taurine-CI ref whose cache scope main never reads. A gated-off condition is
+# `if: ${{ false && ... }}` with no `||` outside parentheses (which would re-open it).
+compiled_cache_gated_off() {
+  local cond="$1" flat
+  [[ "$cond" =~ ^[[:space:]]*if:[[:space:]]*\$\{\{[[:space:]]*false[[:space:]]+\&\&[[:space:]] ]] || return 1
+  flat="$cond"
+  while [[ "$flat" =~ \([^()]*\) ]]; do
+    flat="${flat//${BASH_REMATCH[0]}/}"
+  done
+  [[ "$flat" != *'||'* ]]
+}
+
 check_cache_policy() {
   local workflow="$1" cache_paths_ok cache_line save_if flat
 
@@ -12,7 +25,8 @@ check_cache_policy() {
   #   registry `.crate` archives and the git dependency databases under
   #   Cargo home, re-verified against the private Cargo.lock checksums
   #   after every restore;
-  # - compiled third-party crates (2026-10-05, approved): the deps/,
+  # - compiled third-party crates (2026-10-05, approved; DISABLED the same
+  #   day, finding H1, see compiled_cache_gated_off): the deps/,
   #   build/ and .fingerprint/ directories of the debug profile under the
   #   located target directory, which is always outside the private
   #   checkout. The rust-target-cache composite strips every workspace,
@@ -115,6 +129,10 @@ check_cache_policy() {
           echo "A compiled-dependency save must require the strip-and-prove step: $cond" >&2
           exit 1
         fi
+        if ! compiled_cache_gated_off "$cond"; then
+          echo "The compiled-dependency cache is disabled until ref isolation exists (finding H1): every restore and save must be conditioned on a leading literal 'false &&' with no unparenthesised ||: $cond" >&2
+          exit 1
+        fi
       done < <(awk '
         function flush() { if (cache && target) print kind "|" rk "|" key "|" cond; cache = 0; target = 0; rk = 0; key = ""; cond = ""; kind = "" }
         /^      - name:/ { flush() }
@@ -124,6 +142,20 @@ check_cache_policy() {
         /steps\.cargo-target\.outputs\.dir/ { target = 1 }
         /^[[:space:]]+restore-keys:/ { rk = 1 }
         /^[[:space:]]+key:/ { key = $0 }
+        END { flush() }
+      ' "$workflow")
+      # The restore-time and save-time strips of the composite are gated off with them.
+      while IFS= read -r cond; do
+        if ! compiled_cache_gated_off "$cond"; then
+          echo "The compiled-dependency strip steps are disabled with the cache (finding H1): $cond" >&2
+          exit 1
+        fi
+      done < <(awk '
+        function flush() { if (composite && mode != "locate") print cond; composite = 0; mode = ""; cond = "" }
+        /^      - name:/ { flush() }
+        /^[[:space:]]+if:/ { cond = $0 }
+        /uses:[[:space:]]*\.\/\.github\/actions\/rust-target-cache/ { composite = 1 }
+        /^[[:space:]]+mode:/ { mode = $2 }
         END { flush() }
       ' "$workflow")
       for required in 'Strip workspace crates from the restored dependency cache' 'Strip and prove the compiled dependency cache'; do

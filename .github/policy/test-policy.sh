@@ -168,4 +168,12 @@ cache_expect_fail 'save without the proof' 'strip-and-prove step' \
   's/ && steps\.cargo-target-strip\.outcome == .success.//'
 cache_expect_fail 'a target path outside the reviewed three' 'Disallowed cache path line' \
   's#outputs\.dir \}\}/debug/build#outputs.dir }}/debug#'
-echo 'cache policy fixtures: the compiled-dependency guards reject restore-keys, an unguarded save and an unreviewed path'
+cache_expect_fail 'compiled cache restore re-enabled' 'disabled until ref isolation exists' \
+  's/if: \$\{\{ false && (startsWith\(inputs\.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
+cache_expect_fail 'compiled cache save re-enabled' 'disabled until ref isolation exists' \
+  's/if: \$\{\{ false && (github\.ref == .refs\/heads\/main. && inputs\.concern == .rust-app-2. && [^\n]*cargo-target-strip\.outcome)/if: \$\{\{ $1/'
+cache_expect_fail 'compiled cache gate re-opened by ||' 'disabled until ref isolation exists' \
+  's/(if: \$\{\{ false && startsWith\(inputs\.concern, .rust-app-.\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
+cache_expect_fail 'compiled cache strip re-enabled' 'strip steps are disabled' \
+  's/if: \$\{\{ false && (github\.ref == [^\n]*steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
+echo 'cache policy fixtures: the compiled-dependency guards reject restore-keys, an unguarded save, an unreviewed path and a re-enabled cache'
