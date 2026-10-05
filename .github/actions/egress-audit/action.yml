@@ -6,8 +6,8 @@ description: >
   after the source-checkout composite (the token is already revoked), and report,
   called last under always(), which publishes the allow-listed host names (any
   other name only as a SHA-256 prefix) and destination ports to the job log and
-  summary. Audit only: it never blocks a
-  connection and never fails the job. The recorders start as root before the
+  summary. The start and report phases never
+  block a connection and never fail the job. The recorders start as root before the
   drop-root composite removes sudo, and keep running as root; project code no
   longer has root on Linux or macOS, but it can still write the runner-owned
   record files and has administrator rights on Windows, so this is evidence for
@@ -21,10 +21,25 @@ description: >
   query through the DNS Client operational event log (names only, no connection
   log).
 
+  Block mode (Linux only, input mode: block): the enforce phase, called after the root-setup
+  composite and immediately before drop-root, installs a filtering resolver and a default-drop
+  firewall through the egress-block composite (see its description). It fails the job when the blocker
+  cannot be installed or its self-test fails; it never falls back to audit. The recorders keep
+  running, so the report shows the same evidence plus the refused names (hashed) and dropped
+  connection attempts. Docker-kept jobs, job containers, macOS and Windows stay in audit mode
+  (docs/how-ci-works.md, "Egress").
+
 inputs:
   phase:
-    description: start or report
+    description: start, enforce or report
     required: true
+  mode:
+    description: >
+      audit (record only) or block (Linux: enforce the allow-list from the enforce phase). The
+      Linux concerns take it from ci-matrix.json (egress), where the policy requires block for
+      every concern without Docker unless an audit exception carries its reason.
+    required: false
+    default: audit
 
 runs:
   using: composite
@@ -101,6 +116,31 @@ runs:
         fi
         echo "egress-audit: started ($(cat "${state}/coverage"))"
         exit 0
+
+    - name: Validate the egress mode
+      if: ${{ inputs.phase != 'report' }}
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        PHASE: ${{ inputs.phase }}
+      run: |
+        set -euo pipefail
+        case "${PHASE}:${MODE}" in
+          start:audit|start:block|enforce:audit|enforce:block) ;;
+          *) echo "egress-audit: unsupported phase/mode ${PHASE}/${MODE}" >&2; exit 1 ;;
+        esac
+        if [[ "${MODE}" == block && "${RUNNER_OS}" != Linux ]]; then
+          echo "egress-audit: block mode is Linux-only (${RUNNER_OS} stays in audit)" >&2
+          exit 1
+        fi
+
+    # Fail closed: no continue-on-error at the call site, and none here.
+    - name: Enforce the egress allow-list (Linux, block mode)
+      if: ${{ inputs.phase == 'enforce' && inputs.mode == 'block' }}
+      # Kept as ./ : the policy matches this exact form for local actions.
+      uses: ./.github/actions/egress-block  # zizmor: ignore[self-repository]
+      with:
+        scope: linux
 
     - name: Start the egress audit (Windows)
       if: ${{ inputs.phase == 'start' && runner.os == 'Windows' }}
@@ -247,17 +287,57 @@ runs:
             cat
           fi | grep -E '^[a-z0-9_.:*/ -]{1,200}$' || true
         }
+        # Block mode: the names the filtering resolver refused (published like any other name:
+        # allow-listed names in clear, the rest hashed) and the connection attempts the firewall
+        # dropped (label proto/port count). A refused or dropped attempt does not fail the job by
+        # itself; the job fails only when the build does.
+        mode=audit
+        refused=''; dropped="${state}/dropped.txt"; : > "${dropped}"
+        if [[ -f "${state}/mode-active" ]]; then
+          mode=block
+          refused="$(sed -nE 's/.* config ([^ ]+) is NXDOMAIN.*/\1/p' /var/log/taurine-egress/dns.log 2>/dev/null \
+            | tr '[:upper:]' '[:lower:]' | sed 's/\.$//' | sort -u | while read -r n; do
+                l="$(awk -v n="${n}" '$1 == n { print $2; exit }' "${labels}")"
+                echo "${l:-unlisted:$(hash12 "${n}")}"
+              done | sort -u)"
+          { journalctl -k -o cat --no-pager --since "@${started}" 2>/dev/null || true; } | grep 'egress-block: ' \
+            | sed -nE 's/.* DST=([^ ]+) .* PROTO=([A-Z0-9]+).* DPT=([0-9]+).*/\1 \2 \3/p' \
+            | while read -r ip proto port; do
+                label="$(awk -v a="${ip}" '$1 == a { print $2; exit }' "${iplabels}")"
+                echo "${label:-unresolved:$(hash12 "${ip}")} ${proto}/${port}"
+              done | tr '[:upper:]' '[:lower:]' | sort | uniq -c | awk '{ print $2, $3, $1 }' > "${dropped}" || true
+        fi
+        n_refused="$(printf '%s\n' "${refused}" | grep -c . || true)"
+        n_dropped="$(awk '{ s += $3 } END { print s + 0 }' "${dropped}")"
         n_listed="$(printf '%s\n' "${listed}" | grep -c . || true)"
         n_unlisted="$(printf '%s\n' "${unlisted}" | grep -c . || true)"
-        echo "::group::egress-audit (${RUNNER_OS}, audit mode)"
+        echo "::group::egress-audit (${RUNNER_OS}, ${mode} mode)"
+        echo "egress-audit: mode ${mode}"
         echo "egress-audit: coverage ${coverage}"
         echo "egress-audit: ${n_listed} allow-listed names, ${n_unlisted} unlisted names (hashed)"
         printf '%s\n' "${listed}" | publish | sed 's/^/egress-audit-name: /'
         printf '%s\n' "${unlisted}" | publish | sed 's/^/egress-audit-unlisted: /'
         publish < "${report}" | sed 's/^/egress-audit-dest: /'
+        if [[ "${mode}" == block ]]; then
+          echo "egress-block: ${n_refused} names refused (NXDOMAIN), ${n_dropped} connection attempts dropped"
+          printf '%s\n' "${refused}" | publish | sed 's/^/egress-block-refused: /'
+          publish < "${dropped}" | sed 's/^/egress-block-dropped: /'
+        fi
         echo '::endgroup::'
         {
-          printf '### Egress audit (audit mode, nothing blocked)\n\n'
+          if [[ "${mode}" == block ]]; then
+            printf '### Egress (block mode: allow-list enforced)\n\n'
+            printf -- '- Blocked: %d names refused by the filtering resolver, %d connection attempts dropped by the firewall (the job fails only if the build does)\n' \
+              "${n_refused}" "${n_dropped}"
+            if (( n_refused > 0 )) || [[ -s "${dropped}" ]]; then
+              printf '<details><summary>Blocked attempts</summary>\n\n```\n'
+              printf '%s\n' "${refused}" | publish | sed 's/^/refused /' | head -n 150
+              publish < "${dropped}" | sed 's/^/dropped /' | head -n 150
+              printf '```\n</details>\n\n'
+            fi
+          else
+            printf '### Egress audit (audit mode, nothing blocked)\n\n'
+          fi
           printf -- '- Coverage: %s\n- %d allow-listed host names, %d unlisted (published as a SHA-256 prefix only), %d destination/port pairs\n\n' \
             "${coverage}" "${n_listed}" "${n_unlisted}" "$(wc -l < "${report}" | tr -d ' ')"
           if (( n_listed + n_unlisted > 0 )); then
