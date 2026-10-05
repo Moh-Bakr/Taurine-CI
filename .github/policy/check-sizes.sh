@@ -12,7 +12,6 @@ hard=800
 # file may not grow, and the entry is deleted when the split lands.
 pending_ceiling() {
   case "$1" in
-    .github/workflows/live-proofs.yml) echo 1101 ;;
     .github/workflows/keeldock-validation-concern.yml) echo 800 ;;
     *) echo 0 ;;
   esac

@@ -30,6 +30,10 @@ on:
         required: false
         default: 120
         type: number
+    secrets:
+      SOURCE_READER_PRIVATE_KEY:
+        description: The source-reader App private key, passed by name by the dispatcher
+        required: true
 
 permissions: {}
 

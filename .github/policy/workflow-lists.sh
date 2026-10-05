@@ -18,20 +18,24 @@ protected_source_workflows=(
   ".github/workflows/orchestrate-validation.yml"
   # Second private source: Moh-Bakr/keeldock-cloud rather than Taurine.
   ".github/workflows/keeldock-validation-concern.yml"
-  # Env-gated live database proofs: dispatch-only, checks out the
-  # exact private SHA, runs one engine's conformance suite against
-  # its documented single-node Docker server, publishes only a
-  # sanitized summary (check titles and counts, never data values).
-  ".github/workflows/live-proofs.yml"
+  # One arm of the env-gated live database proofs: a reusable workflow called by
+  # the live-proofs dispatcher. It checks out the exact private SHA, runs one
+  # engine's conformance suite against its documented single-node Docker server
+  # and publishes only a sanitized summary (check titles and counts, never data
+  # values).
+  ".github/workflows/live-proof-arm.yml"
 )
 reusable_protected_workflows=(
   ".github/workflows/windows-validation-concern.yml"
   ".github/workflows/linux-validation-concern.yml"
   ".github/workflows/select-concerns.yml"
   ".github/workflows/keeldock-validation-concern.yml"
+  ".github/workflows/live-proof-arm.yml"
 )
 protected_dispatch_workflows=(
   ".github/workflows/windows-validation.yml"
   ".github/workflows/linux-validation.yml"
   ".github/workflows/keeldock-validation.yml"
+  # Dispatch-only: validates the engine selection and fans out to live-proof-arm.yml.
+  ".github/workflows/live-proofs.yml"
 )

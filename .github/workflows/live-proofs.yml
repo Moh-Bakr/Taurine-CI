@@ -137,8 +137,10 @@ jobs:
         arm: ${{ fromJSON(needs.plan.outputs.arms) }}
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/live-proof-arm.yml  # zizmor: ignore[self-repository]
-    # Deliberate: the callee is this repository's own protected reusable workflow, and validate-public-changes.yml requires this exact form for protected dispatchers.
-    secrets: inherit  # zizmor: ignore[secrets-inherit]
+    # Exactly one secret, the source-reader App key, passed by name: the policy
+    # requires this for every protected dispatcher and forbids secrets: inherit.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
       engine: ${{ matrix.arm }}
