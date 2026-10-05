@@ -48,7 +48,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: windows-validation-${{ github.workflow }}-${{ inputs.source_sha }}-${{ inputs.windows_image }}
+  group: windows-validation-${{ github.workflow }}-${{ inputs.source_sha }}-${{ inputs.windows_image }}-${{ inputs.rust }}
   # Never cancel source-bearing jobs: cancellation can interrupt cleanup that
   # revokes a short-lived private-source token in one of the matrix jobs.
   cancel-in-progress: false

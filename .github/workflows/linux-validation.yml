@@ -37,7 +37,10 @@ on:
 permissions: {}
 
 concurrency:
-  group: linux-validation-${{ github.workflow }}-${{ inputs.source_sha }}
+  # The dispatch purpose is part of the group, so a quick, selective, visual or history run on the
+  # same SHA never replaces another kind of run that is still pending (GitHub keeps one pending
+  # run per group). Cancellation stays off.
+  group: linux-validation-${{ github.workflow }}-${{ inputs.source_sha }}-${{ inputs.profile }}-${{ inputs.visual }}-${{ inputs.gitleaks_history }}-${{ inputs.base_sha }}
   # Never cancel a source-bearing run: cancellation can interrupt the cleanup
   # step that revokes the short-lived private-source token.
   cancel-in-progress: false

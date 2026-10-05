@@ -36,7 +36,8 @@ on:
 permissions: {}
 
 concurrency:
-  group: macos-validation-${{ github.workflow }}-${{ inputs.source_sha }}
+  # The dispatch purpose is part of the group (see linux-validation.yml); cancellation stays off.
+  group: macos-validation-${{ github.workflow }}-${{ inputs.source_sha }}-${{ inputs.rust }}-${{ inputs.flavor }}
   # Never cancel a source-bearing run: cancellation can interrupt the cleanup
   # step that revokes the short-lived private-source token.
   cancel-in-progress: false
