@@ -2,29 +2,28 @@ name: KeelDock Cloud source validation (protected)
 
 # The second private source this control plane validates.
 #
-# `Moh-Bakr/keeldock-cloud` is a private repository, and GitHub refuses to start Actions
-# jobs on this account's private repositories (a billing or spending-limit block, the same
-# condition that stripped every automatic trigger from the Taurine repository on
-# 2026-08-19). The source repository's own `.github/workflows/ci.yml` therefore cannot run
-# there; this lane is where its gates actually execute, and the concerns below follow that
-# file's gate order (build, structural, database, publish) while discovering suites the way
-# `scripts/run-tests.sh` does rather than keeping a second suite list.
+# `Moh-Bakr/keeldock-cloud` is private, and GitHub refuses to start Actions jobs on this account's
+# private repositories (a billing or spending-limit block), so the source's own `.github/workflows/ci.yml`
+# cannot run there. This lane is where its gates execute: the concerns follow that file's gate order and
+# discover suites the way `scripts/run-tests.sh` does, instead of keeping a second suite list. This
+# repository is public, so its minutes are free; the source-read pattern checks out an exact private SHA
+# and destroys the token before project code runs.
 #
-# This repository is public, so its minutes are free, and the source-read pattern checks out
-# an exact private SHA and destroys the token before project code runs.
+# A run is a clean checkout on all three operating systems, which is also the evidence the source's
+# Phase 0 record lacked ("clean-machine topology start on macOS, Windows and Linux").
 #
-# It also supplies evidence the source repository could not produce alone: its Phase 0
-# record lists "clean-machine topology start on macOS, Windows and Linux" as not met because
-# its tests had only run on one contributor's macOS/arm64 laptop. A run here is a clean
-# checkout on all three operating systems.
+# **Scope, stated honestly.** Every run executes build-format, structural, unit and
+# contracts-publish-smoke on Linux, macOS and Windows, plus two Linux-only concerns: db-containers (the
+# Testcontainers suites) and supply-chain (vulnerable packages, SBOM and licence gate). Together they
+# prove the solution restores from its lock files, builds, passes its structural and unit gates
+# everywhere, passes its database-backed gates and a real-PostgreSQL Migrator proof on Linux, and ships no
+# known-vulnerable or denied-licence package. The Aspire AppHost cold start (`apphost-cold-start`, a
+# fourteenth job) is opt-in: dispatch with `apphost: true`.
 #
-# **Scope, stated honestly.** One run is five concerns (build-format, structural, unit,
-# contracts-publish-smoke on all three operating systems; db-containers on Linux only,
-# because only the Ubuntu runner has a Docker daemon). Together they prove the solution
-# restores from its lock files, builds, passes its structural and unit gates everywhere, and
-# passes its database-backed gates and a real-PostgreSQL Migrator proof on Linux. They do
-# *not* start the Aspire topology: a full cold AppHost start is separate work, so the Phase 0
-# criterion is partly, not wholly, satisfied by a green run here.
+# **Making the vulnerable-package scan blocking.** It is warn-only by default. Dispatch with
+# `vulnerability_gate: high` (fail on High and Critical) or `critical` (Critical only); to change the
+# default, edit `default:` of that input below, in a reviewed commit. The denied-licence list is
+# `SBOM_DENIED_LICENSES` in keeldock-validation-concern.yml.
 on:
   workflow_dispatch:
     inputs:
@@ -32,6 +31,12 @@ on:
         description: Exact 40-character commit SHA to validate from private keeldock-cloud
         required: true
         type: string
+      vulnerability_gate:
+        description: Vulnerable-package scan severity that fails the supply-chain concern (none = warn-only)
+        required: false
+        default: none
+        type: choice
+        options: [none, high, critical]
       apphost:
         description: Also run the Aspire AppHost cold-start concern (experimental, Linux; off by default)
         required: false
@@ -60,6 +65,7 @@ jobs:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
             exit 1
@@ -93,6 +99,7 @@ jobs:
           # Only the Ubuntu runner has a Docker daemon, so the Testcontainers suites
           # (including the extraction-fitness gates) are Linux-only evidence.
           - { concern: db-containers, platform: linux }
+          - { concern: supply-chain, platform: linux }
           - { concern: apphost-cold-start, platform: linux }
     uses: ./.github/workflows/keeldock-validation-concern.yml  # zizmor: ignore[self-repository]
     # Exactly one secret is passed, by name: the App private key. It is a repository
@@ -116,15 +123,13 @@ jobs:
       platform: ${{ matrix.platform }}
       concern: ${{ matrix.concern }}
       apphost: ${{ inputs.apphost }}
+      vulnerability_gate: ${{ inputs.vulnerability_gate }}
 
-  # Tabulates every concern's duration and conclusion for this run and warns when a concern
-  # took more than 25% (and more than two minutes) longer than the committed baseline below,
-  # in minutes. Warning only: it never fails the run, calls no service beyond this
-  # repository's own run API with the run's read-only token, and publishes no artifact. A
-  # concern with no baseline is listed without a comparison.
-  #
-  # The baseline is keyed `<os> <concern>`, in whole minutes rounded up, measured from run
-  # 37161663699 (all 13 concerns green).
+  # Tabulates every concern's duration and conclusion for this run and warns when a concern took more
+  # than 25% (and more than two minutes) longer than the committed baseline, in seconds, keyed
+  # `<os> <concern>` (measured from run 37232233167). Warning only, never fails the run, publishes no
+  # artifact, and uses only this repository's own run API with the run's read-only token. A concern with
+  # no baseline (supply-chain, until measured) is listed without a comparison.
   timings:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
     needs: [validate]
@@ -133,39 +138,22 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: read
+      contents: read
     steps:
-      - name: Tabulate concern timings against the baseline
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Record the runner image
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASELINE_MINUTES: '{"linux build-format":5,"linux structural":5,"linux unit":3,"linux contracts-publish-smoke":3,"linux db-containers":14,"macos build-format":6,"macos structural":5,"macos unit":3,"macos contracts-publish-smoke":3,"windows build-format":7,"windows structural":6,"windows unit":5,"windows contracts-publish-smoke":5}'
-          NAME_PATTERN: '^validate \(.+\) / KeelDock (?<concern>(linux|macos|windows) .+)$'
         run: |
-          set -euo pipefail
-          rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
-            | jq -r --arg re "${NAME_PATTERN}" '.jobs[]
-              | select(.started_at != null and .completed_at != null)
-              | select(.name | test($re))
-              | [(.name | capture($re).concern), (.conclusion // "unknown"),
-                 (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)]
-              | @tsv' | sort)"
-          {
-            echo '## KeelDock concern timings'
-            echo
-            echo '| Concern | Duration | Baseline | Conclusion |'
-            echo '| --- | --- | --- | --- |'
-          } >> "${GITHUB_STEP_SUMMARY}"
-          while IFS=$'\t' read -r concern conclusion seconds; do
-            [[ -n "${concern}" ]] || continue
-            base="$(jq -r --arg c "${concern}" '.[$c] // empty' <<<"${BASELINE_MINUTES}")"
-            shown='none'
-            if [[ -n "${base}" ]]; then
-              shown="${base}m"
-              limit=$(( base * 60 * 125 / 100 ))
-              if (( seconds > limit && seconds > base * 60 + 120 )); then
-                echo "::warning title=Slow concern::${concern} took $((seconds / 60))m$((seconds % 60))s against a baseline of ${base}m (more than 25% slower)"
-                shown="${base}m (SLOWER)"
-              fi
-            fi
-            printf '| %s | %dm%02ds | %s | %s |\n' "${concern}" $((seconds / 60)) $((seconds % 60)) "${shown}" "${conclusion}" >> "${GITHUB_STEP_SUMMARY}"
-          done <<<"${rows}"
+          echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Tabulate concern timings against the baseline
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: table
+          label: KeelDock
+          github-token: ${{ github.token }}
+          baseline-seconds: '{"linux build-format":408,"linux structural":257,"linux unit":172,"linux contracts-publish-smoke":182,"linux db-containers":854,"macos build-format":432,"macos structural":315,"macos unit":246,"macos contracts-publish-smoke":135,"windows build-format":425,"windows structural":272,"windows unit":274,"windows contracts-publish-smoke":253}'
+          name-pattern: '^validate \(.+\) / KeelDock (?<concern>(linux|macos|windows) .+)$'
