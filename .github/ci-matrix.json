@@ -237,6 +237,13 @@
           "**/package.json"
         ]
       },
+      "scan-history": {
+        "opt_in": "gitleaks_history",
+        "timeout": 30,
+        "paths": [
+          "**/*"
+        ]
+      },
       "e2e-visual": {
         "opt_in": "visual",
         "timeout": 60,
