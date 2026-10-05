@@ -220,9 +220,16 @@ jobs:
           fi
           echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
 
+      # Third-party crate source cache (restore, completion and save): DISABLED (2026-10-05, finding
+      # H1 extended). The runner's runtime token lets any dispatched SHA's code write main's cache
+      # scope directly, and the cache action extracts with absolute paths, so a planted entry could
+      # overwrite files outside the cached path in a later protected run; re-hashing the `.crate`
+      # archives afterwards cannot see that. Each of the three steps carries a literal `false &&`
+      # and the cache policy fails if one does not. They stay off until unprotected SHAs run from a
+      # separate ref whose cache scope main never reads.
       - name: Restore cached third-party crate sources
         id: cargo-sources
-        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
+        if: ${{ false && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -254,7 +261,7 @@ jobs:
       # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
       # cargo verifies each download against the lock checksum and runs no build script.
       - name: Complete the third-party source set before saving
-        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ false && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -268,7 +275,7 @@ jobs:
           echo 'cargo-fetch: done'
 
       - name: Save verified third-party crate sources
-        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ false && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

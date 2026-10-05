@@ -189,7 +189,29 @@ cache_expect_fail 'protected ancestry inside an always-true alternative' 'exact 
 cache_expect_fail 'protected ancestry negated' 'exact top-level term' \
   's/ && (steps\.verified-source\.outputs\.protected-ancestor == .true.) && steps\.cargo-sources/ \&\& !($1) \&\& steps.cargo-sources/g'
 cache_expect_fail 'the main guard inside an always-true alternative' 'main branch as a top-level term' \
-  's/if: \$\{\{ (github\.ref == .refs\/heads\/main.) && (\(inputs\.concern == .taurine-cli.)/if: \${{ ($1 || true) \&\& $2/g'
+  's/if: \$\{\{ false && (github\.ref == .refs\/heads\/main.) && (\(inputs\.concern == .taurine-cli.)/if: \${{ false \&\& ($1 || true) \&\& $2/g'
+# Finding H1 extended: the cargo source cache restore, its completion step and its save are off,
+# and a setup action's built-in cache stays off.
+cache_expect_fail 'cargo source restore re-enabled' 'cargo source cache is disabled' \
+  's/if: \$\{\{ false && \((inputs\.concern == .taurine-cli.[^\n]*)\) \}\}(\n        uses: actions\/cache\/restore)/if: \$\{\{ $1 }}$2/'
+cache_expect_fail 'cargo source restore gate re-opened by ||' 'cargo source cache is disabled' \
+  's/(if: \$\{\{ false && \(inputs\.concern == .taurine-cli.[^\n]*\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
+cache_expect_fail 'cargo source save re-enabled' 'cargo source cache is disabled' \
+  's/false && (github\.ref == [^\n]*\n        uses: actions\/cache\/save\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0\n        with:\n          path: \|\n            \$\{\{ steps\.cargo-home)/$1/'
+cache_expect_fail 'cargo source completion step re-enabled' 'cargo source cache is disabled' \
+  's/false && (github\.ref == [^\n]*\n        shell: bash\n        run: \|\n          set -euo pipefail\n          while IFS= read -r lock)/$1/'
+cache_expect_fail 'cargo source restore with no condition' 'cargo source cache is disabled' \
+  's/\n        if: \$\{\{ false && \(inputs\.concern == .taurine-cli.[^\n]*\) \}\}(\n        uses: actions\/cache\/restore)/$1/'
+# A built-in setup cache: setup-node without the opt-out, or a `cache:` input.
+node_fixture="${base}/node-cache.yml"
+for mutation in 's/^( +)package-manager-cache: false\n//m' 's/^( +)package-manager-cache: false$/$1package-manager-cache: false\n$1cache: npm/m'; do
+  perl -0pe "${mutation}" .github/actions/node-setup/action.yml > "${node_fixture}"
+  if (source "${policy}/check-cache-policy.sh"; check_builtin_cache_off "${node_fixture}") >/dev/null 2>&1; then
+    echo "a setup-node built-in cache fixture should fail but passed" >&2
+    exit 1
+  fi
+done
+(source "${policy}/check-cache-policy.sh"; check_builtin_cache_off .github/actions/node-setup/action.yml) || { echo 'the reviewed setup-node step should pass' >&2; exit 1; }
 echo 'cache policy fixtures: the compiled-dependency guards reject restore-keys, an unguarded save, an unreviewed path and a re-enabled cache'
 
 # The KeelDock NuGet cache: the reviewed concern passes; a re-enabled restore or save, a save

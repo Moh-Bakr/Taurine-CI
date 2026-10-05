@@ -11,6 +11,30 @@ compiled_cache_gated_off() {
   [[ "$(head -n 1 <<<"$terms")" == false ]]
 }
 
+# Built-in action caches (finding H1 extended, 2026-10-05). `setup-node` (v5 and later) and the
+# other `setup-*` actions restore the package manager's downloads from the same cache scope an
+# unprotected run can write, and their restore extracts with absolute paths exactly as
+# actions/cache does. So every setup-node step must say `package-manager-cache: false`, and no
+# step may turn a setup-* cache on with `cache:`, `cache-dependency-path:` or `cache-read-only:`.
+# Prints the offending step and returns 1.
+check_builtin_cache_off() {
+  local file="$1"
+  if grep -nE '^[[:space:]]+(cache|cache-dependency-path|cache-read-only|cache-write-only):' "$file"; then
+    echo "A setup action's built-in cache is disabled until ref isolation exists (finding H1): $file" >&2
+    return 1
+  fi
+  if ! awk '
+    function flush() { if (need && !off) { print "setup-node step without package-manager-cache: false at line " need; bad = 1 } need = 0; off = 0 }
+    /^[[:space:]]*- / { flush() }
+    /uses:[[:space:]]*actions\/setup-node@/ { need = NR }
+    /^[[:space:]]+package-manager-cache:[[:space:]]*false[[:space:]]*$/ { off = 1 }
+    END { flush(); exit bad }
+  ' "$file"; then
+    echo "Every setup-node step must set package-manager-cache: false (finding H1): $file" >&2
+    return 1
+  fi
+}
+
 # The top-level conjuncts of an `if:` condition, one per line. The `${{ }}` wrapper is
 # dropped, every parenthesised group (a call's arguments, an `(a || b)` alternative, a
 # negated `!(...)`) is removed whole, and what remains is split on `&&`. A required term
@@ -45,6 +69,9 @@ cond_requires() {
 
 check_cache_policy() {
   local workflow="$1" cache_paths_ok cache_line save_if flat
+
+  # A setup action's built-in cache is off as well (check_builtin_cache_off).
+  check_builtin_cache_off "$workflow" || exit 1
 
   # Cache policy (a deliberate, narrow exception). Source-bearing
   # jobs may use ONLY actions/cache/restore and actions/cache/save
@@ -150,6 +177,26 @@ check_cache_policy() {
       /uses:[[:space:]]*actions\/cache\/save@/ { save = 1 }
       /steps\.cargo-home\.outputs\.dir/ { home = 1 }
       /^[[:space:]]+key:/ { key = $0 }
+      END { flush() }
+    ' "$workflow")
+    # Finding H1, extended (2026-10-05): the cargo source cache is off too. actions/cache extracts
+    # with absolute paths and a cache write needs only the runner's runtime token, so any run's
+    # code can plant an entry in main's scope that a protected run would restore; re-hashing the
+    # `.crate` files afterwards cannot see a file written elsewhere. The restore, the completion
+    # step that only exists to feed the save, and the save each need a leading literal `false &&`.
+    while IFS= read -r cond; do
+      if ! compiled_cache_gated_off "$cond"; then
+        echo "The cargo source cache is disabled until ref isolation exists (finding H1): the restore, completion and save steps must be conditioned on a leading literal 'false &&' with no unparenthesised ||: $cond" >&2
+        exit 1
+      fi
+    done < <(awk '
+      function flush() { if (home || completion) print (cond == "" ? "<no if>" : cond); home = 0; completion = 0; cond = "" }
+      /^      - name:/ { flush() }
+      /^      - name: Complete the third-party source set before saving/ { completion = 1 }
+      /^[[:space:]]+if:/ { cond = $0 }
+      /uses:[[:space:]]*actions\/cache\/(restore|save)@/ { cache = 1 }
+      /steps\.cargo-home\.outputs\.dir/ { if (cache) home = 1 }
+      /^      - name:/ { cache = 0 }
       END { flush() }
     ' "$workflow")
     # The compiled-dependency cache: one exact key from the locate step and no
