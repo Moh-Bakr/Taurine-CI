@@ -23,6 +23,10 @@ while IFS= read -r -d '' path; do
   if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json ]]; then
     continue
   fi
+  # Flat documentation guides: markdown directly under docs/, nothing else.
+  if [[ "$path" =~ ^docs/[a-z0-9-]+\.md$ ]]; then
+    continue
+  fi
   if [[ "$path" == .gitignore ]]; then
     continue
   fi
