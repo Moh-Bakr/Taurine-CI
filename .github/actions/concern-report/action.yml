@@ -130,6 +130,22 @@ runs:
           grep -oE '(^|[ (])[A-Za-z0-9_./@-]+\.(ts|tsx|js|mjs|vue|css|json)[:(][0-9]+' <<<"${body}" | sed -E 's/^[ (]//; s/[(]/:/' | awk '!seen[$0]++' | head -12
         }
 
+        # Why a Node step (tsc, vite, rollup, esbuild) died, as one fixed class plus TS codes.
+        # Only the class and `TS####` codes are published, never a message.
+        node_crash_class() {
+          local log="$1" clean class codes
+          clean="$(tr -d '\r' <"${log}" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
+          if grep -qE 'JavaScript heap out of memory|FATAL ERROR: .*(Allocation failed|heap)|Reached heap limit' <<<"${clean}"; then class='heap out of memory'
+          elif grep -qE 'error TS[0-9]+' <<<"${clean}"; then class="TS error count: $(grep -cE 'error TS[0-9]+' <<<"${clean}")"
+          elif grep -qiE 'esbuild|rollup' <<<"${clean}" && grep -qiE 'panic|SIGSEGV|SIGABRT|Segmentation fault|service was stopped|crash' <<<"${clean}"; then class='rollup or esbuild crash'
+          elif grep -qE 'SIGABRT|SIGSEGV|SIGBUS|Abort trap|Segmentation fault|core dumped|exit code 13[0-9]|exited with code 13[0-9]|Illegal instruction' <<<"${clean}"; then class='native crash (signal or abort)'
+          else class='no Node failure class recognised'
+          fi
+          echo "node failure class: ${class}"
+          codes="$(grep -oE 'TS[0-9]{3,5}' <<<"${clean}" | sort | uniq -c | sort -rn | head -12 | awk '{printf "%s(x%s) ", $2, $1}')"
+          [[ -z "${codes}" ]] || echo "TS codes: ${codes}"
+        }
+
         packaging_detail() {
           local log="$1" phase reason
           if grep -qE 'Running (beforeBuildCommand|before_build_command)|beforeBuildCommand' "${log}" && ! grep -qE '^[[:space:]]*Compiling ' "${log}"; then
@@ -160,6 +176,7 @@ runs:
             sanitize_stream <"${log}" | grep -iE -A8 'Found version mismatched' | grep -E '^[[:space:]]*[A-Za-z0-9@/_.() :+*>-]+$' | sed -E 's/^[[:space:]]+//' | cut -c1-160 | head -14 >&2 || true
           fi
           build_stage_lines "${log}" >&2 || true
+          node_crash_class "${log}" >&2 || true
         }
 
         # Installed `@tauri-apps/*` npm package versions per install root, and the locked

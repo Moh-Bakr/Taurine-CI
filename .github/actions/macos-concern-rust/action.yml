@@ -134,7 +134,10 @@ runs:
             # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
             # CLI, to prove the app still bundles on this OS. Nothing is signed, notarised
             # or uploaded; the output stays on the runner.
+            # The frontend build (tsc && vite build) aborted with exit 134 on the hosted
+            # runner; a 4 GB heap rules a Node out-of-memory in or out.
             run_deferred rust-packaging-smoke \
+              env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" \
               npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci
             ;;
           rust-tls-openssl)

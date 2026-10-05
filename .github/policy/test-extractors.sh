@@ -43,4 +43,13 @@ bash -c '
   out="$(cargo_test_detail "$1/cargo.log" 2>&1)"
   if grep -qE "secret_thing|private_var" <<<"${out}"; then echo "an error message leaked (test detail)" >&2; exit 1; fi
 ' _ "${dir}"
+printf 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\nsecretmessage\n' > "${dir}/node.log"
+bash -c '
+  set -euo pipefail
+  source "$1/lib.sh"
+  source "$1/report.sh"
+  out="$(node_crash_class "$1/node.log")"
+  grep -qF "node failure class: heap out of memory" <<<"${out}"
+  if grep -q secretmessage <<<"${out}"; then exit 1; fi
+' _ "${dir}"
 echo 'failure-detail extractor fixtures: ok'
