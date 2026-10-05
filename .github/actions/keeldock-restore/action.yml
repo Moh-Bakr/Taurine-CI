@@ -4,6 +4,14 @@ description: >
   runs the locked restore of the solution, the first sub-step every KeelDock concern shares. Runs
   after the source is checked out and the token revoked; publishes nothing.
 
+inputs:
+  local-feed:
+    description: >
+      Directory of re-hashed, lock-verified .nupkg archives from the NuGet cache (the
+      keeldock-nuget-verify feed output); added as an extra package source when it holds any.
+    required: false
+    default: ''
+
 runs:
   using: composite
   steps:
@@ -89,6 +97,8 @@ runs:
     - name: Restore the solution from its lock files
       shell: bash
       working-directory: ${{ github.workspace }}/src
+      env:
+        KD_LOCAL_FEED: ${{ inputs.local-feed }}
       run: |
         # KD_PLATFORM / KD_CONCERN, never PLATFORM: MSBuild turns every environment variable into a
         # property, and Platform=linux makes `dotnet restore` fail with MSB4126 in every child process.
@@ -101,5 +111,11 @@ runs:
           elif grep -q 'NU1403' "$1"; then echo "package content hash differs from the lock file (${codes})"
           else echo "restore failed (diagnostic ids: ${codes:-none})"; fi
         }
-        sub_step restore reason_restore dotnet restore KeelDock.Cloud.slnx --locked-mode
+        # The verified archives are an additional source: NuGet extracts from them and checks each
+        # against the lock hash itself, and fetches anything absent from the configured feeds.
+        extra=()
+        if [[ -n "${KD_LOCAL_FEED}" && -d "${KD_LOCAL_FEED}" ]] && compgen -G "${KD_LOCAL_FEED}/*.nupkg" >/dev/null; then
+          extra=("-p:RestoreAdditionalProjectSources=${KD_LOCAL_FEED}")
+        fi
+        sub_step restore reason_restore dotnet restore KeelDock.Cloud.slnx --locked-mode ${extra[@]+"${extra[@]}"}
         exit 0

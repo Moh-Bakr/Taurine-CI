@@ -177,3 +177,29 @@ cache_expect_fail 'compiled cache gate re-opened by ||' 'disabled until ref isol
 cache_expect_fail 'compiled cache strip re-enabled' 'strip steps are disabled' \
   's/if: \$\{\{ false && (github\.ref == [^\n]*steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
 echo 'cache policy fixtures: the compiled-dependency guards reject restore-keys, an unguarded save, an unreviewed path and a re-enabled cache'
+
+# The KeelDock NuGet cache: the reviewed concern passes; a re-enabled restore or save, a save
+# without the protected-ancestry answer and a save key evaluated after project code fail. The
+# policy recognises the concern by its repository path, so each fixture is checked from its own
+# root under that path.
+nuget_root="${base}/nuget"
+mkdir -p "${nuget_root}/.github/workflows"
+nuget_expect_fail() {
+  local label="$1" needle="$2" expr="$3"
+  perl -0pe "${expr}" .github/workflows/keeldock-validation-concern.yml > "${nuget_root}/.github/workflows/keeldock-validation-concern.yml"
+  if (cd "${nuget_root}" && source "${policy}/check-cache-policy.sh" && check_cache_policy .github/workflows/keeldock-validation-concern.yml) >/dev/null 2>"${base}/err"; then
+    echo "NuGet fixture '${label}' should fail but passed" >&2
+    exit 1
+  fi
+  grep -qF -- "${needle}" "${base}/err" || { echo "NuGet fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+(source "${policy}/check-cache-policy.sh"; check_cache_policy .github/workflows/keeldock-validation-concern.yml) || { echo 'the reviewed NuGet cache steps should pass' >&2; exit 1; }
+nuget_expect_fail 'NuGet restore re-enabled' 'NuGet cache is disabled' \
+  's/if: \$\{\{ false && (steps\.verified-source\.outcome)/if: \$\{\{ $1/'
+nuget_expect_fail 'NuGet save re-enabled' 'NuGet cache is disabled' \
+  's/if: \$\{\{ false && (github\.ref == .refs\/heads\/main. && steps\.verified-source\.outputs)/if: \$\{\{ $1/'
+nuget_expect_fail 'NuGet save without protected ancestry' 'protected-ancestry answer' \
+  's/ && steps\.verified-source\.outputs\.protected-ancestor == .true.//'
+nuget_expect_fail 'NuGet save key after project code' 'cache-primary-key' \
+  's/key: \$\{\{ steps\.nuget-packages\.outputs\.cache-primary-key \}\}/key: nuget-\$\{\{ runner.os \}\}-\$\{\{ hashFiles(\x27**\/packages.lock.json\x27) \}\}/'
+echo 'cache policy fixtures: the NuGet guards reject a re-enabled cache, an unprotected save and a late save key'

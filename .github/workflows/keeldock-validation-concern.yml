@@ -147,6 +147,7 @@ jobs:
           lfs: false
 
       - name: Verify identity, exact checkout, and revoke source token
+        id: verified-source
         if: always()
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -180,6 +181,24 @@ jobs:
             echo 'The requested source SHA was not resolved from the configured repository' >&2
             failed=1
           fi
+          # Protected ancestry (the same rule as the source-checkout composite, kept inline as the
+          # KeelDock policy requires): the compare of <branch>...<sha> is `identical` or `behind`
+          # exactly when the SHA is that branch's tip or an ancestor. Asked with the contents-read
+          # token before it is revoked, so it is fixed before any project code runs. A missing
+          # branch, an API error or anything else answers false (fail closed); it never fails
+          # the validation itself. Only a protected SHA may save the NuGet cache.
+          protected_ancestor=false
+          if (( failed == 0 )); then
+            for branch in develop uat main; do
+              status="$(curl --fail --silent --retry 3 --retry-delay 2 --retry-max-time 30 -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/compare/${branch}...${requested_sha}?per_page=1" 2>/dev/null | jq -r '.status // empty' 2>/dev/null || true)"
+              if [[ "${status}" == identical || "${status}" == behind ]]; then
+                protected_ancestor=true
+                echo "protected ancestry: the source SHA is on ${branch}"
+                break
+              fi
+            done
+            [[ "${protected_ancestor}" == true ]] || echo 'protected ancestry: the source SHA is on no protected branch; the NuGet cache is not saved'
+          fi
           if ! curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors -X DELETE -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/installation/token"; then
             echo 'Source token revocation failed; refusing to execute project code' >&2
             failed=1
@@ -189,6 +208,12 @@ jobs:
           git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
           git config --global --unset-all credential.helper 2>/dev/null || true
           find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
+          # Written after the clear above, and only ever the literal true or false.
+          if [[ "${protected_ancestor}" == true ]]; then
+            echo 'protected-ancestor=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'protected-ancestor=false' >> "${GITHUB_OUTPUT}"
+          fi
           (( failed == 0 ))
 
       - name: Start the egress audit
@@ -214,9 +239,19 @@ jobs:
 
       # NuGet's downloaded third-party packages only (`~/.nuget/packages`): never bin/, obj/, publish
       # output or anything under the private source. The key hashes the lock files, revealing nothing
-      # of their contents; one cache per OS serves every concern (all do the same locked restore).
+      # of their contents; one cache per OS serves every concern (all do the same locked restore). The
+      # key is computed here, before project code, and the save reuses it (cache-primary-key).
+      #
+      # DISABLED (2026-10-05, findings H1 and M1): a cache write is authorised by the runner's runtime
+      # token, which project code of ANY dispatched SHA can read (it has root on a hosted runner), and
+      # every run is on ref main, so an unprotected SHA can plant main's entry directly. Re-hashing the
+      # restored packages (below) defeats a tampered package, but not the archive itself: the cache action
+      # extracts with `tar -P` relative to the workspace, so a planted archive can write files outside
+      # the cached path. Restore and save carry a literal `false &&` (the cache policy enforces it) until
+      # unprotected SHAs run from a separate ref whose cache scope main never reads.
       - name: Restore cached NuGet packages
         id: nuget-packages
+        if: ${{ false && steps.verified-source.outcome == 'success' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -225,10 +260,11 @@ jobs:
           restore-keys: |
             nuget-${{ runner.os }}-
 
-      # Every restored <id>/<version> folder must carry a .nupkg.metadata whose contentHash equals the
-      # one packages.lock.json records for that id and version, or it is deleted before restore runs. A
-      # record check, not a re-hash; the cache is saved only from main, from a set the locked restore
-      # already validated (NU1403 on a mismatch).
+      # Every restored .nupkg is re-hashed (SHA-512, base64) and kept only when it equals the
+      # contentHash packages.lock.json records for its id and version; the kept archives become a local
+      # feed and everything else restored (the extracted folders and NuGet's own metadata) is deleted,
+      # so the locked restore re-extracts each package from a verified archive and checks the lock hash
+      # again itself (NU1403). Runs on a miss too, so the feed always exists.
       - name: Verify restored NuGet packages against the lock files
         id: nuget-verify
         uses: ./.github/actions/keeldock-nuget-verify  # zizmor: ignore[self-repository]
@@ -261,6 +297,8 @@ jobs:
       # source excerpts never leave the runner. The summary step fails the concern at the end.
       - name: Restore the solution and install the sub-step library
         uses: ./.github/actions/keeldock-restore  # zizmor: ignore[self-repository]
+        with:
+          local-feed: ${{ steps.nuget-verify.outputs.feed }}
 
       - name: Build and check formatting
         if: inputs.concern == 'build-format'
@@ -290,19 +328,23 @@ jobs:
           platform: ${{ inputs.platform }}
 
       - name: Publish the sub-step summary
+        id: concern-summary
         uses: ./.github/actions/keeldock-summary  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
           platform: ${{ inputs.platform }}
 
-      # Saved only from main, only on a miss (a key is written once) and only when the packages were verified.
+      # Disabled with the restore (see above). When re-enabled: saved only from main, only for a source
+      # SHA on a protected keeldock-cloud branch (fixed before project code ran), only on a miss (a key
+      # is written once), only after the verification and the whole concern passed, and under the key
+      # computed before project code, never a hashFiles evaluated after it.
       - name: Save verified NuGet packages
-        if: ${{ always() && github.ref == 'refs/heads/main' && steps.nuget-packages.outputs.cache-hit != 'true' && steps.nuget-verify.outcome == 'success' }}
+        if: ${{ false && github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.nuget-packages.outputs.cache-hit != 'true' && steps.nuget-verify.outcome == 'success' && steps.concern-summary.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json', 'src/Directory.Packages.props') }}
+          key: ${{ steps.nuget-packages.outputs.cache-primary-key }}
 
       # Cleanup is part of the proof: the container and its volume go even when an earlier step failed.
       - name: Remove the PostgreSQL container
