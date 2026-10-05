@@ -121,6 +121,28 @@ runs:
           echo "packaging phase: ${phase}; reason: ${reason}" >&2
           ts_diagnostics "${log}"
           tauri_version_mismatch "${log}" >&2 || true
+          if [[ "${reason}" == 'Tauri package version mismatch' ]]; then tauri_versions_inventory >&2 || true; fi
+        }
+
+        # Installed `@tauri-apps/*` npm package versions per install root, and the locked
+        # `tauri*` crate versions: package names, repo-relative directories and version numbers
+        # only. Shows which install (root, desktop or mobile) the CLI resolved a skewed package
+        # from, and whether a global or stray copy exists.
+        tauri_versions_inventory() {
+          local dir pkg name ver
+          echo 'installed @tauri-apps packages (install root: package version):'
+          for dir in . taurine-desktop taurine-mobile; do
+            for pkg in "${dir}"/node_modules/@tauri-apps/*/package.json; do
+              [[ -f "${pkg}" ]] || continue
+              name="$(jq -r '.name // "?"' "${pkg}" 2>/dev/null | cut -c1-80)"
+              ver="$(jq -r '.version // "?"' "${pkg}" 2>/dev/null | cut -c1-30)"
+              echo "  ${dir}: ${name} ${ver}"
+            done
+          done
+          echo 'locked tauri crates (Cargo.lock: name version):'
+          awk '/^name = "tauri(-[a-z0-9-]+)?"$/ { n = $3; gsub(/"/, "", n); getline v; gsub(/[^0-9a-zA-Z.+-]/, "", v); sub(/^version/, "", v); print "  " n " " v }' Cargo.lock 2>/dev/null | head -40
+          echo "global tauri CLI on PATH: $(command -v tauri >/dev/null 2>&1 && echo yes || echo no)"
+          echo "npm global @tauri-apps packages: $(npm ls -g --depth=0 2>/dev/null | grep -c '@tauri-apps' || true)"
         }
 
         run_quiet() {
