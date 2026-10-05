@@ -8,6 +8,10 @@ inputs:
   concern:
     description: The macOS validation concern being run
     required: true
+  flavor:
+    description: Build flavour for the packaging smoke (prod, dev or uat)
+    required: false
+    default: prod
 
 runs:
   using: composite
@@ -17,6 +21,7 @@ runs:
       working-directory: ${{ github.workspace }}/src
       env:
         CONCERN: ${{ inputs.concern }}
+        FLAVOR: ${{ inputs.flavor }}
         OS_LABEL: macOS
       run: |
         set -euo pipefail
@@ -167,9 +172,34 @@ runs:
             # or uploaded; the output stays on the runner.
             # The frontend build (tsc && vite build) aborted with exit 134 on the hosted
             # runner; a 4 GB heap rules a Node out-of-memory in or out.
+            # The flavour is a closed set: dev and uat add the same `--config` override that
+            # `npm run build:dev|build:uat` use, and the produced bundle identifier is read
+            # back from the built app and compared with the expected one.
+            flavor_args=()
+            case "${FLAVOR}" in
+              prod) expected_identifier=co.tangent.taurine ;;
+              dev|uat)
+                expected_identifier="co.tangent.taurine.${FLAVOR}"
+                flavor_args=(--config "src-tauri/tauri.conf.${FLAVOR}.json")
+                ;;
+              *) echo "Unsupported packaging flavor: ${FLAVOR}" >&2; exit 2 ;;
+            esac
             run_deferred rust-packaging-smoke \
               env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" \
-              npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci
+              npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci "${flavor_args[@]}"
+            packaging_identifier_check() {
+              local plist found=''
+              plist="$(find . -path '*/bundle/macos/*.app/Contents/Info.plist' -not -path './node_modules/*' 2>/dev/null | head -n 1)"
+              if [[ -n "${plist}" ]]; then
+                found="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${plist}" 2>/dev/null || true)"
+              fi
+              {
+                echo "- Packaging flavour: \`${FLAVOR}\`"
+                echo "- Bundle identifier produced: \`${found:-none}\` (expected \`${expected_identifier}\`)"
+              } >> "${GITHUB_STEP_SUMMARY}"
+              [[ "${found}" == "${expected_identifier}" ]]
+            }
+            run_deferred rust-packaging-identifier packaging_identifier_check
             ;;
           rust-tls-openssl)
             # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
