@@ -40,31 +40,20 @@ check_dispatcher() {
     echo "The protected dispatcher must require a full source SHA: $workflow" >&2
     exit 1
   fi
-  # Every protected dispatcher passes exactly one secret, the source-reader App key,
-  # by name, to each workflow it calls; none inherits secrets. KeelDock's dedicated
-  # environment may name its key differently (a reviewed set) and names its
-  # environment once.
-  if grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit' "$workflow"; then
-    echo "A protected dispatcher must not inherit secrets: $workflow" >&2
+  # No protected dispatcher passes any secret to a workflow it calls: the source-reader App key
+  # is an environment secret of source-read, read by the called job that declares that
+  # environment (the universal rules in check-universal.rb enforce this on every workflow). KeelDock
+  # names its environment once, as source-read or keeldock-source-read.
+  if grep -qE '^[[:space:]]+secrets:' "$workflow"; then
+    echo "A protected dispatcher must not pass or inherit secrets; the called job reads its environment secret: $workflow" >&2
     exit 1
   fi
   calls="$(grep -cE '^    uses:' "$workflow")"
-  if [[ "$(grep -cE '^      [A-Z_]+:[[:space:]]+\$\{\{ secrets\.' "$workflow")" != "${calls}" ]]; then
-    echo "Every workflow a protected dispatcher calls must receive exactly one secret, the App private key: $workflow" >&2
-    exit 1
-  fi
   if [[ "$workflow" == ".github/workflows/keeldock-validation.yml" ]]; then
-    if ! grep -qE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.(SOURCE_READER_PRIVATE_KEY|KEELDOCK_SOURCE_READER_PRIVATE_KEY) \}\}[[:space:]]*$' "$workflow"; then
-      echo "The KeelDock dispatcher must pass exactly the App private key, by a reviewed name: $workflow" >&2
-      exit 1
-    fi
     if [[ "$(grep -cE '^[[:space:]]+environment:[[:space:]]+(source-read|keeldock-source-read)[[:space:]]*(#.*)?$' "$workflow")" != 1 ]]; then
       echo "The KeelDock dispatcher must name its environment once, as source-read or keeldock-source-read: $workflow" >&2
       exit 1
     fi
-  elif [[ "$(grep -cE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.SOURCE_READER_PRIVATE_KEY \}\}[[:space:]]*$' "$workflow")" != "${calls}" ]]; then
-    echo "The protected dispatcher must pass secrets.SOURCE_READER_PRIVATE_KEY by name to each called workflow: $workflow" >&2
-    exit 1
   fi
   if [[ "$workflow" == ".github/workflows/windows-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/windows-validation-concern\.yml' "$workflow"; then
     echo "The protected Windows dispatcher must call the reviewed concern workflow: $workflow" >&2

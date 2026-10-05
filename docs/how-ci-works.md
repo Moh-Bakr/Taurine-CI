@@ -23,6 +23,9 @@ flat `docs/*.md` guides such as this one.
 The `.github/actions/source-checkout` composite is the only way source-bearing jobs read the
 private repository. Jobs that use it run in the `source-read` environment, which holds the
 source-reader GitHub App (`SOURCE_READER_APP_ID` variable, `SOURCE_READER_PRIVATE_KEY` secret).
+The key is an environment secret: only a job that declares `environment: source-read` can read it,
+so a called reusable workflow reads it in its own job and no caller passes it with `secrets:`
+(the universal policy rules reject a reference without the environment and any `secrets:` pass).
 
 1. **Guard.** The repository must be this one, the ref must be `refs/heads/main` or
    `refs/heads/untrusted` (see [Ref isolation](#ref-isolation-main-and-untrusted)), and the SHA

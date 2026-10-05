@@ -37,10 +37,6 @@ on:
       reason:
         description: Why this selection was made
         value: ${{ jobs.select.outputs.reason }}
-    secrets:
-      SOURCE_READER_PRIVATE_KEY:
-        description: The source-reader App private key, passed explicitly by the dispatcher (never inherited)
-        required: true
 
 permissions: {}
 

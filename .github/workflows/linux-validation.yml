@@ -173,9 +173,7 @@ jobs:
     needs: [validate-input, plan]
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/select-concerns.yml  # zizmor: ignore[self-repository]
-    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
-    secrets:
-      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    # No secret is passed: the called job declares environment source-read and reads the App key itself.
     with:
       source_sha: ${{ inputs.source_sha }}
       base_sha: ${{ inputs.base_sha }}
@@ -191,9 +189,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix) }}
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]
-    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
-    secrets:
-      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    # No secret is passed: the called job declares environment source-read and reads the App key itself.
     with:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}

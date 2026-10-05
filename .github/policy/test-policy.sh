@@ -131,6 +131,33 @@ root="$(fresh environment-input)"; mutate "${root}" .github/workflows/protected.
 mutate "${root}" .github/workflows/protected.yml 's/      - uses: \.\/\.github\/actions\/source-checkout\n//'
 expect_fail 'an environment-input job without the composite' "${root}" 'does not call the source-checkout composite'
 
+# The App key is an environment secret: read only in an environment job, never passed on.
+root="$(fresh key-ok)"; mutate "${root}" .github/workflows/protected.yml 's/(        run: npm ci)/$1\n        env:\n          K: \$\{\{ secrets.SOURCE_READER_PRIVATE_KEY \}\}/'
+expect_pass 'the key read in a source-read job' "${root}"
+
+root="$(fresh key-no-environment)"
+cat >> "${root}/.github/workflows/ordinary.yml" <<'YAML'
+  leak:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "${K}"
+        env:
+          K: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+YAML
+expect_fail 'the key read without the environment' "${root}" 'without `environment: source-read`'
+
+root="$(fresh key-passed)"
+cat >> "${root}/.github/workflows/ordinary.yml" <<'YAML'
+  call:
+    uses: ./.github/workflows/protected.yml
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+YAML
+expect_fail 'the key passed via secrets:' "${root}" 'via `secrets:` to a reusable workflow'
+
+root="$(fresh key-declared)"; mutate "${root}" .github/workflows/protected.yml 's/  workflow_dispatch:/  workflow_call:\n    secrets:\n      SOURCE_READER_PRIVATE_KEY:\n        required: true/'
+expect_fail 'a workflow_call secret declaration' "${root}" 'workflow_call declares secret'
+
 # Size limits.
 size_root="${base}/sizes"
 mkdir -p "${size_root}/.github/workflows" "${size_root}/.github/actions"
