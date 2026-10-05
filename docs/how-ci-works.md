@@ -182,11 +182,26 @@ are published.
 Source-bearing output is public, so it is treated as hostile:
 
 - No artifacts, no source-bearing caches. Composites may not use `actions/upload-artifact`,
-  `download-artifact` or caches. The reviewed caches hold only third-party downloads: crate
-  sources (re-hashed against Cargo.lock on restore) and Keel Dock's NuGet packages. The compiled
-  third-party dependency cache (`rust-target-cache`) is disabled: any dispatched SHA's project
-  code can write main's cache scope directly with the runner's runtime token, and cargo never
-  re-verifies a compiled `.rlib`, so it stays off until unprotected SHAs run from a separate ref.
+  `download-artifact` or caches.
+- Every GitHub Actions cache that a protected job would restore is switched off. That covers the
+  compiled third-party dependency cache (`rust-target-cache`), the Cargo third-party crate source
+  cache and Keel Dock's NuGet package cache, and `setup-node`'s built-in package-manager cache
+  (`package-manager-cache: false`). The reason is plain: a cache entry is only as trustworthy as
+  whoever could write it. Writing needs nothing more than the runner's own runtime token, and the
+  code of any dispatched source SHA, protected or not, runs on that runner with enough rights to
+  read the token. Every run here uses the `main` ref, so whatever a run plants lands in the cache
+  that a later protected run restores. The cache action unpacks with absolute paths, so a planted
+  entry can overwrite files well outside the folder it claims to hold, such as a composite action
+  that later runs. Checking the unpacked files afterwards does not help, because the damage is
+  done outside the folder being checked. Limiting who may save also does not help, because the
+  write can bypass the save step altogether.
+- Each disabled step carries a literal `false &&` in its condition. The cache policy
+  (`check-cache-policy.sh`) fails the build if one is removed, and its fixtures prove that a
+  re-enabled restore, save or completion step, or an `||` that reopens the gate, is rejected.
+  Runs are slower as a result: crates are downloaded and dependencies compiled on every run.
+- Turning caches back on needs ref isolation first: unprotected source SHAs must run from a
+  separate ref whose cache scope `main` never reads. That is a separate design and is not part of
+  this change. Until it exists, do not re-enable a cache, however small or well verified.
 - Commands run through `run_quiet` (or the mobile `mobile_run`): output stays in a runner-local
   log and only a fixed one-line classification, the exit status and allow-listed detail are printed.
 - The `sanitize` composite installs the shared library: it strips ANSI codes, workspace and

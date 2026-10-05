@@ -27,5 +27,6 @@ check_composite_action() {
     echo "A composite action may not use secrets, variables, OIDC, artifacts or a cache: $1" >&2
     return 1
   fi
+  check_builtin_cache_off "$1" || return 1
   ruby .github/policy/composite-action.rb "$1"
 }
