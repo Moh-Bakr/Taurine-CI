@@ -103,7 +103,14 @@ jobs:
           set -euo pipefail
           apt-get update -qq
           apt-get install -y --no-install-recommends 'jq=1.7.1-3ubuntu0.24.04.*'
+          # The source-checkout composite needs these too; present in the pinned image, and
+          # installed only if a future image drops one.
+          for tool in git curl; do
+            command -v "${tool}" >/dev/null 2>&1 || apt-get install -y --no-install-recommends "${tool}"
+          done
           jq --version
+          git --version
+          curl --version | head -n 1
 
       - name: Check out the exact private source SHA
         id: verified-source
@@ -133,7 +140,8 @@ jobs:
           root: true
           desktop: true
           mobile: true
-          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' }}
+          # The browser tiers are frontend-only: they do not need the vendored OpenVPN3 sources.
+          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' && !startsWith(inputs.concern, 'e2e-') }}
 
       - name: Set up the Rust toolchain
         if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
