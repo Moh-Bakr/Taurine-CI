@@ -84,17 +84,14 @@ revokes the token.
 
 None of these is required by the runbook. Each one trades convenience for a stronger boundary.
 
-- **Move the key into the `source-read` environment.** As a repository secret, the key can be
-  read by any workflow run in this repository except fork pull requests, and by any branch an
-  owner pushes. An environment secret is released only to jobs that enter `source-read`, and
-  that environment is already limited to protected branches. Moving it needs a reviewed
-  workflow change first. The Keel Dock dispatcher passes `secrets.SOURCE_READER_PRIVATE_KEY`
-  from a job outside the environment, so the reusable concern must read it from its own
-  environment instead. Make that change and verify it with the dispatches above, then delete
-  the repository secret.
-- **Restrict deployment branches to `main` only.** Today `source-read` allows "protected
-  branches". A custom deployment-branch rule of `main` removes any other protected branch from
-  the trusted set. The protected workflows already refuse any ref other than `refs/heads/main`.
+- **Where the key lives.** `SOURCE_READER_PRIVATE_KEY` is an environment secret of
+  `source-read` (there is no repository-level copy). It is released only to jobs that enter
+  `source-read`, and that environment is limited to protected branches (`main` and `untrusted`).
+  When rotating, update the secret under Settings → Environments → `source-read`; do not create a
+  repository secret.
+- **Keep the deployment rule at "protected branches".** `untrusted` must stay able to enter
+  `source-read` so feature-branch SHAs can be validated without touching main's caches (ref
+  isolation). Restricting the rule to `main` alone would break that.
 - **Add required reviewers to `source-read`.** Every source-bearing run would then wait for an
   approval in the Actions UI before any job enters the environment. One approval releases all the
   jobs waiting at that moment. This guards against a workflow merged by mistake reading the key,
