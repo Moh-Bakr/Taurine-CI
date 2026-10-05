@@ -41,7 +41,8 @@ jobs:
     # generated in (Playwright 1.62.0, Ubuntu noble, linux/amd64; see the private
     # docs/visual-baselines.md), so hosted and local rendering are identical. Every other
     # concern runs on the runner image directly.
-    container: ${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}
+    # Deliberate: the image is pinned by digest; zizmor cannot see through the expression form.
+    container: ${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}  # zizmor: ignore[unpinned-images]
     # The browser tiers start a dev server, download a browser and drive a
     # real page; the unit and contract concerns stay on the reviewed 30.
     # 45 for the Rust concern. Compiled output is never cached — `target/` holds
