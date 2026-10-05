@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "comment": "Every tool installed from a release in a workflow or composite, with the version it is pinned to. The weekly validation warns when a newer stable release exists; the policy fails when a pinned version here is not present in its file, so this list cannot drift from the workflows. Updating a pin means changing the version, its SHA-256 and this file together, reviewed by a person.",
+  "tools": [
+    { "name": "cargo-nextest", "repo": "nextest-rs/nextest", "tag_prefix": "cargo-nextest-", "current": "0.9.146", "file": ".github/actions/rust-toolchain/action.yml" },
+    { "name": "cargo-deny", "repo": "EmbarkStudios/cargo-deny", "tag_prefix": "", "current": "0.20.2", "file": ".github/actions/scan-concern/action.yml" },
+    { "name": "gitleaks", "repo": "gitleaks/gitleaks", "tag_prefix": "v", "current": "8.30.1", "file": ".github/actions/scan-concern/action.yml" },
+    { "name": "semgrep", "repo": "semgrep/semgrep", "tag_prefix": "v", "current": "1.140.0", "file": ".github/actions/scan-concern/action.yml" },
+    { "name": "cargo-audit", "repo": "rustsec/rustsec", "tag_prefix": "cargo-audit/v", "current": "0.22.2", "file": ".github/workflows/linux-validation-concern.yml" },
+    { "name": "actionlint", "repo": "rhysd/actionlint", "tag_prefix": "v", "current": "1.7.12", "file": ".github/workflows/validate-public-changes.yml" },
+    { "name": "zizmor", "repo": "zizmorcore/zizmor", "tag_prefix": "v", "current": "1.30.1", "file": ".github/workflows/validate-public-changes.yml" },
+    { "name": "scorecard", "repo": "ossf/scorecard", "tag_prefix": "v", "current": "5.5.0", "file": ".github/workflows/scorecard.yml" },
+    { "name": "xcodegen", "repo": "yonaskolb/XcodeGen", "tag_prefix": "", "current": "2.46.0", "file": ".github/workflows/ios-validation.yml" }
+  ]
+}
