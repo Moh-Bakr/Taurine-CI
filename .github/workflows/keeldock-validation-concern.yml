@@ -786,9 +786,10 @@ jobs:
             echo '- Outputs: no source files, logs, reports or artifacts published; failing test names only.'
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      # The concern's own wall-clock time, excluding queue time; the dispatcher's timings job compares it with a baseline.
+      # Wall-clock time from the first step (a local composite is not usable here: the workspace holds the private source).
       - name: Report concern duration
         if: ${{ always() }}
-        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
-        with:
-          mode: report
+        shell: bash
+        run: |
+          [[ -n "${CONCERN_STARTED_AT:-}" ]] || exit 0
+          e=$(( $(date +%s) - CONCERN_STARTED_AT )); printf '### Concern duration\n\n%dm%02ds from the first step, excluding runner queue time.\n' $((e / 60)) $((e % 60)) >> "${GITHUB_STEP_SUMMARY}"
