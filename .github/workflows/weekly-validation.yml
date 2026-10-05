@@ -8,10 +8,19 @@ name: Weekly develop validation (scheduled)
 # dispatches the three protected validation workflows for that exact SHA with
 # the run's own token. The dispatched workflows do all the source-bearing work
 # under their own protections.
+#
+# Missed-run check. No other workflow in this repository runs on a frequent schedule (the
+# policy workflow runs on pull requests and pushes only), so there is no watchdog job; check by
+# hand instead: `gh run list --repo Moh-Bakr/Taurine-CI --workflow weekly-validation.yml
+# --event schedule --limit 3` should show a run each Monday after 05:23 UTC. If Monday's is
+# missing, dispatch this workflow by hand from the Actions tab or the gh CLI on main (a manual
+# dispatch uses the same jobs; set dry_run to only resolve and summarise). A repository with no
+# activity for 60 days has its schedules disabled by GitHub; re-enable them under Actions.
 on:
   schedule:
-    # Monday 05:00 UTC.
-    - cron: '0 5 * * 1'
+    # Monday 05:23 UTC. Off the top of the hour on purpose: GitHub delays or drops scheduled
+    # runs at :00 under load.
+    - cron: '23 5 * * 1'
   workflow_dispatch:
     inputs:
       dry_run:
