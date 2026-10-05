@@ -45,10 +45,9 @@ jobs:
     container: ${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}  # zizmor: ignore[unpinned-images]
     # The browser tiers start a dev server, download a browser and drive a
     # real page; the unit and contract concerns stay on the reviewed 30.
-    # 45 for the Rust concern. Compiled output is never cached — `target/` holds
-    # compiled private source — so every run compiles rquickjs, which builds C
-    # and generates bindings through libclang, plus reqwest's TLS stack, cold.
-    # Only cargo's downloaded third-party sources are cached (see the cache steps).
+    # 45 for the Rust concern. Compiled private source is never cached; only the
+    # rust-app build restores compiled third-party crates (see the cache steps), so
+    # the other Rust concerns compile their whole closure cold.
     #
     # The `rust-*` crate-test concerns get the browser tiers' 60: each compiles
     # its whole closure cold for the same reason. `rust-app` and `rust-dbx` get
@@ -123,6 +122,8 @@ jobs:
           repository-id: ${{ env.SOURCE_REPOSITORY_ID }}
           repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
+          # Gates every cache save below: only a SHA on a protected private branch may write.
+          check-protected-ancestry: 'true'
 
       - name: Start the egress audit
         # Audit only: records outbound destinations, never blocks, never fails the job.
@@ -177,9 +178,11 @@ jobs:
       # Third-party crate sources only: cargo's registry index, the downloaded
       # `.crate` archives and the git dependency databases. Never `target/`, never
       # an extracted source tree, never anything under the checked-out private
-      # source, so no compiled or private code ever enters a cache. The key is the
-      # OS, the concern and a hash of the private Cargo.lock files, which reveals
-      # nothing about their contents.
+      # source, so no private code ever enters this cache. The key is the OS and a
+      # hash of the private Cargo.lock files (which reveals nothing about their
+      # contents), shared by every Rust concern on this OS: one entry per OS and
+      # lockfile set, not one per concern. The fallback key is safe here because every
+      # restored archive is re-verified against the lock checksums below.
       - name: Locate Cargo home for the third-party source cache
         id: cargo-home
         if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
@@ -201,9 +204,9 @@ jobs:
             ${{ steps.cargo-home.outputs.dir }}/registry/index
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
             ${{ steps.cargo-home.outputs.dir }}/git/db
-          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
+          key: cargo-sources-v2-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
           restore-keys: |
-            cargo-sources-${{ runner.os }}-${{ inputs.concern }}-
+            cargo-sources-v2-${{ runner.os }}-
 
       # Defence in depth: do not rely on cargo alone to notice a tampered archive.
       # Every restored `.crate` must hash to the checksum recorded for it in a
@@ -211,52 +214,55 @@ jobs:
       # all, is deleted before cargo runs. Only counts are printed.
       - name: Verify restored crate archives against Cargo.lock
         if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
-        shell: bash
-        env:
-          CARGO_SOURCES_DIR: ${{ steps.cargo-home.outputs.dir }}
-          CACHE_HIT: ${{ steps.cargo-sources.outputs.cache-hit }}
-          OS_LABEL: Linux
-        run: |
-          set -euo pipefail
-          sha256_of() {
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum < "$1" | cut -d' ' -f1
-            else
-              shasum -a 256 < "$1" | cut -d' ' -f1
-            fi
-          }
-          expected="${RUNNER_TEMP}/crate-checksums.txt"
-          : > "${expected}"
-          while IFS= read -r lock; do
-            tr -d '\r' < "${lock}" | awk '
-              /^\[\[package\]\]/ { n = ""; v = ""; next }
-              /^name = /     { gsub(/"/, "", $3); n = $3 }
-              /^version = /  { gsub(/"/, "", $3); v = $3 }
-              /^checksum = / { gsub(/"/, "", $3); if (n != "" && v != "") print n "-" v ".crate " $3 }
-            ' >> "${expected}"
-          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*')
-          kept=0
-          dropped=0
-          cache_dir="${CARGO_SOURCES_DIR}/registry/cache"
-          if [[ -d "${cache_dir}" ]]; then
-            find "${cache_dir}" -type f ! -name '*.crate' -delete
-            while IFS= read -r -d '' crate; do
-              want="$(awk -v f="$(basename "${crate}")" '$1 == f { print $2; exit }' "${expected}")"
-              if [[ -n "${want}" && "$(sha256_of "${crate}")" == "${want}" ]]; then
-                kept=$((kept + 1))
-              else
-                rm -f "${crate}"
-                dropped=$((dropped + 1))
-              fi
-            done < <(find "${cache_dir}" -type f -name '*.crate' -print0)
-          fi
-          case "${CACHE_HIT}" in
-            true) state='exact hit' ;;
-            false) state='restored from an earlier lockfile' ;;
-            *) state='miss' ;;
-          esac
-          echo "cargo-sources: ${state}; ${kept} archives verified, ${dropped} dropped"
-          echo "- ${OS_LABEL} Cargo source cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
+        with:
+          sources-dir: ${{ steps.cargo-home.outputs.dir }}
+          cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}
+          os-label: Linux
+
+      # Compiled third-party dependencies of the rust-app build: only the debug profile's
+      # deps/, build/ and .fingerprint/ entries of crates.io and git crates, with every
+      # workspace, path and vendored crate (and every third-party crate that depends on
+      # one) stripped both after restore and before save, and a proof step that fails the
+      # job if a workspace crate name, a private-checkout path or an executable would be
+      # saved. One exact key (no fallback): OS, arch, image, build and feature set, exact
+      # rustc, Cargo.lock, every cargo manifest and config, the cargo/compiler
+      # environment, and the ISO week, so every entry expires within a week. Any SHA may
+      # restore; only a SHA on a protected private branch saves (see below). Cargo does not
+      # re-verify a compiled .rlib against Cargo.lock: the residual risk and its
+      # mitigations are recorded in the rust-target-cache composite.
+      - name: Locate the compiled dependency cache
+        id: cargo-target
+        if: ${{ startsWith(inputs.concern, 'rust-app-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: locate
+          group: rust-app
+          features: test-default+check-openvpn
+          os-label: Linux
+
+      - name: Restore compiled third-party dependencies
+        id: cargo-target-cache
+        if: ${{ startsWith(inputs.concern, 'rust-app-') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-target.outputs.dir }}/debug/deps
+            ${{ steps.cargo-target.outputs.dir }}/debug/build
+            ${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint
+          key: ${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored dependency cache
+        if: ${{ startsWith(inputs.concern, 'rust-app-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored
+          dir: ${{ steps.cargo-target.outputs.dir }}
+          cache-hit: ${{ steps.cargo-target-cache.outputs.cache-hit }}
+          os-label: Linux
 
       - name: Install the pinned Playwright browser
         # e2e-visual runs in the Playwright image, whose browsers are preinstalled.
@@ -320,17 +326,58 @@ jobs:
           exit 2
 
       # Saved only from the protected main branch (every job here already refuses to
-      # run elsewhere; the condition repeats it so the write permission is explicit)
-      # and only on a miss, so a key is written once and never overwritten.
+      # run elsewhere; the condition repeats it so the write permission is explicit),
+      # only for a source SHA on a protected private branch (the source-checkout
+      # ancestry answer, fixed before any project code ran), and only on a miss, so a
+      # key is written once and never overwritten. The entry is shared by every Rust
+      # concern on this OS, so the saver first fetches every crate each lockfile names
+      # (all platforms); cargo verifies each download against the lock checksum.
+      - name: Complete the third-party source set before saving
+        if: ${{ always() && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r lock; do
+            manifest="$(dirname "${lock}")/Cargo.toml"
+            [[ -f "${manifest}" ]] || continue
+            if ! cargo fetch --locked --manifest-path "${manifest}" >"${RUNNER_TEMP}/cargo-fetch.log" 2>&1; then
+              echo 'cargo-fetch: one lockfile could not be fetched completely (detail withheld)'
+            fi
+          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*' | sort)
+          echo 'cargo-fetch: done'
+
       - name: Save verified third-party crate sources
-        if: ${{ always() && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ always() && github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ steps.cargo-home.outputs.dir }}/registry/index
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
             ${{ steps.cargo-home.outputs.dir }}/git/db
-          key: cargo-sources-${{ runner.os }}-${{ inputs.concern }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
+          key: cargo-sources-v2-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
+
+      # Only the build that runs everything the key covers saves it, only on a miss, only
+      # for a protected source SHA and only after the concern passed; the strip-and-prove
+      # step must succeed first, so a failed proof leaves nothing saved.
+      - name: Strip and prove the compiled dependency cache
+        id: cargo-target-strip
+        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: save
+          dir: ${{ steps.cargo-target.outputs.dir }}
+          os-label: Linux
+
+      - name: Save compiled third-party dependencies
+        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-target.outputs.dir }}/debug/deps
+            ${{ steps.cargo-target.outputs.dir }}/debug/build
+            ${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint
+          key: ${{ steps.cargo-target.outputs.key }}
 
       - name: Publish sanitized validation proof
         shell: bash

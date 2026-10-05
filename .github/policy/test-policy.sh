@@ -146,3 +146,26 @@ if bash "${policy}/check-sizes.sh" "${size_root}" >/dev/null 2>&1; then
 fi
 
 echo 'policy fixtures: every universal rule and size limit accepts a compliant tree and rejects its violation'
+
+# Cache policy: the reviewed Linux concern passes, and each compiled-dependency guard rejects
+# the one mutation it exists for.
+cache_fixture="${base}/cache.yml"
+cache_expect_fail() {
+  local label="$1" needle="$2" expr="$3"
+  perl -0pe "${expr}" .github/workflows/linux-validation-concern.yml > "${cache_fixture}"
+  if (source "${policy}/check-cache-policy.sh"; check_cache_policy "${cache_fixture}") >/dev/null 2>"${base}/err"; then
+    echo "cache fixture '${label}' should fail but passed" >&2
+    exit 1
+  fi
+  grep -qF -- "${needle}" "${base}/err" || { echo "cache fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+(source "${policy}/check-cache-policy.sh"; check_cache_policy .github/workflows/linux-validation-concern.yml) || { echo 'the reviewed cache steps should pass' >&2; exit 1; }
+cache_expect_fail 'target restore-keys' 'must not have restore-keys' \
+  's/(          key: \$\{\{ steps\.cargo-target\.outputs\.key \}\}\n)/$1          restore-keys: |\n            cargo-target-\n/'
+cache_expect_fail 'save without protected ancestry' 'protected-ancestry answer' \
+  's/ && steps\.verified-source\.outputs\.protected-ancestor == .true.//g'
+cache_expect_fail 'save without the proof' 'strip-and-prove step' \
+  's/ && steps\.cargo-target-strip\.outcome == .success.//'
+cache_expect_fail 'a target path outside the reviewed three' 'Disallowed cache path line' \
+  's#outputs\.dir \}\}/debug/build#outputs.dir }}/debug#'
+echo 'cache policy fixtures: the compiled-dependency guards reject restore-keys, an unguarded save and an unreviewed path'

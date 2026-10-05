@@ -1,0 +1,369 @@
+name: Compiled third-party dependency cache
+description: |
+  Owns everything about the compiled-dependency cache except the restore and save themselves,
+  which stay in the protected workflows so the cache policy can audit each one (a composite
+  may not touch the cache). Three modes:
+  - locate: the cached target directory and the exact key;
+  - restored: strips every workspace (path, vendored or Taurine-authored) crate from what was
+    restored, so restored state can only ever stand in for third-party crates, and reports
+    hit or miss with the restored size;
+  - save: strips the same set from the finished build, then proves the result (inventory,
+    no workspace crate name, no reference into the private checkout, no executable) and
+    fails when the proof does not hold, so the save step after it never runs.
+  The workspace set is computed from the private Cargo.lock: every package without a
+  `source` line is local, and so is every third-party package that depends on one (cargo
+  rebuilds those anyway, and their metadata can name a local crate's paths). Only counts and
+  sizes are printed, never crate names: the dependency inventory of the private lockfile is
+  not published.
+
+  Residual risk, stated plainly. Cargo verifies a `.crate` download against Cargo.lock, but
+  it never re-verifies a compiled `.rlib`: a restored artefact is trusted as built. Whatever
+  ran in the saving job (the build scripts, proc macros and tests of the private SHA) could
+  have altered third-party artefacts before the save. Mitigations: saves only on main, only
+  for a SHA on a protected private branch (decided by the source checkout before any project
+  code ran), only after the concern passed and the strip proof held, never overwriting a key;
+  workspace crates are always rebuilt from source, never restored; the exact key changes with
+  the lockfile, manifests, toolchain and environment, and the ISO week in it retires every
+  entry within seven days. Code that executes in a job can still reach the job's cache
+  credentials directly, so the trust placed in a restored entry is the trust placed in the
+  protected branches' code; the same holds for the source and NuGet caches, whose contents
+  are additionally re-verified against their lock files. Entries are readable by any run in
+  this public repository, so they hold only third-party code.
+
+inputs:
+  mode:
+    description: locate, restored or save
+    required: true
+  group:
+    description: The build the cache belongs to (one key per build, e.g. rust-app)
+    required: false
+    default: ''
+  features:
+    description: The cargo profile and feature set the build compiles, as a fixed label
+    required: false
+    default: ''
+  dir:
+    description: The cached target directory (the locate output; restored and save modes)
+    required: false
+    default: ''
+  cache-hit:
+    description: The restore step cache-hit output (restored mode)
+    required: false
+    default: ''
+  os-label:
+    description: Label for the summary lines
+    required: true
+
+outputs:
+  dir:
+    description: The cargo target directory whose debug profile is cached
+    value: ${{ steps.locate.outputs.dir }}
+  key:
+    description: The exact cache key; there are deliberately no fallback keys
+    value: ${{ steps.locate.outputs.key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the compiled dependency cache helpers
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${RUNNER_TEMP}/taurine-ci"
+        cat > "${RUNNER_TEMP}/taurine-ci/target-cache.sh" <<'HELPERS'
+        # Sourced by the rust-target-cache composite. Portable to the bash 3.2 and BSD tools
+        # of a macOS runner and to Git Bash on Windows: no associative arrays, no GNU flags.
+
+        # The cached entries live in these three directories of the debug profile; nothing
+        # else under the target directory (final binaries, incremental state, the lock file,
+        # doc or package output) is ever saved.
+        cached_dirs='deps build .fingerprint'
+
+        # Writes local.txt (crates built from the private checkout: no `source` in the lock)
+        # and strip.txt (local plus every package that depends on one, transitively) and
+        # keep.txt (everything else), all as normalised names (dashes to underscores, the
+        # form cargo uses in deps/ file names) under $1.
+        classify_lock() {
+          local out="$1"
+          mkdir -p "${out}"
+          tr -d '\r' < Cargo.lock | awk -v out="${out}" '
+            function flush() {
+              if (name != "") { count++; pname[count] = name; plocal[count] = !remote; pdeps[count] = deps }
+              name = ""; remote = 0; deps = ""; indeps = 0
+            }
+            function norm(s) { gsub(/-/, "_", s); return s }
+            /^\[\[package\]\]/ { flush(); next }
+            /^name = / { v = $3; gsub(/"/, "", v); name = v; next }
+            /^source = / { remote = 1; next }
+            /^dependencies = \[\]/ { next }
+            /^dependencies = \[/ { indeps = 1; next }
+            indeps && /^\]/ { indeps = 0; next }
+            indeps { v = $1; gsub(/[",]/, "", v); deps = deps " " norm(v); next }
+            END {
+              flush()
+              for (i = 1; i <= count; i++) if (plocal[i]) { strip[norm(pname[i])] = 1; local_[norm(pname[i])] = 1 }
+              changed = 1
+              while (changed) {
+                changed = 0
+                for (i = 1; i <= count; i++) {
+                  n = norm(pname[i])
+                  if (n in strip) continue
+                  k = split(pdeps[i], d, " ")
+                  for (j = 1; j <= k; j++) if (d[j] in strip) { strip[n] = 1; changed = 1; break }
+                }
+              }
+              for (n in local_) print n > (out "/local.txt")
+              for (n in strip) print n > (out "/strip.txt")
+              for (i = 1; i <= count; i++) { n = norm(pname[i]); if (!(n in strip)) print n > (out "/keep.txt") }
+            }
+          '
+          touch "${out}/local.txt" "${out}/strip.txt" "${out}/keep.txt"
+          sort -u -o "${out}/keep.txt" "${out}/keep.txt"
+          sort -u -o "${out}/strip.txt" "${out}/strip.txt"
+          sort -u -o "${out}/local.txt" "${out}/local.txt"
+        }
+
+        # The private checkout as it appears in a path, in either separator style. The
+        # target directory is always outside it (locate guarantees that), so any
+        # occurrence in a cached file is a reference into private source.
+        private_path_pattern() {
+          local ws
+          ws="$(basename "${GITHUB_WORKSPACE}")"
+          printf '%s[/\\]+src[/\\]' "${ws}"
+        }
+
+        # Removes, from the debug profile under $1, every entry that is not a third-party
+        # crate of keep.txt, every test or bin executable (with the files sharing its stem),
+        # and every entry whose metadata names a path in the private checkout. Prints the
+        # number of entries removed.
+        strip_profile() {
+          local profile="$1" sets="$2" listing="${2}/entries.txt" pattern
+          : > "${listing}"
+          [[ -d "${profile}" ]] || { echo 0; return 0; }
+          pattern="$(private_path_pattern)"
+          (
+            cd "${profile}"
+            for d in ${cached_dirs}; do
+              [[ -d "${d}" ]] || continue
+              find "${d}" -mindepth 1 -maxdepth 1 -print
+            done
+          ) > "${listing}"
+          # Executables in deps/ are test or bin targets: no dependency produces one there.
+          (
+            cd "${profile}"
+            if [[ -d deps ]]; then
+              find deps -maxdepth 1 -type f \( -name '*.exe' -o \( ! -name '*.*' -perm -u+x \) \) -print
+            fi
+          ) | sed -E 's#^deps/##; s#\.exe$##' > "${sets}/exe-stems.txt"
+          # Metadata (dep-info, build-script output, fingerprints) naming the private checkout.
+          (
+            cd "${profile}"
+            for d in ${cached_dirs}; do
+              [[ -d "${d}" ]] || continue
+              LC_ALL=C grep -rlaE --include='*.d' --include='output' --include='root-output' --include='*.json' --include='dep-*' -- "${pattern}" "${d}" 2>/dev/null || true
+            done
+          ) | awk -F/ '{ print $1 "/" $2 }' | sort -u > "${sets}/private-refs.txt"
+          awk -v sets="${sets}" '
+            BEGIN {
+              while ((getline n < (sets "/keep.txt")) > 0) keep[n] = 1
+              while ((getline n < (sets "/strip.txt")) > 0) strip[n] = 1
+              while ((getline n < (sets "/exe-stems.txt")) > 0) exe[n] = 1
+              while ((getline n < (sets "/private-refs.txt")) > 0) priv[n] = 1
+            }
+            {
+              entry = $0; split(entry, parts, "/"); kind = parts[1]; base = parts[2]
+              stem = base; sub(/\..*$/, "", stem)
+              top = kind "/" base
+              if (top in priv) { print entry; next }
+              if (kind == "deps" && (stem in exe)) { print entry; next }
+              if (kind == "deps" && (top in priv)) { print entry; next }
+              if (!match(stem, /-[0-9a-f]+$/)) { print entry; next }
+              n = substr(stem, 1, RSTART - 1); gsub(/-/, "_", n)
+              alt = ""
+              if (kind == "deps" && n ~ /^lib./) alt = substr(n, 4)
+              if ((n in strip) || (alt != "" && (alt in strip))) { print entry; next }
+              if ((n in keep) || (alt != "" && (alt in keep))) next
+              print entry
+            }
+          ' "${listing}" > "${sets}/remove.txt"
+          # A deps/ dep-info file that names the private checkout takes its whole stem.
+          if [[ -s "${sets}/private-refs.txt" ]]; then
+            grep '^deps/' "${sets}/private-refs.txt" | sed -E 's#^deps/##; s#\..*$##' | while IFS= read -r stem; do
+              grep -E "^deps/${stem}(\.|$)" "${listing}" || true
+            done >> "${sets}/remove.txt"
+          fi
+          sort -u -o "${sets}/remove.txt" "${sets}/remove.txt"
+          (
+            cd "${profile}"
+            while IFS= read -r entry; do
+              if [[ -n "${entry}" ]]; then rm -rf -- "${entry}"; fi
+            done < "${sets}/remove.txt"
+          )
+          wc -l < "${sets}/remove.txt" | tr -d ' '
+        }
+
+        size_mib() {
+          local total=0 d kib
+          for d in ${cached_dirs}; do
+            if [[ -d "$1/${d}" ]]; then
+              kib="$(du -sk "$1/${d}" | awk '{ print $1 }')"
+              total=$((total + kib))
+            fi
+          done
+          echo $((total / 1024))
+        }
+
+        to_unix_path() {
+          if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
+        }
+        HELPERS
+
+    - name: Locate the compiled dependency cache
+      id: locate
+      if: ${{ inputs.mode == 'locate' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        GROUP: ${{ inputs.group }}
+        FEATURES: ${{ inputs.features }}
+      # The value written to the environment file is a path built from HOME, never input.
+      run: |  # zizmor: ignore[github-env]
+        set -euo pipefail
+        sha256_text() {
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
+        }
+        [[ "${GROUP}" =~ ^[a-z0-9-]+$ && "${FEATURES}" =~ ^[a-z0-9+-]+$ ]] || { echo 'target-cache: group and features must be fixed labels' >&2; exit 1; }
+        # The target directory is always outside the private checkout, so the cache path can
+        # never name private source. Linux and Windows set it in the toolchain step; when
+        # nothing set it (macOS), it moves to the runner's home for this build.
+        dir="${CARGO_TARGET_DIR:-}"
+        if [[ -z "${dir}" ]]; then
+          dir="${HOME}/cargo-target"
+          mkdir -p "${dir}"
+          echo "CARGO_TARGET_DIR=${dir}" >> "${GITHUB_ENV}"
+        fi
+        if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -m "${dir}")"; fi
+        case "$(cd "$(dirname "${dir}")" && pwd -P)/" in
+          "$(cd "${GITHUB_WORKSPACE}/src" && pwd -P)/"*) echo 'target-cache: the target directory is inside the private checkout' >&2; exit 1 ;;
+        esac
+        # The exact key. Every input a cached artefact depends on is part of it: OS, arch and
+        # runner image; the build and its feature set; the exact rustc (version, commit,
+        # host and LLVM); the lockfile; every tracked cargo manifest, cargo config and
+        # toolchain file (feature selections live there); and the cargo, compiler and
+        # native-library environment. The ISO week rotates every key weekly, so any entry,
+        # including a poisoned one, outlives its week by at most the one save it took.
+        week="$(date -u +%G-W%V)"
+        rustc_version="$(rustc -V | awk '{ print $2 }')"
+        toolchain="$(rustc -vV | tr -d '\r' | sha256_text | cut -c1-12)"
+        lock="$(tr -d '\r' < Cargo.lock | sha256_text | cut -c1-16)"
+        manifests="$(git ls-files -z -- '*Cargo.toml' '.cargo/config.toml' '.cargo/config' 'rust-toolchain.toml' 'rust-toolchain' | xargs -0 cat | tr -d '\r' | sha256_text | cut -c1-16)"
+        environment="$(env | LC_ALL=C sort | grep -E '^(CARGO_INCREMENTAL|CARGO_PROFILE_[A-Z_]+|CARGO_BUILD_[A-Z_]+|CARGO_ENCODED_RUSTFLAGS|CARGO_TARGET_DIR|RUSTFLAGS|RUSTDOCFLAGS|RUSTC_WRAPPER|CC|CXX|CFLAGS|CXXFLAGS|LDFLAGS|LIBCLANG_PATH|PKG_CONFIG_PATH|MACOSX_DEPLOYMENT_TARGET|VCPKG_ROOT|OPENSSL_[A-Z_]+|LIBSQLITE3_FLAGS)=' | tr -d '\r' | sha256_text | cut -c1-12 || true)"
+        key="cargo-target-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS:-image}-${GROUP}-${FEATURES}-rustc${rustc_version}-${toolchain}-${week}-lock${lock}-manifests${manifests}-env${environment}"
+        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
+        echo "key=${key}" >> "${GITHUB_OUTPUT}"
+        echo "target-cache: key ${key}"
+
+    - name: Strip workspace crates from the restored dependency cache
+      if: ${{ inputs.mode == 'restored' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        TARGET_DIR: ${{ inputs.dir }}
+        CACHE_HIT: ${{ inputs.cache-hit }}
+        OS_LABEL: ${{ inputs.os-label }}
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/target-cache.sh"
+        profile="$(to_unix_path "${TARGET_DIR}")/debug"
+        sets="${RUNNER_TEMP}/target-cache-restored"
+        classify_lock "${sets}"
+        if [[ "${CACHE_HIT}" == true ]]; then
+          # Defence in depth: whatever the entry holds, a workspace crate is never taken from
+          # it, so a restored entry can only stand in for third-party crates.
+          removed="$(strip_profile "${profile}" "${sets}")"
+          size="$(size_mib "${profile}")"
+          state="exact hit, ${size} MiB restored (${removed} entries removed by the restore-time strip)"
+        else
+          state='miss: every crate compiles from source; the build saves this key on main'
+        fi
+        echo "target-cache: ${state}"
+        echo "- ${OS_LABEL} compiled dependency cache: ${state}" >> "${GITHUB_STEP_SUMMARY}"
+
+    - name: Strip workspace crates from the compiled dependency cache
+      if: ${{ inputs.mode == 'save' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        TARGET_DIR: ${{ inputs.dir }}
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/target-cache.sh"
+        profile="$(to_unix_path "${TARGET_DIR}")/debug"
+        sets="${RUNNER_TEMP}/target-cache-save"
+        classify_lock "${sets}"
+        before="$(size_mib "${profile}")"
+        removed="$(strip_profile "${profile}" "${sets}")"
+        echo "target-cache: stripped ${removed} workspace, executable or private-path entries (${before} MiB before the strip)"
+
+    - name: Prove the compiled dependency cache holds no workspace crate
+      if: ${{ inputs.mode == 'save' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        TARGET_DIR: ${{ inputs.dir }}
+        OS_LABEL: ${{ inputs.os-label }}
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/target-cache.sh"
+        profile="$(to_unix_path "${TARGET_DIR}")/debug"
+        sets="${RUNNER_TEMP}/target-cache-proof"
+        # Recomputed from the lockfile on its own, not taken from the strip step.
+        classify_lock "${sets}"
+        failed=0
+        [[ -d "${profile}" ]] || { echo 'target-cache: nothing to save' >&2; exit 1; }
+        cd "${profile}"
+        # What is saved: entries and size per cached directory, and file kinds in deps/.
+        echo 'target-cache: saved inventory (counts only; crate names are not published)'
+        for d in ${cached_dirs}; do
+          entries=0; kib=0
+          if [[ -d "${d}" ]]; then
+            entries="$(find "${d}" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+            kib="$(du -sk "${d}" | awk '{ print $1 }')"
+          fi
+          echo "  ${d}: ${entries} entries, $((kib / 1024)) MiB"
+        done
+        if [[ -d deps ]]; then
+          find deps -maxdepth 1 -type f | sed -E 's#^.*/##; s#^[^.]*##; s#^$#(none)#' | sort | uniq -c | sed 's/^/  deps kind /'
+        fi
+        # 1. No entry carries the name of a crate built from the private checkout. The names
+        #    come from the lockfile (packages without a source), matched as a whole crate
+        #    name in either the package (dash) or file (underscore) form.
+        names="$(sed 's/_/[-_]/g' "${sets}/local.txt" | paste -sd'|' -)"
+        if [[ -n "${names}" ]]; then
+          hits="$(for d in ${cached_dirs}; do [[ -d "${d}" ]] && find "${d}" -mindepth 1 -maxdepth 1 -print; done | sed -E 's#^[^/]*/##' | grep -cE "^(lib)?(${names})-[0-9a-f]+(\.|$)" || true)"
+          if [[ "${hits}" != 0 ]]; then
+            echo "target-cache: ${hits} saved entries carry a workspace crate name" >&2
+            failed=1
+          fi
+        fi
+        # 2. No saved file, binary or text, names a path in the private checkout.
+        pattern="$(private_path_pattern)"
+        refs="$(for d in ${cached_dirs}; do [[ -d "${d}" ]] && LC_ALL=C grep -rlaE -- "${pattern}" "${d}"; done 2>/dev/null | wc -l | tr -d ' ' || true)"
+        if [[ "${refs}" != 0 ]]; then
+          echo "target-cache: ${refs} saved files name a path in the private checkout" >&2
+          failed=1
+        fi
+        # 3. No test or bin executable remains in deps/.
+        exes="$( { [[ -d deps ]] && find deps -maxdepth 1 -type f \( -name '*.exe' -o \( ! -name '*.*' -perm -u+x \) \) -print; } | wc -l | tr -d ' ' || true)"
+        if [[ "${exes}" != 0 ]]; then
+          echo "target-cache: ${exes} executables remain in deps/" >&2
+          failed=1
+        fi
+        size="$(size_mib .)"
+        if (( failed )); then
+          echo "- ${OS_LABEL} compiled dependency cache: NOT saved, the strip proof failed" >> "${GITHUB_STEP_SUMMARY}"
+          exit 1
+        fi
+        echo "target-cache: proof passed: no workspace crate, no private path, no executable; ${size} MiB to save"
+        echo "- ${OS_LABEL} compiled dependency cache: saving ${size} MiB of third-party crates (proof passed: no workspace crate, private path or executable)" >> "${GITHUB_STEP_SUMMARY}"

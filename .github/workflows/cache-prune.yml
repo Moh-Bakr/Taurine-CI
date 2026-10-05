@@ -1,0 +1,92 @@
+name: Prune stale caches (scheduled)
+
+# Keeps the repository's dependency caches inside GitHub's 10 GB per-repository budget, so
+# the least-recently-used eviction never has to choose (an over-budget cache is also the
+# documented route to displacing a legitimate entry with a planted one). This workflow
+# checks out nothing, runs no project code, holds no secret and no environment: it lists
+# the cache entries through the API with the run's own token and deletes
+# - entries of a superseded key shape (the per-concern cargo-sources keys);
+# - entries nobody has restored for seven days;
+# - every entry of a key family but the most recently used one (a family is the key
+#   without its lockfile or toolchain hashes: one per OS for the cargo sources and NuGet,
+#   one per OS and build for the compiled dependencies).
+# Deleting a cache entry only costs the next run a cold restore; nothing else depends on it.
+on:
+  schedule:
+    # Monday 05:07 UTC, before the weekly validation dispatch at 05:23.
+    - cron: '7 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List what would be deleted, delete nothing
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Prune stale and superseded cache entries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Listing and deleting cache entries; nothing else.
+      actions: write
+    steps:
+      - name: Delete stale and superseded cache entries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          now="$(date -u +%s)"
+          stale_after=$((7 * 24 * 3600))
+          list="${RUNNER_TEMP}/caches.tsv"
+          gh cache list --repo "${REPOSITORY}" --limit 1000 --sort last_accessed_at --order desc \
+            --json id,key,ref,lastAccessedAt,sizeInBytes \
+            --jq '.[] | [.id, .key, .ref, .lastAccessedAt, .sizeInBytes] | @tsv' > "${list}"
+          before="$(awk -F'\t' '{ s += $5 } END { printf "%.2f", s / 1073741824 }' "${list}")"
+          # Newest-first, so the first entry seen of each family is the one kept.
+          plan="${RUNNER_TEMP}/delete.tsv"
+          : > "${plan}"
+          declare -A seen=()
+          while IFS=$'\t' read -r id key ref accessed size; do
+            age=$(( now - $(date -u -d "${accessed}" +%s) ))
+            case "${key}" in
+              cargo-target-*) family="${ref} ${key%%-rustc*}" ;;
+              cargo-sources-v2-*|nuget-*) family="${ref} ${key%-*}" ;;
+              cargo-sources-*) printf '%s\t%s\t%s\n' "${id}" "${size}" 'superseded per-concern key' >> "${plan}"; continue ;;
+              *) family="${ref} ${key}" ;;
+            esac
+            if (( age > stale_after )); then
+              printf '%s\t%s\t%s\n' "${id}" "${size}" 'not restored for seven days' >> "${plan}"
+            elif [[ -n "${seen[${family}]:-}" ]]; then
+              printf '%s\t%s\t%s\n' "${id}" "${size}" 'older entry of a kept family' >> "${plan}"
+            else
+              seen[${family}]=1
+            fi
+          done < "${list}"
+          freed="$(awk -F'\t' '{ s += $2 } END { printf "%.2f", s / 1073741824 }' "${plan}")"
+          {
+            echo '## Cache prune'
+            echo
+            echo "- Before: $(wc -l < "${list}" | tr -d ' ') entries, ${before} GiB"
+            echo "- To delete: $(wc -l < "${plan}" | tr -d ' ') entries, ${freed} GiB (dry run: ${DRY_RUN})"
+            awk -F'\t' '{ n[$3]++ } END { for (r in n) print "  - " r ": " n[r] }' "${plan}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${DRY_RUN}" != true ]]; then
+            while IFS=$'\t' read -r id _ _; do
+              gh cache delete --repo "${REPOSITORY}" "${id}" >/dev/null || echo "cache-prune: entry ${id} could not be deleted"
+            done < "${plan}"
+          fi
+          after="$(gh cache list --repo "${REPOSITORY}" --limit 1000 --json sizeInBytes --jq '[.[].sizeInBytes] | add // 0 | . / 1073741824 * 100 | floor / 100')"
+          echo "- After: ${after} GiB in use" >> "${GITHUB_STEP_SUMMARY}"
+          echo "cache-prune: ${before} GiB before, ${freed} GiB planned, ${after} GiB after"

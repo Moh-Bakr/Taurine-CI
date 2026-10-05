@@ -36,6 +36,21 @@ inputs:
     description: Partial-clone filter (for example blob:none) to keep deep history cheap
     required: false
     default: ''
+  check-protected-ancestry:
+    description: >
+      'true' to ask, while the token is still live, whether the requested SHA is reachable from
+      a protected private branch (develop, uat or main). The answer is the protected-ancestor
+      output, which gates every cache save: a feature-branch SHA may restore a cache but never
+      write one.
+    required: false
+    default: 'false'
+
+# The single output is a fixed true/false answer written after the token is revoked and the
+# runner's pending step outputs are cleared, so the token can never leave through it.
+outputs:
+  protected-ancestor:
+    description: "'true' when the checked-out SHA is on develop, uat or main of the source repository; otherwise 'false'"
+    value: ${{ steps.verify.outputs.protected-ancestor }}
 
 runs:
   using: composite
@@ -82,6 +97,7 @@ runs:
         lfs: false
 
     - name: Verify identity, exact checkout, and revoke source token
+      id: verify
       if: always()
       shell: bash
       working-directory: ${{ github.workspace }}
@@ -92,6 +108,7 @@ runs:
         SOURCE_REPOSITORY_OWNER: ${{ inputs.repository-owner }}
         SOURCE_REPOSITORY_NAME: ${{ inputs.repository-name }}
         CHECKOUT_PATH: ${{ inputs.path }}
+        CHECK_PROTECTED_ANCESTRY: ${{ inputs.check-protected-ancestry }}
       run: |
         set -euo pipefail
         set +x
@@ -127,6 +144,26 @@ runs:
           echo 'The requested source SHA was not resolved from the configured repository' >&2
           failed=1
         fi
+        # Protected ancestry, asked with the same contents-read token before it is revoked:
+        # the compare of <branch>...<sha> is `identical` or `behind` exactly when the SHA is
+        # the branch tip or one of its ancestors. A missing branch, an API error or anything
+        # else answers false (fail closed), never fails the validation itself.
+        protected_ancestor=false
+        if [[ "${CHECK_PROTECTED_ANCESTRY}" == true && "${failed}" -eq 0 ]]; then
+          for branch in develop uat main; do
+            status="$(curl --fail --silent --retry 3 --retry-delay 2 --retry-max-time 30 \
+              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/compare/${branch}...${requested_sha}?per_page=1" 2>/dev/null \
+              | jq -r '.status // empty' 2>/dev/null || true)"
+            if [[ "${status}" == identical || "${status}" == behind ]]; then
+              protected_ancestor=true
+              echo "protected ancestry: the source SHA is on ${branch}"
+              break
+            fi
+          done
+          [[ "${protected_ancestor}" == true ]] || echo 'protected ancestry: the source SHA is on no protected branch; caches may be restored but not saved'
+        fi
         if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then
           echo 'Source token revocation failed; refusing to execute project code' >&2
           failed=1
@@ -136,4 +173,10 @@ runs:
         git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
         git config --global --unset-all credential.helper 2>/dev/null || true
         find "${RUNNER_TEMP}" -type f -path '*/_runner_file_commands/set_output_*' -exec sh -c ': > "$1"' _ {} \;
+        # Written after the clear above, and only ever the literal true or false.
+        if [[ "${protected_ancestor}" == true ]]; then
+          echo 'protected-ancestor=true' >> "${GITHUB_OUTPUT}"
+        else
+          echo 'protected-ancestor=false' >> "${GITHUB_OUTPUT}"
+        fi
         [[ "${failed}" -eq 0 ]]
