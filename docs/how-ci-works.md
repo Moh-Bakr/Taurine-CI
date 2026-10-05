@@ -159,7 +159,7 @@ place for unreviewed code is a ref whose cache main never reads. Hence two refs:
 | Ref | Runs | Caches |
 | --- | --- | --- |
 | `main` | Only SHAs on `develop`, `uat` or `main` of the source repository (protected ancestry). Anything else is refused, fail-closed, after the token is revoked and before project code, with a message saying to use `untrusted`. | The only ref that may restore or save caches. |
-| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be identical to main's tip, or the run stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
+| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip or an ancestor of it (an older, previously reviewed main commit); a run from an `untrusted` that is ahead of main or has diverged from it stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
 
 ### Dispatching feature-branch validation
 
@@ -179,13 +179,20 @@ Protected tips (`develop`, `uat`, `main`, and the weekly run) keep dispatching f
 that receives the App private key. A workflow that fast-forwards it would need `contents:
 write` and a bypass of untrusted's push restriction, which adds a second writer to a ref that
 holds the key. The safer option is to keep the owner as the only writer and sync by hand after
-each merge to main. The runs enforce it: a run from a stale or diverged `untrusted` fails at
-the guard with a message to sync. Only the admin role may update `untrusted` (its ruleset), and
-the ruleset blocks non-fast-forward updates, so the sync is an admin fast-forward push:
+each merge to main. The guard compares the run's commit with main through the compare API
+(`main...<sha>`) before any token is minted: `identical` (main's tip) and `behind` (an ancestor
+of main's tip) are accepted, `ahead` and `diverged` are refused. This is safe because `untrusted`
+is protected by ruleset 24500573 (no deletion, no force-push, updated only by the admin role) and
+the admin only ever fast-forwards it from main, so every commit it can point at was once main's
+reviewed tip. A merge to main therefore no longer blocks feature-branch runs while `untrusted`
+waits for its sync; a run from a behind `untrusted` still passes, prints a warning in the step
+summary saying how many commits behind it is, and names the sync command. Only the admin role may
+update `untrusted`, and the ruleset blocks non-fast-forward updates, so the sync is an admin
+fast-forward push:
 
 ```bash
 git fetch origin && git push origin origin/main:refs/heads/untrusted
-gh api repos/Moh-Bakr/Taurine-CI/compare/main...untrusted -q '[.status, .ahead_by, .behind_by] | @tsv'   # identical 0 0
+gh api repos/Moh-Bakr/Taurine-CI/compare/main...untrusted -q '[.status, .ahead_by, .behind_by] | @tsv'   # identical 0 0 once synced
 ```
 
 ### Repository settings the owner applies (once)
