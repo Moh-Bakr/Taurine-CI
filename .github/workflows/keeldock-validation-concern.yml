@@ -789,6 +789,6 @@ jobs:
       # The concern's own wall-clock time, excluding queue time; the dispatcher's timings job compares it with a baseline.
       - name: Report concern duration
         if: ${{ always() }}
-        uses: ./.github/actions/timings
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
         with:
           mode: report

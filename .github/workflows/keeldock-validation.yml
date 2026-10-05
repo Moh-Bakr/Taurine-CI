@@ -150,7 +150,7 @@ jobs:
         run: |
           echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}" >> "${GITHUB_STEP_SUMMARY}"
       - name: Tabulate concern timings against the baseline
-        uses: ./.github/actions/timings
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
         with:
           mode: table
           label: KeelDock
