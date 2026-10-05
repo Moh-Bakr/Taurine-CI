@@ -600,12 +600,21 @@ jobs:
               run_deferred rust-net-tests \
                 cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
               ;;
-            rust-app)
+            rust-app-1|rust-app-2)
+              # Two nextest partitions of the same package set (measured: the single concern ran
+              # over 1.8x the next slowest). `count:N/2` splits deterministically; no artifact
+              # crosses between the jobs. Doctests ride with partition 1, the openvpn check with
+              # partition 2, so neither runs twice and the two stay balanced.
+              export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
               # The command tier both shells call, and the two shells' own unit
               # tests. Tauri's `test` feature drives the commands through its
               # mock runtime, so no display or WebView process is started; the
               # webkit2gtk install above is only what the crates link.
-              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              if [[ "${CONCERN}" == rust-app-1 ]]; then
+                rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              else
+                NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              fi
               # The `openvpn` feature of taurine-app links the vendored openvpn3 C++ shim; no
               # test build enables it. A library check compiles it (the C++ build runs, the
               # system libraries above are the ones openvpn3 needs).
@@ -615,8 +624,10 @@ jobs:
               # OpenSSL only resolve inside dbx-core's own workspace; enabling it from the
               # root workspace is deliberately off, so a change that only breaks that feature
               # is not caught by this CI.
-              run_deferred rust-app-openvpn-check \
-                cargo check --locked --lib --package taurine-app --features openvpn
+              if [[ "${CONCERN}" == rust-app-2 ]]; then
+                run_deferred rust-app-openvpn-check \
+                  cargo check --locked --lib --package taurine-app --features openvpn
+              fi
               ;;
             rust-packaging)
               # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
