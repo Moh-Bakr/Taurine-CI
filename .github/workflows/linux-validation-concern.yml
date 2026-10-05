@@ -37,6 +37,11 @@ jobs:
     name: Linux ${{ inputs.concern }}
     environment: source-read
     runs-on: ubuntu-24.04
+    # The visual tier runs inside the same pinned Playwright image the Linux baselines were
+    # generated in (Playwright 1.62.0, Ubuntu noble, linux/amd64; see the private
+    # docs/visual-baselines.md), so hosted and local rendering are identical. Every other
+    # concern runs on the runner image directly.
+    container: ${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}
     # The browser tiers start a dev server, download a browser and drive a
     # real page; the unit and contract concerns stay on the reviewed 30.
     # 45 for the Rust concern. Compiled output is never cached — `target/` holds
@@ -224,7 +229,8 @@ jobs:
           echo "- ${OS_LABEL} Cargo source cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Install the pinned Playwright browser
-        if: startsWith(inputs.concern, 'e2e-')
+        # e2e-visual runs in the Playwright image, whose browsers are preinstalled.
+        if: startsWith(inputs.concern, 'e2e-') && inputs.concern != 'e2e-visual'
         shell: bash
         run: |
           set -euo pipefail

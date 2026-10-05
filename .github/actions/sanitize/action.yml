@@ -225,14 +225,20 @@ runs:
           local report="$1"
           [[ -s "${report}" ]] || { echo '(no JSON report was written: the run ended before the test phase, for example a dev-server start failure)'; return 0; }
           jq -r '
-            def specs: (.suites // [])[] | recurse(.suites[]?) | .specs[]? ;
-            [ specs as $s | $s.tests[]? as $t
+            def clean: gsub("\u001b\\[[0-9;]*[A-Za-z]"; "");
+            def msg($t): ([ $t.results[]?.error.message? // "" ] | map(clean) | join("\n"));
+            def pixels($m): ([ $m | scan("([0-9]+) pixels") | .[0] | tonumber ] | add // 0);
+            def lines($m): [ $m | split("\n")[] | select(test("^[[:space:]]*(Locator|Expected|Received|Error: expect)")) | sub("^[[:space:]]+"; "") ];
+            [ (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
               | select(($t.status // "") != "expected" and ($t.status // "") != "skipped")
+              | (msg($t)) as $m
               | { file: ($s.file // "?"), line: ($s.line // 0), title: ($s.title // "?"), project: ($t.projectName // "?"), status: ($t.status // "?"),
-                  visual: ([ $t.results[]?.error.message? // "" ] | map(select(test("Screenshot comparison failed|toHaveScreenshot|expect\\(.*\\)\\.toMatchSnapshot"))) | length) } ]
-            | (.[] | "FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))"),
-              ( group_by(.file) | map(select(any(.[]; .visual > 0))) | .[]
-                | "visual diffs: \(.[0].file): \(map(.visual) | add) screenshot mismatch(es) in \(length) test(s)" )
-          ' "${report}" 2>/dev/null | cut -c1-220 | awk '!seen[$0]++' | head -60
+                  visual: (if ($m | test("Screenshot comparison failed|toHaveScreenshot")) then 1 else 0 end),
+                  pixels: pixels($m), detail: lines($m) } ] as $f
+            | ($f[] | "FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))",
+                (.detail[:6][] | "    " + (if test("^(Locator|Error: expect)") then .[0:140] else .[0:70] end))),
+              ( $f | group_by(.file) | map(select(any(.[]; .visual > 0))) | .[]
+                | "visual diffs: \(.[0].file): \(map(.visual) | add) screenshot mismatch(es) in \(length) test(s), \(map(.pixels) | add) pixels differ" )
+          ' "${report}" 2>/dev/null | sed -E 's#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g' | cut -c1-220 | awk '!seen[$0]++' | head -90
         }
         TCI_SANITIZE_LIBRARY
