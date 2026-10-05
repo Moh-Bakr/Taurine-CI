@@ -47,3 +47,5 @@ unless problems.empty?
 end
 puts "concern table: #{table.length} Linux concerns (#{opt_in.length} opt-in) match the plan and the result check"
 RUBY
+# Each Linux concern's egress mode (block, or audit with its recorded reason).
+bash .github/policy/check-egress-modes.sh

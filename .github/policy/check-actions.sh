@@ -70,6 +70,8 @@ check_action_references() {
       ./.github/actions/keeldock-proof) ;;
       ./.github/actions/keeldock-nuget-verify) ;;
       ./.github/actions/egress-audit) ;;
+      # Linux egress block mode, called only from the egress-audit composite's enforce phase.
+      ./.github/actions/egress-block) ;;
       # Finding H2: root-needing setup, then the removal of root, before project code.
       ./.github/actions/root-setup) ;;
       ./.github/actions/drop-root) ;;

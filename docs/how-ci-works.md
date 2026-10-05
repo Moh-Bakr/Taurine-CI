@@ -149,6 +149,64 @@ same `source-checkout` order, enforced by the policy), the App can only read the
 repositories, and the key can be rotated (`docs/source-reader-key-rotation.md`). The job
 summary records the residual risk on every Windows job.
 
+## Egress: audit and block
+
+Every source-bearing job runs the `egress-audit` composite: `start` straight after the source
+checkout, `report` last. It records DNS answers and new outbound connections (Linux:
+`resolvectl monitor` and an iptables LOG chain; macOS: `tcpdump`; Windows: the DNS Client
+event log) and publishes only names on the reviewed allow-list (`.github/egress-allowlist.txt`);
+any other name appears as `unlisted:<12-hex SHA-256 prefix>`.
+
+**Block mode (Linux).** The composite takes `mode: audit|block`. A Linux concern's mode comes
+from `ci-matrix.json` (`egress`). In block mode the composite's `enforce` phase, which runs
+after `root-setup` and immediately before `drop-root`, calls the `egress-block` composite:
+
+- a filtering resolver (dnsmasq, `dnsmasq-base` pinned from the runner's Ubuntu archive, as its
+  own system user) forwards only names on the allow-list (scopes `all` and `linux`) to the
+  runner's Azure DNS and answers NXDOMAIN for everything else, so an unlisted name never leaves
+  the runner, not even as a DNS query;
+- every address it returns for an allowed name goes into an nftables set, and the output chain
+  drops by default: loopback, established flows, root's own traffic, the resolver's upstream
+  queries, the Azure wire server and metadata endpoints, the Docker bridges and that set are
+  accepted, everything else is logged and dropped;
+- a NAT rule sends every DNS packet not sent by the resolver (systemd-resolved's upstream
+  queries, or anything asking a public resolver directly) to the filtering resolver;
+- a self-test proves an allowed name resolves and is reachable, an unlisted public name does
+  not resolve, a direct query to a public resolver is filtered, and a literal unlisted address
+  is unreachable.
+
+It fails closed: if a package will not install, the configuration does not parse or the
+self-test fails, the job fails; it never falls back to audit. It is installed while root is
+still available and project code never gets root, so project code cannot undo it. A refused
+name or dropped connection does not fail the job by itself (the job fails only if the build
+does); the report lists them (hashed unless allow-listed) with counts, under "Egress (block
+mode)".
+
+The policy (`check-egress-modes.sh`, with fixtures in `test-policy.sh`) requires every Linux
+concern to name its mode, and an `audit` concern to carry `egress_audit_reason`: a concern
+cannot be switched back to audit without a written exception.
+
+Kept in audit, and why:
+
+- **Linux `e2e-visual`**: it runs inside a job container as root with the host Docker socket,
+  so a host firewall cannot bind it.
+- **Docker-kept jobs** (the live-proof `bastion` arm, Keel Dock `db-containers` and
+  `apphost-cold-start`): Docker access is root-equivalent, so project code could remove the
+  firewall; blocking there would be a claim the job cannot keep.
+- **macOS**: `tcpdump` records only. A `pf` anchor with a filtering resolver is technically
+  possible before `drop-root`, but macOS background services (software update, OCSP, Xcode
+  services) query a long, changing tail of Apple and Akamai names (over a hundred unidentified
+  hashes per run), so it stays in audit until that tail is identified.
+- **Windows**: the job user is an administrator and cannot be demoted, so any firewall rule is
+  removable by project code.
+
+Residual risk in block mode: an allowed name's addresses are often shared CDN or cloud-storage
+front ends (Fastly, Akamai, Azure Front Door, Azure Storage), so a client that connects to an
+allowed address with another host name in TLS SNI reaches whatever else that front end serves;
+a subdomain of an allowed name is forwarded to that operator's own DNS; and root processes
+(the runner's platform agents) are not filtered. The allow-list keeps wildcards to
+operator-owned names for this reason.
+
 ## Ref isolation: main and untrusted
 
 The Actions cache is scoped by ref. A run on `main` reads and writes main's cache scope; a run
@@ -229,7 +287,7 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
 
 | Workflow | Concerns |
 | --- | --- |
-| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and opt-in e2e-visual |
+| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and the opt-in e2e-visual and scan-history |
 | `macos-validation.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app, rust-packaging, rust-tls-openssl |
 | `windows-validation.yml` and `windows-validation-concern.yml` | The same app concerns plus contracts; Rust concerns with `rust=true`; `windows_image` selects `windows-2022` (default) or `windows-2025` |
 | `android-validation.yml` | android-native (debug build for aarch64); android-rust with `rust=true` (compile-only mobile test targets, not executed) |
@@ -305,6 +363,7 @@ Only Linux uses `base_sha`; the other platforms always run their whole list.
 | `source_sha` | every workflow | Exact private commit to validate |
 | `profile` (`full` or `quick`) | Linux | `quick` drops `full_only` concerns (rust-app, rust-db, rust-dbx, scan-security, a11y, regression e2e) and gives PASS (partial) |
 | `visual` | Linux | Adds the Playwright `e2e-visual` tier; leave off until baselines for Linux exist |
+| `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `apphost` | Keel Dock | Adds the experimental Aspire apphost-cold-start concern |
