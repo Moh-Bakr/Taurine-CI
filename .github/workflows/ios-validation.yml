@@ -127,6 +127,14 @@ jobs:
           repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
 
+      - name: Start the egress audit
+        # Audit only: records outbound destinations, never blocks, never fails the job.
+        continue-on-error: true
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: start
+
       - name: Install the shared sanitizers
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
@@ -293,6 +301,14 @@ jobs:
         uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
         with:
           mode: report
+
+      - name: Report observed egress
+        if: always()
+        continue-on-error: true
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: report
 
   timings:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' }}
