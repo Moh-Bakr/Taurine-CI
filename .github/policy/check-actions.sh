@@ -62,6 +62,7 @@ check_action_references() {
       ./.github/actions/keeldock-summary) ;;
       ./.github/actions/keeldock-proof) ;;
       ./.github/actions/keeldock-nuget-verify) ;;
+      ./.github/actions/egress-audit) ;;
       '') ;;
       *)
         echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2

@@ -1,0 +1,238 @@
+name: Egress audit
+description: >
+  Records the outbound network destinations a source-bearing job contacts while
+  private project code runs, using only tools already on the runner image (no
+  third-party Action, no vendor telemetry). Two phases: start, called straight
+  after the source-checkout composite (the token is already revoked), and report,
+  called last under always(), which publishes the observed host names and
+  destination ports to the job log and summary. Audit only: it never blocks a
+  connection and never fails the job. Project code runs with sudo, so a hostile
+  dependency could tamper with what this records; it is evidence for building an
+  allow-list, not a control.
+
+  Coverage per runner: Linux records every DNS answer from systemd-resolved
+  (resolvectl monitor) and logs every new outbound connection from the host and
+  from Docker containers (iptables/ip6tables LOG); a job container (the Linux
+  visual tier) is not covered. macOS captures DNS traffic and outbound TCP SYNs
+  on the default interface with the built-in tcpdump. Windows records every DNS
+  query through the DNS Client operational event log (names only, no connection
+  log).
+
+inputs:
+  phase:
+    description: start or report
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Start the egress audit (Linux, macOS)
+      if: ${{ inputs.phase == 'start' && runner.os != 'Windows' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -uo pipefail
+        state="${RUNNER_TEMP}/egress-audit"
+        mkdir -p "${state}"
+        date +%s > "${state}/started"
+        coverage=()
+        if [[ -f /.dockerenv ]]; then
+          echo 'job container: the host network is not visible from inside it' > "${state}/coverage"
+          exit 0
+        fi
+        if ! sudo -n true 2>/dev/null; then
+          echo 'no passwordless sudo' > "${state}/coverage"
+          exit 0
+        fi
+        if [[ "${RUNNER_OS}" == 'Linux' ]]; then
+          if resolvectl --help 2>/dev/null | grep -q 'monitor'; then
+            # Line-buffered so the record survives an abrupt end of the job. The
+            # redirect is deliberately the runner user's, so the report can read it.
+            # shellcheck disable=SC2024
+            sudo -n nohup stdbuf -oL resolvectl monitor --json=short \
+              >"${state}/dns.jsonl" 2>"${state}/dns.err" </dev/null &
+            echo "$!" > "${state}/dns.pid"
+            coverage+=('DNS answers (resolvectl monitor)')
+          fi
+          logged=0
+          for table in iptables ip6tables; do
+            # New outbound connections that leave the host; loopback and the
+            # Docker bridges are local traffic.
+            if sudo -n "${table}" -w -I OUTPUT 1 ! -o lo ! -o docker+ ! -o br-+ \
+              -m conntrack --ctstate NEW -j LOG --log-prefix 'egress-audit: ' --log-level 6 2>/dev/null; then
+              logged=1
+            fi
+            # Containers (live-proof servers, Keel Dock PostgreSQL) leave through FORWARD.
+            if sudo -n "${table}" -w -L DOCKER-USER -n >/dev/null 2>&1; then
+              sudo -n "${table}" -w -I DOCKER-USER 1 ! -o docker+ ! -o br-+ \
+                -m conntrack --ctstate NEW -j LOG --log-prefix 'egress-audit: ' --log-level 6 2>/dev/null || true
+            fi
+          done
+          (( logged )) && coverage+=('new outbound connections (iptables LOG)')
+        else
+          iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
+          if [[ -n "${iface}" ]]; then
+            # DNS in both directions, IPv4 TCP SYNs, and IPv6 TCP SYNs (no extension headers).
+            # shellcheck disable=SC2024
+            sudo -n nohup tcpdump -n -l -i "${iface}" -s 512 \
+              'udp port 53 or tcp port 53 or (tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn) or (ip6 and ip6[6] == 6 and (ip6[53] & 0x12) == 0x02)' \
+              >"${state}/tcpdump.txt" 2>"${state}/tcpdump.err" </dev/null &
+            echo "$!" > "${state}/tcpdump.pid"
+            coverage+=("DNS and TCP SYNs on ${iface} (tcpdump)")
+          fi
+        fi
+        if (( ${#coverage[@]} )); then
+          (IFS=';'; echo "${coverage[*]}") > "${state}/coverage"
+        else
+          echo 'no recorder could be started' > "${state}/coverage"
+        fi
+        echo "egress-audit: started ($(cat "${state}/coverage"))"
+        exit 0
+
+    - name: Start the egress audit (Windows)
+      if: ${{ inputs.phase == 'start' && runner.os == 'Windows' }}
+      shell: pwsh
+      working-directory: ${{ github.workspace }}
+      run: |
+        $state = Join-Path $env:RUNNER_TEMP 'egress-audit'
+        New-Item -ItemType Directory -Force -Path $state | Out-Null
+        [DateTime]::UtcNow.ToString('o') | Set-Content (Join-Path $state 'started')
+        try {
+          # 256 MiB so a long job does not wrap the log.
+          wevtutil sl Microsoft-Windows-DNS-Client/Operational /e:true /ms:268435456 /q:true
+          if ($LASTEXITCODE -eq 0) { 'DNS queries (DNS Client operational log)' | Set-Content (Join-Path $state 'coverage') }
+          else { 'the DNS Client log could not be enabled' | Set-Content (Join-Path $state 'coverage') }
+        } catch {
+          'the DNS Client log could not be enabled' | Set-Content (Join-Path $state 'coverage')
+        }
+        Write-Output "egress-audit: started ($(Get-Content (Join-Path $state 'coverage')))"
+        exit 0
+
+    - name: Report observed egress (Linux, macOS)
+      if: ${{ always() && inputs.phase == 'report' && runner.os != 'Windows' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -uo pipefail
+        state="${RUNNER_TEMP}/egress-audit"
+        [[ -f "${state}/started" ]] || { echo 'egress-audit: not started in this job'; exit 0; }
+        started="$(cat "${state}/started")"
+        coverage="$(cat "${state}/coverage" 2>/dev/null || echo unknown)"
+        names="${state}/names.txt"; conns="${state}/conns.txt"; map="${state}/map.txt"
+        : > "${names}"; : > "${conns}"; : > "${map}"
+        for pidfile in "${state}/dns.pid" "${state}/tcpdump.pid"; do
+          [[ -f "${pidfile}" ]] || continue
+          sudo -n kill -INT "$(cat "${pidfile}")" 2>/dev/null || true
+        done
+        sleep 1
+        if [[ "${RUNNER_OS}" == 'Linux' ]]; then
+          if [[ -s "${state}/dns.jsonl" ]]; then
+            # name<TAB>address for every A/AAAA answer, and every queried name.
+            jq -r '
+              # IPv6 in the full, uncompressed form the kernel LOG target prints.
+              def hexd: . as $d | "0123456789abcdef" | .[$d:$d + 1];
+              def addr: if length == 4 then map(tostring) | join(".")
+                elif length == 16 then [range(0; 16; 2) as $i | (.[$i] * 256 + .[$i + 1])]
+                  | map([(. / 4096 | floor), ((. / 256 | floor) % 16), ((. / 16 | floor) % 16), (. % 16)]
+                    | map(hexd) | join("")) | join(":")
+                else empty end;
+              (.. | objects | select(has("key") and (.address | type) == "array")
+                | "\(.key.name)\t\(.address | addr)"),
+              (.. | objects | select(has("name") and has("type") and (.name | type) == "string") | "\(.name)\t-")
+            ' "${state}/dns.jsonl" 2>/dev/null | sed -E 's/\.(\t)/\1/' | sort -u > "${map}" || true
+          fi
+          # The kernel LOG lines, from the journal or, failing that, the ring buffer.
+          { sudo -n journalctl -k -o cat --no-pager --since "@${started}" 2>/dev/null | grep 'egress-audit: ' \
+            || sudo -n dmesg 2>/dev/null | grep 'egress-audit: '; } \
+            | sed -nE 's/.* DST=([^ ]+) .* PROTO=([A-Z0-9]+).* DPT=([0-9]+).*/\1 \2 \3/p' > "${conns}" || true
+        else
+          if [[ -s "${state}/tcpdump.txt" ]]; then
+            awk '
+              # Query: "<src>.<port> > <dns>.53: <id>[+] A? name. (n)"
+              / > [^ ]+\.53: [0-9]+/ && /\? / {
+                for (i = 1; i <= NF; i++) if ($i ~ /\?$/ && i < NF) { n = $(i + 1); sub(/\.$/, "", n); print n "\t-"
+                  id = $0; sub(/.*\.53: /, "", id); sub(/[^0-9].*/, "", id); q[id] = n }
+                next
+              }
+              # Answer: "<dns>.53 > <dst>.<port>: <id> 2/0/0 A a.b.c.d, AAAA x:y (n)"
+              /\.53 > / {
+                id = $0; sub(/.*: /, "", id); sub(/[^0-9].*/, "", id)
+                if (!(id in q)) next
+                for (i = 1; i < NF; i++) if ($i == "A" || $i == "AAAA") { a = $(i + 1); sub(/,$/, "", a); print q[id] "\t" a }
+                next
+              }
+            ' "${state}/tcpdump.txt" | sort -u > "${map}" || true
+            awk '
+              /Flags \[S\]/ {
+                for (i = 1; i <= NF; i++) if ($i == ">") { d = $(i + 1); sub(/:$/, "", d)
+                  p = d; sub(/.*\./, "", p); sub(/\.[^.]*$/, "", d); print d " TCP " p }
+              }
+            ' "${state}/tcpdump.txt" > "${conns}" || true
+          fi
+        fi
+        cut -f1 "${map}" | grep -E '^[A-Za-z0-9_.-]+\.[A-Za-z]{2,}$' | tr '[:upper:]' '[:lower:]' | sort -u > "${names}"
+        # One line per destination: the host name(s) that resolved to the address, or the address.
+        report="${state}/report.txt"
+        awk 'NR == FNR { split($0, f, "\t"); if (f[2] != "-") { k = f[2]; h = tolower(f[1]); if (index("," n[k] ",", "," h ",") == 0) n[k] = (n[k] ? n[k] "," : "") h } next }
+          {
+            ip = $1; proto = $2; port = $3
+            local = (ip ~ /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|168\.63\.129\.16$|::1$|fe80:|fd)/)
+            host = (ip in n) ? n[ip] : (local ? "local:" ip : "unresolved:" ip)
+            key = host " " proto "/" port
+            c[key]++
+          }
+          END { for (k in c) print k " " c[k] }' "${map}" "${conns}" | sort > "${report}"
+        echo "::group::egress-audit (${RUNNER_OS}, audit mode)"
+        echo "egress-audit: coverage ${coverage}"
+        while read -r h; do echo "egress-audit-name: ${h}"; done < "${names}"
+        while read -r host port count; do echo "egress-audit-dest: ${host} ${port} ${count}"; done < "${report}"
+        echo '::endgroup::'
+        {
+          printf '### Egress audit (audit mode, nothing blocked)\n\n'
+          printf -- '- Coverage: %s\n- %d host names resolved, %d destination/port pairs contacted\n\n' \
+            "${coverage}" "$(wc -l < "${names}" | tr -d ' ')" "$(wc -l < "${report}" | tr -d ' ')"
+          if [[ -s "${names}" ]]; then
+            printf '<details><summary>Host names</summary>\n\n```\n'
+            head -n 300 "${names}"
+            printf '```\n</details>\n\n'
+          fi
+          if [[ -s "${report}" ]]; then
+            printf '<details><summary>Destinations (host proto/port connections)</summary>\n\n```\n'
+            head -n 300 "${report}"
+            printf '```\n</details>\n'
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+        exit 0
+
+    - name: Report observed egress (Windows)
+      if: ${{ always() && inputs.phase == 'report' && runner.os == 'Windows' }}
+      shell: pwsh
+      working-directory: ${{ github.workspace }}
+      run: |
+        $state = Join-Path $env:RUNNER_TEMP 'egress-audit'
+        $startedFile = Join-Path $state 'started'
+        if (-not (Test-Path $startedFile)) { Write-Output 'egress-audit: not started in this job'; exit 0 }
+        $started = [DateTime]::Parse((Get-Content $startedFile), $null, 'RoundtripKind').ToLocalTime()
+        $coverage = Get-Content (Join-Path $state 'coverage') -ErrorAction SilentlyContinue
+        $names = @()
+        try {
+          # 3006: a DNS query is called for the name in the first property.
+          $names = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-DNS-Client/Operational'; Id = 3006; StartTime = $started } -ErrorAction Stop |
+            ForEach-Object { "$($_.Properties[0].Value)".ToLowerInvariant().TrimEnd('.') } |
+            Where-Object { $_ -match '^[a-z0-9_.-]+\.[a-z]{2,}$' } | Sort-Object -Unique
+        } catch { $names = @() }
+        Write-Output '::group::egress-audit (Windows, audit mode)'
+        Write-Output "egress-audit: coverage $coverage"
+        foreach ($n in $names) { Write-Output "egress-audit-name: $n" }
+        Write-Output '::endgroup::'
+        $summary = @('### Egress audit (audit mode, nothing blocked)', '', "- Coverage: $coverage", "- $(@($names).Count) host names queried (Windows records names, not connections)", '')
+        if (@($names).Count -gt 0) {
+          $summary += '<details><summary>Host names</summary>'
+          $summary += ''
+          $summary += '```'
+          $summary += @($names | Select-Object -First 300)
+          $summary += '```'
+          $summary += '</details>'
+        }
+        $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+        exit 0
