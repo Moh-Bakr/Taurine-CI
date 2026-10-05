@@ -1,0 +1,116 @@
+name: Start the Doris and StarRocks live servers
+description: >
+  Starts the Apache Doris (fe + be) or StarRocks all-in-one server and waits for a live backend.
+  Every server image is pinned by digest. Credentials are per-run throwaways for a
+  loopback container that dies with the runner, masked before first use and handed
+  to the suite only through GITHUB_ENV. Reads the private source only through the
+  checked-out tree and publishes nothing.
+
+inputs:
+  engine:
+    description: Arm to start (doris, starrocks)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Start the doris, starrocks server and wait for readiness
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        ENGINE: ${{ inputs.engine }}
+      run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mysql-client >/dev/null
+          ready=0
+
+          case "${ENGINE}" in
+            doris)
+              # Images pinned by index digest (tags fe-2.1.8 / be-2.1.8, resolved
+              # 2026-10-04; amd64 compressed 1.26 GB fe, 2.14 GB be — the be alone
+              # is over the 2 GB per-engine cap, recorded rather than hidden).
+              # Apache Doris fe + be, the pair the official quick-start
+              # compose brings up (FE keeps the MySQL wire on 9030; the BE is
+              # reached by the FE over the docker network, never from the
+              # host). fe+be are ~3.9 GB compressed. The BE needs minutes to
+              # register and report its tablets after its container starts —
+              # the wait below polls the FE for a live backend and allows
+              # 15 minutes before giving up. Root ships with an empty
+              # password.
+              docker network create --subnet=172.20.80.0/24 dbx-doris-net
+              docker run -d --name dbx-doris-fe --hostname fe \
+                --network dbx-doris-net --ip 172.20.80.2 \
+                -e FE_SERVERS=fe1:172.20.80.2:9010 -e FE_ID=1 \
+                -p 127.0.0.1:9030:9030 \
+                apache/doris@sha256:3e225c86c64ad2a2d45652abe5dea0d482c2c257551e17f323613dcfb6ebf7a8
+              docker run -d --name dbx-doris-be --hostname be \
+                --network dbx-doris-net --ip 172.20.80.3 \
+                -e FE_SERVERS=fe1:172.20.80.2:9010 -e BE_ADDR=172.20.80.3:9050 \
+                apache/doris@sha256:c272e0406d26af1bc2579e49e250858926d7ced28910e7a9df55c01626ea2664
+              for _ in $(seq 1 60); do
+                if mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\G' 2>/dev/null | grep -q 'Alive: true'; then
+                  ready=1
+                  break
+                fi
+                sleep 15
+              done
+              if (( ready == 0 )); then
+                echo 'doris: no live backend after 15 minutes; fe log tail below' >&2
+                docker logs dbx-doris-fe 2>&1 | tail -20 >&2 || true
+                docker logs dbx-doris-be 2>&1 | tail -20 >&2 || true
+                exit 1
+              fi
+              # Two lab facts a fresh single-BE cluster needs pinned, the way
+              # db-lab creates `payments` and sets compatibility knobs for
+              # the engines it hosts: modern Doris ships no `default`
+              # database, and a table's default replication of 3 cannot be
+              # satisfied by one backend. Both are measured, not assumed.
+              mysql -h127.0.0.1 -P9030 -uroot -e 'CREATE DATABASE IF NOT EXISTS `default`'
+              mysql -h127.0.0.1 -P9030 -uroot -e 'ADMIN SET FRONTEND CONFIG ("force_olap_table_replication_num" = "1")'
+              version="$(mysql -h127.0.0.1 -P9030 -uroot -N -e 'select version()' 2>/dev/null | head -1)"
+              {
+                echo "TAURINE_TEST_DORIS=127.0.0.1:9030"
+                echo "PROOF_SERVER_VERSION=${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            starrocks)
+              # Pinned by index digest (tag 3.2.3, resolved 2026-10-04; amd64
+              # compressed 3.62 GB — over the 2 GB per-engine cap, recorded).
+              # StarRocks all-in-one (FE + BE in one container, supervisord).
+              # The image is ~3.6 GB compressed and the docs ask for at least
+              # 4 GB of RAM for Docker; the hosted runner provides more. Same
+              # readiness shape as Doris: poll the FE's MySQL wire on 9030
+              # for a live backend, 20 minutes budget. Root ships with an
+              # empty password. A fresh cluster has no `default` database
+              # (neither engine ships one any more), so create it — the
+              # suite's flavour qualifies table paths by database.
+              docker run -d --name dbx-starrocks --hostname dbx-sr \
+                -p 127.0.0.1:9030:9030 \
+                starrocks/allin1-ubuntu@sha256:f31f55cd091bf623ed8112391fbfc3c9a09c1441113fac714d2fb7ae952aca66
+              for _ in $(seq 1 80); do
+                if mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\G' 2>/dev/null | grep -q 'Alive: true'; then
+                  ready=1
+                  break
+                fi
+                sleep 15
+              done
+              if (( ready == 0 )); then
+                echo 'starrocks: no live backend after 20 minutes; log tail below' >&2
+                docker logs dbx-starrocks 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              mysql -h127.0.0.1 -P9030 -uroot -e 'CREATE DATABASE IF NOT EXISTS `default`' 2>/dev/null
+              version="$(mysql -h127.0.0.1 -P9030 -uroot -N -e 'select version()' 2>/dev/null | head -1)"
+              {
+                echo "TAURINE_TEST_STARROCKS=127.0.0.1:9030"
+                echo "PROOF_SERVER_VERSION=${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            *)
+              echo "Unsupported engine for this composite: ${ENGINE}" >&2
+              exit 2
+              ;;
+          esac

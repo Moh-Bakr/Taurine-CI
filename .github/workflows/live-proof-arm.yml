@@ -1,0 +1,239 @@
+name: Live database proof arm (protected)
+
+# One arm of the live database proofs: a clean hosted runner that checks out the
+# exact private SHA, starts one engine's digest-pinned single-node Docker server,
+# runs the env-gated suite the private repository carries for that engine and
+# publishes only a sanitized summary. No source-bearing artifact, cache or output
+# crosses job boundaries. Called once per arm by live-proofs.yml, which owns the
+# arm roster and each arm's definition (suites, target, filter, report shape).
+#
+# The per-engine servers live in the .github/actions/live-start-* composites, the
+# cargo build, run and summary steps in live-build, live-run and live-summary.
+# Per-engine quirks are recorded beside each engine's start step there.
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to validate from private Taurine
+        required: true
+        type: string
+      engine:
+        description: The arm to prove, one of the names the dispatcher selects
+        required: true
+        type: string
+      config:
+        description: The arm's definition (JSON) from the dispatcher's roster
+        required: true
+        type: string
+      timeout_minutes:
+        description: Job timeout in minutes
+        required: false
+        default: 120
+        type: number
+
+permissions: {}
+
+env:
+  SOURCE_REPOSITORY_ID: '1330267721'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: Taurine
+
+jobs:
+  prove:
+    permissions:
+      contents: read
+    # The dispatcher can be selected on another branch in the UI. Fail closed
+    # unless this exact workflow came from the protected default branch.
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    name: Live proof — ${{ inputs.engine }}
+    environment: source-read
+    runs-on: ubuntu-24.04
+    # Generous by design: the engine servers are slow guests. The Db2 image
+    # needs up to ~20 minutes on first boot alone; the Doris BE registers and
+    # reports tablets for minutes after its container starts; the Rust test
+    # binary builds cold (this control plane caches nothing).
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Start the concern timer
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: start
+
+      - name: Validate protected call input
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          REQUESTED_ENGINE: ${{ inputs.engine }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          ARM_CONFIG: ${{ inputs.config }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo 'live-proofs must run only from the protected main branch' >&2
+            exit 1
+          fi
+          if [[ ! "${REQUESTED_ENGINE}" =~ ^[a-z0-9]+$ ]]; then
+            echo 'engine must be a lower-case arm name from the dispatcher roster' >&2
+            exit 1
+          fi
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
+          # The arm definition is data the later steps read with jq: refuse a
+          # shape that is not exactly what the roster produces.
+          printf '%s\n' "${ARM_CONFIG}" > "${RUNNER_TEMP}/live-arm.json"
+          jq -e --arg engine "${REQUESTED_ENGINE}" '
+            .engine == $engine
+            and (.report | type == "boolean")
+            and ((.blurb // "") | type == "string")
+            and ((.target // "") | test("^[a-z0-9_]*$"))
+            and ((.filter // "") | test("^[a-z0-9_]*$"))
+            and ((.suites // []) | all(type == "string" and test("^[a-z0-9-]+ [a-z0-9_,]+( [a-z0-9_]+)?$")))
+            and ((.target // "") != "" or ((.suites // []) | length) > 0)
+          ' "${RUNNER_TEMP}/live-arm.json" >/dev/null || { echo 'the arm definition is malformed' >&2; exit 1; }
+          printf 'Requested engine: %s\nRequested source SHA: %s\n' "${REQUESTED_ENGINE}" "${REQUESTED_SOURCE_SHA,,}"
+
+      - name: Check out the exact private source SHA
+        id: verified-source
+        # Kept as ./ : the policy matches this exact form for the private-source action.
+        uses: ./.github/actions/source-checkout  # zizmor: ignore[self-repository]
+        with:
+          source-sha: ${{ inputs.source_sha }}
+          app-client-id: ${{ vars.SOURCE_READER_APP_ID }}
+          app-private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          repository-id: ${{ env.SOURCE_REPOSITORY_ID }}
+          repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
+
+      - name: Install the shared sanitizers
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
+
+      - name: Free disk for the server image
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift \
+            /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
+
+      - name: Set up the Rust toolchain and pinned vendored sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The runner's own rustup, not a third-party action: this control
+          # plane adds no action it does not have to.
+          rustup --version >/dev/null
+          # `[patch.crates-io]` in the workspace root points at `vendor/`
+          # by path, and cargo refuses to load a manifest that is not there —
+          # so *every* cargo command in this repository fails on a fresh
+          # checkout until the script has run. `fetch` verifies each download
+          # against the sha256 pinned in vendor.lock.
+          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
+            echo 'vendor-fetch: failed (detailed output withheld)' >&2
+            exit 1
+          fi
+          echo 'vendor-fetch: passed'
+
+      - name: Install native build packages (bastion proof only)
+        if: ${{ inputs.engine == 'bastion' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The bastion proof is a `taurine-app` integration test, and that
+          # crate links Tauri: the same Ubuntu archive packages the hosted
+          # rust-app concern installs (.github/actions/rust-toolchain).
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang libclang-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config >/dev/null
+          echo 'native-packages: installed'
+
+      - name: Build the engine's proof test binary
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/live-build  # zizmor: ignore[self-repository]
+
+      # Every engine starts its documented single-node container, waits for the
+      # server's own readiness signal (not a fixed sleep), records the server
+      # version, and exports the exact environment variables the private
+      # suite's gates read. One composite per server family; the arm that is
+      # not selected skips its step.
+      - name: Start the Doris or StarRocks server
+        if: ${{ inputs.engine == 'doris' || inputs.engine == 'starrocks' }}
+        uses: ./.github/actions/live-start-mpp  # zizmor: ignore[self-repository]
+        with:
+          engine: ${{ inputs.engine }}
+
+      - name: Start the Db2 or Informix server
+        if: ${{ inputs.engine == 'db2' || inputs.engine == 'informix' }}
+        uses: ./.github/actions/live-start-ibm  # zizmor: ignore[self-repository]
+        with:
+          engine: ${{ inputs.engine }}
+
+      - name: Start the RocketMQ server
+        if: ${{ inputs.engine == 'rocketmq' }}
+        uses: ./.github/actions/live-start-rocketmq  # zizmor: ignore[self-repository]
+        with:
+          engine: ${{ inputs.engine }}
+
+      - name: Start the IRIS server
+        if: ${{ inputs.engine == 'iris' }}
+        uses: ./.github/actions/live-start-iris  # zizmor: ignore[self-repository]
+        with:
+          engine: ${{ inputs.engine }}
+
+      - name: Start the PostgreSQL, TLS or bastion servers
+        if: ${{ inputs.engine == 'postgres' || inputs.engine == 'pgtls' || inputs.engine == 'bastion' }}
+        uses: ./.github/actions/live-start-pg  # zizmor: ignore[self-repository]
+        with:
+          engine: ${{ inputs.engine }}
+
+      - name: Start the MySQL or SQL Server server
+        if: ${{ inputs.engine == 'mysql' || inputs.engine == 'mssql' }}
+        uses: ./.github/actions/live-start-sql  # zizmor: ignore[self-repository]
+        with:
+          engine: ${{ inputs.engine }}
+
+      - name: Record the running server images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker ps --format '{{.Names}} {{.Status}}'
+          # What actually ran, as the references the containers were created
+          # from (digest-pinned): published in the summary as the proof's
+          # image identity. Names and image references only.
+          docker ps --format '{{.Names}}' | while read -r c; do
+            docker inspect --format '{{.Name}} {{.Config.Image}}' "${c}"
+          done | sed 's#^/##' > "${RUNNER_TEMP}/proof-images.txt"
+          cat "${RUNNER_TEMP}/proof-images.txt"
+
+      - name: Run the engine's live proof
+        uses: ./.github/actions/live-run  # zizmor: ignore[self-repository]
+
+      - name: Publish sanitized live-proof summary
+        if: always()
+        uses: ./.github/actions/live-summary  # zizmor: ignore[self-repository]
+        with:
+          engine: ${{ inputs.engine }}
+          source-sha: ${{ inputs.source_sha }}
+
+      # The job's own wall-clock time, shown next to its result; the dispatcher's
+      # timings job tabulates it against a committed baseline.
+      - name: Report concern duration
+        if: ${{ always() }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: report

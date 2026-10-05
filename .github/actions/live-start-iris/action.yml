@@ -1,0 +1,79 @@
+name: Start the IRIS live server
+description: >
+  Starts InterSystems IRIS Community and waits for an authenticated Atelier namespace read.
+  Every server image is pinned by digest. Credentials are per-run throwaways for a
+  loopback container that dies with the runner, masked before first use and handed
+  to the suite only through GITHUB_ENV. Reads the private source only through the
+  checked-out tree and publishes nothing.
+
+inputs:
+  engine:
+    description: Arm to start (iris)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Start the iris server and wait for readiness
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        ENGINE: ${{ inputs.engine }}
+      run: |
+          set -euo pipefail
+          ready=0
+
+          case "${ENGINE}" in
+            iris)
+              # InterSystems IRIS Community from InterSystems' own registry
+              # (anonymous pull), pinned by the multi-arch index digest of
+              # tag 2025.3 (amd64 layers measured 1.15 GB compressed from the
+              # registry manifest, inside the 2 GB per-engine cap). The driver
+              # speaks Atelier REST (/api/atelier/v1) on the image's private
+              # web server, port 52773, plain HTTP; the superserver is not
+              # published because nothing here uses it. A fresh image forces a
+              # password change for its predefined accounts, so the lane hands
+              # the entrypoint a throwaway generated per run through its
+              # documented `--password-file` flag (the instance consumes the
+              # file at first start). The password is masked before it is
+              # written anywhere and reaches the suite only through the
+              # environment. Readiness is the endpoint the driver's connect
+              # probe uses — an authenticated namespace read answering 200 —
+              # not a fixed sleep, 10 minutes budget.
+              iris_pass="ci$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              echo "::add-mask::${iris_pass}"
+              printf '%s\n' "${iris_pass}" > "${RUNNER_TEMP}/iris-password.txt"
+              chmod 644 "${RUNNER_TEMP}/iris-password.txt"
+              docker run -d --name dbx-iris \
+                -p 127.0.0.1:52773:52773 \
+                -v "${RUNNER_TEMP}/iris-password.txt:/tmp/iris-password.txt" \
+                containers.intersystems.com/intersystems/iris-community@sha256:00a19ce756e96775c3f04514f8a6f0636122d25bdc22a53e01b57eef12dcaed9 \
+                --password-file /tmp/iris-password.txt
+              iris_code=000
+              for _ in $(seq 1 60); do
+                iris_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+                  -u "SuperUser:${iris_pass}" http://127.0.0.1:52773/api/atelier/v1/USER 2>/dev/null || true)"
+                if [[ "${iris_code}" == "200" ]]; then
+                  ready=1
+                  break
+                fi
+                sleep 10
+              done
+              if (( ready == 0 )); then
+                echo "iris: Atelier namespace read never answered 200 in 10 minutes (last HTTP ${iris_code}); log tail below" >&2
+                docker logs dbx-iris 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              version="$(curl --silent --max-time 10 -u "SuperUser:${iris_pass}" http://127.0.0.1:52773/api/atelier/ 2>/dev/null | jq -r '.result.content.version // empty' 2>/dev/null || true)"
+              {
+                echo "TAURINE_TEST_IRIS=127.0.0.1:52773"
+                echo "TAURINE_TEST_IRIS_PASSWORD=${iris_pass}"
+                echo "PROOF_SERVER_VERSION=${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            *)
+              echo "Unsupported engine for this composite: ${ENGINE}" >&2
+              exit 2
+              ;;
+          esac

@@ -1,0 +1,163 @@
+name: Start the Db2 and Informix live servers
+description: >
+  Starts the IBM Db2 Community or Informix Developer server (privileged, amd64) and waits for the engine itself to report ready.
+  Every server image is pinned by digest. Credentials are per-run throwaways for a
+  loopback container that dies with the runner, masked before first use and handed
+  to the suite only through GITHUB_ENV. Reads the private source only through the
+  checked-out tree and publishes nothing.
+
+inputs:
+  engine:
+    description: Arm to start (db2, informix)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Start the db2, informix server and wait for readiness
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        ENGINE: ${{ inputs.engine }}
+      run: |
+          set -euo pipefail
+          ready=0
+
+          case "${ENGINE}" in
+            db2)
+              # Pinned by index digest (tag 11.5.9.0, resolved 2026-10-04; amd64
+              # compressed 1.58 GB).
+              # IBM Db2 Community on the amd64-only icr.io image. Requires a
+              # privileged container and ~10 minutes on first boot while the
+              # instance and the DBNAME database are created; IBM's own docs
+              # say readiness is the "Setup has completed" line in the
+              # container log. Database names are limited to 8 bytes, hence
+              # `taurine`. The instance password is generated at run time and
+              # handed to the suite through the environment — never printed.
+              db2_pass="ci-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              docker run -d --name dbx-db2 --privileged \
+                -p 127.0.0.1:50000:50000 \
+                -e LICENSE=accept -e DB2INST1_PASSWORD="${db2_pass}" -e DBNAME=taurine \
+                icr.io/db2_community/db2@sha256:77095d4e04cf4448c0257086afcb2c166193d718dc33441da3b949f97e21efd5
+              for _ in $(seq 1 90); do
+                if docker logs dbx-db2 2>&1 | grep -q 'Setup has completed'; then
+                  ready=1
+                  break
+                fi
+                sleep 15
+              done
+              if (( ready == 0 )); then
+                echo 'db2: setup did not complete in 22 minutes; log tail below' >&2
+                docker logs dbx-db2 2>&1 | tail -20 >&2 || true
+                exit 1
+              fi
+              for _ in $(seq 1 12); do
+                if (exec 3<>/dev/tcp/127.0.0.1/50000) 2>/dev/null; then
+                  ready=2
+                  break
+                fi
+                sleep 5
+              done
+              if (( ready != 2 )); then
+                echo 'db2: setup reported completion but port 50000 never opened' >&2
+                exit 1
+              fi
+              version="$(docker exec dbx-db2 su - db2inst1 -c db2level 2>/dev/null | grep -m1 'DB2 v' || true)"
+              {
+                echo "TAURINE_TEST_DB2=127.0.0.1:50000"
+                echo "TAURINE_TEST_DB2_DB=taurine"
+                echo "TAURINE_TEST_DB2_USER=db2inst1"
+                echo "TAURINE_TEST_DB2_PASS=${db2_pass}"
+                echo "PROOF_SERVER_VERSION=${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            informix)
+              # Pinned by manifest digest (tag 14.10.FC7W1DE, resolved 2026-10-04;
+              # single-platform image, compressed 0.87 GB).
+              # IBM Informix Developer Edition, the amd64-only community
+              # image (the icr.io community repository needs IBM
+              # entitlement; this Docker Hub image is the anonymously
+              # pullable one the driver's descriptor names). Privileged, and
+              # run with a TTY as its documentation recommends. Readiness is
+              # the server's own onstat reporting the engine online — run by
+              # binary path with the environment spelled out, because `su -
+              # informix` demands a password this image's account cannot
+              # answer (measured: every readiness probe silently failed
+              # auth while the server had been online for twenty minutes).
+              # The developer image ships no empty application database, so
+              # the lane creates a logged database for the suite, the way
+              # the local lab creates `payments` for other engines. The
+              # password is the image's published default for user
+              # `informix`.
+              # onstat/dbaccess need three variables the image's own layout
+              # implies and no login profile exports to `docker exec`.
+              docker run -d -t --name dbx-informix --hostname dbx-ifx --privileged \
+                -p 127.0.0.1:9088:9088 -p 127.0.0.1:9089:9089 \
+                -e LICENSE=accept \
+                ibmcom/informix-developer-database@sha256:069febf6b08d72866ad8d7b06c1caf190df423f7b407de1ce18e3d89a8f8803d
+              # Two readiness signals, either of which proves the server is
+              # open for business: the engine's own onstat by binary path,
+              # and the SQLI listener dialled **inside the container** — the
+              # host-mapped port is useless here, because docker's userland
+              # proxy accepts a connection the moment the mapping exists,
+              # before the server listens (measured: a 250-millisecond-old
+              # container "passed" that probe and the lane sailed past a
+              # server that had not finished init). The listener probe
+              # exists because the exec probe failed for twenty minutes on
+              # one runner while the container log showed the server online
+              # since minute one — the probe, not the server, was the
+              # suspect, and a single signal makes a twenty-minute round
+              # trip the only way to learn that.
+              # `onstat` exits non-zero as a status bitmask even while the
+              # server is On-Line (exit 5 measured on 14.10.FC7W1DE), so the
+              # answer is what it prints, never what it returns — and with
+              # `pipefail` its exit code must not reach the probe. The same
+              # bitmask killed the version capture below through `set -e`:
+              # the server came up, the database was created, and the step
+              # died mid-assignment without a word.
+              informix_online=""
+              for _ in $(seq 1 90); do
+                informix_online="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -E -- '-- On-?Line' || true)"
+                if [[ -n "${informix_online}" ]]; then
+                  ready=1
+                  break
+                fi
+                if docker exec dbx-informix bash -c 'exec 3<>/dev/tcp/127.0.0.1/9088' 2>/dev/null; then
+                  echo 'informix: onstat did not answer but the SQLI listener is accepting (in-container)'
+                  ready=2
+                  break
+                fi
+                sleep 20
+              done
+              if (( ready == 0 )); then
+                echo 'informix: not online after 30 minutes' >&2
+                echo 'the onstat probe said:' >&2
+                docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>&1 | tail -5 >&2 || echo '  (the probe itself could not run)' >&2
+                docker exec dbx-informix bash -c 'echo exec-alive' 2>&1 | tail -1 >&2 || echo '  (docker exec itself failed)' >&2
+                echo 'container log tail:' >&2
+                docker logs dbx-informix 2>&1 | tail -30 >&2 || true
+                exit 1
+              fi
+              if ! printf 'create database taurine with log;\n' |
+                docker exec -i dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/dbaccess -' >/dev/null 2>&1; then
+                echo 'informix: creating the proof database failed; dbaccess output below' >&2
+                printf 'create database taurine with log;\n' |
+                  docker exec -i dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/dbaccess -' 2>&1 | tail -10 >&2 || true
+                exit 1
+              fi
+              version="$(docker exec dbx-informix bash -c 'INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix ONCONFIG=onconfig /opt/ibm/informix/bin/onstat -' 2>/dev/null | grep -m1 'IBM Informix' || true)"
+              {
+                echo "TAURINE_TEST_INFORMIX=127.0.0.1:9088"
+                echo "TAURINE_TEST_INFORMIX_DB=taurine"
+                echo "TAURINE_TEST_INFORMIX_USER=informix"
+                echo "TAURINE_TEST_INFORMIX_PASS=in4mix"
+                echo "PROOF_SERVER_VERSION=${version}"
+              } >> "${GITHUB_ENV}"
+              ;;
+
+            *)
+              echo "Unsupported engine for this composite: ${ENGINE}" >&2
+              exit 2
+              ;;
+          esac
