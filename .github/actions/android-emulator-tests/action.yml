@@ -28,7 +28,11 @@ runs:
         # SHA-256. The system image is pinned by API level, ABI and variant; Google publishes
         # no per-revision checksum for it, so its revision is the one the repository serves.
         sdkmanager_bin="${RUNNER_TEMP}/android-cmdline-tools/cmdline-tools/bin/sdkmanager"
-        avdmanager_bin="${RUNNER_TEMP}/android-cmdline-tools/cmdline-tools/bin/avdmanager"
+        # avdmanager infers the SDK root from where it is installed, so run the same pinned
+        # tools from inside the SDK (sdkmanager's --sdk_root flag has no avdmanager equivalent).
+        mkdir -p "${ANDROID_HOME}/cmdline-tools"
+        cp -R "${RUNNER_TEMP}/android-cmdline-tools/cmdline-tools" "${ANDROID_HOME}/cmdline-tools/pinned-ci"
+        avdmanager_bin="${ANDROID_HOME}/cmdline-tools/pinned-ci/bin/avdmanager"
         [[ -x "${sdkmanager_bin}" && -x "${avdmanager_bin}" ]] || { echo 'pinned Android command-line tools are unavailable' >&2; exit 1; }
         image='system-images;android-34;default;x86_64'
         "${sdkmanager_bin}" --sdk_root="${ANDROID_HOME}" platform-tools emulator "${image}" >"${RUNNER_TEMP}/sdkmanager-emulator.log" 2>&1 \

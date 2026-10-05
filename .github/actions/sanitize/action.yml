@@ -58,6 +58,67 @@ runs:
                   /^[[:space:]]*[|][[:space:]]*$/d'
         }
 
+        # Dependency names are never published. A scanner finding is published as a count, a
+        # category (lint code, severity, advisory id) and `name_hash`: the first 8 hex
+        # characters of the SHA-256 of the dependency name, which is stable between runs (so a
+        # finding can be tracked) and is looked up locally with the same tool and config in the
+        # private checkout. An advisory id (RUSTSEC, GHSA) does not encode a crate name; the
+        # advisory title and package are never printed. The detail functions below read a
+        # scanner's own report file and print only that shape.
+        name_hash() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            printf '%s' "$1" | sha256sum | cut -c1-8
+          else
+            printf '%s' "$1" | shasum -a 256 | cut -c1-8
+          fi
+        }
+
+        # cargo-deny bans, licences and sources: `severity lint-code name-hash`, one per
+        # distinct finding, duplicate-version noise left to the counts. Input is cargo-deny's
+        # JSON lines.
+        deny_policy_detail() {
+          local sev code name
+          jq -r 'select(.type == "diagnostic")
+            | select((.fields.severity // "" | ascii_downcase) as $s | $s == "error" or $s == "warning")
+            | select((.fields.code // "") != "duplicate")
+            | [(.fields.severity | ascii_downcase), (.fields.code // "-"), (.fields.graphs[0].Krate.name // "-")] | @tsv' "$1" 2>/dev/null |
+            while IFS=$'\t' read -r sev code name; do
+              printf '  %s %s %s\n' "${sev}" "${code}" "$(name_hash "${name}")"
+            done | sort -u | sanitize_stream | head -60
+        }
+
+        # cargo-deny advisories: the advisory id only (never the package or the title).
+        deny_advisory_detail() {
+          jq -r 'select(.type == "diagnostic") | select(.fields.advisory != null) | "  \(.fields.advisory.id)"' "$1" 2>/dev/null |
+            sort -u | sanitize_stream | head -30
+        }
+
+        # cargo-machete: for each unused dependency the manifest's index in the sorted manifest
+        # list (file $2, one repository-relative path per line) and the dependency's name hash.
+        machete_detail() {
+          local line cur='?' idx manifest
+          while IFS= read -r line; do
+            if [[ "${line}" == *' -- '*: ]]; then
+              manifest="${line#* -- }"; manifest="${manifest%:}"; manifest="${manifest#./}"
+              idx="$(grep -nxF -- "${manifest}" "$2" | head -n 1 | cut -d: -f1 || true)"
+              cur="${idx:-?}"
+            elif [[ "${line}" =~ ^[[:space:]]+([A-Za-z0-9_-]+)$ ]]; then
+              printf '  manifest #%s %s\n' "${cur}" "$(name_hash "${BASH_REMATCH[1]}")"
+            fi
+          done < <(tr -d '\r' <"$1") | sort -u | sanitize_stream | head -80
+        }
+
+        # npm audit (JSON in $1): high and critical findings as `name-hash severity advisory ids`.
+        npm_audit_detail() {
+          local name sev ids
+          jq -r '.vulnerabilities // {} | to_entries[]
+            | select(.value.severity == "high" or .value.severity == "critical")
+            | [.key, .value.severity, ([.value.via[]? | objects | .url // empty | sub("^.*/"; "")] | unique | join(","))] | @tsv' "$1" 2>/dev/null |
+            while IFS=$'\t' read -r name sev ids; do
+              printf '  %s %s %s\n' "$(name_hash "${name}")" "${sev}" "${ids}"
+            done | sort -u | sanitize_stream | head -20
+        }
+
         # A failed test's captured output (`---- name stdout ----` up to the next
         # `failures:`) is dropped whole, compiler warnings are dropped, an
         # `error[Ennnn]` header is published with its `-->` location, and an uncoded

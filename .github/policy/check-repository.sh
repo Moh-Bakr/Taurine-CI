@@ -20,7 +20,7 @@ while IFS= read -r -d '' path; do
   if [[ "$path" =~ ^\.github/policy/[a-z0-9-]+\.(sh|rb)$ ]]; then
     continue
   fi
-  if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json ]]; then
+  if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt ]]; then
     continue
   fi
   # Flat documentation guides: markdown directly under docs/, nothing else.
