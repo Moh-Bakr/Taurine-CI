@@ -34,6 +34,7 @@ check_action_references() {
       ./.github/workflows/select-concerns.yml) ;;
       ./.github/actions/select-concerns) ;;
       ./.github/actions/scan-concern) ;;
+      ./.github/actions/rust-lint-enforce) ;;
       ./.github/actions/linux-concern-js) ;;
       ./.github/actions/linux-concern-e2e) ;;
       ./.github/actions/linux-concern-rust) ;;
