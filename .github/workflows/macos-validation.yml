@@ -23,6 +23,15 @@ on:
         required: false
         default: false
         type: boolean
+      flavor:
+        description: Build flavour for the rust-packaging smoke (prod, dev or uat)
+        required: false
+        default: prod
+        type: choice
+        options:
+          - prod
+          - dev
+          - uat
 
 permissions: {}
 
@@ -285,6 +294,7 @@ jobs:
         uses: ./.github/actions/macos-concern-rust  # zizmor: ignore[self-repository]
         with:
           concern: ${{ matrix.concern }}
+          flavor: ${{ inputs.flavor }}
 
       # Saved only from the protected main branch (every job here already refuses to
       # run elsewhere; the condition repeats it so the write permission is explicit),
