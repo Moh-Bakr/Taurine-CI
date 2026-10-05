@@ -297,7 +297,7 @@ jobs:
         with:
           mode: table
           label: Android
-          baseline-seconds: '{"android-native":552}'
+          baseline-seconds: '{"android-native":657,"android-rust":604}'
           name-pattern: '^Android (?<concern>.+) validation$'
           github-token: ${{ github.token }}
 
