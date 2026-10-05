@@ -1,0 +1,161 @@
+name: macOS Rust concern runner
+description: |
+  Runs the macOS Rust concern (crate-test families, packaging, TLS spike) inside the protected
+  concern job, after the source is checked out and the token revoked. The reviewed case body of
+  macos-validation.yml, moved here by responsibility.
+
+inputs:
+  concern:
+    description: The macOS validation concern being run
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run the macOS Rust concern
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        CONCERN: ${{ inputs.concern }}
+        OS_LABEL: macOS
+      run: |
+        set -euo pipefail
+        source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
+        source "${RUNNER_TEMP}/taurine-ci/report.sh"
+
+        # The helpers below are the Linux `rust-*` concerns' own (see
+        # linux-validation-concern.yml, which is where the reasoning for each lives),
+        # with the changes a macOS or Windows runner needs and nothing else:
+        # - carriage returns are stripped before any pattern runs, because Windows
+        #   tools end lines with CRLF and the anchored patterns below would never match;
+        # - the path rules also cover a Windows drive path, the `\\?\` prefix and the
+        #   registry checkout of a dependency, so no absolute runner path is published;
+        # - the failure classes a Windows or macOS test binary can add (a missing entry
+        #   point or DLL, a stack overflow, a dynamic library that would not load) and a
+        #   vcpkg port build failure get their own fixed one-line classification.
+        # Everything else, including what is and is not published, is unchanged: only
+        # failing test names, `error[Ennnn]` headers with their location, and cargo's
+        # own fixed failure shapes leave this runner.
+
+
+
+        # Which workspace crates each Rust concern tests on this OS. Every member of the
+        # private workspace belongs to a concern, and `rust_coverage_check` (run by
+        # `rust-domain`) fails when a member is in none of them, so a crate added later
+        # cannot go untested by omission. The database family needs no list: `rust-db`
+        # selects it with cargo's own `taurine-db*` package glob.
+        rust_domain_packages=(
+          taurine-model taurine-atomic taurine-auth taurine-crypt taurine-store
+          taurine-repo taurine-replicate taurine-sync taurine-notes taurine-core
+          taurine-exec taurine-scripting taurine-mock taurine-git
+          taurine-transport-fs taurine-transport-git taurine-transport-wifi
+          taurine-cli
+        )
+
+        rust_net_packages=(taurine-peer-sys taurine-net taurine-net-conformance)
+        rust_ovpn_packages=(taurine-ovpn-sys)
+        rust_app_packages=(taurine-app taurine-desktop taurine-mobile)
+
+        rust_coverage_check() {
+          local members member missing=0
+          if ! members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort -u)" || [[ -z "${members}" ]]; then
+            echo 'error: failed to load the workspace member list' >&2
+            return 1
+          fi
+          while IFS= read -r member; do
+            case " ${rust_domain_packages[*]} ${rust_net_packages[*]} ${rust_ovpn_packages[*]} ${rust_app_packages[*]} " in
+              *" ${member} "*) continue ;;
+            esac
+            [[ "${member}" == taurine-db* ]] && continue
+            echo "error: workspace member ${member} is tested by no ${OS_LABEL} Rust concern" >&2
+            missing=1
+          done <<<"${members}"
+          return "${missing}"
+        }
+
+        # `--locked`: the committed Cargo.lock is what was reviewed and what the Linux
+        # contracts concern's advisory sweep audits. `--no-fail-fast`: every failing
+        # target is reported in one dispatch. No `--features`: each crate is tested as
+        # its manifest builds it, as on Linux. Env-gated live suites print SKIPPED and
+        # pass when their variable is unset; the live servers belong to live-proofs.yml.
+        case "${CONCERN}" in
+          rust-domain)
+            # The same crates as Linux, plus taurine-cli, whose exit codes and paths
+            # are the part a user on this OS can observe. taurine-crypt links the real
+            # macOS Keychain here (its default `keychain` feature, apple-native) against
+            # the throwaway keychain the toolchain step created, then is tested again
+            # without the feature, which is the build a machine with no keychain gets.
+            run_deferred rust-coverage rust_coverage_check
+            run_deferred rust-crypt-no-keychain-tests \
+              cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
+            run_deferred rust-domain-tests \
+              cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
+            # dbx-core's `os-keyring` feature takes the keyring crate's Apple backend on
+            # macOS; no hosted job compiles it (the dbx-core tests run on Linux without
+            # the feature). A non-test library check does, without running anything.
+            run_deferred rust-dbx-core-keyring-check \
+              cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --features os-keyring
+            ;;
+          rust-db)
+            # Every `taurine-db*` crate. Platform-neutral engines, but the family has
+            # `#[cfg(unix)]` socket paths (mongo, mysql, sidecar, engine) that Linux
+            # also takes and macOS-only linking of its bundled C (sqlite, duckdb,
+            # libsql), which only a macOS compile proves.
+            db_packages=()
+            while IFS= read -r db_package; do
+              db_packages+=("--package=${db_package}")
+            done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
+            rust_tests rust-db-tests "${db_packages[@]}"
+            ;;
+          rust-net)
+            # The dialer, the egress verifier and the conformance suites. The latter
+            # depend on the vendored openvpn3 shim, so this concern gets the same C++
+            # setup as `rust-ovpn`, which tests the shim crate on its own.
+            run_deferred rust-net-tests \
+              cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
+            ;;
+          rust-ovpn)
+            # The vendored openvpn3 shim. On macOS openvpn3 compiles its own platform
+            # integration (MacDNSWatchdog, ReachabilityTracker, MacSleep) against
+            # CoreFoundation, SystemConfiguration, IOKit and Security, which no Linux
+            # run can compile. The OpenVPN lab tests are `#[ignore]`d: they need the
+            # local lab's servers.
+            run_deferred rust-ovpn-tests \
+              cargo test --locked --no-fail-fast "${rust_ovpn_packages[@]/#/--package=}"
+            ;;
+          rust-app)
+            # The command tier both shells call and the two shells' own unit tests.
+            # Tauri's `test` feature drives the commands through its mock runtime, so
+            # no window or WebView process is started; AppKit and WKWebView are what
+            # the crates link.
+            rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+            ;;
+          rust-packaging)
+            # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
+            # CLI, to prove the app still bundles on this OS. Nothing is signed, notarised
+            # or uploaded; the output stays on the runner.
+            # The frontend build (tsc && vite build) aborted with exit 134 on the hosted
+            # runner; a 4 GB heap rules a Node out-of-memory in or out.
+            run_deferred rust-packaging-smoke \
+              env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" \
+              npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci
+            ;;
+          rust-tls-openssl)
+            # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
+            # one). Present only on sources that carry it; otherwise a note and a pass,
+            # not a silent skip of a concern the source never had.
+            tls_manifest=taurine-backend/taurine-tls-openssl/Cargo.toml
+            if [[ -f "${tls_manifest}" ]]; then
+              run_deferred rust-tls-openssl-tests \
+                cargo test --locked --manifest-path "${tls_manifest}"
+            else
+              echo "rust-tls-openssl: the source has no ${tls_manifest}; nothing to build"
+              run_deferred rust-tls-openssl-absent true
+            fi
+            ;;
+          *)
+            echo "Unsupported macOS Rust concern: ${CONCERN}" >&2
+            exit 2
+            ;;
+        esac
+        finish_deferred

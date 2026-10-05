@@ -24,9 +24,25 @@ runs:
         # "detailed output withheld".
 
         cargo_detail() {
-          cargo_sanitize "$1" |
-            grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^[[:space:]]*= note: .*(lint level|-D |-W |deny\(|warn\()|^Diff in |^test .* FAILED$|^test result: |^failures:$|^smoke: ' |
-            head -40 >&2 || true
+          # Same rule as cargo_test_detail (see the POLICY note in the sanitize library): an
+          # `error[Ennnn]` is its code and location only, an uncoded error its fixed shape or
+          # "(message withheld)"; lint-level notes, rustfmt diffs and smoke lines are fixed shapes.
+          cargo_sanitize "$1" | strip_excerpts | awk '
+            /^warning: / { block = "warning"; pending = ""; next }
+            /^error\[E[0-9]+\]: / { block = "error"; pending = ""; code = $1; sub(/\]:.*$/, "]", code); print code; next }
+            /^error: / {
+              block = "error"; pending = ""
+              if ($0 ~ /^error: (could not compile|aborting due to|test failed|[0-9]+ targets? failed|failed to run custom build command for|linking with |failed to (download|select|get|load|parse|fetch)|no matching package)/) print
+              else pending = "yes"
+              next
+            }
+            /^[[:space:]]*--> / {
+              if (block == "error") { if (pending != "") print "error: (message withheld)"; pending = ""; print }
+              next
+            }
+            /^[[:space:]]*= note: .*(lint level|-D |-W |deny\(|warn\()/ { print; next }
+            /^Diff in / || /^test .* FAILED$/ || /^test result: / || /^failures:$/ || /^smoke: / { print }
+          ' | head -40 >&2 || true
         }
 
         # One line saying which kind of failure it was, so the classification
@@ -97,6 +113,39 @@ runs:
         # The packaging smoke build (an unsigned Tauri build): which phase failed and a fixed
         # class of the reason. Cargo's own error shapes follow from cargo_test_detail; nothing
         # else from the output is published.
+        # What failed after the frontend build started: the lines after vite's start line
+        # (or the whole log when there is none) that are build errors, as fixed classes with
+        # quoted strings blanked, plus repo-relative file:line locations of TypeScript and
+        # vite errors and the first bundler stage word seen. Messages are never republished.
+        build_stage_lines() {
+          local log="$1" body stage
+          body="$(sanitize_stream <"${log}" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | awk '{ all[NR] = $0 } /vite v[0-9.]+ building/ { start = NR } END { for (i = (start ? start : 1); i <= NR; i++) print all[i] }')"
+          [[ -n "${body}" ]] || return 0
+          stage="$(grep -oiE 'transforming|rendering chunks|computing gzip size|building for production|resolving|bundl(e|ing)' <<<"${body}" | tail -1)"
+          echo "build stage reached: ${stage:-unknown}"
+          echo 'build error lines (quoted text blanked):'
+          grep -E '^(error|Error|ERROR)|error during build|error TS[0-9]+|Could not resolve|\[plugin|\[vite|Build failed|ELIFECYCLE|ENOENT|ERR_[A-Z_]+|Command failed|exit code|Cannot find|is not exported|failed to' <<<"${body}" |
+            sed -E "s/error (TS[0-9]+): .*/error \\1/; s/\"[^\"]*\"/\"...\"/g; s/'[^']*'/'...'/g" | sed -E 's/^[[:space:]]+//' | cut -c1-160 | awk '!seen[$0]++' | head -20
+          echo 'locations (file:line):'
+          grep -oE '(^|[ (])[A-Za-z0-9_./@-]+\.(ts|tsx|js|mjs|vue|css|json)[:(][0-9]+' <<<"${body}" | sed -E 's/^[ (]//; s/[(]/:/' | awk '!seen[$0]++' | head -12
+        }
+
+        # Why a Node step (tsc, vite, rollup, esbuild) died, as one fixed class plus TS codes.
+        # Only the class and `TS####` codes are published, never a message.
+        node_crash_class() {
+          local log="$1" clean class codes
+          clean="$(tr -d '\r' <"${log}" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
+          if grep -qE 'JavaScript heap out of memory|FATAL ERROR: .*(Allocation failed|heap)|Reached heap limit' <<<"${clean}"; then class='heap out of memory'
+          elif grep -qE 'error TS[0-9]+' <<<"${clean}"; then class="TS error count: $(grep -cE 'error TS[0-9]+' <<<"${clean}")"
+          elif grep -qiE 'esbuild|rollup' <<<"${clean}" && grep -qiE 'panic|SIGSEGV|SIGABRT|Segmentation fault|service was stopped|crash' <<<"${clean}"; then class='rollup or esbuild crash'
+          elif grep -qE 'SIGABRT|SIGSEGV|SIGBUS|Abort trap|Segmentation fault|core dumped|exit code 13[0-9]|exited with code 13[0-9]|Illegal instruction' <<<"${clean}"; then class='native crash (signal or abort)'
+          else class='no Node failure class recognised'
+          fi
+          echo "node failure class: ${class}"
+          codes="$(grep -oE 'TS[0-9]{3,5}' <<<"${clean}" | sort | uniq -c | sort -rn | head -12 | awk '{printf "%s(x%s) ", $2, $1}')"
+          [[ -z "${codes}" ]] || echo "TS codes: ${codes}"
+        }
+
         packaging_detail() {
           local log="$1" phase reason
           if grep -qE 'Running (beforeBuildCommand|before_build_command)|beforeBuildCommand' "${log}" && ! grep -qE '^[[:space:]]*Compiling ' "${log}"; then
@@ -114,13 +163,93 @@ runs:
           elif grep -qE 'error(\[E[0-9]+\])?: could not compile|error\[E[0-9]+\]' "${log}"; then reason='Rust compilation failure'
           elif grep -qiE 'frontendDist|dist.*(does not exist|not found)' "${log}"; then reason='frontend output directory missing'
           elif grep -qiE 'tauri.conf|invalid configuration|unknown field' "${log}"; then reason='Tauri configuration error'
-          elif grep -qiE 'version mismatched|mismatch' "${log}"; then reason='Tauri package version mismatch'
+          elif grep -qiE 'Found version mismatched Tauri packages|version mismatched Tauri' "${log}"; then reason='Tauri package version mismatch'
           elif grep -qE 'No space left on device' "${log}"; then reason='runner disk exhaustion'
           else reason='unclassified (output withheld)'
           fi
           echo "packaging phase: ${phase}; reason: ${reason}" >&2
           ts_diagnostics "${log}"
           tauri_version_mismatch "${log}" >&2 || true
+          if [[ "${reason}" == 'Tauri package version mismatch' ]]; then tauri_versions_inventory >&2 || true; fi
+          if [[ "${reason}" == 'Tauri package version mismatch' ]]; then
+            echo 'lines naming a mismatch (charset-restricted):' >&2
+            sanitize_stream <"${log}" | grep -iE -A8 'Found version mismatched' | grep -E '^[[:space:]]*[A-Za-z0-9@/_.() :+*>-]+$' | sed -E 's/^[[:space:]]+//' | cut -c1-160 | head -14 >&2 || true
+          fi
+          build_stage_lines "${log}" >&2 || true
+          node_crash_class "${log}" >&2 || true
+        }
+
+        # Installed `@tauri-apps/*` npm package versions per install root, and the locked
+        # `tauri*` crate versions: package names, repo-relative directories and version numbers
+        # only. Shows which install (root, desktop or mobile) the CLI resolved a skewed package
+        # from, and whether a global or stray copy exists.
+        tauri_versions_inventory() {
+          local dir pkg name ver
+          echo 'installed @tauri-apps packages (install root: package version):'
+          for dir in . taurine-desktop taurine-mobile; do
+            for pkg in "${dir}"/node_modules/@tauri-apps/*/package.json; do
+              [[ -f "${pkg}" ]] || continue
+              name="$(jq -r '.name // "?"' "${pkg}" 2>/dev/null | cut -c1-80)"
+              ver="$(jq -r '.version // "?"' "${pkg}" 2>/dev/null | cut -c1-30)"
+              echo "  ${dir}: ${name} ${ver}"
+            done
+          done
+          echo 'locked tauri crates (Cargo.lock: name version):'
+          awk '/^name = "tauri(-[a-z0-9-]+)?"$/ { n = $3; gsub(/"/, "", n); getline v; gsub(/[^0-9a-zA-Z.+-]/, "", v); sub(/^version/, "", v); print "  " n " " v }' Cargo.lock 2>/dev/null | head -40
+          echo "global tauri CLI on PATH: $(command -v tauri >/dev/null 2>&1 && echo yes || echo no)"
+          echo "npm global @tauri-apps packages: $(npm ls -g --depth=0 2>/dev/null | grep -c '@tauri-apps' || true)"
+        }
+
+        # A test binary that cannot start: name it (crate name without the hash) and the DLLs
+        # it imports that cannot be found. The import list comes from llvm-objdump (Windows) on
+        # the built test executables; only file names of public libraries are published, as
+        # fixed classes: "missing import" (not in system32, the binary's directory or PATH).
+        loader_detail() {
+          local log="$1" dir exe base dll found line
+          echo 'test binary load failure detail (binary: missing imports; names only):'
+          # Binaries named in the log, hashes stripped.
+          tr -d '\r' <"${log}" | grep -oE '[A-Za-z0-9_-]+-[0-9a-f]{16}\.exe' | sed -E 's/-[0-9a-f]{16}\.exe$//' | sort -u | head -10 | sed 's/^/  named in log: /' || true
+          dir="${CARGO_TARGET_DIR:-}"
+          [[ -n "${dir}" ]] || return 0
+          local objdump=''
+          for c in llvm-objdump "/c/Program Files/LLVM/bin/llvm-objdump.exe"; do
+            if command -v "${c}" >/dev/null 2>&1 || [[ -x "${c}" ]]; then objdump="${c}"; break; fi
+          done
+          if [[ -z "${objdump}" ]]; then echo '  llvm-objdump unavailable: import list not read'; return 0; fi
+          local seen="${RUNNER_TEMP}/loader-missing.txt"
+          : >"${seen}"
+          : >"${RUNNER_TEMP}/loader-path.txt"
+          for exe in "$(cygpath -u "${dir}" 2>/dev/null || echo "${dir}")"/debug/deps/*.exe; do
+            [[ -f "${exe}" ]] || continue
+            base="$(basename "${exe}" .exe | sed -E 's/-[0-9a-f]{16}$//')"
+            while IFS= read -r dll; do
+              case "${dll}" in api-ms-win-*|ext-ms-win-*) continue ;; esac
+              found=0
+              if [[ -f "/c/Windows/System32/${dll}" || -f "$(dirname "${exe}")/${dll}" ]]; then found=1
+              elif command -v "${dll}" >/dev/null 2>&1; then found=1
+              elif cmd //c "where ${dll}" >/dev/null 2>&1; then
+                found=1
+                # Resolved from PATH rather than System32: record where (a runner tool
+                # directory, public image paths) because a shadowing copy of the wrong
+                # version is the usual cause of an entry-point failure.
+                echo "${dll}|PATH:$(cmd //c "where ${dll}" 2>/dev/null | head -1 | tr -d '\r' | sed -E 's#\\[^\\]*$##; s#^[A-Za-z]:\\Users\\[^\\]*#<user>#' | cut -c1-80)" >>"${RUNNER_TEMP}/loader-path.txt"
+              fi
+              if [[ "${found}" == 0 ]]; then echo "${dll}|${base}" >>"${seen}"; fi
+            done < <("${objdump}" -p "${exe}" 2>/dev/null | sed -n 's/^[[:space:]]*DLL Name: \([A-Za-z0-9_.-]*\.dll\)$/\1/p' | sort -u)
+          done
+          if [[ -s "${seen}" ]]; then
+            echo '  imports not found (DLL: binaries needing it, up to 4):'
+            cut -d'|' -f1 "${seen}" | sort -u | while IFS= read -r dll; do
+              echo "    ${dll}: $(grep -F "${dll}|" "${seen}" | cut -d'|' -f2 | sort -u | head -4 | tr '\n' ' ')"
+            done | head -20
+          fi
+          if [[ -s "${RUNNER_TEMP}/loader-path.txt" ]]; then
+            echo '  imports resolved from PATH, not System32 (DLL: first directory):'
+            sort -u "${RUNNER_TEMP}/loader-path.txt" | sed -E 's/^([^|]*)\|PATH:/    \1: /' | head -20
+          fi
+          if [[ ! -s "${seen}" ]]; then
+            echo '  every imported DLL resolves from the runner; the failure is an entry point (a DLL version mismatch), not a missing file'
+          fi
         }
 
         run_quiet() {
@@ -166,14 +295,17 @@ runs:
                 packaging_detail "${log}"
               fi
               # cargo-nextest: the failing tests, signals, timeouts and flaky retries by name.
-              nextest_lines="$(nextest_failures "${log}")"
+              nextest_lines="$(nextest_failures "${log}" || true)"
               if [[ -n "${nextest_lines}" ]]; then
                 echo 'nextest failures (status, test binary and name):' >&2
                 printf '%s\n' "${nextest_lines}" >&2
                 nextest_summary "${log}" >&2 || true
               fi
+              if grep -qE '0xc0000139|STATUS_ENTRYPOINT_NOT_FOUND|0xc0000135|STATUS_DLL_NOT_FOUND|Library not loaded|error while loading shared libraries' "${log}"; then
+                loader_detail "${log}" >&2 || true
+              fi
               # The panicking tests with a fixed class of each panic and its file:line.
-              panics="$(panic_summary "${log}")"
+              panics="$(panic_summary "${log}" || true)"
               if [[ -n "${panics}" ]]; then
                 echo 'panics (test, file:line, class; messages withheld):' >&2
                 printf '%s\n' "${panics}" >&2
@@ -202,10 +334,15 @@ runs:
             fi
             if [[ "${label}" == e2e-* ]]; then
               # The failing specs by name (list reporter lines and annotation titles).
-              pw="$(playwright_failures "${log}")"
+              pw="$(playwright_failures "${log}" || true)"
               if [[ -n "${pw}" ]]; then
                 echo 'failing specs (spec > title):' >&2
                 printf '%s\n' "${pw}" >&2
+              fi
+              pwj="$(playwright_json_failures "${RUNNER_TEMP}/test-ids/${label}.json" || true)"
+              if [[ -n "${pwj}" ]]; then
+                echo 'failing specs from the JSON report:' >&2
+                printf '%s\n' "${pwj}" >&2
               fi
             fi
             if [[ "${label}" == bundle-budget || "${label}" == check-bundle ]]; then
@@ -299,7 +436,9 @@ runs:
             # says: ask for them on the command line (status shown while running, repeated in
             # the final list) so a failure is never reduced to counts.
             run_deferred "${label}" cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail ${NEXTEST_PARTITION:+--partition "${NEXTEST_PARTITION}"} "$@"
-            run_deferred "${label%-tests}-doctests" cargo test --locked --doc --no-fail-fast "$@"
+            if [[ "${NEXTEST_DOCTESTS:-run}" != skip ]]; then
+              run_deferred "${label%-tests}-doctests" cargo test --locked --doc --no-fail-fast "$@"
+            fi
           else
             run_deferred "${label}" cargo test --locked --no-fail-fast "$@"
           fi

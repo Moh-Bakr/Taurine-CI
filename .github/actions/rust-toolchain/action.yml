@@ -37,7 +37,7 @@ runs:
         cargo --version
 
     - name: Install the pinned cargo-nextest release
-      if: ${{ inputs.concern == 'rust-app' || inputs.concern == 'rust-db' }}
+      if: ${{ startsWith(inputs.concern, 'rust-app') || inputs.concern == 'rust-db' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
       env:
@@ -137,7 +137,7 @@ runs:
         case "${CONCERN}" in
           rust-domain) extra_packages=(libdbus-1-dev pkg-config) ;;
           rust-net) extra_packages=(libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev libssl-dev pkg-config) ;;
-          rust-app) extra_packages=(libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
+          rust-app|rust-app-1|rust-app-2|rust-packaging) extra_packages=(libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
           rust-dbx) extra_packages=(libfontconfig1-dev libfreetype-dev libssl-dev pkg-config) ;;
           rust-tls-openssl) extra_packages=(libssl-dev pkg-config) ;;
         esac
@@ -355,7 +355,13 @@ runs:
         # floating install.
         llvm_bin='/c/Program Files/LLVM/bin'
         if [[ ! -f "${llvm_bin}/libclang.dll" ]]; then
-          choco install llvm --version=18.1.8 --no-progress -y
+          # The installer's SHA-256 is pinned here (LLVM-18.1.8-win64.exe, the digest the
+          # Chocolatey package's own install script carries) and Chocolatey is told to
+          # verify the download against it, so a changed package script or a replaced release
+          # asset fails the install instead of running.
+          choco install llvm --version=18.1.8 --no-progress -y \
+            --download-checksum-x64=94af030060d88cc17e9f00ef1663ebdc1126b35e16bebdfa1e807984b70abd8f \
+            --download-checksum-type-x64=sha256
         fi
         [[ -f "${llvm_bin}/libclang.dll" ]] || { echo 'libclang.dll is unavailable' >&2; exit 1; }
 

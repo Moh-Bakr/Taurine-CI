@@ -17,11 +17,11 @@ inputs:
     default: src
   gitleaks-fail:
     description: >
-      Whether a gitleaks finding fails the concern. Starts as false (warning only,
-      rule ids and counts) while known fixture keys in the source are triaged; change
-      the default here to true, in a reviewed commit, to enforce.
+      Whether a gitleaks finding fails the concern. Enforced (true) now that the known
+      fixture keys are triaged in the source's allowlist; set to false, in a reviewed
+      commit, to go back to warning only. Rule ids and counts only are ever published.
     required: false
-    default: 'false'
+    default: 'true'
 
 runs:
   using: composite

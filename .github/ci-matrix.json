@@ -35,11 +35,13 @@
   "excluded_trees": {
     "taurine-backend/dbx-core": [
       "rust-dbx",
-      "rust-app"
+      "rust-app-1",
+      "rust-app-2"
     ],
     "taurine-backend/dbx-mongo-shell": [
       "rust-dbx",
-      "rust-app"
+      "rust-app-1",
+      "rust-app-2"
     ],
     "taurine-backend/taurine-tls-openssl": [
       "rust-tls-openssl"
@@ -133,14 +135,23 @@
         ],
         "timeout": 60
       },
-      "rust-app": {
+      "rust-app-1": {
         "rust_packages": [
           "taurine-app",
           "taurine-desktop",
           "taurine-mobile"
         ],
         "full_only": true,
-        "timeout": 90
+        "timeout": 60
+      },
+      "rust-app-2": {
+        "rust_packages": [
+          "taurine-app",
+          "taurine-desktop",
+          "taurine-mobile"
+        ],
+        "full_only": true,
+        "timeout": 60
       },
       "rust-dbx": {
         "excluded_trees": [

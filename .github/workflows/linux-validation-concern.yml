@@ -18,6 +18,10 @@ on:
         required: false
         default: 60
         type: number
+    secrets:
+      SOURCE_READER_PRIVATE_KEY:
+        description: The source-reader App private key, passed explicitly by the dispatcher (never inherited)
+        required: true
 
 permissions: {}
 
@@ -33,6 +37,12 @@ jobs:
     name: Linux ${{ inputs.concern }}
     environment: source-read
     runs-on: ubuntu-24.04
+    # The visual tier runs inside the same pinned Playwright image the Linux baselines were
+    # generated in (Playwright 1.62.0, Ubuntu noble, linux/amd64; see the private
+    # docs/visual-baselines.md), so hosted and local rendering are identical. Every other
+    # concern runs on the runner image directly.
+    # Deliberate: the image is pinned by digest; zizmor cannot see through the expression form.
+    container: ${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}  # zizmor: ignore[unpinned-images]
     # The browser tiers start a dev server, download a browser and drive a
     # real page; the unit and contract concerns stay on the reviewed 30.
     # 45 for the Rust concern. Compiled output is never cached — `target/` holds
@@ -82,6 +92,26 @@ jobs:
             exit 1
           fi
 
+      # The pinned Playwright image lacks jq (curl, git, bash and sha256sum are present), which
+      # the shared composites use. Installed from the image's own Ubuntu noble archive, as root,
+      # pinned to the 1.7.1 release line; it holds no source and runs before the checkout.
+      - name: Install jq in the visual container
+        if: inputs.concern == 'e2e-visual'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y --no-install-recommends 'jq=1.7.1-3ubuntu0.24.04.*'
+          # The source-checkout composite needs these too; present in the pinned image, and
+          # installed only if a future image drops one.
+          for tool in git curl; do
+            command -v "${tool}" >/dev/null 2>&1 || apt-get install -y --no-install-recommends "${tool}"
+          done
+          jq --version
+          git --version
+          curl --version | head -n 1
+
       - name: Check out the exact private source SHA
         id: verified-source
         # Kept as ./ : the policy matches this exact form for the private-source action.
@@ -110,7 +140,8 @@ jobs:
           root: true
           desktop: true
           mobile: true
-          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' }}
+          # The browser tiers are frontend-only: they do not need the vendored OpenVPN3 sources.
+          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' && !startsWith(inputs.concern, 'e2e-') }}
 
       - name: Set up the Rust toolchain
         if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
@@ -220,7 +251,8 @@ jobs:
           echo "- ${OS_LABEL} Cargo source cache: ${state} (${kept} verified, ${dropped} dropped)" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Install the pinned Playwright browser
-        if: startsWith(inputs.concern, 'e2e-')
+        # e2e-visual runs in the Playwright image, whose browsers are preinstalled.
+        if: startsWith(inputs.concern, 'e2e-') && inputs.concern != 'e2e-visual'
         shell: bash
         run: |
           set -euo pipefail
@@ -245,418 +277,39 @@ jobs:
         with:
           scanner: all
 
-      - name: Run isolated Linux validation concern
-        id: concern-validation
-        if: ${{ inputs.concern != 'scan-security' }}
+      - name: Run the isolated Linux JavaScript concern
+        id: concern-js
+        if: ${{ contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/linux-concern-js  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+
+      - name: Run the isolated Linux browser concern
+        id: concern-e2e
+        if: ${{ startsWith(inputs.concern, 'e2e-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/linux-concern-e2e  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+
+      - name: Run the isolated Linux Rust concern
+        id: concern-rust
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/linux-concern-rust  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+
+      # A concern no family above handles must fail loudly, never pass by omission.
+      - name: Reject an unsupported concern
+        if: ${{ inputs.concern != 'scan-security' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) || startsWith(inputs.concern, 'e2e-') || inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
         shell: bash
         env:
           CONCERN: ${{ inputs.concern }}
-          OS_LABEL: Linux
         run: |
-          set -euo pipefail
-          source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          source "${RUNNER_TEMP}/taurine-ci/report.sh"
-
-
-          # Which workspace crates each Rust concern tests. Every member of the
-          # private workspace belongs to exactly one concern, and
-          # `rust_coverage_check` (run by `rust-domain`) fails when a member is
-          # in none of them — so a crate added later cannot go untested by
-          # omission. The database family needs no list: `rust-db` selects it
-          # with cargo's own `taurine-db*` package glob, so a new driver crate
-          # is in it the day it joins the workspace.
-          rust_domain_packages=(
-            taurine-model taurine-atomic taurine-auth taurine-crypt taurine-store
-            taurine-repo taurine-replicate taurine-sync taurine-notes taurine-core
-            taurine-exec taurine-scripting taurine-mock taurine-git
-            taurine-transport-fs taurine-transport-git taurine-transport-wifi
-          )
-          rust_net_packages=(taurine-peer-sys taurine-net taurine-ovpn-sys taurine-net-conformance)
-          rust_app_packages=(taurine-app taurine-desktop taurine-mobile)
-
-          rust_coverage_check() {
-            local members member missing=0
-            if ! members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)" || [[ -z "${members}" ]]; then
-              echo 'error: failed to load the workspace member list' >&2
-              return 1
-            fi
-            while IFS= read -r member; do
-              case " taurine-cli ${rust_domain_packages[*]} ${rust_net_packages[*]} ${rust_app_packages[*]} " in
-                *" ${member} "*) continue ;;
-              esac
-              [[ "${member}" == taurine-db* ]] && continue
-              echo "error: workspace member ${member} is tested by no Linux Rust concern" >&2
-              missing=1
-            done <<<"${members}"
-            return "${missing}"
-          }
-
-          if [[ "${CONCERN}" == e2e-* ]]; then cd taurine-desktop; fi
-          case "${CONCERN}" in
-            contracts)
-              # Every sub-step runs and is reported (the checks are independent: a failed
-              # contracts check must not hide the wire check, the package tests or the
-              # advisory sweep), through the same deferred reporting as the Rust concerns.
-              run_deferred contracts-check npm run check:contracts
-              run_deferred wire-check npm run check:wire
-              # The flaky-test quarantine list must have no expired entry, and the third-party
-              # notices must match the lockfiles; both are static checks of the source.
-              run_deferred quarantine-check npm run check:quarantine
-              run_deferred notices-check npm run check:notices
-              run_deferred packages-tests npm run test:packages -- \
-                --reporter=default --reporter=json \
-                --outputFile.json="${RUNNER_TEMP}/test-ids/packages.json"
-
-              # Supply-chain sweep (milestone-1 audit, tooling-gap finding;
-              # coverage widened per the 2026-10-02 security conformance
-              # audit): the RustSec advisory database is swept against EVERY
-              # Cargo.lock committed to the private source on every
-              # contracts concern. The
-              # scanner is the RustSec project's own release tarball, pinned
-              # here to an exact version AND an exact sha256 recorded in this
-              # file — a changed or moved release fails the checksum gate
-              # instead of being silently installed, so this step cannot
-              # float. No Rust toolchain is pulled in for it: a scanner that
-              # could compile anything is also a step that could execute
-              # anything, and this one only needs to read a lock file.
-              # Unmaintained-crate warnings (rustls-pemfile, paste) are
-              # recorded acceptances tracked in the private repository and do
-              # not fail the concern; only vulnerabilities do.
-              run_deferred cargo-audit-install bash -c '
-                set -euo pipefail
-                bin_dir="${RUNNER_TEMP}/cargo-audit-bin"
-                mkdir -p "${bin_dir}"
-                tgz="${RUNNER_TEMP}/cargo-audit-v0.22.2.tgz"
-                curl --fail --silent --show-error --retry 2 --location \
-                  --output "${tgz}" \
-                  "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz"
-                echo "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  ${tgz}" | sha256sum --check --status
-                tar -xzf "${tgz}" -C "${bin_dir}"
-                "${bin_dir}/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit" --version
-              '
-              # Accepted advisories are recorded in exactly one place: the
-              # reviewed `.cargo/audit.toml` committed at the root of the
-              # private source, which cargo-audit picks up automatically from
-              # its working directory. This workflow hard-codes no advisory
-              # ids, so the suppression list and its review record cannot
-              # drift apart across the repository boundary: an entry removed
-              # from that baseline un-suppresses CI on the next run (fail
-              # closed), and a finding the baseline does not name fails the
-              # concern. Each entry's crate, locked version, dependency path,
-              # rationale and review-by note live in the baseline itself,
-              # beside the lock it qualifies — the reachability record and
-              # the suppression are the same artifact.
-              #
-              # Why every lock, not just the root one: vendored forks and
-              # sub-workspaces commit their own resolved pins (the backend
-              # sub-workspaces and the vendored rumqttc fork each carry a
-              # Cargo.lock), so sweeping only the workspace root leaves whole
-              # dependency sets unscanned. The enumeration is `find`,
-              # excluding only build output (target/) and npm's installed
-              # tree (node_modules/, gitignored — a lock an npm package
-              # ships there is not this repository's resolution). All
-              # discovered locks are audited even after one fails, so a
-              # single run names every failing lock, and on failure the
-              # findings are published exactly as the single-lock sweep
-              # published them.
-              # The sweep needs the pinned scanner; if its install failed, say so instead of
-              # failing a second time on a missing binary.
-              if [[ "${deferred_results[*]}" == *"cargo-audit-install|failed"* ]]; then
-                run_deferred cargo-audit bash -c 'echo "cargo-audit not run: the pinned scanner did not install" >&2; exit 1'
-              else
-              run_deferred cargo-audit bash -c '
-                set -euo pipefail
-                audit_bin="${RUNNER_TEMP}/cargo-audit-bin/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit"
-                failed=0
-                while IFS= read -r lock; do
-                  if "${audit_bin}" audit --file "${lock}"; then
-                    echo "cargo-audit: ${lock}: passed"
-                  else
-                    echo "error: unaccepted advisory findings in ${lock}" >&2
-                    failed=1
-                  fi
-                done < <(find . -name Cargo.lock -not -path "*/target/*" -not -path "*/node_modules/*" | sort)
-                if [[ "${failed}" -ne 0 ]]; then
-                  echo "error: the committed Cargo.lock advisory sweep failed" >&2
-                fi
-                exit "${failed}"
-              '
-              fi
-              ;;
-            frontend-build-budget)
-              # The desktop typecheck runs once, in desktop-quality; it is not repeated here.
-              run_quiet vite-preflight bash -c 'test -f taurine-desktop/node_modules/vite/bin/vite.js && test -x taurine-desktop/node_modules/.bin/vite'
-              run_quiet desktop-vite-build bash -c 'cd taurine-desktop && npm exec --offline -- vite build'
-              run_quiet mobile-build npm --prefix taurine-mobile run build
-              run_quiet bundle-budget npm run check:bundle
-              ;;
-            desktop-shard-1)
-              run_quiet desktop-tests-shard-1 npm --prefix taurine-desktop run test -- --shard=1/2 --no-file-parallelism \
-                --reporter=default --reporter=json \
-                --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-1.json"
-              ;;
-            desktop-shard-2)
-              run_quiet desktop-tests-shard-2 npm --prefix taurine-desktop run test -- --shard=2/2 --no-file-parallelism \
-                --reporter=default --reporter=json \
-                --outputFile.json="${RUNNER_TEMP}/test-ids/desktop-shard-2.json"
-              ;;
-            desktop-quality)
-              run_quiet desktop-typecheck npm --prefix taurine-desktop run typecheck
-              run_quiet desktop-lint npm --prefix taurine-desktop run lint
-              ;;
-            e2e-critical)
-              # The three narrow tiers together: they share a dev server start,
-              # and splitting 156 tests across three runners would spend more on
-              # `npm ci` than on testing.
-              #
-              # The JSON reporter writes the per-test inventory (file, title,
-              # status, duration) to RUNNER_TEMP for the publishing step below;
-              # it is read by `scripts/ci/collect-test-ids.ts` from the checked
-              # out source and sanitized there. It never leaves this runner
-              # unsanitized. The console reporter stays `github`, so the log and
-              # its failure diagnostics are exactly what they were before.
-              export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/e2e-critical.json"
-              run_quiet e2e-critical npx --no-install playwright test \
-                --reporter=github --reporter=json \
-                --project=smoke --project=critical --project=shell-browser
-              ;;
-            e2e-visual)
-              # The visual tier: screenshot comparison against baselines committed in the source
-              # (Linux ones, `-linux` suffixed). Opt-in: it runs only when the dispatch sets
-              # visual=true, after the baselines exist. Comparison images and diffs stay on the
-              # runner; only the runner's pass/fail lines are published.
-              export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/e2e-visual.json"
-              run_quiet e2e-visual npx --no-install playwright test \
-                --reporter=github --reporter=json \
-                --project=visual
-              ;;
-            e2e-a11y)
-              # Serial by the project's own config: axe walks the whole tree, and
-              # two of them racing on one dev server produced a timeout rather
-              # than a finding.
-              export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/e2e-a11y.json"
-              run_quiet e2e-a11y npx --no-install playwright test \
-                --reporter=github --reporter=json --project=a11y
-              ;;
-            e2e-regression-1|e2e-regression-2|e2e-regression-3|e2e-regression-4)
-              # Playwright's own sharding, so a rebalanced suite does not need a
-              # workflow edit. The shard index is the concern's own suffix.
-              export PLAYWRIGHT_JSON_OUTPUT_NAME="${RUNNER_TEMP}/test-ids/${CONCERN}.json"
-              run_quiet "${CONCERN}" npx --no-install playwright test \
-                --reporter=github --reporter=json \
-                --project=regression --shard="${CONCERN##*-}/4"
-              ;;
-            taurine-cli)
-              # Format and lint first: they are seconds and need almost nothing
-              # compiled, so a style failure does not arrive after a full build.
-              run_quiet cli-fmt cargo fmt --package taurine-cli -- --check
-
-              # `--keep-going` because this lane is dispatched, not pushed, and
-              # every dispatch costs the whole matrix. Cargo stops the build at
-              # the first unit that errors, so a denied lint anywhere in the
-              # closure hides every lint behind it and each one costs another
-              # full run to discover. Keeping going reports them all at once;
-              # the exit status is unchanged, so the gate is no weaker.
-              #
-              # The closure, not just this package: `cargo clippy` wraps every
-              # *workspace* member with clippy-driver and clippy-driver applies
-              # the trailing `--deny warnings` to each of them, so `--package
-              # taurine-cli` still lints the sibling crates it depends on. That
-              # is why a failure here can name a file outside `taurine-cli`.
-              run_quiet cli-clippy cargo clippy --package taurine-cli --all-targets --keep-going -- --deny warnings
-              run_quiet cli-tests cargo test --package taurine-cli
-              run_quiet cli-build cargo build --package taurine-cli --release
-
-              # The binary's documented contract, exercised on the artifact that
-              # was just built rather than on the library behind it. Both cases
-              # are hermetic: no network, no fixture server, no collection that
-              # could drift. `taurine-cli` unit tests cover report shapes; what
-              # they cannot cover is whether the produced executable still
-              # starts and still exits with the codes CI pipelines branch on.
-              # Each expectation says what it observed when it fails. A bare
-              # `test` under `set -e` exits silently, which would leave
-              # `cli-smoke: failed` with an empty log and nothing to read. Exit
-              # codes and flag names are the binary's documented contract, not
-              # source, so they are safe to print.
-              run_quiet cli-smoke bash -c '
-                set -euo pipefail
-                bin=target/release/taurine
-                if [ ! -x "$bin" ]; then
-                  echo "smoke: the release build produced no executable at the expected path" >&2
-                  exit 1
-                fi
-
-                # --help must succeed: a pipeline that probes for the CLI would
-                # otherwise read a non-zero exit as "not installed".
-                set +e
-                "$bin" --help >/dev/null 2>&1
-                help_status=$?
-                set -e
-                if [ "$help_status" -ne 0 ]; then
-                  echo "smoke: --help exited $help_status, expected 0" >&2
-                  exit 1
-                fi
-
-                # An unreadable collection must exit 2, not 1. The difference is
-                # load-bearing: 1 means tests failed and 2 means the run never
-                # started, and a pipeline that confuses them reports a broken
-                # config as a failing test suite.
-                set +e
-                "$bin" test /nonexistent/collection.json >/dev/null 2>&1
-                missing_status=$?
-                set -e
-                if [ "$missing_status" -ne 2 ]; then
-                  echo "smoke: a missing collection exited $missing_status, expected 2" >&2
-                  exit 1
-                fi
-
-                # Malformed JSON is the same class of failure and must agree.
-                tmp="$(mktemp -d)"
-                printf "{ not json" > "$tmp/bad.json"
-                set +e
-                "$bin" test "$tmp/bad.json" >/dev/null 2>&1
-                bad_status=$?
-                set -e
-                rm -rf "$tmp"
-                if [ "$bad_status" -ne 2 ]; then
-                  echo "smoke: a malformed collection exited $bad_status, expected 2" >&2
-                  exit 1
-                fi
-              '
-              ;;
-            # The crate-test concerns. Shared by all four workspace ones:
-            # - `--locked`: the committed Cargo.lock is what was reviewed and
-            #   what the contracts concern's advisory sweep audits, so a test
-            #   run must not quietly resolve anything else;
-            # - `--no-fail-fast`: the `--keep-going` argument above, for tests.
-            #   Every failing target is reported in one dispatch; the exit
-            #   status is unchanged;
-            # - no `--features`/`--all-features`: each crate is tested as its
-            #   manifest builds it. That leaves `taurine-app`'s opt-in `openvpn`
-            #   and `dbx-breadth` code paths out, as `cargo test --workspace`
-            #   does.
-            # Env-gated live suites (`TAURINE_TEST_<ENGINE>=host:port`) print
-            # SKIPPED and pass when the variable is unset, and `#[ignore]`d lab
-            # tests stay ignored; the live servers belong to live-proofs.yml.
-            rust-domain)
-              # The application's storage, sync, scripting and git core — every
-              # crate below the command tier that is not a database or network
-              # crate. taurine-crypt is run a second time without its default
-              # `keychain` feature: that is the build a machine with no OS
-              # keychain gets, and the private CI plan lists it beside the
-              # workspace run.
-              #
-              # The coverage check runs first: it compiles nothing (`cargo
-              # metadata --no-deps` lists members without resolving, so it
-              # cannot touch Cargo.lock ahead of the `--locked` runs), and a
-              # crate tested by no concern is the one failure no test result
-              # below can reveal.
-              run_deferred rust-coverage rust_coverage_check
-              run_deferred rust-crypt-no-keychain-tests \
-                cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
-              run_deferred rust-domain-tests \
-                cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
-              ;;
-            rust-db)
-              # Every `taurine-db*` crate: the model, the engine and its law
-              # tests, the HTTP and sidecar machinery, each driver's offline
-              # unit and mapping tests, and taurine-db-conformance's offline
-              # suites (sqlite, duckdb, turso, the recorded fixtures, the
-              # falsification and transfer runs). Only the conformance suite's
-              # live targets need a server, and they skip without one.
-              db_packages=()
-              while IFS= read -r db_package; do
-                db_packages+=("--package=${db_package}")
-              done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
-              rust_tests rust-db-tests "${db_packages[@]}"
-              ;;
-            rust-net)
-              # The dialer, the egress verifier and the vendored openvpn3 shim.
-              # The OpenVPN lab tests are `#[ignore]`d: they need a TUN device
-              # and the local lab's servers, which a hosted runner does not have.
-              run_deferred rust-net-tests \
-                cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
-              ;;
-            rust-app)
-              # The command tier both shells call, and the two shells' own unit
-              # tests. Tauri's `test` feature drives the commands through its
-              # mock runtime, so no display or WebView process is started; the
-              # webkit2gtk install above is only what the crates link.
-              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
-              # The `openvpn` feature of taurine-app links the vendored openvpn3 C++ shim; no
-              # test build enables it. A library check compiles it (the C++ build runs, the
-              # system libraries above are the ones openvpn3 needs).
-              #
-              # Known unverified lane, recorded rather than hidden: taurine-app's
-              # `dbx-breadth` feature is NOT built anywhere. Its forked database clients and
-              # OpenSSL only resolve inside dbx-core's own workspace; enabling it from the
-              # root workspace is deliberately off, so a change that only breaks that feature
-              # is not caught by this CI.
-              run_deferred rust-app-openvpn-check \
-                cargo check --locked --lib --package taurine-app --features openvpn
-              ;;
-            rust-packaging)
-              # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
-              # CLI, to prove the app still bundles on this OS. Nothing is signed, notarised
-              # or uploaded; the output stays on the runner.
-              run_deferred rust-packaging-smoke \
-                npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci
-              ;;
-            rust-tls-openssl)
-              # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
-              # one). Present only on sources that carry it; otherwise a note and a pass,
-              # not a silent skip of a concern the source never had.
-              tls_manifest=taurine-backend/taurine-tls-openssl/Cargo.toml
-              if [[ -f "${tls_manifest}" ]]; then
-                run_deferred rust-tls-openssl-tests \
-                  cargo test --locked --manifest-path "${tls_manifest}"
-              else
-                echo "rust-tls-openssl: the source has no ${tls_manifest}; nothing to build"
-                run_deferred rust-tls-openssl-absent true
-              fi
-              ;;
-            rust-dbx)
-              # The trees the root manifest excludes from the workspace, each
-              # with its own committed Cargo.lock. `dbx-core` runs through the
-              # root `package.json` script so the stack size it needs is set in
-              # one place; its Postgres-backed tests start a disposable
-              # container when Docker answers, which it does on this runner.
-              # `dbx-sqlite-worker` is compiled here as dbx-core's path
-              # dependency, but its own tests are not run: it commits no
-              # Cargo.lock, so a standalone run would resolve dependency
-              # versions nobody reviewed. `vendor/boringtun`'s standalone run is
-              # left out for the same reason (its lock is generated, not
-              # fetched); the patched copy the product links is exercised by
-              # taurine-net under the workspace lock.
-              run_deferred rust-dbx-core-tests \
-                npm run --silent test:dbx-core -- --locked --no-fail-fast
-              run_deferred rust-dbx-mongo-shell-tests \
-                cargo test --locked --no-fail-fast --manifest-path taurine-backend/dbx-mongo-shell/Cargo.toml
-              # The Linux Secret Service half of dbx-core's `os-keyring` feature
-              # (`all(feature = "os-keyring", target_os = "linux", not(test))`) is
-              # compiled by no other job: the tests above run without the feature and
-              # neither shell enables it. A non-test library check compiles it. The
-              # Secret Service client is pure Rust (zbus), so no system library is
-              # needed beyond what this concern already installs.
-              run_deferred rust-dbx-core-keyring-check \
-                cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --features os-keyring
-              ;;
-            mobile-quality)
-              run_quiet mobile-tests npm --prefix taurine-mobile run test -- --no-file-parallelism \
-                --reporter=default --reporter=json \
-                --outputFile.json="${RUNNER_TEMP}/test-ids/mobile.json"
-              run_quiet mobile-typecheck npm --prefix taurine-mobile run typecheck
-              run_quiet mobile-lint npm --prefix taurine-mobile run lint
-              ;;
-            *)
-              echo "Unsupported Linux validation concern: ${CONCERN}" >&2
-              exit 2
-              ;;
-          esac
-          # Every `rust-*` branch above ran its sub-steps through
-          # `run_deferred`; this is where their results are reported and the
-          # concern fails if any one of them did.
-          if [[ "${CONCERN}" == rust-* || "${CONCERN}" == contracts ]]; then finish_deferred; fi
+          echo "Unsupported Linux validation concern: ${CONCERN}" >&2
+          exit 2
 
       # Saved only from the protected main branch (every job here already refuses to
       # run elsewhere; the condition repeats it so the write permission is explicit)
@@ -704,7 +357,7 @@ jobs:
         # Failed validation still owns useful sanitized identities. Never run
         # private collector code without successful exact-source verification
         # and token revocation, or after cancellation/setup-only failures.
-        if: ${{ always() && !cancelled() && steps.verified-source.outcome == 'success' && (steps.concern-validation.outcome == 'success' || steps.concern-validation.outcome == 'failure') }}
+        if: ${{ always() && !cancelled() && steps.verified-source.outcome == 'success' && (contains(fromJSON('["success","failure"]'), steps.concern-js.outcome) || contains(fromJSON('["success","failure"]'), steps.concern-e2e.outcome) || contains(fromJSON('["success","failure"]'), steps.concern-rust.outcome)) }}
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -737,6 +390,23 @@ jobs:
               echo "### Tests exercised by this run"
               echo
               echo "Test inventory unavailable: the collector did not complete."
+              # Fallback from the runner's own JSON reports, so a failing run still names its
+              # failing specs: counts per status and, for each non-passing test, its project,
+              # repo-relative spec file:line and title. The collector's own error is reduced to
+              # fixed class names (an Error type or ERR_ code), never its message.
+              echo
+              echo "collector error class: $(grep -ohE '\b[A-Z][A-Za-z]*Error\b|\bERR_[A-Z_]+\b' "${RUNNER_TEMP}/test-ids/collector-private.log" 2>/dev/null | head -1 || true)"
+              for report in "${RUNNER_TEMP}"/test-ids/*.json; do
+                [[ -f "${report}" ]] || continue
+                echo
+                echo "#### $(basename "${report}" .json) (fallback, from the runner report)"
+                jq -r '
+                  [ (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
+                    | { status: ($t.status // "?"), project: ($t.projectName // "?"), file: ($s.file // "?"), line: ($s.line // 0), title: ($s.title // "?") } ] as $all
+                  | "- tests: \($all | length); " + ([$all | group_by(.status)[] | "\(.[0].status) \(length)"] | join(", ")),
+                    ($all[] | select(.status != "expected" and .status != "skipped") | "- FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))")
+                ' "${report}" 2>/dev/null | sed -E 's#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g' | cut -c1-220 | head -80 || true
+              done
             } > "${section_file}"
           fi
           cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
