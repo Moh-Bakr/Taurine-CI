@@ -56,19 +56,29 @@ runs:
           fi
           logged=0
           for table in iptables ip6tables; do
-            # New outbound connections that leave the host; loopback and the
-            # Docker bridges are local traffic.
-            if sudo -n "${table}" -w -I OUTPUT 1 ! -o lo ! -o docker+ ! -o br-+ \
-              -m conntrack --ctstate NEW -j LOG --log-prefix 'egress-audit: ' --log-level 6 2>/dev/null; then
+            # One audit chain, entered from OUTPUT (the host) and DOCKER-USER (containers,
+            # such as live-proof servers and the Keel Dock PostgreSQL). Loopback and the
+            # Docker bridges are local traffic; only new connections that leave are logged.
+            # iptables accepts one -o per rule, hence the RETURN rules.
+            sudo -n "${table}" -w -N EGRESS_AUDIT 2>/dev/null || continue
+            sudo -n "${table}" -w -A EGRESS_AUDIT -o lo -j RETURN
+            sudo -n "${table}" -w -A EGRESS_AUDIT -o docker+ -j RETURN
+            sudo -n "${table}" -w -A EGRESS_AUDIT -o br-+ -j RETURN
+            if sudo -n "${table}" -w -A EGRESS_AUDIT -m conntrack --ctstate NEW \
+              -j LOG --log-prefix 'egress-audit: ' --log-level 6 2>"${state}/${table}.err" \
+              && sudo -n "${table}" -w -I OUTPUT 1 -j EGRESS_AUDIT 2>>"${state}/${table}.err"; then
               logged=1
             fi
-            # Containers (live-proof servers, Keel Dock PostgreSQL) leave through FORWARD.
             if sudo -n "${table}" -w -L DOCKER-USER -n >/dev/null 2>&1; then
-              sudo -n "${table}" -w -I DOCKER-USER 1 ! -o docker+ ! -o br-+ \
-                -m conntrack --ctstate NEW -j LOG --log-prefix 'egress-audit: ' --log-level 6 2>/dev/null || true
+              sudo -n "${table}" -w -I DOCKER-USER 1 -j EGRESS_AUDIT 2>/dev/null || true
             fi
           done
-          (( logged )) && coverage+=('new outbound connections (iptables LOG)')
+          if (( logged )); then
+            coverage+=('new outbound connections (iptables LOG)')
+          else
+            # The iptables error text only, so a missing recorder is diagnosable.
+            echo "egress-audit: connection logging unavailable: $(head -c 300 "${state}/iptables.err" 2>/dev/null)"
+          fi
         else
           iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
           if [[ -n "${iface}" ]]; then
