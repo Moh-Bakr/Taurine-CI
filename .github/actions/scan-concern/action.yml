@@ -375,7 +375,12 @@ runs:
         total=0
         policy_errors=0
         lock_index=0
-        for manifest in Cargo.toml taurine-backend/dbx-core/Cargo.toml taurine-backend/dbx-mongo-shell/Cargo.toml; do
+        # Every Cargo.lock the source tracks, sorted (audit finding S-2: a lockfile missing
+        # from this list is never scanned, so it is explicit, not a find-glob). Regenerate
+        # whenever a lockfile is added to or removed from the private checkout: the root
+        # workspace, the two standalone backend crates and the two vendored crates
+        # (rumqttc, the rquickjs-sys fork). The boringtun copy is not tracked on develop.
+        for manifest in Cargo.toml taurine-backend/dbx-core/Cargo.toml taurine-backend/dbx-mongo-shell/Cargo.toml taurine-backend/vendor/rumqttc/Cargo.toml vendor/rquickjs-sys/Cargo.toml; do
           [[ -f "${manifest}" ]] || continue
           out="${RUNNER_TEMP}/deny-$(echo "${manifest}" | tr '/' '_').jsonl"
           # cargo-deny writes its diagnostics as JSON lines on stderr. Only the advisory id
