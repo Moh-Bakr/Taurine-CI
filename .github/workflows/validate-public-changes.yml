@@ -3,7 +3,16 @@ name: Validate public CI policy
 # The policy gate for this public repository. It has no OIDC permission, secrets, private
 # checkout, cache access or artifact upload, and validates only this repository. Each check
 # is a script under .github/policy/ (one responsibility each, read the script header for the
-# rule and its rationale); this file only sequences them.
+# rule and its rationale); this file only sequences them. Its job name, "Validate workflow
+# policy", is the required status check on main.
+#
+# A pull request carries its own copy of .github/policy/, so the policy it brings could be the
+# weakened one that lets it pass. On pull_request the same job therefore also checks out the
+# BASE commit's policy and runs every base check against the pull request's tree: a change must
+# pass both its own policy (so new fixtures run) and the base's. A legitimate policy change
+# that the base policy rejects lands in two steps: first a change that makes the rule
+# permissive (or adds the new rule beside the old one), then the change that relies on it
+# (docs/how-ci-works.md, "Changing the policy").
 on:
   pull_request:
   push:
@@ -22,7 +31,7 @@ jobs:
       contents: read
     name: Validate workflow policy
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Check out public policy repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,6 +79,18 @@ jobs:
         shell: bash
         run: bash .github/policy/test-preflight.sh
 
+      # The three steps that hold the source token, run against stub curl, git and date: each
+      # revokes on every path, calls only the reviewed endpoints and refuses what it must.
+      - name: Test the source-token revoke against stub endpoints
+        shell: bash
+        run: bash .github/policy/test-revoke.sh
+
+      # Every weakening an independent review found is applied to a copy of the tree and must be
+      # rejected, including a pull request that weakens its own policy.
+      - name: Prove each reviewed weakening fails the policy
+        shell: bash
+        run: bash .github/policy/test-mutations.sh
+
       # Sanitizers and failure-detail extractors, run over path, token and message fixtures.
       - name: Test the sanitizer expressions against path and token fixtures
         shell: bash
@@ -97,3 +118,39 @@ jobs:
       - name: Check the egress allow-list
         shell: bash
         run: bash .github/policy/check-egress-allowlist.sh
+
+      # The base commit's policy, run against this pull request's tree (see the header). The base
+      # policy replaces the pull request's in the working tree for these checks only; every check
+      # script it has is run, so a base check cannot be skipped by renaming a step here.
+      - name: Check out the base commit's policy
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-policy
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run the base commit's policy against this pull request
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP}/base-policy"
+          rm -rf "${base}"
+          mv base-policy "${base}"
+          rm -rf .github/policy
+          cp -R "${base}/.github/policy" .github/policy
+          status=0
+          for check in .github/policy/check-*.rb .github/policy/check-*.sh .github/policy/lint.sh .github/policy/test-*.sh; do
+            [[ -f "${check}" ]] || continue
+            echo "::group::base policy: ${check##*/}"
+            case "${check}" in
+              *.rb) ruby "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
+              *) bash "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
+            esac
+            echo '::endgroup::'
+          done
+          exit "${status}"

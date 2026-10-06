@@ -51,6 +51,25 @@ project script runs before the revoking step, or if that step is not under `alwa
 Linux and Windows concerns therefore only install dependencies, run `npm ci`, `cargo` or
 `xcodebuild` after the token is dead.
 
+Every App token mint (the composite's and the weekly resolver's) is an
+exact allow-list of `with:` keys and values: `client-id` or `app-id`, `private-key`, `owner`,
+`repositories`, `permission-contents: read` and `skip-token-revoke: true`, nothing else. Every
+call of `source-checkout` passes the reviewed App settings and its workflow's
+`SOURCE_REPOSITORY_*` constants, which must be the Taurine repository's; no expression may read a
+whole `secrets`, `vars` or `github` context (`check-universal.rb` rules 7 and 8).
+
+Strings prove little about a script, so the steps that hold the token are also run as behaviour.
+`test-revoke.sh` extracts the composite's verify-and-revoke step and the weekly resolver, and
+runs each against stub `curl`, `git` and `date` that record
+every call. On every path (success, failed checkout, identity id/owner/name mismatch, SHA
+mismatch, unreachable SHA, failed revoke) each must call exactly the reviewed endpoints, in
+order, ending in `DELETE /installation/token` with the source token, write only the reviewed
+outputs, and fail unless every check passed; on `main` a SHA with no protected ancestry must be
+refused, and the ancestry question is always asked there. `test-mutations.sh` applies each
+weakening an independent review found (an early `exit 0`, a re-pointed endpoint, a dropped
+`needs:`, an extra mint permission, `toJSON(secrets)`, an unconditional `keep-docker` and more)
+to a copy of the tree and requires the policy to reject every one.
+
 ## Root before project code
 
 Revoking the source token is not enough on its own. The App private key that mints it
@@ -477,6 +496,52 @@ Source-bearing output is public, so it is treated as hostile:
 - Workflows declare `permissions: {}` and grant per job; every Action is pinned to a full
   commit SHA on the policy allow-list; protected concurrency groups set `cancel-in-progress:
   false` so a cancel cannot skip token revocation.
+
+## Changing the policy
+
+A pull request carries its own `.github/policy/`, so on its own the policy run would let a
+change weaken a check and rely on the weakening in one step. On `pull_request`,
+`validate-public-changes.yml` therefore runs twice in the same required job: first the pull
+request's own policy (so new fixtures run), then the base commit's: it checks out
+`github.event.pull_request.base.sha`, puts that commit's `.github/policy/` in place of the pull
+request's and runs every base check script against the pull request's tree. A change must pass
+both. `test-mutations.sh` proves the second pass catches a pull request that quietly exempts a
+file from a rule and breaks it in the same change.
+
+So a legitimate policy change that the old policy would reject (a new reviewed mint, a new local
+composite on the Action allow-list, another `keep-docker` expression, a renamed step a fixture
+extracts) lands in two pull requests: first make the rule permissive or add the new rule beside
+the old one, merge, then land the change that relies on it. The pull request's own copy of
+`validate-public-changes.yml` is what runs, so a pull request that edits that file to drop the
+base pass is caught only by review: treat any change to `validate-public-changes.yml` or
+`.github/policy/` as a policy change and review it as one.
+
+## Accepted residual risks
+
+These are known, reviewed and accepted; each is limited by the controls named.
+
+- **(a) The App key is readable by project code on Windows and in Docker-kept concerns.** The
+  key is a job secret held in runner memory for the whole job. Windows cannot drop administrator
+  rights, and the jobs that keep Docker or root (the bastion live proof, the opt-in
+  `e2e-visual` job container) leave a
+  root-equivalent path, so project code there can read it. The key is rotated every 90 days
+  (`docs/source-reader-key-rotation.md`), and the App is installed on the source repository
+  with contents read-only, so a stolen key reads source and nothing else.
+- **(b) An approved fork pull request can read main's caches.** Caches written by the base
+  branch (the Cargo source and compiled-dependency caches) are readable by pull request
+  runs, so a fork pull request a maintainer approves runs code that can ask the cache service
+  for main's entries. Fork approval ("Require approval for all external contributors") therefore
+  stays mandatory; the caches hold third-party dependencies only, and only `main` runs for a
+  protected SHA write them.
+- **(c) Hashed package names are a weak control.** Where dependency names are published as short
+  SHA-256 prefixes, the set of public package names is small enough that a dictionary attack
+  reverses them. The hash keeps names out of casual reading, not out of a determined reader.
+- **(d) After the revoke, project code can tamper with later reporting steps.** Project code runs
+  as the job user in the same job as the summary, proof and egress steps, so it can change what
+  they report. The trust model is that source-repository writers and their dependencies are
+  trusted for confidentiality: the controls stop them reaching the token, root and main's
+  caches, not falsifying their own run's report. The source of truth for a result is the job
+  conclusion.
 
 ## How to add a concern
 

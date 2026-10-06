@@ -31,6 +31,10 @@ name: protected
 on:
   workflow_dispatch:
 permissions: {}
+env:
+  SOURCE_REPOSITORY_ID: '1330267721'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: Taurine
 jobs:
   validate:
     runs-on: ubuntu-24.04
@@ -42,6 +46,14 @@ jobs:
         shell: bash
         run: test -n "\${INPUT}"
       - uses: ./.github/actions/source-checkout
+        with:
+          source-sha: \${{ inputs.source_sha }}
+          app-client-id: \${{ vars.SOURCE_READER_APP_ID }}
+          app-private-key: \${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          repository-id: \${{ env.SOURCE_REPOSITORY_ID }}
+          repository-owner: \${{ env.SOURCE_REPOSITORY_OWNER }}
+          repository-name: \${{ env.SOURCE_REPOSITORY_NAME }}
+          check-protected-ancestry: 'true'
       - name: Project work
         shell: bash
         run: npm ci
@@ -62,6 +74,15 @@ runs:
   steps:
     - shell: bash
       run: echo ok
+    - name: Mint read-only private-source token
+      uses: actions/create-github-app-token@${sha}
+      with:
+        client-id: \${{ inputs.app-client-id }}
+        private-key: \${{ inputs.app-private-key }}
+        owner: \${{ inputs.repository-owner }}
+        repositories: \${{ inputs.repository-name }}
+        permission-contents: read
+        skip-token-revoke: true
 YAML
 }
 
@@ -163,6 +184,89 @@ expect_fail 'the pre-flight continues on error' "${root}" 'must not continue on 
 root="$(preflight_tree preflight-renamed)"; swap "${root}" .github/workflows/source-read.yml '  validate-input:' '  checks:'
 expect_fail 'the pre-flight job renamed away' "${root}" 'the reviewed pre-flight job validate-input is missing'
 echo 'pre-flight fixtures (rule 6): a dropped needs, a run past failure, a skipped or missing environment check are rejected'
+
+checkout_line="      - uses: actions/checkout@${sha}
+"
+add_after() { swap "$1" "$2" "$3" "$3$4"; }
+
+# Whole-context reads (rule 7).
+for leak in '${{ toJSON(secrets) }}' '${{ toJSON(vars) }}' '${{ toJSON(github) }}' "\${{ format('{0}', secrets) }}" '${{ secrets[matrix.name] }}' '${{ secrets.* }}' '${{ join(vars) }}'; do
+  root="$(fresh whole-context)"; add_after "${root}" .github/workflows/ordinary.yml "${checkout_line}" "        env:
+          LEAK: ${leak}
+"
+  expect_fail "a whole-context read (${leak})" "${root}" 'reads a whole secrets, vars or github context'
+done
+root="$(fresh bare-if)"; add_after "${root}" .github/workflows/ordinary.yml '  build:
+' "    if: toJSON(vars) != '{}'
+"
+expect_fail 'a whole-context read in a bare if' "${root}" 'reads a whole secrets, vars or github context'
+root="$(fresh whole-context-composite)"; add_after "${root}" .github/actions/demo/action.yml "    - uses: actions/checkout@${sha}
+" '      with:
+        token: ${{ toJSON(secrets) }}
+'
+expect_fail 'a whole-context read in a composite' "${root}" 'actions/demo/action.yml: an expression reads a whole'
+root="$(fresh named-member)"; add_after "${root}" .github/workflows/ordinary.yml "${checkout_line}" "        env:
+          OK: \${{ vars.SOURCE_READER_APP_ID }} \${{ matrix.vars }} \${{ format('secrets') }}
+"
+expect_pass 'named members and a quoted word are not whole-context reads' "${root}"
+
+# The token mint is an exact allow-list; source-checkout calls are pinned (rule 8).
+mint_case() {
+  local label="$1" old="$2" new="$3"
+  root="$(fresh mint)"; swap "${root}" .github/actions/source-checkout/action.yml "${old}" "${new}"
+  expect_fail "a token mint outside the allow-list (${label})" "${root}" 'is not a reviewed `with:` map'
+}
+mint_case 'an extra permission' '        permission-contents: read
+' '        permission-contents: read
+        permission-secrets: read
+'
+mint_case 'contents write' 'permission-contents: read' 'permission-contents: write'
+mint_case 'another owner' 'owner: ${{ inputs.repository-owner }}' 'owner: Moh-Bakr'
+mint_case 'another repository' 'repositories: ${{ inputs.repository-name }}' 'repositories: Taurine,other'
+mint_case 'no skip-token-revoke' '        skip-token-revoke: true
+' ''
+mint_case 'an unreviewed key' '        permission-contents: read
+' '        permission-contents: read
+        github-api-url: https://example.invalid
+'
+root="$(fresh app-id)"; swap "${root}" .github/actions/source-checkout/action.yml 'client-id:' 'app-id:'
+expect_pass 'app-id is the reviewed alias of client-id' "${root}"
+root="$(fresh mint-elsewhere)"; add_after "${root}" .github/workflows/ordinary.yml "${checkout_line}" "      - uses: actions/create-github-app-token@${sha}
+"
+expect_fail 'a mint in an unreviewed file' "${root}" 'ordinary.yml: token mint'
+root="$(fresh no-mint)"; swap "${root}" .github/actions/source-checkout/action.yml "uses: actions/create-github-app-token@${sha}" "uses: actions/checkout@${sha}"
+expect_fail 'the reviewed mint removed' "${root}" 'the reviewed token mint is missing'
+checkout_case() {
+  local label="$1" old="$2" new="$3" needle="${4:-must pass exactly the reviewed App settings}"
+  root="$(fresh checkout-call)"; swap "${root}" .github/workflows/protected.yml "${old}" "${new}"
+  expect_fail "a source-checkout call (${label})" "${root}" "${needle}"
+}
+checkout_case 'another repository id' 'repository-id: ${{ env.SOURCE_REPOSITORY_ID }}' "repository-id: '1377321992'"
+checkout_case 'another owner' 'repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}' 'repository-owner: someone'
+checkout_case 'an extra input' "          check-protected-ancestry: 'true'
+" "          check-protected-ancestry: 'true'
+          app-scope: all
+"
+checkout_case 'a missing App key' '          app-private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+' ''
+checkout_case 'the workflow points at another repository' "  SOURCE_REPOSITORY_ID: '1330267721'" "  SOURCE_REPOSITORY_ID: '1377321992'" 'must pin SOURCE_REPOSITORY_ID, _OWNER and _NAME to the Taurine repository'
+checkout_case 'the workflow renames the repository' '  SOURCE_REPOSITORY_NAME: Taurine' '  SOURCE_REPOSITORY_NAME: Other' 'must pin SOURCE_REPOSITORY_ID, _OWNER and _NAME'
+
+# drop-root inputs are absent or the reviewed expression (rule 9).
+reviewed_container="\${{ inputs.concern == 'e2e-visual' }}"
+root="$(fresh container-root)"; cp .github/workflows/linux-validation-concern.yml "${root}/.github/workflows/"; expect_pass 'the reviewed container-root' "${root}"
+swap "${root}" .github/workflows/linux-validation-concern.yml "container-root: ${reviewed_container}" "container-root: 'true'"
+expect_fail 'an unconditional container-root' "${root}" 'drop-root container-root must be absent or the reviewed expression'
+root="$(fresh keep-docker)"; cp .github/workflows/linux-validation-concern.yml "${root}/.github/workflows/"
+swap "${root}" .github/workflows/linux-validation-concern.yml "container-root: ${reviewed_container}" "keep-docker: 'true'"
+expect_fail 'an unreviewed keep-docker' "${root}" 'drop-root keep-docker must be absent or the reviewed expression'
+reviewed_keep="\${{ inputs.engine == 'bastion' }}"
+for keep in "'true'" 'true' '${{ true }}' "${reviewed_keep} || true"; do
+  root="$(fresh keep-docker-arm)"; cp .github/workflows/live-proof-arm.yml "${root}/.github/workflows/"
+  swap "${root}" .github/workflows/live-proof-arm.yml "keep-docker: ${reviewed_keep}" "keep-docker: ${keep}"
+  expect_fail "keep-docker ${keep} in the live-proof arm" "${root}" 'drop-root keep-docker must be absent or the reviewed expression'
+done
+echo 'hardening fixtures: whole-context reads, unreviewed mints and source-checkout calls, and unreviewed drop-root inputs are rejected'
 
 # Size limits.
 size_root="${base}/sizes"
@@ -287,9 +391,20 @@ fresh_dir="${base}/freshness"
 mkdir -p "${fresh_dir}/bin"
 cat > "${fresh_dir}/bin/curl" <<'STUB'
 #!/usr/bin/env bash
-case "${FAKE_COMPARE_STATUS}" in
-  unreadable) exit 22 ;;
-  *) printf '{"status":"%s","ahead_by":%s,"behind_by":%s}\n' "${FAKE_COMPARE_STATUS}" "${FAKE_AHEAD_BY:-0}" "${FAKE_BEHIND_BY:-0}" ;;
+url="${*: -1}"
+case "${url}" in
+  */compare/main...*)
+    case "${FAKE_COMPARE_STATUS}" in
+      unreadable) exit 22 ;;
+      *) printf '{"status":"%s","ahead_by":%s,"behind_by":%s}\n' "${FAKE_COMPARE_STATUS}" "${FAKE_AHEAD_BY:-0}" "${FAKE_BEHIND_BY:-0}" ;;
+    esac ;;
+  # What main changed since this commit (the files of compare <this>...main).
+  */compare/"${GITHUB_SHA}"...main)
+    files="${FAKE_FILES:-}"
+    [[ -n "${files}" ]] || files='[{"filename":"docs/how-ci-works.md"}]'
+    [[ "${files}" == unreadable ]] && exit 22
+    printf '{"status":"ahead","files":%s}\n' "${files}" ;;
+  *) exit 22 ;;
 esac
 STUB
 chmod +x "${fresh_dir}/bin/curl"
@@ -309,7 +424,7 @@ for guard_file in .github/actions/source-checkout/action.yml; do
       GITHUB_STEP_SUMMARY="${fresh_dir}/summary" CONTROL_PLANE_TOKEN=unused \
       REQUESTED_SOURCE_SHA=2222222222222222222222222222222222222222 REQUESTED_PLATFORM=linux \
       REQUESTED_CONCERN=unit REQUESTED_VULN_GATE=none \
-      FAKE_COMPARE_STATUS="${status}" FAKE_AHEAD_BY="${ahead}" FAKE_BEHIND_BY="${behind}" \
+      FAKE_COMPARE_STATUS="${status}" FAKE_AHEAD_BY="${ahead}" FAKE_BEHIND_BY="${behind}" FAKE_FILES="${FAKE_FILES:-}" \
       bash "${fresh_dir}/guard.sh" >"${fresh_dir}/out" 2>&1
     freshness_rc=$?
     set -e
