@@ -9,7 +9,7 @@
 set -euo pipefail
 file=.github/egress-allowlist.txt
 [[ -f "${file}" ]] || { echo "${file} is missing" >&2; exit 1; }
-scopes='all|linux|macos|windows|android|ios|orchestrate|keeldock|live'
+scopes='all|linux|macos|windows|android|ios|orchestrate|live'
 label='[a-z0-9*]([a-z0-9*-]*[a-z0-9*])?'
 literal='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
 host="(\\*\\.)?(${label}\\.)*${literal}\\.${literal}"

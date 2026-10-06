@@ -22,8 +22,7 @@
 #   revokes the token before project code and fails closed),
 #   `secrets-inherit` (the callee is this repository's own protected
 #   reusable workflow, and the policy below requires that form) and
-#   `self-repository` (the policy matches the `./` form). The keeldock-*
-#   workflows are linted like every other workflow.
+#   `self-repository` (the policy matches the `./` form).
 # Run from the repository root (the policy workflow does).
 set -euo pipefail
 tools="${RUNNER_TEMP}/lint-tools"

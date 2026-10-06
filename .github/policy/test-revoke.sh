@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Behavioural fixtures for the three steps that hold the private-source token: the
-# source-checkout composite's verify-and-revoke step, the Keel Dock concern's inline copy of it,
-# and the weekly resolver. Each reviewed script is extracted and run against stub `curl`, `git`
+# Behavioural fixtures for the two steps that hold the private-source token: the
+# source-checkout composite's verify-and-revoke step and the weekly resolver. Each reviewed script is extracted and run against stub `curl`, `git`
 # and `date` on PATH, which record every call. On every path (success, a failed checkout, an
 # identity mismatch, a SHA mismatch, an unreachable SHA, a failed revoke) the step must call
 # DELETE /installation/token with the source token, call exactly the reviewed endpoints in order,
@@ -119,7 +118,7 @@ ${want}"
 }
 compare_call() { printf 'GET %s/repos/%s/%s/compare/%s...%s?per_page=1' "${api}" "${owner}" "${name}" "$1" "${sha}"; }
 
-# The verify-and-revoke step (composite and Keel Dock concern): branches develop, uat, main are
+# The source-checkout verify-and-revoke step: branches develop, uat, main are
 # asked in order until one holds the SHA.
 verify_scenarios() {
   local identity commit revoke d u m
@@ -177,13 +176,6 @@ expect 'untrusted without the ancestry question' 0 protected-ancestor=false "GET
 revoke_run refs/heads/main CHECK_PROTECTED_ANCESTRY=false FAKE_COMPARE_develop=identical
 expect 'main always asks the ancestry question' 0 protected-ancestor=true "GET ${api}/repositories/${repo_id}" "GET ${api}/repos/${owner}/${name}/commits/${sha}" "$(compare_call develop)" "DELETE ${api}/installation/token"
 
-target=keeldock-concern
-repo_id=1377321992 owner=Moh-Bakr name=keeldock-cloud
-load .github/workflows/keeldock-validation-concern.yml 'Verify identity, exact checkout, and revoke source token' \
-  '{"SOURCE_TOKEN":"${{ steps.source-token.outputs.token }}","REQUESTED_SOURCE_SHA":"${{ inputs.source_sha }}"}' \
-  '{"${{ steps.source-token.outputs.token }}":"'"${token}"'","${{ inputs.source_sha }}":"'"${sha}"'"}'
-verify_scenarios
-
 # The weekly resolver: identity, the develop and main tips, last week's develop tip, the three
 # lock files, revoke;
 # outputs only after every check passed.
@@ -218,4 +210,4 @@ revoke_run refs/heads/main FAKE_REVOKE_RC=22
 expect 'revoke failed' fail '' "${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${revoke}"
 revoke_run refs/heads/main SOURCE_TOKEN=
 expect 'no token minted' fail -
-echo 'revoke fixtures: source-checkout, the Keel Dock concern and the weekly resolver revoke on every path with the source token, call only the reviewed endpoints, and main refuses an unprotected SHA'
+echo 'revoke fixtures: source-checkout and the weekly resolver revoke on every path with the source token, call only the reviewed endpoints, and main refuses an unprotected SHA'

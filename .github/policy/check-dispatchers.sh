@@ -41,9 +41,7 @@ check_dispatcher() {
     exit 1
   fi
   # Every protected dispatcher passes exactly one secret, the source-reader App key,
-  # by name, to each workflow it calls; none inherits secrets. KeelDock's dedicated
-  # environment may name its key differently (a reviewed set) and names its
-  # environment once.
+  # by name, to each workflow it calls; none inherits secrets.
   if grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit' "$workflow"; then
     echo "A protected dispatcher must not inherit secrets: $workflow" >&2
     exit 1
@@ -53,25 +51,12 @@ check_dispatcher() {
     echo "Every workflow a protected dispatcher calls must receive exactly one secret, the App private key: $workflow" >&2
     exit 1
   fi
-  if [[ "$workflow" == ".github/workflows/keeldock-validation.yml" ]]; then
-    if ! grep -qE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.(SOURCE_READER_PRIVATE_KEY|KEELDOCK_SOURCE_READER_PRIVATE_KEY) \}\}[[:space:]]*$' "$workflow"; then
-      echo "The KeelDock dispatcher must pass exactly the App private key, by a reviewed name: $workflow" >&2
-      exit 1
-    fi
-    if [[ "$(grep -cE '^[[:space:]]+environment:[[:space:]]+(source-read|keeldock-source-read)[[:space:]]*(#.*)?$' "$workflow")" != 1 ]]; then
-      echo "The KeelDock dispatcher must name its environment once, as source-read or keeldock-source-read: $workflow" >&2
-      exit 1
-    fi
-  elif [[ "$(grep -cE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.SOURCE_READER_PRIVATE_KEY \}\}[[:space:]]*$' "$workflow")" != "${calls}" ]]; then
+  if [[ "$(grep -cE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.SOURCE_READER_PRIVATE_KEY \}\}[[:space:]]*$' "$workflow")" != "${calls}" ]]; then
     echo "The protected dispatcher must pass secrets.SOURCE_READER_PRIVATE_KEY by name to each called workflow: $workflow" >&2
     exit 1
   fi
   if [[ "$workflow" == ".github/workflows/windows-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/windows-validation-concern\.yml' "$workflow"; then
     echo "The protected Windows dispatcher must call the reviewed concern workflow: $workflow" >&2
-    exit 1
-  fi
-  if [[ "$workflow" == ".github/workflows/keeldock-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/keeldock-validation-concern\.yml' "$workflow"; then
-    echo "The protected KeelDock dispatcher must call the reviewed concern workflow: $workflow" >&2
     exit 1
   fi
   if [[ "$workflow" == ".github/workflows/linux-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/linux-validation-concern\.yml' "$workflow"; then

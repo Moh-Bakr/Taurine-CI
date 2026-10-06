@@ -10,7 +10,7 @@
 #  5. Every job that enters the source-read environment calls the source-checkout composite,
 #     and nothing that runs project code precedes it: only the public checkout (needed to
 #     reach the local composites), the timer composite and plain-shell input validation may
-#     come first. The two reviewed exceptions are listed below with their reason.
+#     come first. The reviewed exception is listed below with its reason.
 #  6. Every workflow that enters source-read on dispatch has its reviewed pre-flight job, which
 #     calls the environment-preflight composite (the deployment branches must be exactly main
 #     and untrusted) and does not continue on error; every job that calls a workflow, enters an
@@ -34,14 +34,12 @@ failures = []
 
 # job-level exceptions to rule 5: [workflow file, job id] => reason
 PROTECTED_JOB_EXEMPT = {
-  ['keeldock-validation-concern.yml', 'validate'] => 'second private source: inline mint with its own stricter checks (check-keeldock.sh)',
   ['weekly-validation.yml', 'resolve'] => 'scheduled resolver: mints, reads one API value and revokes; checks nothing out by design (check-weekly.sh)'
 }.freeze
 
 PREFLIGHT = {
   '.github/workflows/linux-validation.yml' => 'validate-input',
   '.github/workflows/windows-validation.yml' => 'validate-input',
-  '.github/workflows/keeldock-validation.yml' => 'validate-input',
   '.github/workflows/orchestrate-validation.yml' => 'validate-input',
   '.github/workflows/source-read.yml' => 'validate-input',
   '.github/workflows/live-proofs.yml' => 'plan',
@@ -88,7 +86,6 @@ MINTS = {
     'permission-contents' => 'read',
     'skip-token-revoke' => true
   }],
-  '.github/workflows/keeldock-validation-concern.yml' => [INLINE_MINT],
   '.github/workflows/weekly-validation.yml' => [INLINE_MINT]
 }.freeze
 # The source-checkout call: these keys exactly, plus only the listed shape keys.
@@ -104,7 +101,6 @@ SOURCE_CHECKOUT_SHAPE = %w[path fetch-depth filter check-protected-ancestry].fre
 TAURINE_SOURCE = { 'SOURCE_REPOSITORY_ID' => '1330267721', 'SOURCE_REPOSITORY_OWNER' => 'Moh-Bakr', 'SOURCE_REPOSITORY_NAME' => 'Taurine' }.freeze
 # drop-root inputs: file => input => reviewed values (absent is always allowed)
 DROP_ROOT_WITH = {
-  '.github/workflows/keeldock-validation-concern.yml' => { 'keep-docker' => ["#{E}inputs.concern == 'db-containers' || inputs.concern == 'apphost-cold-start' }}"] },
   '.github/workflows/live-proof-arm.yml' => { 'keep-docker' => ["#{E}inputs.engine == 'bastion' }}"] },
   '.github/workflows/linux-validation-concern.yml' => { 'container-root' => ["#{E}inputs.concern == 'e2e-visual' }}"] }
 }.freeze

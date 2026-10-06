@@ -71,14 +71,12 @@ if ! (cd "${dir}/tree" && offline_policy >/dev/null); then
 fi
 
 composite=.github/actions/source-checkout/action.yml
-keeldock=.github/workflows/keeldock-validation-concern.yml
 weekly=.github/workflows/weekly-validation.yml
 linux=.github/workflows/linux-validation.yml
 linux_concern=.github/workflows/linux-validation-concern.yml
 preflight=.github/actions/environment-preflight/action.yml
 public=.github/workflows/validate-public-changes.yml
 composite_revoke='        if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
-keeldock_revoke='          if ! curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors -X DELETE'
 weekly_revoke='          if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 
 mutation '1. the Linux concern no longer needs the pre-flight job' "${linux}" '    needs: [validate-input, plan, select]' '    needs: [plan, select]'
@@ -95,8 +93,6 @@ mutation '2. exit 0 just before the composite revoke' "${composite}" "${composit
 ${composite_revoke}"
 mutation '2. the composite revoke made best-effort' "${composite}" "          echo 'Source token revocation failed; refusing to execute project code' >&2
           failed=1" "          echo 'Source token revocation failed; refusing to execute project code' >&2"
-mutation '2. exit 0 just before the Keel Dock concern revoke' "${keeldock}" "${keeldock_revoke}" "          exit 0
-${keeldock_revoke}"
 mutation '2. exit 0 just before the weekly resolver revoke' "${weekly}" "${weekly_revoke}" "          exit 0
 ${weekly_revoke}"
 mutation '3. main refusal disabled in the composite' "${composite}" '        if [[ "${GITHUB_REF}" == refs/heads/main && "${failed}" -eq 0 && "${protected_ancestor}" != true ]]; then' \
@@ -106,8 +102,6 @@ mutation '3. main no longer forced to ask the ancestry question' "${composite}" 
 mutation '3. protected ancestry assumed in the composite' "${composite}" '        protected_ancestor=false
 ' '        protected_ancestor=true
 '
-mutation '3. main refusal disabled in the Keel Dock concern' "${keeldock}" '          if [[ "${GITHUB_REF}" == refs/heads/main && "${failed}" -eq 0 && "${protected_ancestor}" != true ]]; then' \
-  '          if [[ "${GITHUB_REF}" == refs/heads/never && "${failed}" -eq 0 && "${protected_ancestor}" != true ]]; then'
 mutation '4. composite identity read from another endpoint' "${composite}" '"${GITHUB_API_URL}/repositories/${SOURCE_REPOSITORY_ID}"' '"${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}"'
 mutation '4. composite identity id compared with itself' "${composite}" "\"\$(jq -r '.id' <<<\"\${identity}\")\" != \"\${SOURCE_REPOSITORY_ID}\"" "\"\$(jq -r '.id' <<<\"\${identity}\")\" != \"\$(jq -r '.id' <<<\"\${identity}\")\""
 mutation '4. a caller points source-checkout at another repository id' .github/workflows/source-read.yml "  SOURCE_REPOSITORY_ID: '1330267721'" "  SOURCE_REPOSITORY_ID: '1377321992'"
@@ -116,7 +110,7 @@ mutation '5. an extra permission on the composite mint' "${composite}" '        
 ' '        permission-contents: read
         permission-secrets: read
 '
-mutation '5. an extra permission on the Keel Dock mint' "${keeldock}" '          permission-contents: read
+mutation '5. an extra permission on the weekly resolver mint' "${weekly}" '          permission-contents: read
 ' '          permission-contents: read
           permission-members: read
 '
@@ -131,8 +125,8 @@ mutation '6. toJSON(vars) in the public policy workflow' "${public}" '        ru
           ALL: ${{ toJSON(vars) }}
         run: bash .github/policy/check-repository.sh'
 mutation '6. a bare secrets context passed by the Linux dispatcher' "${linux}" '      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}' '      SOURCE_READER_PRIVATE_KEY: ${{ toJSON(secrets) }}'
-mutation '7. an unconditional keep-docker in the Keel Dock concern' "${keeldock}" "keep-docker: \${{ inputs.concern == 'db-containers' || inputs.concern == 'apphost-cold-start' }}" "keep-docker: 'true'"
 mutation '7. an unconditional container-root in the Linux concern' "${linux_concern}" "container-root: \${{ inputs.concern == 'e2e-visual' }}" "container-root: 'true'"
+mutation '7. an unconditional keep-docker in the live-proof arm' .github/workflows/live-proof-arm.yml "keep-docker: \${{ inputs.engine == 'bastion' }}" "keep-docker: 'true'"
 mutation '9. exit 0 at the start of the environment pre-flight' "${preflight}" '        set -euo pipefail
 ' '        set -euo pipefail
         exit 0

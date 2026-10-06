@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# The reviewed cargo and NuGet source cache policy (sourced).
+# The reviewed cargo source cache policy (sourced).
 
 # Finding H1 (2026-10-05), with ref isolation: unprotected SHAs run from the untrusted ref,
 # whose cache scope main never reads, and main runs only protected-ancestry SHAs. So the cargo
-# source, compiled-dependency and NuGet caches run only on main for a protected source SHA: every
+# source, compiled-dependency caches run only on main for a protected source SHA: every
 # restore, save and helper step of them has both exact top-level terms below, and no `||` at the
 # top level (which would re-open the gate). Defined after cond_top_terms, which it calls.
 cache_gated_to_protected_main() {
@@ -114,17 +114,6 @@ check_cache_policy() {
         # registry index and git databases cannot be verified that way (finding L1).
         '${{ steps.cargo-home.outputs.dir }}/registry/cache') ;;
         '${{ steps.cargo-target.outputs.dir }}/debug/deps'|'${{ steps.cargo-target.outputs.dir }}/debug/build'|'${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint') ;;
-        # The KeelDock concern caches only NuGet's downloaded third-party
-        # package folder (restored packages, their .nupkg archives and
-        # metadata): never bin/, obj/, publish output or anything under the
-        # checked-out private source. Each restored .nupkg is re-hashed against
-        # the private packages.lock.json contentHash and the extracted folders
-        # are discarded before use. No other workflow may name this path.
-        [~]/.nuget/packages)
-          if [[ "$workflow" != ".github/workflows/keeldock-validation-concern.yml" && "$workflow" != "./.github/workflows/keeldock-validation-concern.yml" ]]; then
-            cache_paths_ok=0; echo "NuGet cache path outside the KeelDock concern: $cache_line" >&2
-          fi
-          ;;
         *) cache_paths_ok=0; echo "Disallowed cache path line: $cache_line" >&2 ;;
       esac
     done < <(awk '
@@ -135,7 +124,7 @@ check_cache_policy() {
       in_cache && in_path && NF { sub(/^[[:space:]]+/, ""); print "            " $0 }
     ' "$workflow" | sed -E 's/^ +//')
     if (( ! cache_paths_ok )); then
-      echo "Cache steps may only name registry/cache under the located Cargo home, debug/deps, debug/build and debug/.fingerprint under the located target directory, or the KeelDock NuGet folder: $workflow" >&2
+      echo "Cache steps may only name registry/cache under the located Cargo home, debug/deps, debug/build and debug/.fingerprint under the located target directory: $workflow" >&2
       exit 1
     fi
     if grep -nE 'enableCrossOsArchive|fail-on-cache-miss|lookup-only' "$workflow"; then
@@ -157,9 +146,8 @@ check_cache_policy() {
         exit 1
       fi
     done < <(awk '/^      - name:/ { cond = "" } /^[[:space:]]+if:/ { cond = $0 } /uses:[[:space:]]*actions\/cache\/save@/ { print cond }' "$workflow")
-    # Every cache save, cargo and NuGet alike, requires the protected-ancestry
-    # answer of the source checkout (KeelDock's inline checkout gives the same
-    # answer under the same step id), fixed before any project code ran.
+    # Every cache save, requires the protected-ancestry
+    # answer of the source checkout, fixed before any project code ran.
     while IFS= read -r save_if; do
       if ! cond_requires "$save_if" "steps.verified-source.outputs.protected-ancestor == 'true'"; then
         echo "A cache save must require the protected-ancestry answer as an exact top-level term: $save_if" >&2
@@ -253,38 +241,7 @@ check_cache_policy() {
         fi
       done
     fi
-    if [[ "$workflow" == ".github/workflows/keeldock-validation-concern.yml" || "$workflow" == "./.github/workflows/keeldock-validation-concern.yml" ]]; then
-      if ! grep -q 'Verify restored NuGet packages against the lock files' "$workflow"; then
-        echo "A restored NuGet cache must be verified against packages.lock.json before use: $workflow" >&2
-        exit 1
-      fi
-      # Findings H1/M1 (2026-10-05): the NuGet restore and save stay off until
-      # unprotected SHAs run from a ref whose cache scope main never reads. The
-      # save key is the restore step's primary key (computed before project
-      # code), never a hashFiles evaluated after it.
-      while IFS='|' read -r cond key; do
-        if ! cache_gated_to_protected_main "$cond"; then
-          echo "The NuGet cache ${GATE_RULE}: $cond" >&2
-          exit 1
-        fi
-        if [[ -n "$key" && "$key" != *'key: ${{ steps.nuget-packages.outputs.cache-primary-key }}' ]]; then
-          echo "The NuGet cache save key must be the restore step's cache-primary-key: $key" >&2
-          exit 1
-        fi
-      done < <(awk '
-        function flush() { if (cache) print cond "|" (kind == "save" ? key : ""); cache = 0; key = ""; cond = ""; kind = "" }
-        /^      - name:/ { flush() }
-        /^[[:space:]]+if:/ { cond = $0 }
-        /uses:[[:space:]]*actions\/cache\/save@/ { cache = 1; kind = "save" }
-        /uses:[[:space:]]*actions\/cache\/restore@/ { cache = 1; kind = "restore" }
-        /^[[:space:]]+key:/ { key = $0 }
-        END { flush() }
-      ' "$workflow")
-      if grep -nE '^[[:space:]]+path:.*(bin|obj|publish|artifacts)([/[:space:]]|$)' "$workflow"; then
-        echo "The KeelDock cache must never name build or publish output: $workflow" >&2
-        exit 1
-      fi
-    elif ! grep -q 'Verify restored crate archives against Cargo.lock' "$workflow"; then
+    if ! grep -q 'Verify restored crate archives against Cargo.lock' "$workflow"; then
       echo "A restored cache must be verified against Cargo.lock before use: $workflow" >&2
       exit 1
     fi
