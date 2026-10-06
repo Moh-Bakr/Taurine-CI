@@ -11,6 +11,12 @@
 #     and nothing that runs project code precedes it: only the public checkout (needed to
 #     reach the local composites), the timer composite and plain-shell input validation may
 #     come first. The reviewed exception is listed below with their reason.
+#  6. Every workflow that enters source-read on dispatch has its reviewed pre-flight job, which
+#     calls the environment-preflight composite (the deployment branches must be exactly main
+#     and untrusted) and does not continue on error; every job that calls a workflow, enters an
+#     environment or receives a secret needs it directly and never runs past its failure (an
+#     always(), failure() or cancelled() in its `if` is allowed only beside a top-level
+#     `needs.<pre-flight>.result == 'success'` term).
 require 'yaml'
 
 root = ARGV[0] || '.'
@@ -20,6 +26,37 @@ failures = []
 PROTECTED_JOB_EXEMPT = {
   ['weekly-validation.yml', 'resolve'] => 'scheduled resolver: mints, reads one API value and revokes; checks nothing out by design (check-weekly.sh)'
 }.freeze
+
+PREFLIGHT = {
+  '.github/workflows/linux-validation.yml' => 'validate-input',
+  '.github/workflows/windows-validation.yml' => 'validate-input',
+  '.github/workflows/orchestrate-validation.yml' => 'validate-input',
+  '.github/workflows/source-read.yml' => 'validate-input',
+  '.github/workflows/live-proofs.yml' => 'plan',
+  '.github/workflows/macos-validation.yml' => 'plan',
+  '.github/workflows/android-validation.yml' => 'plan',
+  '.github/workflows/ios-validation.yml' => 'plan'
+}.freeze
+RUNS_PAST_FAILURE = /\b(always|failure|cancelled)\s*\(/
+
+# The top-level `&&` terms of an expression (the braces removed, parentheses respected).
+def conjuncts(expr)
+  text = expr.to_s.strip.sub(/\A\$\{\{/, '').sub(/\}\}\z/, '')
+  terms, depth, cur, i = [], 0, +'', 0
+  while i < text.length
+    c = text[i]
+    depth += 1 if c == '('
+    depth -= 1 if c == ')'
+    if depth.zero? && text[i, 2] == '&&'
+      terms << cur.strip; cur = +''; i += 2; next
+    end
+    if depth.zero? && text[i, 2] == '||'
+      return [] # a top-level || can reopen anything: no term is guaranteed
+    end
+    cur << c; i += 1
+  end
+  terms << cur.strip
+end
 
 PIN = /\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.\/-]+)?@[0-9a-f]{40}\z/
 ALLOWED_BEFORE_CHECKOUT = [
@@ -62,6 +99,26 @@ files.sort.each do |file|
   # 4. secrets: inherit
   (doc['jobs'] || {}).each do |job_id, job|
     failures << "#{rel}: job #{job_id} passes `secrets: inherit`" if job['secrets'] == 'inherit'
+  end
+
+  # 6. the reviewed pre-flight gates every protected job
+  if (pre = PREFLIGHT[rel])
+    jobs = doc['jobs'] || {}
+    if !jobs.key?(pre)
+      failures << "#{rel}: the reviewed pre-flight job #{pre} is missing"
+    else
+      failures << "#{rel}: the pre-flight job #{pre} must not continue on error" if jobs[pre].key?('continue-on-error')
+      unless (jobs[pre]['steps'] || []).any? { |st| st['uses'].to_s == './.github/actions/environment-preflight' && !st.key?('if') && !st.key?('continue-on-error') }
+        failures << "#{rel}: the pre-flight job #{pre} must call ./.github/actions/environment-preflight unconditionally"
+      end
+      jobs.each do |job_id, job|
+        next if job_id == pre || !(job['uses'] || job['environment'] || job['secrets'])
+        failures << "#{rel}: job #{job_id} must need the pre-flight job #{pre} directly" unless Array(job['needs']).include?(pre)
+        next unless job['if'].to_s.match?(RUNS_PAST_FAILURE)
+        next if conjuncts(job['if']).include?("needs.#{pre}.result == 'success'")
+        failures << "#{rel}: job #{job_id} may not run past a failed pre-flight (#{job['if'].to_s[0, 60]})"
+      end
+    end
   end
 
   # 5. protected jobs start with the source-checkout composite

@@ -92,12 +92,15 @@ None of these is required by the runbook. Each one trades convenience for a stro
 
 - **Where the key lives.** `SOURCE_READER_PRIVATE_KEY` is an environment secret of
   `source-read` (there is no repository-level copy). It is released only to jobs that enter
-  `source-read`, and that environment is limited to protected branches (`main` and `untrusted`).
+  `source-read`, and that environment is limited to exactly the branches `main` and `untrusted`.
   When rotating, update the secret under Settings → Environments → `source-read` (step 2); do not
   create a repository secret.
-- **Keep the deployment rule at "protected branches".** `untrusted` must stay able to enter
-  `source-read` so feature-branch SHAs can be validated without touching main's caches (ref
-  isolation). Restricting the rule to `main` alone would break that.
+- **Keep the deployment rule at exactly `main` and `untrusted`** ("Selected branches and tags",
+  two branch rules). Not "Protected branches only": rulesets do not count as protected branches
+  for environments, so that setting admits every branch, and the pre-flight refuses it.
+  `untrusted` must stay able to enter `source-read` so feature-branch SHAs can be validated
+  without touching main's caches (ref isolation). Restricting the rule to `main` alone would
+  break that.
 - **Add required reviewers to `source-read`.** Every source-bearing run would then wait for an
   approval in the Actions UI before any job enters the environment. One approval releases all the
   jobs waiting at that moment. This guards against a workflow merged by mistake reading the key,

@@ -131,6 +131,39 @@ root="$(fresh environment-input)"; mutate "${root}" .github/workflows/protected.
 mutate "${root}" .github/workflows/protected.yml 's/      - uses: \.\/\.github\/actions\/source-checkout\n//'
 expect_fail 'an environment-input job without the composite' "${root}" 'does not call the source-checkout composite'
 
+# Literal edits (no regex escaping): swap replaces the first occurrence of OLD with NEW and
+# fails loudly when OLD is not there, so a fixture can never silently test nothing.
+swap() { OLD="$3" NEW="$4" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("fixture text not found: #{ENV["OLD"]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "$1/$2"; }
+# The reviewed pre-flight (rule 6), on copies of two real dispatchers: one where the pre-flight
+# is its own job, one whose concern job runs under always() beside the pre-flight's result.
+preflight_tree() { local root; root="$(fresh "$1")"; cp .github/workflows/source-read.yml .github/workflows/linux-validation.yml "${root}/.github/workflows/"; echo "${root}"; }
+root="$(preflight_tree preflight-good)"; expect_pass 'the reviewed pre-flight jobs' "${root}"
+root="$(preflight_tree preflight-no-needs)"; swap "${root}" .github/workflows/source-read.yml '    needs: validate-input
+' ''
+expect_fail 'the protected job no longer needs the pre-flight' "${root}" 'must need the pre-flight job validate-input directly'
+root="$(preflight_tree preflight-always)"; swap "${root}" .github/workflows/source-read.yml '    needs: validate-input
+' '    needs: validate-input
+    if: always()
+'
+expect_fail 'the protected job runs past a failed pre-flight' "${root}" 'may not run past a failed pre-flight'
+root="$(preflight_tree preflight-or)"; swap "${root}" .github/workflows/linux-validation.yml "needs.validate-input.result == 'success' &&" "needs.validate-input.result == 'success' || true &&"
+expect_fail 'the pre-flight result term reopened by ||' "${root}" 'may not run past a failed pre-flight'
+root="$(preflight_tree preflight-term-gone)"; swap "${root}" .github/workflows/linux-validation.yml "needs.validate-input.result == 'success' &&" ''
+expect_fail 'the pre-flight result term removed' "${root}" 'may not run past a failed pre-flight'
+root="$(preflight_tree preflight-no-call)"; swap "${root}" .github/workflows/source-read.yml 'uses: ./.github/actions/environment-preflight' "uses: actions/checkout@${sha}"
+expect_fail 'the pre-flight composite not called' "${root}" 'must call ./.github/actions/environment-preflight unconditionally'
+root="$(preflight_tree preflight-skipped)"; swap "${root}" .github/workflows/source-read.yml '        uses: ./.github/actions/environment-preflight' "        if: false
+        uses: ./.github/actions/environment-preflight"
+expect_fail 'the pre-flight composite skipped' "${root}" 'must call ./.github/actions/environment-preflight unconditionally'
+root="$(preflight_tree preflight-continue)"; swap "${root}" .github/workflows/linux-validation.yml '  validate-input:
+' '  validate-input:
+    continue-on-error: true
+'
+expect_fail 'the pre-flight continues on error' "${root}" 'must not continue on error'
+root="$(preflight_tree preflight-renamed)"; swap "${root}" .github/workflows/source-read.yml '  validate-input:' '  checks:'
+expect_fail 'the pre-flight job renamed away' "${root}" 'the reviewed pre-flight job validate-input is missing'
+echo 'pre-flight fixtures (rule 6): a dropped needs, a run past failure, a skipped or missing environment check are rejected'
+
 # Size limits.
 size_root="${base}/sizes"
 mkdir -p "${size_root}/.github/workflows" "${size_root}/.github/actions"
@@ -320,3 +353,26 @@ egress_expect_fail 'a concern with no egress mode' 'del(.concerns.linux.contract
 egress_mutate '.concerns.linux.contracts.egress = "audit" | .concerns.linux.contracts.egress_audit_reason = "kept in audit while a named dependency is investigated"'
 bash "${policy}/check-egress-modes.sh" "${egress_fixture}" >/dev/null || { echo 'an audit exception with its reason should pass' >&2; exit 1; }
 echo 'egress-mode fixtures: audit without a recorded reason, an unknown mode and a missing mode are refused'
+
+# Concurrency: a per-run group, no block, and an absent cancel-in-progress pass; a shared per-SHA
+# group, a group without the run id and cancel-in-progress true fail.
+conc_dir="${base}/concurrency"; mkdir -p "${conc_dir}"
+conc_file() { printf 'name: x\non:\n  workflow_dispatch:\npermissions: {}\n%s\njobs:\n  a:\n    runs-on: ubuntu-24.04\n' "$1" > "${conc_dir}/$2.yml"; echo "${conc_dir}/$2.yml"; }
+conc_pass() { bash "${policy}/check-concurrency.sh" "$1" >/dev/null 2>&1 || { echo "concurrency fixture '$2' should pass" >&2; exit 1; }; }
+conc_fail() { if bash "${policy}/check-concurrency.sh" "$1" >/dev/null 2>"${base}/err"; then echo "concurrency fixture '$2' should fail but passed" >&2; exit 1; fi; grep -qF -- "$3" "${base}/err" || { echo "concurrency fixture '$2' failed with the wrong message" >&2; cat "${base}/err" >&2; exit 1; }; }
+conc_pass "$(conc_file 'concurrency:
+  group: wf-${{ inputs.source_sha }}-${{ github.run_id }}
+  cancel-in-progress: false' per-run)" 'a per-run group'
+conc_pass "$(conc_file '' none)" 'no concurrency block'
+conc_pass "$(conc_file 'concurrency:
+  group: wf-${{ github.run_id }}' no-cancel-key)" 'cancel-in-progress absent'
+conc_fail "$(conc_file 'concurrency:
+  group: wf-${{ github.workflow }}-${{ inputs.source_sha }}
+  cancel-in-progress: false' shared)" 'a shared per-SHA group' 'github.run_id'
+conc_fail "$(conc_file 'concurrency:
+  group: weekly-validation
+  cancel-in-progress: false' fixed)" 'a fixed group' 'github.run_id'
+conc_fail "$(conc_file 'concurrency:
+  group: wf-${{ github.run_id }}
+  cancel-in-progress: true' cancelling)" 'cancel-in-progress true' 'cancel-in-progress'
+echo 'concurrency fixtures: per-run groups pass; shared groups and cancel-in-progress true are refused'
