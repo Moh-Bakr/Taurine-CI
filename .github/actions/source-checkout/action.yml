@@ -88,6 +88,21 @@ runs:
           case "${freshness}" in
             identical) ;;
             behind)
+              # What main changed since this commit (compare <this>...main). Behind is accepted only while
+              # main has not changed .github/ since: a later fix to a workflow, composite or the policy must
+              # not be skipped by dispatching from a stale untrusted. The compare API lists at most 300
+              # files, so a list that long, or one that cannot be read, fails closed.
+              github_changes="$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --retry-all-errors \
+                -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" \
+                -H 'X-GitHub-Api-Version: 2022-11-28' "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...main" \
+                | jq -er 'if (.files | type) != "array" or (.files | length) >= 300 then "unknown"
+                          else [.files[] | select((.filename | startswith(".github/")) or ((.previous_filename // "") | startswith(".github/")))] | length | tostring end')" \
+                || { echo 'untrusted ref: could not list what main changed since this commit; refusing to continue' >&2; exit 1; }
+              if [[ "${github_changes}" != 0 ]]; then
+                echo "untrusted ref: untrusted is ${behind_by} commit(s) behind main, and main has since changed .github/ (workflows, composites or policy), so this run would use superseded workflows; refusing to continue." >&2
+                echo 'Sync untrusted to main with: git push origin origin/main:refs/heads/untrusted, then dispatch again.' >&2
+                exit 1
+              fi
               echo "::warning::untrusted is ${behind_by} commit(s) behind main; this run uses an older, previously reviewed main commit. Sync it with: git push origin origin/main:refs/heads/untrusted"
               if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
                 printf '%s\n' "**Warning:** \`untrusted\` is ${behind_by} commit(s) behind \`main\`. This run used an older, previously reviewed \`main\` commit (\`${GITHUB_SHA}\`). Sync it with \`git push origin origin/main:refs/heads/untrusted\`." >> "${GITHUB_STEP_SUMMARY}"
