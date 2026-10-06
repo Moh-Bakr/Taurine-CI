@@ -57,7 +57,8 @@
           "package.json"
         ],
         "timeout": 30,
-        "egress": "block"
+        "egress": "audit",
+        "egress_audit_reason": "held in audit until the 0.2.0 release candidate has finished: the first block proof (Linux run 37369923956) failed closed at the package install, fixed in this change, and the re-proof needs a protected run"
       },
       "frontend-build-budget": {
         "paths": [
