@@ -13,25 +13,10 @@ source "${policy}/check-keeldock.sh"
 source "${policy}/check-protected.sh"
 source "${policy}/check-dispatchers.sh"
 
-# Never cancel a source-bearing run: cancellation can interrupt the step that
-# revokes the short-lived source token. Every protected workflow, reusable or
-# not, that declares a concurrency group must say cancel-in-progress: false, and
-# every non-reusable protected workflow must declare one (a missing group would
-# let overlapping dispatches race on the same SHA).
-for guarded in "${protected_source_workflows[@]}" "${protected_dispatch_workflows[@]}" .github/workflows/weekly-validation.yml; do
-  if grep -qE '^  cancel-in-progress:[[:space:]]*(true|\$\{\{)' "$guarded"; then
-    echo "A protected workflow must set cancel-in-progress: false: $guarded" >&2
-    exit 1
-  fi
-  reusable_only=0
-  for reusable_workflow in "${reusable_protected_workflows[@]}"; do
-    [[ "$guarded" == "$reusable_workflow" ]] && reusable_only=1
-  done
-  if (( ! reusable_only )) && ! grep -qE '^  cancel-in-progress:[[:space:]]*false[[:space:]]*$' "$guarded"; then
-    echo "A protected workflow must declare cancel-in-progress: false: $guarded" >&2
-    exit 1
-  fi
-done
+# Never cancel or replace a source-bearing run: cancellation can interrupt the step that revokes
+# the short-lived source token, and GitHub replaces a pending run in a shared group. Each run
+# needs its own group (github.run_id) or none, and cancel-in-progress false (check-concurrency.sh).
+bash "${policy}/check-concurrency.sh" >/dev/null || { bash "${policy}/check-concurrency.sh" >&2 || true; exit 1; }
 
 # Windows is intentionally app-only. The full skill verifier is
 # required in the protected Ubuntu lane, while macOS retains a
