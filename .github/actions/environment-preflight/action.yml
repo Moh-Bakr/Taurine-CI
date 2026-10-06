@@ -1,0 +1,58 @@
+name: Verify the source-read environment's deployment branches
+description: >
+  Run in a job with no environment and no secret, before any job enters source-read. It reads
+  this repository's source-read environment and its deployment branch policies and refuses the
+  run unless the environment exists, uses custom branch policies ("Selected branches and tags")
+  and those are exactly the two branches main and untrusted: no wildcard, no tag policy, no
+  other branch. "Protected branches only" is refused: for environments GitHub counts only
+  classic branch protection rules as protected, not rulesets, and this repository protects its
+  branches with rulesets, so that setting lets every branch deploy (a probe proved an
+  unprotected scratch branch could enter source-read). Anything unreadable refuses too. The
+  calling job needs actions: read; the token reads nothing else.
+
+inputs:
+  github-token:
+    description: The job's own token (actions read), used only for the two environment reads
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Verify the source-read deployment branches
+      shell: bash
+      env:
+        CONTROL_PLANE_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        code="$(curl --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --output "${RUNNER_TEMP}/environment.json" --write-out '%{http_code}' \
+          -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' \
+          "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments/source-read")" || code=000
+        if [[ "${code}" == 404 ]]; then
+          echo 'The source-read environment does not exist. Create it (Deployment branches and tags: Selected branches and tags, exactly the branches main and untrusted); see docs/how-ci-works.md, "Repository settings the owner applies". Refusing before any job enters it.' >&2
+          exit 1
+        fi
+        if [[ "${code}" != 200 ]]; then
+          echo "The source-read environment could not be read (HTTP ${code}); refusing to continue" >&2
+          exit 1
+        fi
+        # Custom branch policies only. "Protected branches only" counts classic branch protection
+        # rules alone, not rulesets, so here it would admit every branch.
+        if [[ "$(jq -r '[.deployment_branch_policy.protected_branches, .deployment_branch_policy.custom_branch_policies] | @tsv' "${RUNNER_TEMP}/environment.json")" != $'false\ttrue' ]]; then
+          echo 'The source-read environment must use selected branches (custom deployment branch policies), exactly main and untrusted; "Protected branches only" is refused because rulesets do not count as protected branches for environments (Settings, Environments, source-read, Deployment branches and tags); refusing to continue' >&2
+          exit 1
+        fi
+        code="$(curl --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --output "${RUNNER_TEMP}/branch-policies.json" --write-out '%{http_code}' \
+          -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' \
+          "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments/source-read/deployment-branch-policies?per_page=100")" || code=000
+        if [[ "${code}" != 200 ]]; then
+          echo "The source-read deployment branch policies could not be read (HTTP ${code}); refusing to continue" >&2
+          exit 1
+        fi
+        # Exactly two branch-type policies, named main and untrusted: no wildcard, no tag policy,
+        # no third branch. Anything else, including an unreadable answer, refuses.
+        if [[ "$(jq -r 'if (.branch_policies | type) == "array" and .total_count == (.branch_policies | length)
+              then [.branch_policies[] | "\(.type):\(.name)"] | sort | join(",") else "unreadable" end' "${RUNNER_TEMP}/branch-policies.json" 2>/dev/null)" != 'branch:main,branch:untrusted' ]]; then
+          echo 'The source-read environment must allow exactly the branches main and untrusted (no wildcard, no tag, no other branch); refusing to continue' >&2
+          exit 1
+        fi
+        echo 'source-read environment: present, deployment branches exactly main and untrusted'

@@ -55,12 +55,28 @@ concurrency:
 
 jobs:
   validate-input:
-    permissions: {}
+    permissions:
+      actions: read
+      contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Before any job enters source-read: its deployment branches must be exactly main and
+      # untrusted (docs/how-ci-works.md, "Repository settings the owner applies").
+      - name: Verify the source-read deployment branches
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/environment-preflight  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+
       - name: Validate exact source SHA
         shell: bash
         env:
