@@ -39,7 +39,9 @@ concurrency:
 
 jobs:
   plan:
-    permissions: {}
+    permissions:
+      actions: read
+      contents: read
     # workflow_dispatch can be selected on another branch in the UI. Fail
     # closed unless this exact workflow came from the protected default branch.
     if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
@@ -50,6 +52,20 @@ jobs:
       arms: ${{ steps.select.outputs.arms }}
       roster: ${{ steps.select.outputs.roster }}
     steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Before any job enters source-read: its deployment branches must be exactly main and
+      # untrusted (docs/how-ci-works.md, "Repository settings the owner applies").
+      - name: Verify the source-read deployment branches
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/environment-preflight  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+
       - name: Validate the dispatch input and select the arms
         id: select
         shell: bash

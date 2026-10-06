@@ -24,6 +24,12 @@ The `.github/actions/source-checkout` composite is the only way source-bearing j
 private repository. Jobs that use it run in the `source-read` environment, which holds the
 source-reader GitHub App (`SOURCE_READER_APP_ID` variable, `SOURCE_READER_PRIVATE_KEY` secret).
 
+0. **Environment pre-flight.** Before any job enters `source-read`, a job with no environment
+   and no secret runs the `environment-preflight` composite: the environment must use custom
+   deployment branch policies that are exactly the branches `main` and `untrusted`, or the run
+   stops (see [Repository settings](#repository-settings-the-owner-applies-once) for why
+   "Protected branches only" is refused). The scheduled weekly resolver, which runs only from
+   `main`, relies on the lanes it dispatches for this check.
 1. **Guard.** The repository must be this one, the ref must be `refs/heads/main` or
    `refs/heads/untrusted` (see [Ref isolation](#ref-isolation-main-and-untrusted)), and the SHA
    must match `^[0-9a-fA-F]{40}$`. A run from `untrusted` must also be running exactly main's
@@ -265,15 +271,23 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
    24500573. Equivalent under Settings → Branches:
    a branch protection rule for `untrusted` with "Restrict who can push" (owner only), force
    pushes and deletions not allowed.
-2. **Let `source-read` deploy to `untrusted`.** The environment's deployment policy is
-   "Protected branches only" (`protected_branches: true`), so `untrusted` qualifies as soon as
-   step 1 protects it; no environment change is needed. (With "Selected branches and tags"
-   instead, add `untrusted` alongside `main`, never a wildcard.)
+2. **Limit `source-read` to exactly `main` and `untrusted`.** Settings → Environments →
+   `source-read` → Deployment branches and tags: **Selected branches and tags**, with exactly two
+   branch rules, `main` and `untrusted` (no wildcard, no tag rule). Not "Protected branches
+   only": for environments GitHub counts only classic branch protection rules as protected, not
+   rulesets, and this repository protects its branches with rulesets, so that setting lets every
+   branch deploy (a probe proved an unprotected scratch branch could enter `source-read`). Every
+   workflow that enters `source-read` on dispatch first runs the `environment-preflight`
+   composite in a job with no environment and no secret: it refuses the run unless the
+   environment uses custom branch policies that are exactly `main` and `untrusted`
+   (`check-universal.rb` rule 6 requires the job, `test-preflight.sh` proves the refusals).
 3. **Check both:**
 
    ```bash
    gh api repos/Moh-Bakr/Taurine-CI/environments/source-read -q .deployment_branch_policy
-                                                    # expect protected_branches: true
+                                                    # expect protected_branches: false, custom_branch_policies: true
+   gh api repos/Moh-Bakr/Taurine-CI/environments/source-read/deployment-branch-policies \
+     -q '.branch_policies[] | "\(.type) \(.name)"'            # expect branch main, branch untrusted
    gh api repos/Moh-Bakr/Taurine-CI/branches/untrusted -q .protected     # expect true
    gh api repos/Moh-Bakr/Taurine-CI/rules/branches/untrusted \
      -q '.[].type'                                             # expect deletion, non_fast_forward, update

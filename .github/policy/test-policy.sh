@@ -131,6 +131,39 @@ root="$(fresh environment-input)"; mutate "${root}" .github/workflows/protected.
 mutate "${root}" .github/workflows/protected.yml 's/      - uses: \.\/\.github\/actions\/source-checkout\n//'
 expect_fail 'an environment-input job without the composite' "${root}" 'does not call the source-checkout composite'
 
+# Literal edits (no regex escaping): swap replaces the first occurrence of OLD with NEW and
+# fails loudly when OLD is not there, so a fixture can never silently test nothing.
+swap() { OLD="$3" NEW="$4" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("fixture text not found: #{ENV["OLD"]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "$1/$2"; }
+# The reviewed pre-flight (rule 6), on copies of two real dispatchers: one where the pre-flight
+# is its own job, one whose concern job runs under always() beside the pre-flight's result.
+preflight_tree() { local root; root="$(fresh "$1")"; cp .github/workflows/source-read.yml .github/workflows/linux-validation.yml "${root}/.github/workflows/"; echo "${root}"; }
+root="$(preflight_tree preflight-good)"; expect_pass 'the reviewed pre-flight jobs' "${root}"
+root="$(preflight_tree preflight-no-needs)"; swap "${root}" .github/workflows/source-read.yml '    needs: validate-input
+' ''
+expect_fail 'the protected job no longer needs the pre-flight' "${root}" 'must need the pre-flight job validate-input directly'
+root="$(preflight_tree preflight-always)"; swap "${root}" .github/workflows/source-read.yml '    needs: validate-input
+' '    needs: validate-input
+    if: always()
+'
+expect_fail 'the protected job runs past a failed pre-flight' "${root}" 'may not run past a failed pre-flight'
+root="$(preflight_tree preflight-or)"; swap "${root}" .github/workflows/linux-validation.yml "needs.validate-input.result == 'success' &&" "needs.validate-input.result == 'success' || true &&"
+expect_fail 'the pre-flight result term reopened by ||' "${root}" 'may not run past a failed pre-flight'
+root="$(preflight_tree preflight-term-gone)"; swap "${root}" .github/workflows/linux-validation.yml "needs.validate-input.result == 'success' &&" ''
+expect_fail 'the pre-flight result term removed' "${root}" 'may not run past a failed pre-flight'
+root="$(preflight_tree preflight-no-call)"; swap "${root}" .github/workflows/source-read.yml 'uses: ./.github/actions/environment-preflight' "uses: actions/checkout@${sha}"
+expect_fail 'the pre-flight composite not called' "${root}" 'must call ./.github/actions/environment-preflight unconditionally'
+root="$(preflight_tree preflight-skipped)"; swap "${root}" .github/workflows/source-read.yml '        uses: ./.github/actions/environment-preflight' "        if: false
+        uses: ./.github/actions/environment-preflight"
+expect_fail 'the pre-flight composite skipped' "${root}" 'must call ./.github/actions/environment-preflight unconditionally'
+root="$(preflight_tree preflight-continue)"; swap "${root}" .github/workflows/linux-validation.yml '  validate-input:
+' '  validate-input:
+    continue-on-error: true
+'
+expect_fail 'the pre-flight continues on error' "${root}" 'must not continue on error'
+root="$(preflight_tree preflight-renamed)"; swap "${root}" .github/workflows/source-read.yml '  validate-input:' '  checks:'
+expect_fail 'the pre-flight job renamed away' "${root}" 'the reviewed pre-flight job validate-input is missing'
+echo 'pre-flight fixtures (rule 6): a dropped needs, a run past failure, a skipped or missing environment check are rejected'
+
 # Size limits.
 size_root="${base}/sizes"
 mkdir -p "${size_root}/.github/workflows" "${size_root}/.github/actions"
