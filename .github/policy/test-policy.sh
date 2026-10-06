@@ -380,3 +380,26 @@ egress_expect_fail 'a concern with no egress mode' 'del(.concerns.linux.contract
 egress_mutate '.concerns.linux.contracts.egress = "audit" | .concerns.linux.contracts.egress_audit_reason = "kept in audit while a named dependency is investigated"'
 bash "${policy}/check-egress-modes.sh" "${egress_fixture}" >/dev/null || { echo 'an audit exception with its reason should pass' >&2; exit 1; }
 echo 'egress-mode fixtures: audit without a recorded reason, an unknown mode and a missing mode are refused'
+
+# Concurrency: a per-run group, no block, and an absent cancel-in-progress pass; a shared per-SHA
+# group, a group without the run id and cancel-in-progress true fail.
+conc_dir="${base}/concurrency"; mkdir -p "${conc_dir}"
+conc_file() { printf 'name: x\non:\n  workflow_dispatch:\npermissions: {}\n%s\njobs:\n  a:\n    runs-on: ubuntu-24.04\n' "$1" > "${conc_dir}/$2.yml"; echo "${conc_dir}/$2.yml"; }
+conc_pass() { bash "${policy}/check-concurrency.sh" "$1" >/dev/null 2>&1 || { echo "concurrency fixture '$2' should pass" >&2; exit 1; }; }
+conc_fail() { if bash "${policy}/check-concurrency.sh" "$1" >/dev/null 2>"${base}/err"; then echo "concurrency fixture '$2' should fail but passed" >&2; exit 1; fi; grep -qF -- "$3" "${base}/err" || { echo "concurrency fixture '$2' failed with the wrong message" >&2; cat "${base}/err" >&2; exit 1; }; }
+conc_pass "$(conc_file 'concurrency:
+  group: wf-${{ inputs.source_sha }}-${{ github.run_id }}
+  cancel-in-progress: false' per-run)" 'a per-run group'
+conc_pass "$(conc_file '' none)" 'no concurrency block'
+conc_pass "$(conc_file 'concurrency:
+  group: wf-${{ github.run_id }}' no-cancel-key)" 'cancel-in-progress absent'
+conc_fail "$(conc_file 'concurrency:
+  group: wf-${{ github.workflow }}-${{ inputs.source_sha }}
+  cancel-in-progress: false' shared)" 'a shared per-SHA group' 'github.run_id'
+conc_fail "$(conc_file 'concurrency:
+  group: weekly-validation
+  cancel-in-progress: false' fixed)" 'a fixed group' 'github.run_id'
+conc_fail "$(conc_file 'concurrency:
+  group: wf-${{ github.run_id }}
+  cancel-in-progress: true' cancelling)" 'cancel-in-progress true' 'cancel-in-progress'
+echo 'concurrency fixtures: per-run groups pass; shared groups and cancel-in-progress true are refused'

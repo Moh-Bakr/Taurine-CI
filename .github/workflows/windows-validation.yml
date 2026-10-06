@@ -48,7 +48,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: windows-validation-${{ github.workflow }}-${{ inputs.source_sha }}-${{ inputs.windows_image }}
+  # Each run has its own group: GitHub keeps only one PENDING run per group, so a shared per-SHA
+  # group let a later dispatch silently cancel an earlier pending one. Runs are never
+  # deduplicated or cancelled; check for an existing run before dispatching (docs/how-ci-works.md).
+  # Nothing is shared between runs that a group would protect: caches are first-writer-wins on an
+  # exact key, so a race is harmless.
+  group: windows-validation-${{ inputs.source_sha }}-${{ github.run_id }}
   # Never cancel source-bearing jobs: cancellation can interrupt cleanup that
   # revokes a short-lived private-source token in one of the matrix jobs.
   cancel-in-progress: false

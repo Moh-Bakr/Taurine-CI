@@ -18,7 +18,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: ios-validation-${{ github.workflow }}-${{ inputs.source_sha }}
+  # Each run has its own group: GitHub keeps only one PENDING run per group, so a shared per-SHA
+  # group let a later dispatch silently cancel an earlier pending one. Runs are never
+  # deduplicated or cancelled; check for an existing run before dispatching (docs/how-ci-works.md).
+  # Nothing is shared between runs that a group would protect: caches are first-writer-wins on an
+  # exact key, so a race is harmless.
+  group: ios-validation-${{ inputs.source_sha }}-${{ github.run_id }}
   # Never cancel a source-bearing run mid-revocation; let the active token
   # cleanup boundary complete before another dispatch starts.
   cancel-in-progress: false
