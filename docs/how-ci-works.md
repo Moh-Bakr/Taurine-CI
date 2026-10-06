@@ -32,8 +32,8 @@ source-reader GitHub App (`SOURCE_READER_APP_ID` variable, `SOURCE_READER_PRIVAT
    `main`, relies on the lanes it dispatches for this check.
 1. **Guard.** The repository must be this one, the ref must be `refs/heads/main` or
    `refs/heads/untrusted` (see [Ref isolation](#ref-isolation-main-and-untrusted)), and the SHA
-   must match `^[0-9a-fA-F]{40}$`. A run from `untrusted` must also be running exactly main's
-   tip, or it stops here.
+   must match `^[0-9a-fA-F]{40}$`. A run from `untrusted` must also be running main's tip, or
+   an ancestor of it with no `.github/` change on main since, or it stops here.
 2. **Mint.** `actions/create-github-app-token` issues a short-lived token scoped to the one
    private repository with `contents: read` only. Its own end-of-job revoke is disabled
    (`skip-token-revoke`) because step 4 revokes explicitly.
@@ -237,7 +237,7 @@ place for unreviewed code is a ref whose cache main never reads. Hence two refs:
 | Ref | Runs | Caches |
 | --- | --- | --- |
 | `main` | Only SHAs on `develop`, `uat` or `main` of the source repository (protected ancestry). Anything else is refused, fail-closed, after the token is revoked and before project code, with a message saying to use `untrusted`. | The only ref that may restore or save caches. |
-| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip or an ancestor of it (an older, previously reviewed main commit); a run from an `untrusted` that is ahead of main or has diverged from it stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
+| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip, or an ancestor of it (an older, previously reviewed main commit) with no `.github/` change on main since; a run from an `untrusted` that is ahead of main, has diverged from it, or is behind a later `.github/` change stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
 
 ### Dispatching feature-branch validation
 
@@ -258,13 +258,18 @@ that receives the App private key. A workflow that fast-forwards it would need `
 write` and a bypass of untrusted's push restriction, which adds a second writer to a ref that
 holds the key. The safer option is to keep the owner as the only writer and sync by hand after
 each merge to main. The guard compares the run's commit with main through the compare API
-(`main...<sha>`) before any token is minted: `identical` (main's tip) and `behind` (an ancestor
-of main's tip) are accepted, `ahead` and `diverged` are refused. This is safe because `untrusted`
+(`main...<sha>`) before any token is minted: `identical` (main's tip) is accepted; `behind` (an
+ancestor of main's tip) is accepted only while `compare <sha>...main` lists no `.github/` path
+(renames out of it included), because otherwise the run would use workflows, composites or
+policy that main has since superseded, perhaps for a security fix; `ahead` and `diverged` are
+refused. A file list that cannot be read, or that hits the compare API's 300-file cap, is
+refused too. This is safe because `untrusted`
 is protected by ruleset 24500573 (no deletion, no force-push, updated only by the admin role) and
 the admin only ever fast-forwards it from main, so every commit it can point at was once main's
 reviewed tip. A merge to main therefore no longer blocks feature-branch runs while `untrusted`
-waits for its sync; a run from a behind `untrusted` still passes, prints a warning in the step
-summary saying how many commits behind it is, and names the sync command. Only the admin role may
+waits for its sync while only non-`.github/` files changed; such a run passes, prints a warning
+in the step summary saying how many commits behind it is, and names the sync command. Once main
+changes `.github/`, sync `untrusted` before the next feature-branch dispatch. Only the admin role may
 update `untrusted`, and the ruleset blocks non-fast-forward updates, so the sync is an admin
 fast-forward push:
 
@@ -332,9 +337,8 @@ then `scripts/vendor-openvpn3.sh fetch`, which verifies the vendored sources aga
 
 ## How the files are split
 
-The policy warns on any workflow or composite above 400 lines and fails above 800. Most files are under
-400. The exceptions are the `concern-report` composite (about 530 lines, one cohesive reporting library kept whole) and a few
-larger concern workflows and composites; each stays below the 800 hard limit. Files are
+The policy warns on any workflow or composite above 400 lines and fails above 800. Every file is under
+400 except the `concern-report` composite, which is one cohesive reporting library and is kept whole. Files are
 split by responsibility: a workflow keeps everything that must run before project code (input
 validation, the token mint, the exact-SHA checkout and the revoke) plus the job wiring, and the work
 that runs after the revoke lives in composites under `.github/actions/`.

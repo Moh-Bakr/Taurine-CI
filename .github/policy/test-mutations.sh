@@ -127,6 +127,7 @@ mutation '6. toJSON(vars) in the public policy workflow' "${public}" '        ru
 mutation '6. a bare secrets context passed by the Linux dispatcher' "${linux}" '      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}' '      SOURCE_READER_PRIVATE_KEY: ${{ toJSON(secrets) }}'
 mutation '7. an unconditional container-root in the Linux concern' "${linux_concern}" "container-root: \${{ inputs.concern == 'e2e-visual' }}" "container-root: 'true'"
 mutation '7. an unconditional keep-docker in the live-proof arm' .github/workflows/live-proof-arm.yml "keep-docker: \${{ inputs.engine == 'bastion' }}" "keep-docker: 'true'"
+mutation 'untrusted behind main with a later .github/ change accepted (composite)' "${composite}" '              if [[ "${github_changes}" != 0 ]]; then' '              if [[ "${github_changes}" == never ]]; then'
 mutation '9. exit 0 at the start of the environment pre-flight' "${preflight}" '        set -euo pipefail
 ' '        set -euo pipefail
         exit 0

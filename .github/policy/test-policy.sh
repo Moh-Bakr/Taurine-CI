@@ -435,6 +435,19 @@ for guard_file in .github/actions/source-checkout/action.yml; do
   [[ "${freshness_rc}" -eq 0 ]] || { echo "${guard_file}: a behind untrusted should be accepted" >&2; cat "${fresh_dir}/out" >&2; exit 1; }
   grep -qF '3 commit(s) behind' "${fresh_dir}/summary" && grep -qF 'git push origin origin/main:refs/heads/untrusted' "${fresh_dir}/summary" \
     || { echo "${guard_file}: a behind untrusted should warn with the count and the sync command" >&2; cat "${fresh_dir}/summary" >&2; exit 1; }
+  # Behind is accepted only while main has not changed .github/ since: a workflow, composite or
+  # policy change (or a rename out of .github/), a list at the API's 300-file cap and an unreadable
+  # list are all refused with the sync command.
+  FAKE_FILES='[{"filename":"docs/a.md"},{"filename":"README-not-github.md"}]' freshness_run refs/heads/untrusted behind 0 2
+  [[ "${freshness_rc}" -eq 0 ]] || { echo "${guard_file}: a behind untrusted with no .github/ change since should be accepted" >&2; cat "${fresh_dir}/out" >&2; exit 1; }
+  many="$(ruby -rjson -e 'puts JSON.generate((1..300).map { |i| { "filename" => "docs/f#{i}.md" } })')"
+  for changed in '[{"filename":".github/workflows/validation.yml"}]' '[{"filename":"docs/a.md"},{"filename":".github/policy/lib.sh"}]' \
+    '[{"filename":"docs/x.yml","previous_filename":".github/actions/drop-root/action.yml"}]' "${many}" '{}' unreadable; do
+    FAKE_FILES="${changed}" freshness_run refs/heads/untrusted behind 0 2
+    [[ "${freshness_rc}" -ne 0 ]] && grep -qF 'git push origin origin/main:refs/heads/untrusted' "${fresh_dir}/out" \
+      || { [[ "${changed}" == unreadable || "${changed}" == '{}' ]] && [[ "${freshness_rc}" -ne 0 ]]; } \
+      || { echo "${guard_file}: a behind untrusted with main's later .github/ change (${changed:0:60}) should be refused with the sync command" >&2; cat "${fresh_dir}/out" >&2; exit 1; }
+  done
   for refused in ahead diverged unreadable; do
     freshness_run refs/heads/untrusted "${refused}" 2 1
     [[ "${freshness_rc}" -ne 0 ]] || { echo "${guard_file}: a ${refused} untrusted should be refused" >&2; exit 1; }
@@ -442,7 +455,7 @@ for guard_file in .github/actions/source-checkout/action.yml; do
   freshness_run refs/heads/main ahead
   [[ "${freshness_rc}" -eq 0 ]] || { echo "${guard_file}: the guard must not apply to a run from main" >&2; cat "${fresh_dir}/out" >&2; exit 1; }
 done
-echo 'freshness fixtures: untrusted behind or identical to main is accepted (behind warns); ahead, diverged and unreadable are refused'
+echo 'freshness fixtures: untrusted identical to main, or behind it with no later .github/ change, is accepted (behind warns); a later .github/ change, ahead, diverged and unreadable are refused'
 
 # Egress modes: the reviewed table passes; a Linux concern without Docker switched back to
 # audit without a recorded reason fails, as do an unknown mode and a missing one; the same
