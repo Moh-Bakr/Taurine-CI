@@ -1,10 +1,12 @@
 # Rotating the source-reader App key
 
 Every source-bearing job in this repository mints its short-lived checkout token from one
-credential: the private key of the source-reader GitHub App, stored as the Actions secret
-`SOURCE_READER_PRIVATE_KEY`. The App's client ID is the `SOURCE_READER_APP_ID` variable. The
-App is installed on the private source repositories (`Moh-Bakr/Taurine` and
-`Moh-Bakr/keeldock-cloud`) with contents read only.
+credential: the private key of the source-reader GitHub App, stored only as the `source-read`
+**environment** secret `SOURCE_READER_PRIVATE_KEY` (the repository has no repository-level secrets). The App's client ID is the `SOURCE_READER_APP_ID` variable. The
+App is installed **only on `Moh-Bakr/Taurine`**, with contents read only. Keel Dock's CI now lives in
+`Keeldock/keeldock-ci`, so the App must no longer be installed on `Moh-Bakr/keeldock-cloud`. If it still
+is, remove that installation in GitHub settings (this repository's workflows and agents do not change
+App installations).
 
 The key is available to a job before the token is revoked, and that job later runs private
 project code with sudo. A hostile dependency could therefore copy the key out of the runner, so
@@ -33,18 +35,26 @@ the old one is deleted. Validation does not need to stop.
 1. **Generate a new key.** Go to GitHub, then Settings, Developer settings, GitHub Apps, the
    source-reader App, and finally Private keys. Choose **Generate a private key**. The browser
    downloads a `.pem` file. Note the fingerprint GitHub shows next to the new key.
-2. **Update the secret.** In `Moh-Bakr/Taurine-CI`, go to Settings, Secrets and variables,
-   Actions, then `SOURCE_READER_PRIVATE_KEY`, and choose **Update**. Paste the full contents of
-   the new `.pem` file. If you prefer the command line, run this yourself so the key never
-   passes through an agent or a shell history:
+2. **Update the environment secret.** In `Moh-Bakr/Taurine-CI`, go to Settings, Environments,
+   `source-read`, then the environment secret `SOURCE_READER_PRIVATE_KEY`, and choose **Update**.
+   Paste the full contents of the new `.pem` file. If you prefer the command line, run this
+   yourself so the key never passes through an agent or a shell history:
 
    ```bash
-   gh secret set SOURCE_READER_PRIVATE_KEY --repo Moh-Bakr/Taurine-CI < path/to/new-key.pem
+   gh secret set SOURCE_READER_PRIVATE_KEY --env source-read --repo Moh-Bakr/Taurine-CI < path/to/new-key.pem
    ```
 
-   Today the secret is a **repository** secret, not a `source-read` environment secret (the
-   Keel Dock dispatcher comments record this). Update it in the place where it currently lives.
-   See "Optional hardening" before moving it.
+   Do not use `gh secret set` without `--env`: that creates a repository secret, which source-bearing
+   jobs do not read, so the old key would stay active. Confirm the environment secret was updated
+   (the `updated_at` timestamp changes):
+
+   ```bash
+   gh api repos/Moh-Bakr/Taurine-CI/environments/source-read/secrets \
+     -q '.secrets[] | {name, updated_at}'
+   ```
+
+   Also confirm no repository secret of that name exists:
+   `gh api repos/Moh-Bakr/Taurine-CI/actions/secrets -q '.secrets[].name'` must not list it.
 3. **Verify with the new key** (next section). Wait for that to pass before going on to step 4.
 4. **Destroy the local copy.** Securely delete the downloaded `.pem` from the device. Nothing
    needs it once it is in the secret.
@@ -55,16 +65,12 @@ the old one is deleted. Validation does not need to stop.
 
 ## Verifying a rotation
 
-Dispatch the cheapest protected workflow that reads each private repository, from `main`:
+Dispatch the cheapest protected workflow that reads the private repository, from `main`:
 
 ```bash
 # Taurine: the access-path smoke test (about a minute).
 sha="$(gh api repos/Moh-Bakr/Taurine/commits/develop -q .sha)"
 gh workflow run source-read.yml --repo Moh-Bakr/Taurine-CI --ref main -f source_sha="${sha}"
-
-# Keel Dock uses the same App. Its full dispatch is the only entry point.
-kd="$(gh api repos/Moh-Bakr/keeldock-cloud/commits/main -q .sha)"
-gh workflow run keeldock-validation.yml --repo Moh-Bakr/Taurine-CI --ref main -f source_sha="${kd}"
 ```
 
 A rotation is verified only when all of the following hold:
@@ -84,17 +90,17 @@ revokes the token.
 
 None of these is required by the runbook. Each one trades convenience for a stronger boundary.
 
-- **Move the key into the `source-read` environment.** As a repository secret, the key can be
-  read by any workflow run in this repository except fork pull requests, and by any branch an
-  owner pushes. An environment secret is released only to jobs that enter `source-read`, and
-  that environment is already limited to protected branches. Moving it needs a reviewed
-  workflow change first. The Keel Dock dispatcher passes `secrets.SOURCE_READER_PRIVATE_KEY`
-  from a job outside the environment, so the reusable concern must read it from its own
-  environment instead. Make that change and verify it with the dispatches above, then delete
-  the repository secret.
-- **Restrict deployment branches to `main` only.** Today `source-read` allows "protected
-  branches". A custom deployment-branch rule of `main` removes any other protected branch from
-  the trusted set. The protected workflows already refuse any ref other than `refs/heads/main`.
+- **Where the key lives.** `SOURCE_READER_PRIVATE_KEY` is an environment secret of
+  `source-read` (there is no repository-level copy). It is released only to jobs that enter
+  `source-read`, and that environment is limited to exactly the branches `main` and `untrusted`.
+  When rotating, update the secret under Settings → Environments → `source-read` (step 2); do not
+  create a repository secret.
+- **Keep the deployment rule at exactly `main` and `untrusted`** ("Selected branches and tags",
+  two branch rules). Not "Protected branches only": rulesets do not count as protected branches
+  for environments, so that setting admits every branch, and the pre-flight refuses it.
+  `untrusted` must stay able to enter `source-read` so feature-branch SHAs can be validated
+  without touching main's caches (ref isolation). Restricting the rule to `main` alone would
+  break that.
 - **Add required reviewers to `source-read`.** Every source-bearing run would then wait for an
   approval in the Actions UI before any job enters the environment. One approval releases all the
   jobs waiting at that moment. This guards against a workflow merged by mistake reading the key,

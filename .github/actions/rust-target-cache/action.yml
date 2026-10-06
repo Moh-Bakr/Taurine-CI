@@ -40,7 +40,7 @@ description: |
   ref (their cache writes then land in that ref's scope, which main never reads), and only
   protected-ancestry runs on main may restore and save. The cargo source cache shares the
   same write exposure; it stays enabled because every restored `.crate` is re-hashed against
-  Cargo.lock before cargo runs (the NuGet cache is handled under finding M1). Entries are readable by any run in
+  Cargo.lock before cargo runs. Entries are readable by any run in
   this public repository, so they may only ever hold third-party code.
 
 inputs:

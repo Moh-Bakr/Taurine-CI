@@ -13,8 +13,8 @@ description: >
 inputs:
   scanner:
     description: >
-      all (every scanner, each as its own step), or one of gitleaks, npm-audit, deny, clippy,
-      semgrep; or semgrep-container, which only runs the Semgrep container (called before
+      all (every scanner, each as its own step), or one of gitleaks, gitleaks-history (the
+      opt-in full-history scan, report only), npm-audit, deny, clippy, semgrep; or semgrep-container, which only runs the Semgrep container (called before
       drop-root closes Docker) for a later all or semgrep call to report
     required: true
   path:
@@ -41,7 +41,7 @@ runs:
   steps:
     - name: Install the pinned gitleaks release
       continue-on-error: ${{ inputs.scanner == 'all' }}
-      if: ${{ inputs.scanner == 'gitleaks' || inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'gitleaks' || inputs.scanner == 'gitleaks-history' || inputs.scanner == 'all' }}
       shell: bash
       working-directory: ${{ github.workspace }}
       run: |
@@ -124,6 +124,80 @@ runs:
           exit 0
         fi
         echo 'gitleaks: no findings'
+
+    - name: Scan the full git history for secrets with gitleaks (report only)
+      id: scan-gitleaks-history
+      if: ${{ inputs.scanner == 'gitleaks-history' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        # Never enforcing: this is a triage scan of every commit reachable from the exact SHA.
+        # Two passes: with the source's own .gitleaks.toml (what the working-tree scan sees) and
+        # with gitleaks' default rules and no allow-list (what the allow-list hides). Published:
+        # counts, rule ids and commit short SHAs only; never a secret value, path or file content
+        # (reports are redacted and stay on the runner).
+        if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+          echo 'gitleaks-history: the checkout is shallow; refusing to report a partial history' >&2
+          exit 1
+        fi
+        commits="$(git rev-list --count HEAD)"
+        {
+          echo '## Secret scan, full history (gitleaks, report only)'
+          echo
+          echo "- Commits scanned: ${commits}"
+          echo '- Mode: report only (never enforcing)'
+        } >> "${GITHUB_STEP_SUMMARY}"
+        run_pass() {
+          local label="$1" report="${RUNNER_TEMP}/gitleaks-history-$1.json"
+          shift
+          set +e
+          "${RUNNER_TEMP}/scan-bin/gitleaks" git . --redact --no-banner --report-format json --report-path "${report}" "$@" >"${RUNNER_TEMP}/gitleaks-history-${label}.log" 2>&1
+          local status=$?
+          set -e
+          if [[ "${status}" -ne 0 && "${status}" -ne 1 ]]; then
+            echo "gitleaks-history (${label}): failed to run (detailed output withheld)" >&2
+            echo "- Pass \`${label}\`: failed to run" >> "${GITHUB_STEP_SUMMARY}"
+            return 1
+          fi
+          local total=0 distinct=0
+          if [[ -s "${report}" ]]; then
+            total="$(jq 'length' "${report}")"
+            distinct="$(jq '[.[].Commit] | unique | length' "${report}")"
+          fi
+          {
+            echo
+            echo "### Pass: ${label}"
+            echo
+            echo "- Findings: ${total} in ${distinct} commit(s)"
+            if [[ "${total}" -gt 0 ]]; then
+              echo
+              echo '| Rule | Findings | Commits |'
+              echo '| --- | --- | --- |'
+              jq -r 'group_by(.RuleID) | map("| \(.[0].RuleID) | \(length) | \([.[].Commit] | unique | length) |") | .[]' "${report}"
+              echo
+              echo 'Commits with findings (short SHA: findings), first 30:'
+              echo
+              jq -r 'group_by(.Commit) | map({c: .[0].Commit[0:8], n: length}) | sort_by(-.n) | .[0:30] | map("- `\(.c)`: \(.n)") | .[]' "${report}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "gitleaks-history (${label}): ${total} finding(s) in ${distinct} commit(s)"
+          if [[ "${total}" -gt 0 ]]; then
+            echo "gitleaks-history (${label}) per-rule counts:"
+            jq -r 'group_by(.RuleID) | map("  \(.[0].RuleID): \(length)") | .[]' "${report}"
+          fi
+        }
+        failed=0
+        if [[ -f .gitleaks.toml ]]; then
+          run_pass source-config --config .gitleaks.toml || failed=1
+        else
+          echo '- No .gitleaks.toml in the source; the default rules apply to both passes' >> "${GITHUB_STEP_SUMMARY}"
+        fi
+        # gitleaks would otherwise load the source's own .gitleaks.toml (and its allow-list)
+        # from the scanned directory, so an explicit default-rules config is passed.
+        printf '[extend]\nuseDefault = true\n' >"${RUNNER_TEMP}/gitleaks-default.toml"
+        run_pass default-rules-no-allowlist --config "${RUNNER_TEMP}/gitleaks-default.toml" || failed=1
+        (( failed == 0 ))
 
     - name: Check npm registry signatures and advisories
       id: scan-npm

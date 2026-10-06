@@ -124,14 +124,36 @@ jobs:
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
           # Gates every cache save below: only a SHA on a protected private branch may write.
           check-protected-ancestry: 'true'
+          # Only the opt-in gitleaks history scan needs the full history.
+          fetch-depth: ${{ inputs.concern == 'scan-history' && '0' || '1' }}
+
+      # The concern's egress mode, from ci-matrix.json (`egress`): block enforces the
+      # allow-list from the enforce step below; audit only records. The policy requires block
+      # for every concern without Docker unless the table records the audit exception's reason.
+      - name: Select the egress mode
+        id: egress-mode
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          CONCERN: ${{ inputs.concern }}
+        run: |
+          set -euo pipefail
+          mode="$(jq -r --arg c "${CONCERN}" '.concerns.linux[$c].egress // empty' .github/ci-matrix.json)"
+          case "${mode}" in
+            audit|block) ;;
+            *) echo "ci-matrix.json: concern ${CONCERN} has no egress mode (audit or block)" >&2; exit 1 ;;
+          esac
+          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+          echo "egress mode: ${mode}"
 
       - name: Start the egress audit
-        # Audit only: records outbound destinations, never blocks, never fails the job.
+        # Records outbound destinations; never fails the job.
         continue-on-error: true
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
         with:
           phase: start
+          mode: ${{ steps.egress-mode.outputs.mode }}
 
       # Semgrep runs from its digest-pinned image and so needs the Docker daemon, which is
       # root-equivalent and closes at drop-root. Only the container runs here, over the fresh
@@ -150,6 +172,17 @@ jobs:
         uses: ./.github/actions/root-setup  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
+
+      # Block mode: the filtering resolver and default-drop firewall go in here, after the
+      # privileged setup has fetched its packages and before root is removed, so project code
+      # can neither skip nor undo them. Deliberately no continue-on-error: a blocker that fails
+      # to install fails the job instead of falling back to audit.
+      - name: Enforce the egress allow-list
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: enforce
+          mode: ${{ steps.egress-mode.outputs.mode }}
 
       - name: Remove root before project code
         # Kept as ./ : the policy matches this exact form for local actions.
@@ -348,6 +381,22 @@ jobs:
         with:
           scanner: all
 
+      # Enforcing fmt and clippy over the whole owned workspace (the scanner above reports
+      # the security lints only). Runs after the scanner so both reports appear.
+      - name: Enforce rustfmt and clippy over the owned workspace
+        if: ${{ always() && !cancelled() && inputs.concern == 'scan-security' && steps.verified-source.outcome == 'success' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]
+
+      # Opt-in, report-only: gitleaks over the full git history of the exact SHA. The token was
+      # revoked inside the checkout step above, before this runs.
+      - name: Scan the full git history for secrets
+        if: inputs.concern == 'scan-history'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
+        with:
+          scanner: gitleaks-history
+
       - name: Run the isolated Linux JavaScript concern
         id: concern-js
         if: ${{ contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) }}
@@ -374,7 +423,7 @@ jobs:
 
       # A concern no family above handles must fail loudly, never pass by omission.
       - name: Reject an unsupported concern
-        if: ${{ inputs.concern != 'scan-security' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) || startsWith(inputs.concern, 'e2e-') || inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
+        if: ${{ inputs.concern != 'scan-security' && inputs.concern != 'scan-history' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) || startsWith(inputs.concern, 'e2e-') || inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
         shell: bash
         env:
           CONCERN: ${{ inputs.concern }}
@@ -453,3 +502,4 @@ jobs:
         uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
         with:
           phase: report
+          mode: ${{ steps.egress-mode.outputs.mode }}

@@ -1,0 +1,205 @@
+name: Egress block (Linux)
+description: >
+  Egress block mode (Linux hosted runners only). Called by the egress-audit composite's
+  enforce phase, as the job user while passwordless sudo is still available: after the
+  root-setup composite and immediately before drop-root, so no project code has run yet and
+  none can undo it afterwards (it no longer has root). What it installs (fail closed: any
+  error exits non-zero and fails the job; there is no fallback to audit): 1. A filtering
+  resolver: dnsmasq from the runner's Ubuntu archive, pinned, running as its own system user.
+  It forwards only names on the reviewed allow-list (scope `all` or `linux`) to the runner's
+  upstream (Azure DNS) and answers NXDOMAIN for every other name, so a name off the list is
+  never sent upstream (DNS exfiltration through systemd-resolved is closed). Every address it
+  returns for an allowed name is added to an nftables set. 2. An nftables table whose output
+  chain drops by default. Accepted: loopback, established flows, root's own traffic (the
+  runner's platform agents; project code has no root after drop-root), the resolver's upstream
+  queries, the Azure platform endpoints, the Docker bridges, and the addresses in the set.
+  Everything else is logged ("egress-block: ") and dropped. A NAT rule redirects every DNS
+  packet not sent by the resolver itself (from systemd-resolved or from anything querying a
+  public resolver directly) to the filtering resolver, so there is no second path to an
+  upstream. 3. A self-test: an allowed name resolves and is reachable, an unlisted public name
+  does not resolve, a direct query to a public resolver is filtered, and a literal public
+  address off the list is unreachable. Any failure fails the job.
+
+inputs:
+  scope:
+    description: The allow-list scope enforced besides `all` (linux)
+    required: false
+    default: linux
+
+runs:
+  using: composite
+  steps:
+    - name: Install the filtering resolver and the default-drop firewall
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        EGRESS_SCOPE: ${{ inputs.scope }}
+      run: |
+        set -euo pipefail
+
+        state="${RUNNER_TEMP}/egress-audit"
+        allowlist="${GITHUB_WORKSPACE}/.github/egress-allowlist.txt"
+        scope="${EGRESS_SCOPE}"
+        DNSMASQ_PIN='2.91-0ubuntu0.24.04.*'
+        NFTABLES_PIN='1.0.9-*'
+        DNS_USER=taurine-egress-dns
+        TABLE=taurine_egress
+        logdir=/var/log/taurine-egress
+
+        die() { echo "egress-block: $*" >&2; exit 1; }
+
+        [[ "${RUNNER_OS:-}" == Linux ]] || die 'block mode is implemented for Linux runners only'
+        [[ ! -f /.dockerenv ]] || die 'block mode cannot run inside a job container'
+        sudo -n true 2>/dev/null || die 'no passwordless sudo: block mode must run before drop-root'
+        [[ -f "${allowlist}" ]] || die "allow-list ${allowlist} not found"
+        mkdir -p "${state}"
+
+        # --- 1. Packages, from the runner image's own Ubuntu archive, pinned -----------------------
+        # Pinned to the noble release lines (2.91 from noble-updates, nftables 1.0.9); the glob
+        # takes the security rebuilds within a line, so the pin cannot fight the image's own
+        # libnftables1 (the image ships 1.0.9-1ubuntu0.x, not the release's 1.0.9-1build1).
+        sudo -n apt-get update -qq
+        sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          "dnsmasq-base=${DNSMASQ_PIN}" "nftables=${NFTABLES_PIN}" >/dev/null
+        dnsmasq_version="$(dnsmasq --version | head -n 1)"
+        dnsmasq --version | grep -qE '(^|[[:space:]])nftset([[:space:]]|$)' || die "dnsmasq lacks nftset support (${dnsmasq_version})"
+        nft --version >/dev/null
+        echo "egress-block: ${dnsmasq_version}; $(nft --version)"
+
+        # --- 2. The resolver's allow-list ----------------------------------------------------------
+        # Upstream: the runner's own resolvers (Azure DNS), read from systemd-resolved's real config.
+        mapfile -t upstreams < <(awk '/^nameserver/ { print $2 }' /run/systemd/resolve/resolv.conf | grep -E '^[0-9.]+$' | sort -u)
+        (( ${#upstreams[@]} )) || die 'no IPv4 upstream resolver found'
+        domains="${state}/block-domains.txt"
+        # dnsmasq matches a domain and all of its subdomains, so "a.b" and "*.a.b" both become "a.b".
+        # A wildcard inside a label cannot be expressed: those entries are CNAME targets, which a
+        # client never queries (the resolver forwards the whole answer chain for the queried name),
+        # except the Actions results storage, whose account names are expanded explicitly.
+        sed -E 's/#.*//' "${allowlist}" | awk -v s="${scope}" 'NF >= 2 && ($1 == "all" || $1 == s) { print tolower($2) }' |
+          while read -r pattern; do
+            case "${pattern}" in
+              productionresultssa\*.blob.core.windows.net)
+                for i in $(seq 0 99); do echo "productionresultssa${i}.blob.core.windows.net"; done ;;
+              \*.*) p="${pattern#\*.}"; [[ "${p}" == *'*'* ]] || echo "${p}" ;;
+              *'*'*) ;;
+              *) echo "${pattern}" ;;
+            esac
+          done | sort -u > "${domains}"
+        [[ -s "${domains}" ]] || die 'the resolver allow-list is empty'
+
+        # --- 3. The resolver user, log and configuration ---------------------------------------------
+        id -u "${DNS_USER}" >/dev/null 2>&1 \
+          || sudo -n useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "${DNS_USER}"
+        sudo -n install -d -m 0755 -o root -g root "${logdir}"
+        sudo -n install -m 0644 -o "${DNS_USER}" -g root /dev/null "${logdir}/dns.log"
+        conf="$(mktemp)"
+        {
+          echo "user=${DNS_USER}"
+          echo 'group=nogroup'
+          echo 'port=53'
+          echo 'listen-address=127.0.0.1'
+          echo 'bind-interfaces'
+          echo 'no-resolv'
+          echo 'no-hosts'
+          echo 'no-poll'
+          echo 'domain-needed'
+          echo 'bogus-priv'
+          echo 'cache-size=10000'
+          echo 'log-queries'
+          echo "log-facility=${logdir}/dns.log"
+          echo "pid-file=${logdir}/dnsmasq.pid"
+          # Every name not matched below: NXDOMAIN, never forwarded (the most specific match wins).
+          echo 'address=/#/'
+          while read -r d; do
+            for u in "${upstreams[@]}"; do echo "server=/${d}/${u}"; done
+            echo "nftset=/${d}/4#inet#${TABLE}#allow4,6#inet#${TABLE}#allow6"
+          done < "${domains}"
+        } > "${conf}"
+        sudo -n install -m 0644 -o root -g root "${conf}" /etc/taurine-egress-dnsmasq.conf
+        rm -f "${conf}"
+        sudo -n dnsmasq --test --conf-file=/etc/taurine-egress-dnsmasq.conf >/dev/null 2>&1 \
+          || die 'the resolver configuration does not parse'
+
+        # --- 4. The firewall -----------------------------------------------------------------------
+        upstream_set="$(IFS=,; echo "${upstreams[*]}")"
+        dns_uid="$(id -u "${DNS_USER}")"
+        rules="$(mktemp)"
+        cat > "${rules}" <<NFT
+        table inet ${TABLE} {
+          set allow4 { type ipv4_addr; }
+          set allow6 { type ipv6_addr; }
+          chain dns_redirect {
+            type nat hook output priority -100; policy accept;
+            meta skuid ${dns_uid} return
+            ip daddr 127.0.0.0/8 return
+            ip6 daddr ::1 return
+            meta l4proto { tcp, udp } th dport 53 redirect to :53
+          }
+          chain output {
+            type filter hook output priority 0; policy drop;
+            oifname "lo" accept
+            ip daddr 127.0.0.0/8 accept
+            # DNS leaves only through the resolver, even on a flow that predates this table.
+            meta skuid != ${dns_uid} meta l4proto { tcp, udp } th dport 53 counter drop
+            ct state established,related accept
+            meta skuid 0 accept
+            meta skuid ${dns_uid} ip daddr { ${upstream_set} } meta l4proto { tcp, udp } th dport 53 accept
+            # Azure platform: wire server and host agent, instance metadata.
+            ip daddr 168.63.129.16 tcp dport { 80, 32526 } accept
+            ip daddr 169.254.169.254 tcp dport 80 accept
+            oifname "docker0" accept
+            oifname "br-*" accept
+            ip daddr @allow4 accept
+            ip6 daddr @allow6 accept
+            limit rate 20/second burst 50 packets log prefix "egress-block: " level info
+            counter drop
+          }
+        }
+        NFT
+        sudo -n nft -c -f "${rules}" || die 'the firewall ruleset does not parse'
+        sudo -n nft -f "${rules}"
+        rm -f "${rules}"
+
+        # Started after the table exists, so its first answers already reach the set.
+        sudo -n dnsmasq --conf-file=/etc/taurine-egress-dnsmasq.conf
+        sleep 1
+        pid="$(cat "${logdir}/dnsmasq.pid" 2>/dev/null || true)"
+        [[ -n "${pid}" && -d "/proc/${pid}" ]] || die 'the resolver did not start'
+        [[ "$(stat -c %u "/proc/${pid}")" == "${dns_uid}" ]] || die 'the resolver is not running as its own user'
+        # Names cached by systemd-resolved before this point would skip the set; flush them.
+        sudo -n resolvectl flush-caches
+
+        # Seed the set with every exact allowed name, so a connection that does not resolve first
+        # (a cached address in a long-lived process) still finds its address.
+        while read -r d; do
+          getent ahosts "${d}" >/dev/null 2>&1 || true
+        done < <(grep -v '^productionresultssa' "${domains}")
+        for i in $(seq 0 99); do getent ahostsv4 "productionresultssa${i}.blob.core.windows.net" >/dev/null 2>&1 || true; done
+
+        # --- 5. Self-test (as the job user, as project code will run) ------------------------------
+        getent ahostsv4 github.com >/dev/null || die 'self-test: an allowed name (github.com) does not resolve'
+        addr="$(getent ahostsv4 github.com | awk 'NR == 1 { print $1 }')"
+        sudo -n nft get element inet "${TABLE}" allow4 "{ ${addr} }" >/dev/null 2>&1 \
+          || die 'self-test: a resolved allowed address did not reach the firewall set'
+        # A name whose CNAME chain ends outside the allow-list (packages.microsoft.com ends on an
+        # Azure Front Door edge name): the chain's final addresses must reach the set too.
+        caddr="$(getent ahostsv4 packages.microsoft.com | awk 'NR == 1 { print $1 }' || true)"
+        [[ -n "${caddr}" ]] || die 'self-test: packages.microsoft.com does not resolve'
+        sudo -n nft get element inet "${TABLE}" allow4 "{ ${caddr} }" >/dev/null 2>&1 \
+          || die 'self-test: a CNAME-chain answer did not reach the firewall set'
+        curl -sS -o /dev/null --max-time 20 https://github.com/ \
+          || die 'self-test: an allowed host (github.com) is unreachable'
+        if getent ahostsv4 example.com >/dev/null 2>&1; then
+          die 'self-test: an unlisted public name (example.com) still resolves'
+        fi
+        if command -v dig >/dev/null 2>&1; then
+          answer="$(dig +short +time=3 +tries=1 @8.8.8.8 example.com A 2>/dev/null || true)"
+          [[ -z "${answer}" ]] || die 'self-test: a direct query to a public resolver bypassed the filter'
+        fi
+        if curl -sS -o /dev/null --max-time 5 https://1.1.1.1/ 2>/dev/null; then
+          die 'self-test: an unlisted public address (1.1.1.1) is reachable'
+        fi
+
+        echo block > "${state}/mode-active"
+        echo "${pid}" > "${state}/resolver.pid"
+        echo "egress-block: enforcing; resolver forwards $(wc -l < "${domains}" | tr -d ' ') allow-listed domains (scope all+${scope}), everything else NXDOMAIN; output policy drop"

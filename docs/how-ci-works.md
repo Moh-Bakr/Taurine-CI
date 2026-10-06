@@ -1,15 +1,15 @@
 # How the hosted CI works
 
-This repository (`Moh-Bakr/Taurine-CI`) is public. It is the control plane that validates two
-private source repositories on free hosted runners. It contains workflows, small composite
-actions and one concern table, and never any product source.
+This repository (`Moh-Bakr/Taurine-CI`) is public. It is the control plane that validates the private
+Taurine source repository on free hosted runners. It contains workflows, small composite
+actions and one concern table, and never any product source. Keel Dock's CI lives in `Keeldock/keeldock-ci`, not here.
 
 ## The two-repo model
 
 | Repository | Visibility | Holds |
 | --- | --- | --- |
 | `Moh-Bakr/Taurine-CI` | public | Workflows, composite actions, `.github/ci-matrix.json`, the policy workflow |
-| `Moh-Bakr/Taurine` | private | The product source. Second private source: `Moh-Bakr/keeldock-cloud` (Keel Dock lane) |
+| `Moh-Bakr/Taurine` | private | The product source. This is the only private source this control plane reads. Keel Dock's CI lives in `Keeldock/keeldock-ci`. |
 
 Every validation is a manual `workflow_dispatch` (plus the weekly schedule) on `main` of this
 repository, given the exact 40-character SHA of the private commit to test. Nothing runs on
@@ -24,10 +24,16 @@ The `.github/actions/source-checkout` composite is the only way source-bearing j
 private repository. Jobs that use it run in the `source-read` environment, which holds the
 source-reader GitHub App (`SOURCE_READER_APP_ID` variable, `SOURCE_READER_PRIVATE_KEY` secret).
 
+0. **Environment pre-flight.** Before any job enters `source-read`, a job with no environment
+   and no secret runs the `environment-preflight` composite: the environment must use custom
+   deployment branch policies that are exactly the branches `main` and `untrusted`, or the run
+   stops (see [Repository settings](#repository-settings-the-owner-applies-once) for why
+   "Protected branches only" is refused). The scheduled weekly resolver, which runs only from
+   `main`, relies on the lanes it dispatches for this check.
 1. **Guard.** The repository must be this one, the ref must be `refs/heads/main` or
    `refs/heads/untrusted` (see [Ref isolation](#ref-isolation-main-and-untrusted)), and the SHA
-   must match `^[0-9a-fA-F]{40}$`. A run from `untrusted` must also be running exactly main's
-   tip, or it stops here.
+   must match `^[0-9a-fA-F]{40}$`. A run from `untrusted` must also be running main's tip, or
+   an ancestor of it with no `.github/` change on main since, or it stops here.
 2. **Mint.** `actions/create-github-app-token` issues a short-lived token scoped to the one
    private repository with `contents: read` only. Its own end-of-job revoke is disabled
    (`skip-token-revoke`) because step 4 revokes explicitly.
@@ -45,6 +51,25 @@ project script runs before the revoking step, or if that step is not under `alwa
 Linux and Windows concerns therefore only install dependencies, run `npm ci`, `cargo` or
 `xcodebuild` after the token is dead.
 
+Every App token mint (the composite's and the weekly resolver's) is an
+exact allow-list of `with:` keys and values: `client-id` or `app-id`, `private-key`, `owner`,
+`repositories`, `permission-contents: read` and `skip-token-revoke: true`, nothing else. Every
+call of `source-checkout` passes the reviewed App settings and its workflow's
+`SOURCE_REPOSITORY_*` constants, which must be the Taurine repository's; no expression may read a
+whole `secrets`, `vars` or `github` context (`check-universal.rb` rules 7 and 8).
+
+Strings prove little about a script, so the steps that hold the token are also run as behaviour.
+`test-revoke.sh` extracts the composite's verify-and-revoke step and the weekly resolver, and
+runs each against stub `curl`, `git` and `date` that record
+every call. On every path (success, failed checkout, identity id/owner/name mismatch, SHA
+mismatch, unreachable SHA, failed revoke) each must call exactly the reviewed endpoints, in
+order, ending in `DELETE /installation/token` with the source token, write only the reviewed
+outputs, and fail unless every check passed; on `main` a SHA with no protected ancestry must be
+refused, and the ancestry question is always asked there. `test-mutations.sh` applies each
+weakening an independent review found (an early `exit 0`, a re-pointed endpoint, a dropped
+`needs:`, an extra mint permission, `toJSON(secrets)`, an unconditional `keep-docker` and more)
+to a copy of the tree and requires the policy to reject every one.
+
 ## Root before project code
 
 Revoking the source token is not enough on its own. The App private key that mints it
@@ -56,7 +81,7 @@ script, a test) could in principle have read the key as root (finding H2).
 The fix is to take root away before project code runs, not to test whether memory can be read.
 Every source-bearing job does three things, in this order, straight after the token is revoked:
 
-1. **Privileged setup** (`.github/actions/root-setup`, plus the live-proof and Keel Dock
+1. **Privileged setup** (`.github/actions/root-setup`, plus the live-proof
    container start-up). Everything that needs root happens here: the Ubuntu archive packages a
    concern links against, the scratch-disk target directory, Playwright's Chromium host
    libraries (a fixed list, so the locked Playwright CLI no longer runs `--with-deps` as root),
@@ -87,7 +112,7 @@ source, run on 2026-10-05 and then deleted) showed, on `ubuntu-24.04`, `ubuntu-l
 `sudo -n true` once the sudoers files are replaced. Removing the user from the `docker` group
 does **not** work on its own, because running processes keep the group they started with;
 making the socket root-only does. Later `uses:` actions (`setup-node` with an uncached
-release, `setup-dotnet`) still work, because they install into directories the job user owns.
+release) still work, because they install into directories the job user owns.
 Containers started before the drop keep running and stay reachable on their published ports.
 
 ### Residual risk, per operating system
@@ -111,10 +136,6 @@ code. What remains:
 - **The live-proof `bastion` arm keeps Docker**: its tunnel test asks `docker inspect` for the
   lab postgres container's network address, which only the bastion can route to. Every other
   live-proof arm closes Docker. `sudo` is removed in all of them.
-- **Keel Dock `db-containers` and `apphost-cold-start` keep Docker**, because their project
-  code starts containers itself (Testcontainers, the Aspire AppHost). Docker access is
-  root-equivalent, so in those two concerns project code can still reach root through Docker.
-  `sudo` is still removed. The job summary says "Docker: kept open" for these.
 - **The opt-in `e2e-visual` tier** runs inside a job container as root, and GitHub mounts the
   host Docker socket into job containers. Root cannot be removed there. The summary records it;
   leave the tier off unless the run needs it.
@@ -130,7 +151,7 @@ without an authorisation it can no longer grant itself. What remains:
   authorisation; neither is available to the job any more. This was not tested by trying to
   read memory, by design: the probe only proved that `sudo`, developer mode and the group
   memberships are gone, and that the iOS simulator, Homebrew installs, a throwaway keychain,
-  `xcodebuild`, `setup-node` and `setup-dotnet` still work afterwards.
+  `xcodebuild` and `setup-node` still work afterwards.
 - An authorisation prompt (for example `osascript ... with administrator privileges`) cannot
   be answered on a headless runner; the probe showed it simply waits.
 - The job user still owns Homebrew (`/opt/homebrew`) and its own home directory. No root
@@ -149,6 +170,63 @@ same `source-checkout` order, enforced by the policy), the App can only read the
 repositories, and the key can be rotated (`docs/source-reader-key-rotation.md`). The job
 summary records the residual risk on every Windows job.
 
+## Egress: audit and block
+
+Every source-bearing job runs the `egress-audit` composite: `start` straight after the source
+checkout, `report` last. It records DNS answers and new outbound connections (Linux:
+`resolvectl monitor` and an iptables LOG chain; macOS: `tcpdump`; Windows: the DNS Client
+event log) and publishes only names on the reviewed allow-list (`.github/egress-allowlist.txt`);
+any other name appears as `unlisted:<12-hex SHA-256 prefix>`.
+
+**Block mode (Linux).** The composite takes `mode: audit|block`. A Linux concern's mode comes
+from `ci-matrix.json` (`egress`). In block mode the composite's `enforce` phase, which runs
+after `root-setup` and immediately before `drop-root`, calls the `egress-block` composite:
+
+- a filtering resolver (dnsmasq, `dnsmasq-base` pinned from the runner's Ubuntu archive, as its
+  own system user) forwards only names on the allow-list (scopes `all` and `linux`) to the
+  runner's Azure DNS and answers NXDOMAIN for everything else, so an unlisted name never leaves
+  the runner, not even as a DNS query;
+- every address it returns for an allowed name goes into an nftables set, and the output chain
+  drops by default: loopback, established flows, root's own traffic, the resolver's upstream
+  queries, the Azure wire server and metadata endpoints, the Docker bridges and that set are
+  accepted, everything else is logged and dropped;
+- a NAT rule sends every DNS packet not sent by the resolver (systemd-resolved's upstream
+  queries, or anything asking a public resolver directly) to the filtering resolver;
+- a self-test proves an allowed name resolves and is reachable, an unlisted public name does
+  not resolve, a direct query to a public resolver is filtered, and a literal unlisted address
+  is unreachable.
+
+It fails closed: if a package will not install, the configuration does not parse or the
+self-test fails, the job fails; it never falls back to audit. It is installed while root is
+still available and project code never gets root, so project code cannot undo it. A refused
+name or dropped connection does not fail the job by itself (the job fails only if the build
+does); the report lists them (hashed unless allow-listed) with counts, under "Egress (block
+mode)".
+
+The policy (`check-egress-modes.sh`, with fixtures in `test-policy.sh`) requires every Linux
+concern to name its mode, and an `audit` concern to carry `egress_audit_reason`: a concern
+cannot be switched back to audit without a written exception.
+
+Kept in audit, and why:
+
+- **Linux `e2e-visual`**: it runs inside a job container as root with the host Docker socket,
+  so a host firewall cannot bind it.
+- **Docker-kept jobs** (the live-proof `bastion` arm): Docker access is root-equivalent, so project code could remove the
+  firewall; blocking there would be a claim the job cannot keep.
+- **macOS**: `tcpdump` records only. A `pf` anchor with a filtering resolver is technically
+  possible before `drop-root`, but macOS background services (software update, OCSP, Xcode
+  services) query a long, changing tail of Apple and Akamai names (over a hundred unidentified
+  hashes per run), so it stays in audit until that tail is identified.
+- **Windows**: the job user is an administrator and cannot be demoted, so any firewall rule is
+  removable by project code.
+
+Residual risk in block mode: an allowed name's addresses are often shared CDN or cloud-storage
+front ends (Fastly, Akamai, Azure Front Door, Azure Storage), so a client that connects to an
+allowed address with another host name in TLS SNI reaches whatever else that front end serves;
+a subdomain of an allowed name is forwarded to that operator's own DNS; and root processes
+(the runner's platform agents) are not filtered. The allow-list keeps wildcards to
+operator-owned names for this reason.
+
 ## Ref isolation: main and untrusted
 
 The Actions cache is scoped by ref. A run on `main` reads and writes main's cache scope; a run
@@ -159,7 +237,7 @@ place for unreviewed code is a ref whose cache main never reads. Hence two refs:
 | Ref | Runs | Caches |
 | --- | --- | --- |
 | `main` | Only SHAs on `develop`, `uat` or `main` of the source repository (protected ancestry). Anything else is refused, fail-closed, after the token is revoked and before project code, with a message saying to use `untrusted`. | The only ref that may restore or save caches. |
-| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip or an ancestor of it (an older, previously reviewed main commit); a run from an `untrusted` that is ahead of main or has diverged from it stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
+| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip, or an ancestor of it (an older, previously reviewed main commit) with no `.github/` change on main since; a run from an `untrusted` that is ahead of main, has diverged from it, or is behind a later `.github/` change stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
 
 ### Dispatching feature-branch validation
 
@@ -180,13 +258,18 @@ that receives the App private key. A workflow that fast-forwards it would need `
 write` and a bypass of untrusted's push restriction, which adds a second writer to a ref that
 holds the key. The safer option is to keep the owner as the only writer and sync by hand after
 each merge to main. The guard compares the run's commit with main through the compare API
-(`main...<sha>`) before any token is minted: `identical` (main's tip) and `behind` (an ancestor
-of main's tip) are accepted, `ahead` and `diverged` are refused. This is safe because `untrusted`
+(`main...<sha>`) before any token is minted: `identical` (main's tip) is accepted; `behind` (an
+ancestor of main's tip) is accepted only while `compare <sha>...main` lists no `.github/` path
+(renames out of it included), because otherwise the run would use workflows, composites or
+policy that main has since superseded, perhaps for a security fix; `ahead` and `diverged` are
+refused. A file list that cannot be read, or that hits the compare API's 300-file cap, is
+refused too. This is safe because `untrusted`
 is protected by ruleset 24500573 (no deletion, no force-push, updated only by the admin role) and
 the admin only ever fast-forwards it from main, so every commit it can point at was once main's
 reviewed tip. A merge to main therefore no longer blocks feature-branch runs while `untrusted`
-waits for its sync; a run from a behind `untrusted` still passes, prints a warning in the step
-summary saying how many commits behind it is, and names the sync command. Only the admin role may
+waits for its sync while only non-`.github/` files changed; such a run passes, prints a warning
+in the step summary saying how many commits behind it is, and names the sync command. Once main
+changes `.github/`, sync `untrusted` before the next feature-branch dispatch. Only the admin role may
 update `untrusted`, and the ruleset blocks non-fast-forward updates, so the sync is an admin
 fast-forward push:
 
@@ -207,15 +290,23 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
    24500573. Equivalent under Settings → Branches:
    a branch protection rule for `untrusted` with "Restrict who can push" (owner only), force
    pushes and deletions not allowed.
-2. **Let `source-read` deploy to `untrusted`.** The environment's deployment policy is
-   "Protected branches only" (`protected_branches: true`), so `untrusted` qualifies as soon as
-   step 1 protects it; no environment change is needed. (With "Selected branches and tags"
-   instead, add `untrusted` alongside `main`, never a wildcard.)
+2. **Limit `source-read` to exactly `main` and `untrusted`.** Settings → Environments →
+   `source-read` → Deployment branches and tags: **Selected branches and tags**, with exactly two
+   branch rules, `main` and `untrusted` (no wildcard, no tag rule). Not "Protected branches
+   only": for environments GitHub counts only classic branch protection rules as protected, not
+   rulesets, and this repository protects its branches with rulesets, so that setting lets every
+   branch deploy (a probe proved an unprotected scratch branch could enter `source-read`). Every
+   workflow that enters `source-read` on dispatch first runs the `environment-preflight`
+   composite in a job with no environment and no secret: it refuses the run unless the
+   environment uses custom branch policies that are exactly `main` and `untrusted`
+   (`check-universal.rb` rule 6 requires the job, `test-preflight.sh` proves the refusals).
 3. **Check both:**
 
    ```bash
    gh api repos/Moh-Bakr/Taurine-CI/environments/source-read -q .deployment_branch_policy
-                                                    # expect protected_branches: true
+                                                    # expect protected_branches: false, custom_branch_policies: true
+   gh api repos/Moh-Bakr/Taurine-CI/environments/source-read/deployment-branch-policies \
+     -q '.branch_policies[] | "\(.type) \(.name)"'            # expect branch main, branch untrusted
    gh api repos/Moh-Bakr/Taurine-CI/branches/untrusted -q .protected     # expect true
    gh api repos/Moh-Bakr/Taurine-CI/rules/branches/untrusted \
      -q '.[].type'                                             # expect deletion, non_fast_forward, update
@@ -229,13 +320,12 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
 
 | Workflow | Concerns |
 | --- | --- |
-| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and opt-in e2e-visual |
+| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and the opt-in e2e-visual and scan-history |
 | `macos-validation.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app, rust-packaging, rust-tls-openssl |
 | `windows-validation.yml` and `windows-validation-concern.yml` | The same app concerns plus contracts; Rust concerns with `rust=true`; `windows_image` selects `windows-2022` (default) or `windows-2025` |
 | `android-validation.yml` | android-native (debug build for aarch64); android-rust with `rust=true` (compile-only mobile test targets, not executed) |
 | `ios-validation.yml` | ios-native (unsigned simulator build); ios-rust with `rust=true` (compile-only) |
 | `orchestrate-validation.yml` | dashboard, release-verification |
-| `keeldock-validation.yml` and `keeldock-validation-concern.yml` | build-format, structural, unit and contracts-publish-smoke on Linux, macOS and Windows; Linux-only db-containers and supply-chain; opt-in apphost-cold-start |
 | `source-read.yml` | Reads an exact private SHA, a smoke test of the access path |
 | `live-proofs.yml` (dispatcher) and `live-proof-arm.yml` | One arm per database engine; see [The live proofs](#the-live-proofs) |
 
@@ -261,14 +351,12 @@ that runs after the revoke lives in composites under `.github/actions/`.
 | Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust` |
 | Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report` |
 | iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report` |
-| Keel Dock | `keeldock-validation.yml` calls `keeldock-validation-concern.yml` | `keeldock-restore`, `keeldock-build-format`, `keeldock-test-suites`, `keeldock-supply-chain`, `keeldock-apphost`, `keeldock-contracts-publish`, `keeldock-summary`, `keeldock-proof`, `keeldock-nuget-verify` |
 | Live proofs | `live-proofs.yml` calls `live-proof-arm.yml` once per arm | `live-build`, `live-run`, `live-summary`, `live-start-mpp`, `live-start-ibm`, `live-start-rocketmq`, `live-start-iris`, `live-start-pg`, `live-start-sql` |
 | Policy | `validate-public-changes.yml` | the scripts under `.github/policy/` |
 
 Two conventions apply across all of them. Private source is checked out into `src/` and the
 composites run from there, so the control plane's own composites stay available after the checkout;
-the Keel Dock concern follows the same layout (its own mint and checks stay inline in the workflow, as
-its policy requires). A step that must run whatever happens, such as the revoke, the summary and the
+A step that must run whatever happens, such as the revoke, the summary and the
 duration report, is conditioned on `always()` in the workflow, never inside a composite alone.
 
 Every `uses:` reference, including each local workflow and composite, is on an allow-list in
@@ -297,6 +385,24 @@ with history and the token already revoked, diffs `base_sha` to `source_sha`, an
 A requested opt-in concern always joins a partial selection and its absence fails the Result.
 Only Linux uses `base_sha`; the other platforms always run their whole list.
 
+## Runs are never deduplicated or cancelled
+
+Every source-bearing workflow gives each run its own concurrency group (it contains
+`github.run_id`) and `cancel-in-progress` is false. GitHub keeps only one *pending* run per
+group, so a shared per-SHA group let a later dispatch silently cancel an earlier queued run; that
+is why groups are per run. Nothing deduplicates runs: two dispatches for the same SHA both run.
+Lanes must therefore check for an existing run before dispatching:
+
+```bash
+gh run list -R Moh-Bakr/Taurine-CI --workflow linux-validation.yml --status queued
+gh run list -R Moh-Bakr/Taurine-CI --workflow linux-validation.yml --status in_progress
+```
+
+Caches are first-writer-wins on an exact key, so concurrent runs racing on a save are harmless.
+`.github/policy/check-concurrency.sh` enforces the rule, with fixtures in `test-policy.sh`: a group
+without `github.run_id` or a `cancel-in-progress: true` fails the policy. The dispatchers do not
+print a duplicate-run notice, because their first job holds no `actions: read` permission.
+
 ## Dispatch inputs
 
 | Input | Where | Effect |
@@ -304,12 +410,11 @@ Only Linux uses `base_sha`; the other platforms always run their whole list.
 | `source_sha` | every workflow | Exact private commit to validate |
 | `profile` (`full` or `quick`) | Linux | `quick` drops `full_only` concerns (rust-app, rust-db, rust-dbx, scan-security, a11y, regression e2e) and gives PASS (partial) |
 | `visual` | Linux | Adds the Playwright `e2e-visual` tier; leave off until baselines for Linux exist |
+| `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
-| `apphost` | Keel Dock | Adds the experimental Aspire apphost-cold-start concern |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
 | `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
-| `vulnerability_gate` | Keel Dock | `none` (warn-only), `high` or `critical`: the severity that fails supply-chain |
 
 ## The Result verdict
 
@@ -368,7 +473,7 @@ Source-bearing output is public, so it is treated as hostile:
 - No artifacts, no source-bearing caches. Composites may not use `actions/upload-artifact`,
   `download-artifact` or caches.
 - The reviewed caches (the compiled third-party dependency cache `rust-target-cache`, the Cargo
-  third-party crate source cache and Keel Dock's NuGet package cache) run **only on `main`, and
+  third-party crate source cache) run **only on `main`, and
   only for a protected source SHA**. A cache entry is only as trustworthy as whoever could write
   it, and writing needs nothing more than the runner's runtime token, which project code can
   read. The cache action also unpacks with absolute paths, so a planted entry could overwrite
@@ -395,6 +500,52 @@ Source-bearing output is public, so it is treated as hostile:
 - Workflows declare `permissions: {}` and grant per job; every Action is pinned to a full
   commit SHA on the policy allow-list; protected concurrency groups set `cancel-in-progress:
   false` so a cancel cannot skip token revocation.
+
+## Changing the policy
+
+A pull request carries its own `.github/policy/`, so on its own the policy run would let a
+change weaken a check and rely on the weakening in one step. On `pull_request`,
+`validate-public-changes.yml` therefore runs twice in the same required job: first the pull
+request's own policy (so new fixtures run), then the base commit's: it checks out
+`github.event.pull_request.base.sha`, puts that commit's `.github/policy/` in place of the pull
+request's and runs every base check script against the pull request's tree. A change must pass
+both. `test-mutations.sh` proves the second pass catches a pull request that quietly exempts a
+file from a rule and breaks it in the same change.
+
+So a legitimate policy change that the old policy would reject (a new reviewed mint, a new local
+composite on the Action allow-list, another `keep-docker` expression, a renamed step a fixture
+extracts) lands in two pull requests: first make the rule permissive or add the new rule beside
+the old one, merge, then land the change that relies on it. The pull request's own copy of
+`validate-public-changes.yml` is what runs, so a pull request that edits that file to drop the
+base pass is caught only by review: treat any change to `validate-public-changes.yml` or
+`.github/policy/` as a policy change and review it as one.
+
+## Accepted residual risks
+
+These are known, reviewed and accepted; each is limited by the controls named.
+
+- **(a) The App key is readable by project code on Windows and in Docker-kept concerns.** The
+  key is a job secret held in runner memory for the whole job. Windows cannot drop administrator
+  rights, and the jobs that keep Docker or root (the bastion live proof, the opt-in
+  `e2e-visual` job container) leave a
+  root-equivalent path, so project code there can read it. The key is rotated every 90 days
+  (`docs/source-reader-key-rotation.md`), and the App is installed on the source repository
+  with contents read-only, so a stolen key reads source and nothing else.
+- **(b) An approved fork pull request can read main's caches.** Caches written by the base
+  branch (the Cargo source and compiled-dependency caches) are readable by pull request
+  runs, so a fork pull request a maintainer approves runs code that can ask the cache service
+  for main's entries. Fork approval ("Require approval for all external contributors") therefore
+  stays mandatory; the caches hold third-party dependencies only, and only `main` runs for a
+  protected SHA write them.
+- **(c) Hashed package names are a weak control.** Where dependency names are published as short
+  SHA-256 prefixes, the set of public package names is small enough that a dictionary attack
+  reverses them. The hash keeps names out of casual reading, not out of a determined reader.
+- **(d) After the revoke, project code can tamper with later reporting steps.** Project code runs
+  as the job user in the same job as the summary, proof and egress steps, so it can change what
+  they report. The trust model is that source-repository writers and their dependencies are
+  trusted for confidentiality: the controls stop them reaching the token, root and main's
+  caches, not falsifying their own run's report. The source of truth for a result is the job
+  conclusion.
 
 ## How to add a concern
 

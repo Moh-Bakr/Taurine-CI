@@ -14,7 +14,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: orchestrate-validation-${{ github.workflow }}-${{ inputs.source_sha }}
+  # Each run has its own group: GitHub keeps only one PENDING run per group, so a shared per-SHA
+  # group let a later dispatch silently cancel an earlier pending one. Runs are never
+  # deduplicated or cancelled; check for an existing run before dispatching (docs/how-ci-works.md).
+  # Nothing is shared between runs that a group would protect: caches are first-writer-wins on an
+  # exact key, so a race is harmless.
+  group: orchestrate-validation-${{ inputs.source_sha }}-${{ github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -23,10 +28,35 @@ env:
   SOURCE_REPOSITORY_NAME: Taurine
 
 jobs:
+  # Runs with no environment and no secret, before the job that enters source-read.
+  validate-input:
+    permissions:
+      actions: read
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
+    name: Verify the source-read environment
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Before any job enters source-read: its deployment branches must be exactly main and
+      # untrusted (docs/how-ci-works.md, "Repository settings the owner applies").
+      - name: Verify the source-read deployment branches
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/environment-preflight  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+
   validate:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
+    needs: validate-input
     name: Orchestrate ${{ matrix.concern }} validation
     environment: source-read
     runs-on: ubuntu-24.04
@@ -175,6 +205,9 @@ jobs:
     needs: [validate]
     name: Timings
     runs-on: ubuntu-24.04
+    # Reporting only: a queued, slow or cancelled timings job must never fail a run whose
+    # concerns all passed (run 37342723559 was cancelled while waiting for a runner).
+    continue-on-error: true
     timeout-minutes: 5
     permissions:
       actions: read
