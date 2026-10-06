@@ -2,7 +2,7 @@
 #
 # Format: one entry per line, "<scope> <pattern>  # reason". The reason is required.
 #   scope    all, or one workflow family: linux, macos, windows, android, ios,
-#            orchestrate, keeldock, live
+#            orchestrate, live
 #   pattern  an exact host name; a leading "*." matches one or more labels (subdomains only,
 #            never the suffix itself); any other "*" matches characters within one label.
 #            Wildcards are kept to operator-owned names: a wildcard on a platform where anyone
@@ -20,9 +20,9 @@
 # Checked by .github/policy/check-egress-allowlist.sh.
 #
 # Evidence: the audit output of post-merge runs on main against the Taurine develop tip
-# 767a540654a1d5e27c88b2cf87b489e4364ed7c0 (keeldock-cloud main for Keel Dock): orchestrate
+# 767a540654a1d5e27c88b2cf87b489e4364ed7c0: orchestrate
 # 37298764740 and 37303676822, Android 37301315538 and 37303668221, iOS 37303672199, macOS
-# 37303659178, Windows 37303663707, Keel Dock 37303687180, live proofs 37303681764, Linux
+# 37303659178, Windows 37303663707, live proofs 37303681764, Linux
 # 37303679989 and 37307007382. Names the
 # runs showed only as hashes were identified by hashing candidate public names; any name that
 # could not be identified stays unlisted (and so unpublished) until someone can name it.
@@ -53,15 +53,6 @@ all crl.comodoca.com.cdn.cloudflare.net         # crl.comodoca.com CNAME
 all mpki-ocsp.digicert.com.cdn.cloudflare.net   # DigiCert OCSP CNAME
 all www.microsoft.com-c-3.edgekey.net           # www.microsoft.com (PKI) CNAME
 all e13678.dscb.akamaiedge.net                  # www.microsoft.com CNAME target
-all nugetapiprod.trafficmanager.net             # api.nuget.org CNAME
-all api.nuget.org.edgesuite.net                 # api.nuget.org CNAME
-all a2043.dscr.akamai.net                       # api.nuget.org CNAME target
-all nuget-prod-globalcdn.trafficmanager.net     # globalcdn.nuget.org CNAME
-all globalcdn.nuget.org.edgesuite.net           # globalcdn.nuget.org CNAME
-all a918.dscr.akamai.net                        # globalcdn.nuget.org CNAME target
-all dotnetcli.trafficmanager.net                # builds.dotnet.microsoft.com CNAME
-all builds.dotnet.microsoft.com.edgesuite.net   # builds.dotnet.microsoft.com CNAME
-all a441.dscd.akamai.net                        # builds.dotnet.microsoft.com CNAME target
 all mcr.trafficmanager.net                      # mcr.microsoft.com CNAME
 all mcr-0001.mcr-msedge.net                     # mcr.microsoft.com CNAME target
 all homebrew.github.io                          # formulae.brew.sh CNAME (exact: github.io is user-creatable)
@@ -82,14 +73,11 @@ all oneocsp.microsoft.com                       # Microsoft OCSP
 # --- Runner operating-system background traffic (not project code) ------------------------
 macos *.apple.com                               # macOS and Xcode services (OCSP, software update, gdmf)
 ios *.apple.com                                 # same image as macOS
-keeldock *.apple.com                            # Keel Dock macOS legs
 macos *.aaplimg.com                             # Apple CDN names
 ios *.aaplimg.com                               # Apple CDN names
-keeldock *.aaplimg.com                          # Apple CDN names
 macos updates.cdn-apple.com                     # Apple software-update CDN
 ios updates.cdn-apple.com                       # Apple software-update CDN
 windows *.microsoft.com                         # Windows Defender, telemetry and redirect services
-keeldock *.microsoft.com                        # Keel Dock Windows legs and .NET services
 windows incoming.telemetry.mozilla.org          # Firefox preinstalled on the Windows image
 ios rubygems.org                                # CocoaPods and XcodeGen tooling on the iOS image
 
@@ -111,7 +99,7 @@ linux sundry-f-net.trafficmanager.net           # Playwright download CNAME
 linux download.prss.microsoft.com.akamaized.net # Playwright download CNAME
 linux playwright-bkakghazbfe7grc5.z01.azurefd.net  # cdn.playwright.dev Front Door
 linux mr-z01.tm-azurefd.net                     # cdn.playwright.dev CNAME
-all fg.microsoft.map.fastly.net                 # Microsoft edge on Fastly (Linux and Keel Dock)
+all fg.microsoft.map.fastly.net                 # Microsoft edge on Fastly (Linux)
 
 # --- Operating-system packages ---------------------------------------------------------
 all azure.archive.ubuntu.com                    # apt on hosted Ubuntu (Linux, Android, live)
@@ -138,14 +126,8 @@ android plugins-artifacts.gradle.org            # Gradle plugin portal artifacts
 android repo.apache.maven.org                   # Maven Central alias returned by its CDN
 android time.android.com                        # Android emulator NTP
 
-# --- .NET (Keel Dock) ------------------------------------------------------------------
-keeldock api.nuget.org                          # NuGet restore from the lock files
-keeldock globalcdn.nuget.org                    # NuGet package CDN
-keeldock builds.dotnet.microsoft.com            # setup-dotnet SDK download
-keeldock dotnetcli.azureedge.net                # setup-dotnet SDK download (legacy feed)
-keeldock aka.ms                                 # setup-dotnet redirects
 
-# --- Container registries (live proofs, Keel Dock PostgreSQL) ----------------------------
+# --- Container registries (live proofs) ----------------------------
 live registry-1.docker.io                       # Docker Hub (RocketMQ, Doris, StarRocks, Informix)
 live auth.docker.io                             # Docker Hub token service
 live production.cloudflare.docker.com           # Docker Hub layer CDN
@@ -154,7 +136,3 @@ live mcr.microsoft.com                          # SQL Server images
 live *.data.mcr.microsoft.com                   # SQL Server image layers
 live icr.io                                     # IBM Db2 Community image
 live containers.intersystems.com                # InterSystems IRIS Community image
-keeldock registry-1.docker.io                   # PostgreSQL for the Migrator proof
-keeldock auth.docker.io                         # Docker Hub token service
-keeldock production.cloudflare.docker.com       # Docker Hub layer CDN
-keeldock docker-images-prod.*.r2.cloudflarestorage.com  # Docker Hub layer storage

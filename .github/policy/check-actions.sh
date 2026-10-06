@@ -19,7 +19,6 @@ check_action_references() {
       actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9) ;;
       actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1) ;;
       actions/setup-node@820762786026740c76f36085b0efc47a31fe5020) ;;
-      actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68) ;;
       ./.github/workflows/windows-validation-concern.yml) ;;
       # Local composite actions are reviewed in this repository; each one is added
       # here deliberately and held to the composite rules below.
@@ -46,7 +45,6 @@ check_action_references() {
       ./.github/actions/verify-cargo-cache) ;;
       ./.github/actions/linux-test-identities) ;;
       ./.github/actions/rust-target-cache) ;;
-      ./.github/workflows/keeldock-validation-concern.yml) ;;
       ./.github/workflows/live-proof-arm.yml) ;;
       ./.github/actions/mobile-report) ;;
       ./.github/actions/android-sdk-setup) ;;
@@ -62,15 +60,6 @@ check_action_references() {
       ./.github/actions/live-start-pg) ;;
       ./.github/actions/live-start-rocketmq) ;;
       ./.github/actions/live-start-sql) ;;
-      ./.github/actions/keeldock-restore) ;;
-      ./.github/actions/keeldock-build-format) ;;
-      ./.github/actions/keeldock-test-suites) ;;
-      ./.github/actions/keeldock-supply-chain) ;;
-      ./.github/actions/keeldock-apphost) ;;
-      ./.github/actions/keeldock-contracts-publish) ;;
-      ./.github/actions/keeldock-summary) ;;
-      ./.github/actions/keeldock-proof) ;;
-      ./.github/actions/keeldock-nuget-verify) ;;
       ./.github/actions/egress-audit) ;;
       # Linux egress block mode, called only from the egress-audit composite's enforce phase.
       ./.github/actions/egress-block) ;;

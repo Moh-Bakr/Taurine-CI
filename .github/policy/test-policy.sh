@@ -246,32 +246,6 @@ done
 (source "${policy}/check-cache-policy.sh"; check_builtin_cache_off .github/actions/node-setup/action.yml) || { echo 'the reviewed setup-node step should pass' >&2; exit 1; }
 echo 'cache policy fixtures: the cache guards reject restore-keys, an unguarded save, an unreviewed path and a cache step outside protected main'
 
-# The KeelDock NuGet cache: the reviewed concern passes; a restore outside protected main, a save
-# without the protected-ancestry answer and a save key evaluated after project code fail. The
-# policy recognises the concern by its repository path, so each fixture is checked from its own
-# root under that path.
-nuget_root="${base}/nuget"
-mkdir -p "${nuget_root}/.github/workflows"
-nuget_expect_fail() {
-  local label="$1" needle="$2" expr="$3"
-  perl -0pe "${expr}" .github/workflows/keeldock-validation-concern.yml > "${nuget_root}/.github/workflows/keeldock-validation-concern.yml"
-  if (cd "${nuget_root}" && source "${policy}/check-cache-policy.sh" && check_cache_policy .github/workflows/keeldock-validation-concern.yml) >/dev/null 2>"${base}/err"; then
-    echo "NuGet fixture '${label}' should fail but passed" >&2
-    exit 1
-  fi
-  grep -qF -- "${needle}" "${base}/err" || { echo "NuGet fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
-}
-(source "${policy}/check-cache-policy.sh"; check_cache_policy .github/workflows/keeldock-validation-concern.yml) || { echo 'the reviewed NuGet cache steps should pass' >&2; exit 1; }
-nuget_expect_fail 'NuGet restore without the main guard' 'NuGet cache runs only on main' \
-  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && steps\.verified-source\.outcome)/if: \$\{\{ $1/'
-nuget_expect_fail 'NuGet restore gate re-opened by ||' 'NuGet cache runs only on main' \
-  's/(if: \$\{\{ github\.ref == [^\n]*steps\.verified-source\.outcome == .success.) \}\}/$1 || true }}/'
-nuget_expect_fail 'NuGet save without protected ancestry' 'protected-ancestry answer' \
-  's/ && steps\.verified-source\.outputs\.protected-ancestor == .true.( && steps\.nuget-packages\.outputs\.cache-hit)/$1/'
-nuget_expect_fail 'NuGet save key after project code' 'cache-primary-key' \
-  's/key: \$\{\{ steps\.nuget-packages\.outputs\.cache-primary-key \}\}/key: nuget-\$\{\{ runner.os \}\}-\$\{\{ hashFiles(\x27**\/packages.lock.json\x27) \}\}/'
-echo 'cache policy fixtures: the NuGet guards reject a cache step outside protected main, an unprotected save and a late save key'
-
 # Root removal (finding H2): the reviewed protected workflows pass, and each drop-root rule
 # rejects the one mutation it exists for. The fixture sits in a tree whose composites are this
 # repository's own, so the composite sudo scan reads the real actions.
@@ -306,8 +280,7 @@ drop_expect_fail 'a sudo composite after drop-root' .github/workflows/android-va
   's/(      - name: Remove root before project code\n        # Kept as \.\/ : the policy matches this exact form for local actions\.\n        uses: \.\/\.github\/actions\/drop-root[^\n]*\n)/$1\n      - name: Late privileged setup\n        uses: .\/.github\/actions\/root-setup\n        with:\n          concern: x\n/'
 echo 'drop-root fixtures: a missing drop, project code or a setup composite before it, and sudo or Docker after it are rejected'
 
-# Ref isolation freshness guard: the reviewed guard (inline in the source-checkout composite and
-# in the KeelDock concern) is extracted and run against a stubbed compare API. identical and
+# Ref isolation freshness guard: the reviewed guard (inline in the source-checkout composite) is extracted and run against a stubbed compare API. identical and
 # behind are accepted (behind with a warning naming the sync command); ahead, diverged and an
 # unreadable answer are refused, and a run from main is not subject to the guard.
 fresh_dir="${base}/freshness"
@@ -320,7 +293,7 @@ case "${FAKE_COMPARE_STATUS}" in
 esac
 STUB
 chmod +x "${fresh_dir}/bin/curl"
-for guard_file in .github/actions/source-checkout/action.yml .github/workflows/keeldock-validation-concern.yml; do
+for guard_file in .github/actions/source-checkout/action.yml; do
   ruby -ryaml -e '
     doc = YAML.safe_load(File.read(ARGV[0]), aliases: false)
     steps = doc.dig("runs", "steps") || doc["jobs"].values.flat_map { |j| j["steps"] || [] }

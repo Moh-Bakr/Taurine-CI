@@ -9,7 +9,6 @@ source "${policy}/lib.sh"
 source "${policy}/check-actions.sh"
 source "${policy}/check-weekly.sh"
 source "${policy}/check-cache-policy.sh"
-source "${policy}/check-keeldock.sh"
 source "${policy}/check-protected.sh"
 source "${policy}/check-dispatchers.sh"
 

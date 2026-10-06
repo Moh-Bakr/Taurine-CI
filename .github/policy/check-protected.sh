@@ -32,8 +32,7 @@ check_protected_source() {
       exit 1
     fi
   fi
-  # The KeelDock concern takes its environment as an input so a dedicated environment
-  # is a one-line change in its dispatcher; the dispatcher's value is checked below.
+  # A reusable concern may take its environment as an input; the dispatcher passes it.
   if ! grep -qE '^    environment:[[:space:]]+(source-read|\$\{\{ inputs\.environment \}\})[[:space:]]*$' "$workflow"; then
     echo "The protected source workflow must use the protected source-read environment: $workflow" >&2
     exit 1
@@ -88,5 +87,4 @@ check_protected_source() {
     echo "The source-read workflow must explicitly revoke its token before project code: $workflow" >&2
     exit 1
   fi
-  check_keeldock_concern "$workflow"
 }

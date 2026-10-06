@@ -15,8 +15,7 @@ failures = []
 (doc['jobs'] || {}).each do |job_id, job|
   env = job['environment']
   env_name = env.is_a?(Hash) ? env['name'] : env
-  # The KeelDock concern takes its environment as an input (a reviewed set,
-  # enforced on its dispatcher), so that expression counts as the source-read tier.
+  # A reusable concern may take its environment as an input, so that expression counts as the source-read tier.
   next unless env_name == 'source-read' || env_name.to_s == '$' + '{{ inputs.environment }}'
   steps = job['steps'] || []
   revoke_at = steps.index { |st| st['run'].to_s.include?('installation/token') }

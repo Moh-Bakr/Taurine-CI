@@ -1,15 +1,15 @@
 # How the hosted CI works
 
-This repository (`Moh-Bakr/Taurine-CI`) is public. It is the control plane that validates two
-private source repositories on free hosted runners. It contains workflows, small composite
-actions and one concern table, and never any product source.
+This repository (`Moh-Bakr/Taurine-CI`) is public. It is the control plane that validates the private
+Taurine source repository on free hosted runners. It contains workflows, small composite
+actions and one concern table, and never any product source. Keel Dock's CI lives in `Keeldock/keeldock-ci`, not here.
 
 ## The two-repo model
 
 | Repository | Visibility | Holds |
 | --- | --- | --- |
 | `Moh-Bakr/Taurine-CI` | public | Workflows, composite actions, `.github/ci-matrix.json`, the policy workflow |
-| `Moh-Bakr/Taurine` | private | The product source. Second private source: `Moh-Bakr/keeldock-cloud` (Keel Dock lane) |
+| `Moh-Bakr/Taurine` | private | The product source. This is the only private source this control plane reads. Keel Dock's CI lives in `Keeldock/keeldock-ci`. |
 
 Every validation is a manual `workflow_dispatch` (plus the weekly schedule) on `main` of this
 repository, given the exact 40-character SHA of the private commit to test. Nothing runs on
@@ -62,7 +62,7 @@ script, a test) could in principle have read the key as root (finding H2).
 The fix is to take root away before project code runs, not to test whether memory can be read.
 Every source-bearing job does three things, in this order, straight after the token is revoked:
 
-1. **Privileged setup** (`.github/actions/root-setup`, plus the live-proof and Keel Dock
+1. **Privileged setup** (`.github/actions/root-setup`, plus the live-proof
    container start-up). Everything that needs root happens here: the Ubuntu archive packages a
    concern links against, the scratch-disk target directory, Playwright's Chromium host
    libraries (a fixed list, so the locked Playwright CLI no longer runs `--with-deps` as root),
@@ -93,7 +93,7 @@ source, run on 2026-10-05 and then deleted) showed, on `ubuntu-24.04`, `ubuntu-l
 `sudo -n true` once the sudoers files are replaced. Removing the user from the `docker` group
 does **not** work on its own, because running processes keep the group they started with;
 making the socket root-only does. Later `uses:` actions (`setup-node` with an uncached
-release, `setup-dotnet`) still work, because they install into directories the job user owns.
+release) still work, because they install into directories the job user owns.
 Containers started before the drop keep running and stay reachable on their published ports.
 
 ### Residual risk, per operating system
@@ -117,10 +117,6 @@ code. What remains:
 - **The live-proof `bastion` arm keeps Docker**: its tunnel test asks `docker inspect` for the
   lab postgres container's network address, which only the bastion can route to. Every other
   live-proof arm closes Docker. `sudo` is removed in all of them.
-- **Keel Dock `db-containers` and `apphost-cold-start` keep Docker**, because their project
-  code starts containers itself (Testcontainers, the Aspire AppHost). Docker access is
-  root-equivalent, so in those two concerns project code can still reach root through Docker.
-  `sudo` is still removed. The job summary says "Docker: kept open" for these.
 - **The opt-in `e2e-visual` tier** runs inside a job container as root, and GitHub mounts the
   host Docker socket into job containers. Root cannot be removed there. The summary records it;
   leave the tier off unless the run needs it.
@@ -136,7 +132,7 @@ without an authorisation it can no longer grant itself. What remains:
   authorisation; neither is available to the job any more. This was not tested by trying to
   read memory, by design: the probe only proved that `sudo`, developer mode and the group
   memberships are gone, and that the iOS simulator, Homebrew installs, a throwaway keychain,
-  `xcodebuild`, `setup-node` and `setup-dotnet` still work afterwards.
+  `xcodebuild` and `setup-node` still work afterwards.
 - An authorisation prompt (for example `osascript ... with administrator privileges`) cannot
   be answered on a headless runner; the probe showed it simply waits.
 - The job user still owns Homebrew (`/opt/homebrew`) and its own home directory. No root
@@ -196,8 +192,7 @@ Kept in audit, and why:
 
 - **Linux `e2e-visual`**: it runs inside a job container as root with the host Docker socket,
   so a host firewall cannot bind it.
-- **Docker-kept jobs** (the live-proof `bastion` arm, Keel Dock `db-containers` and
-  `apphost-cold-start`): Docker access is root-equivalent, so project code could remove the
+- **Docker-kept jobs** (the live-proof `bastion` arm): Docker access is root-equivalent, so project code could remove the
   firewall; blocking there would be a claim the job cannot keep.
 - **macOS**: `tcpdump` records only. A `pf` anchor with a filtering resolver is technically
   possible before `drop-root`, but macOS background services (software update, OCSP, Xcode
@@ -307,7 +302,6 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
 | `android-validation.yml` | android-native (debug build for aarch64); android-rust with `rust=true` (compile-only mobile test targets, not executed) |
 | `ios-validation.yml` | ios-native (unsigned simulator build); ios-rust with `rust=true` (compile-only) |
 | `orchestrate-validation.yml` | dashboard, release-verification |
-| `keeldock-validation.yml` and `keeldock-validation-concern.yml` | build-format, structural, unit and contracts-publish-smoke on Linux, macOS and Windows; Linux-only db-containers and supply-chain; opt-in apphost-cold-start |
 | `source-read.yml` | Reads an exact private SHA, a smoke test of the access path |
 | `live-proofs.yml` (dispatcher) and `live-proof-arm.yml` | One arm per database engine; see [The live proofs](#the-live-proofs) |
 
@@ -334,14 +328,12 @@ that runs after the revoke lives in composites under `.github/actions/`.
 | Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust` |
 | Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report` |
 | iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report` |
-| Keel Dock | `keeldock-validation.yml` calls `keeldock-validation-concern.yml` | `keeldock-restore`, `keeldock-build-format`, `keeldock-test-suites`, `keeldock-supply-chain`, `keeldock-apphost`, `keeldock-contracts-publish`, `keeldock-summary`, `keeldock-proof`, `keeldock-nuget-verify` |
 | Live proofs | `live-proofs.yml` calls `live-proof-arm.yml` once per arm | `live-build`, `live-run`, `live-summary`, `live-start-mpp`, `live-start-ibm`, `live-start-rocketmq`, `live-start-iris`, `live-start-pg`, `live-start-sql` |
 | Policy | `validate-public-changes.yml` | the scripts under `.github/policy/` |
 
 Two conventions apply across all of them. Private source is checked out into `src/` and the
 composites run from there, so the control plane's own composites stay available after the checkout;
-the Keel Dock concern follows the same layout (its own mint and checks stay inline in the workflow, as
-its policy requires). A step that must run whatever happens, such as the revoke, the summary and the
+A step that must run whatever happens, such as the revoke, the summary and the
 duration report, is conditioned on `always()` in the workflow, never inside a composite alone.
 
 Every `uses:` reference, including each local workflow and composite, is on an allow-list in
@@ -398,10 +390,8 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
-| `apphost` | Keel Dock | Adds the experimental Aspire apphost-cold-start concern |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
 | `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
-| `vulnerability_gate` | Keel Dock | `none` (warn-only), `high` or `critical`: the severity that fails supply-chain |
 
 ## The Result verdict
 
@@ -460,7 +450,7 @@ Source-bearing output is public, so it is treated as hostile:
 - No artifacts, no source-bearing caches. Composites may not use `actions/upload-artifact`,
   `download-artifact` or caches.
 - The reviewed caches (the compiled third-party dependency cache `rust-target-cache`, the Cargo
-  third-party crate source cache and Keel Dock's NuGet package cache) run **only on `main`, and
+  third-party crate source cache) run **only on `main`, and
   only for a protected source SHA**. A cache entry is only as trustworthy as whoever could write
   it, and writing needs nothing more than the runner's runtime token, which project code can
   read. The cache action also unpacks with absolute paths, so a planted entry could overwrite

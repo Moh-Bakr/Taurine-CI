@@ -10,7 +10,7 @@
 #  5. Every job that enters the source-read environment calls the source-checkout composite,
 #     and nothing that runs project code precedes it: only the public checkout (needed to
 #     reach the local composites), the timer composite and plain-shell input validation may
-#     come first. The two reviewed exceptions are listed below with their reason.
+#     come first. The reviewed exception is listed below with their reason.
 #  6. Every workflow that enters source-read on dispatch has its reviewed pre-flight job, which
 #     calls the environment-preflight composite (the deployment branches must be exactly main
 #     and untrusted) and does not continue on error; every job that calls a workflow, enters an
@@ -24,14 +24,12 @@ failures = []
 
 # job-level exceptions to rule 5: [workflow file, job id] => reason
 PROTECTED_JOB_EXEMPT = {
-  ['keeldock-validation-concern.yml', 'validate'] => 'second private source: inline mint with its own stricter checks (check-keeldock.sh)',
   ['weekly-validation.yml', 'resolve'] => 'scheduled resolver: mints, reads one API value and revokes; checks nothing out by design (check-weekly.sh)'
 }.freeze
 
 PREFLIGHT = {
   '.github/workflows/linux-validation.yml' => 'validate-input',
   '.github/workflows/windows-validation.yml' => 'validate-input',
-  '.github/workflows/keeldock-validation.yml' => 'validate-input',
   '.github/workflows/orchestrate-validation.yml' => 'validate-input',
   '.github/workflows/source-read.yml' => 'validate-input',
   '.github/workflows/live-proofs.yml' => 'plan',

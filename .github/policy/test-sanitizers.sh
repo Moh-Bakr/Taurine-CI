@@ -6,9 +6,7 @@
 # of them and runs it over fixtures: a path containing a space (the old
 # `[^ ]+` rules published everything after the space), a Windows drive path, a
 # macOS /private/var path and GitHub token shapes. A program may only claim a
-# root it names; every root it names must be scrubbed completely. The
-# keeldock-* workflows are owned by the Keel Dock lane and join this list when
-# that lane has moved its sanitizers onto the same rules.
+# root it names; every root it names must be scrubbed completely.
 # Run from the repository root (the policy workflow does).
 set -euo pipefail
 fixtures="${RUNNER_TEMP}/sanitizer-fixtures"
@@ -22,7 +20,7 @@ forbidden='SPACEDIR|alice|Jo Bloggs|Secret|ghp_abc|ghs_Xyz|github_pat_11|abc\.DE
 sanitizer_files=()
 while IFS= read -r -d '' file; do
   sanitizer_files+=("${file}")
-done < <(find .github/workflows .github/actions -name '*.yml' -not -name 'keeldock-*' -print0)
+done < <(find .github/workflows .github/actions -name '*.yml' -print0)
 backslash=$'\\'
 count=0
 while IFS= read -r expr; do
