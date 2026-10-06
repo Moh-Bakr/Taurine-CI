@@ -246,8 +246,11 @@ runs:
           # toolchain versions are printed (public tool and formula versions, nothing from
           # the private source) so a failure here is attributable to a compiler or a
           # formula version from the run summary alone.
-          xcodebuild -version | head -n 1
-          xcrun clang++ --version | head -n 1
+          # Captured first, then trimmed to the first line: piping the tool straight into
+          # head(1) has killed three hosted macOS runs (exit 134, most recently rust-net in
+          # run 37451171253) when the tool's own SIGPIPE handling aborted on the closed pipe.
+          xb_out="$(xcodebuild -version 2>&1)"; printf '%s\n' "${xb_out%%$'\n'*}"
+          cc_out="$(xcrun clang++ --version 2>&1)"; printf '%s\n' "${cc_out%%$'\n'*}"
           brew list --versions asio fmt jsoncpp lz4 xxhash openssl@3
         fi
 
