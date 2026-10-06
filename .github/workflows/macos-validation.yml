@@ -110,15 +110,17 @@ jobs:
     environment: source-read
     runs-on: macos-15
     # The TypeScript concerns stay on the reviewed 45. The Rust concerns compile
-    # their closure cold on a three-core runner (only rust-app restores compiled
-    # third-party crates; compiled private source is never cached): `rust-app` carries DuckDB's C++ amalgamation, Tauri and
-    # over a hundred test binaries (about 40 minutes on the four-core Linux
-    # runner), `rust-db` the same drivers' offline suites (about 10 there).
+    # their closure on a three-core runner (the rust-app shards restore compiled
+    # third-party crates on main, for a protected source SHA; compiled private
+    # source is never cached): `rust-app-1`/`rust-app-2` carry DuckDB's C++
+    # amalgamation, Tauri and over a hundred test binaries (about 40 minutes
+    # cold on the four-core Linux runner), `rust-db` the same drivers' offline
+    # suites (about 10 there).
     timeout-minutes: ${{ (startsWith(matrix.concern, 'rust-app') || matrix.concern == 'rust-packaging') && 120 || matrix.concern == 'rust-db' && 90 || startsWith(matrix.concern, 'rust-') && 60 || 45 }}
     strategy:
       fail-fast: false
       # The concern list comes from the `plan` job: the TypeScript concerns always,
-      # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-ovpn, rust-app,
+      # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2,
       # one runner each so a slow one cannot hold the others back) only when the
       # dispatch set rust=true. They are the macOS counterparts of the Linux
       # rust-* concerns. rust-dbx is not repeated here: dbx-core's engine and
@@ -312,7 +314,7 @@ jobs:
       # locate step only computes the key and keeps the target directory outside the private checkout.
       - name: Locate the compiled dependency cache
         id: cargo-target
-        if: ${{ matrix.concern == 'rust-app' }}
+        if: ${{ startsWith(matrix.concern, 'rust-app-') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -323,7 +325,7 @@ jobs:
 
       - name: Restore compiled third-party dependencies
         id: cargo-target-cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && matrix.concern == 'rust-app' }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(matrix.concern, 'rust-app-') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -333,7 +335,7 @@ jobs:
           key: ${{ steps.cargo-target.outputs.key }}
 
       - name: Strip workspace crates from the restored dependency cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && matrix.concern == 'rust-app' }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(matrix.concern, 'rust-app-') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -364,7 +366,7 @@ jobs:
       # SHA, only after the concern passed and the strip-and-prove step succeeded.
       - name: Strip and prove the compiled dependency cache
         id: cargo-target-strip
-        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -373,7 +375,7 @@ jobs:
           os-label: macOS
 
       - name: Save compiled third-party dependencies
-        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
