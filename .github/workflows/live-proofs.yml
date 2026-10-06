@@ -29,12 +29,16 @@ on:
 
 permissions: {}
 
-# One selection per group, so two selections can prove concurrently without
-# colliding, and a re-dispatch of the same selection queues behind the running
-# one instead of cancelling a proof half-done. Proof runs are never cancelled
-# automatically: the whole point is to let a slow server finish.
+# Proof runs are never cancelled automatically: the whole point is to let a slow server
+# finish. Each run has its own group (below), so two selections prove concurrently and none is
+# replaced while pending.
 concurrency:
-  group: live-proofs-${{ inputs.engine }}
+  # Each run has its own group: GitHub keeps only one PENDING run per group, so a shared per-SHA
+  # group let a later dispatch silently cancel an earlier pending one. Runs are never
+  # deduplicated or cancelled; check for an existing run before dispatching (docs/how-ci-works.md).
+  # Nothing is shared between runs that a group would protect: caches are first-writer-wins on an
+  # exact key, so a race is harmless.
+  group: live-proofs-${{ inputs.engine }}-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:

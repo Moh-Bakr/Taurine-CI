@@ -41,7 +41,7 @@ runs:
         allowlist="${GITHUB_WORKSPACE}/.github/egress-allowlist.txt"
         scope="${EGRESS_SCOPE}"
         DNSMASQ_PIN='2.91-0ubuntu0.24.04.*'
-        NFTABLES_PIN='1.0.9-1build1'
+        NFTABLES_PIN='1.0.9-*'
         DNS_USER=taurine-egress-dns
         TABLE=taurine_egress
         logdir=/var/log/taurine-egress
@@ -55,6 +55,9 @@ runs:
         mkdir -p "${state}"
 
         # --- 1. Packages, from the runner image's own Ubuntu archive, pinned -----------------------
+        # Pinned to the noble release lines (2.91 from noble-updates, nftables 1.0.9); the glob
+        # takes the security rebuilds within a line, so the pin cannot fight the image's own
+        # libnftables1 (the image ships 1.0.9-1ubuntu0.x, not the release's 1.0.9-1build1).
         sudo -n apt-get update -qq
         sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
           "dnsmasq-base=${DNSMASQ_PIN}" "nftables=${NFTABLES_PIN}" >/dev/null
@@ -135,6 +138,7 @@ runs:
           chain output {
             type filter hook output priority 0; policy drop;
             oifname "lo" accept
+            ip daddr 127.0.0.0/8 accept
             # DNS leaves only through the resolver, even on a flow that predates this table.
             meta skuid != ${dns_uid} meta l4proto { tcp, udp } th dport 53 counter drop
             ct state established,related accept
@@ -177,9 +181,10 @@ runs:
         addr="$(getent ahostsv4 github.com | awk 'NR == 1 { print $1 }')"
         sudo -n nft get element inet "${TABLE}" allow4 "{ ${addr} }" >/dev/null 2>&1 \
           || die 'self-test: a resolved allowed address did not reach the firewall set'
-        # A name whose answer is a CNAME chain: its final addresses must reach the set too.
-        caddr="$(getent ahostsv4 results-receiver.actions.githubusercontent.com | awk 'NR == 1 { print $1 }' || true)"
-        [[ -n "${caddr}" ]] || die 'self-test: results-receiver.actions.githubusercontent.com does not resolve'
+        # A name whose CNAME chain ends outside the allow-list (packages.microsoft.com ends on an
+        # Azure Front Door edge name): the chain's final addresses must reach the set too.
+        caddr="$(getent ahostsv4 packages.microsoft.com | awk 'NR == 1 { print $1 }' || true)"
+        [[ -n "${caddr}" ]] || die 'self-test: packages.microsoft.com does not resolve'
         sudo -n nft get element inet "${TABLE}" allow4 "{ ${caddr} }" >/dev/null 2>&1 \
           || die 'self-test: a CNAME-chain answer did not reach the firewall set'
         curl -sS -o /dev/null --max-time 20 https://github.com/ \
