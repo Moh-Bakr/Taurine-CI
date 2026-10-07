@@ -1,5 +1,69 @@
 {
   "version": 1,
+  "dispatch_contracts": {
+    "version": 1,
+    "source_repository": "Moh-Bakr/Taurine",
+    "control_repository": "Moh-Bakr/Taurine-CI",
+    "control_refs": [
+      "refs/heads/main",
+      "refs/heads/untrusted"
+    ],
+    "workflows": {
+      ".github/workflows/linux-validation.yml": {
+        "inputs": {
+          "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
+          "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false},
+          "profile": {"type": "choice", "required": false, "default": "full", "options": ["full", "quick"], "digest_include": true},
+          "visual": {"type": "boolean", "required": false, "default": false, "digest_include": true},
+          "gitleaks_history": {"type": "boolean", "required": false, "default": false, "digest_include": true},
+          "base_sha": {"type": "string", "required": false, "default": "", "format": "optional-sha40", "digest_include": true}
+        }
+      },
+      ".github/workflows/macos-validation.yml": {
+        "inputs": {
+          "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
+          "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false},
+          "rust": {"type": "boolean", "required": false, "default": false, "digest_include": true},
+          "flavor": {"type": "choice", "required": false, "default": "prod", "options": ["prod", "dev", "uat"], "digest_include": true}
+        }
+      },
+      ".github/workflows/windows-validation.yml": {
+        "inputs": {
+          "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
+          "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false},
+          "rust": {"type": "boolean", "required": false, "default": false, "digest_include": true},
+          "windows_image": {"type": "choice", "required": false, "default": "windows-2022", "options": ["windows-2022", "windows-2025"], "digest_include": true}
+        }
+      },
+      ".github/workflows/android-validation.yml": {
+        "inputs": {
+          "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
+          "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false},
+          "rust": {"type": "boolean", "required": false, "default": false, "digest_include": true}
+        }
+      },
+      ".github/workflows/ios-validation.yml": {
+        "inputs": {
+          "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
+          "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false},
+          "rust": {"type": "boolean", "required": false, "default": false, "digest_include": true}
+        }
+      },
+      ".github/workflows/orchestrate-validation.yml": {
+        "inputs": {
+          "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
+          "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false}
+        }
+      },
+      ".github/workflows/live-proofs.yml": {
+        "inputs": {
+          "engine": {"type": "string", "required": true, "format": "engine-selection", "options": ["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "mysql", "mssql", "pgtls", "bastion"], "digest_include": true},
+          "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
+          "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false}
+        }
+      }
+    }
+  },
   "rules": {
     "full_if_any_changed": [
       "Cargo.toml",

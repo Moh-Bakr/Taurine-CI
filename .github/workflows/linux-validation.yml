@@ -1,4 +1,5 @@
 name: Linux source validation (protected)
+run-name: Taurine validation ${{ inputs.source_sha }} ${{ inputs.dispatch_key }}
 
 # This is a trusted, manually dispatched dispatcher. Each matrix concern is a
 # separate source-bearing runner so a slow test suite cannot block contracts,
@@ -8,6 +9,10 @@ on:
     inputs:
       source_sha:
         description: Exact 40-character commit SHA to validate from private Taurine
+        required: true
+        type: string
+      dispatch_key:
+        description: Full SHA-256 key for this exact control revision and normalized dispatch inputs
         required: true
         type: string
       profile:
@@ -91,6 +96,21 @@ jobs:
             echo 'base_sha must be empty or a full 40-character hexadecimal commit SHA' >&2
             exit 1
           fi
+
+      - name: Verify the coordinator dispatch identity
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_WORKFLOW_PATH: .github/workflows/linux-validation.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"base_sha":{0},"gitleaks_history":{1},"profile":{2},"source_sha":{3},"visual":{4}}}', toJSON(inputs.base_sha), toJSON(inputs.gitleaks_history), toJSON(inputs.profile), toJSON(inputs.source_sha), toJSON(inputs.visual)) }}
+          CI_DISPATCH_CONTRACT_JSON: ''
+          CI_GENERATE_ONLY: 'false'
+          CI_CONTROL_REPOSITORY: ${{ github.repository }}
+          CI_CONTROL_SHA: ${{ github.sha }}
+          CI_CONTROL_REF: ${{ github.ref }}
+        run: ruby .github/policy/dispatch-identity.rb
 
   # The concern list lives in .github/ci-matrix.json (one table for the selector, this
   # dispatcher and the result check). The reasons the concerns are split the way they are,

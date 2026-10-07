@@ -152,6 +152,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      contents: read
       actions: write
     steps:
       - name: Dispatch the protected validations for the resolved SHAs
@@ -167,6 +168,9 @@ jobs:
           THIS_RUN_ID: ${{ github.run_id }}
           OPENSSL_LOCKED: ${{ needs.resolve.outputs.openssl_locked }}
           DRY_RUN: ${{ inputs.dry_run }}
+          CONTROL_SHA: ${{ github.sha }}
+          CONTROL_REF: ${{ github.ref }}
+          GITHUB_API_URL: ${{ github.api_url }}
         run: |
           set -euo pipefail
           if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -189,26 +193,67 @@ jobs:
           if [[ "${DRY_RUN}" == true ]]; then
             echo "dry run: no validation runs dispatched"
           else
-            gh workflow run linux-validation.yml --ref main -f "source_sha=${SOURCE_SHA}"
+            # The resolver checks nothing out. Read the reviewed identity contract and its
+            # stdlib-only key calculator from this exact control-plane commit, then use that
+            # same contract for every event payload. This keeps scheduled/manual dispatches
+            # aligned with the trusted validate-input proof without executing source code.
+            if [[ ! "${CONTROL_SHA}" =~ ^[0-9a-fA-F]{40}$ || "${CONTROL_REF}" != refs/heads/main ]]; then
+              echo 'The weekly control-plane identity is not the protected main tip' >&2
+              exit 1
+            fi
+            gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/${GH_REPO}/contents/.github/ci-matrix.json?ref=${CONTROL_SHA}" \
+              > "${RUNNER_TEMP}/ci-matrix.json"
+            gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/${GH_REPO}/contents/.github/policy/dispatch-identity.rb?ref=${CONTROL_SHA}" \
+              > "${RUNNER_TEMP}/dispatch-identity.rb"
+            contract_json="$(jq -c '.dispatch_contracts' "${RUNNER_TEMP}/ci-matrix.json")"
+            make_key() {
+              local workflow_path="$1" source_sha="$2" normalized_inputs="$3"
+              CI_DISPATCH_CONTRACT_JSON="${contract_json}" \
+              CI_WORKFLOW_PATH="${workflow_path}" \
+              CI_SOURCE_SHA="${source_sha}" \
+              CI_CONTROL_REPOSITORY="${GH_REPO}" \
+              CI_CONTROL_SHA="${CONTROL_SHA}" \
+              CI_CONTROL_REF="${CONTROL_REF}" \
+              CI_NORMALIZED_INPUTS="${normalized_inputs}" \
+              CI_GENERATE_ONLY=true ruby "${RUNNER_TEMP}/dispatch-identity.rb"
+            }
+            linux_inputs="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source,profile:"full",visual:false,gitleaks_history:false,base_sha:""}')"
+            linux_key="$(make_key .github/workflows/linux-validation.yml "${SOURCE_SHA}" "${linux_inputs}")"
+            gh workflow run linux-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${linux_key}"
             # Drift check: the same week's change also runs through the selector. Compare this
             # run's Result with the full run's: a concern that fails in the full run but was
             # "not selected" here is a gap in ci-matrix.json's rules.
             if [[ -n "${BASE_SHA}" ]]; then
-              gh workflow run linux-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f "base_sha=${BASE_SHA}"
+              drift_inputs="$(jq -cn --arg source "${SOURCE_SHA}" --arg base "${BASE_SHA}" '{source_sha:$source,profile:"full",visual:false,gitleaks_history:false,base_sha:$base}')"
+              drift_key="$(make_key .github/workflows/linux-validation.yml "${SOURCE_SHA}" "${drift_inputs}")"
+              gh workflow run linux-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f "base_sha=${BASE_SHA}" -f "dispatch_key=${drift_key}"
             fi
-            gh workflow run macos-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
-            gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+            mac_inputs="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source,rust:true,flavor:"prod"}')"
+            mac_key="$(make_key .github/workflows/macos-validation.yml "${SOURCE_SHA}" "${mac_inputs}")"
+            gh workflow run macos-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f dispatch_key="${mac_key}" -f rust=true
+            windows_inputs="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source,rust:true,windows_image:"windows-2022"}')"
+            windows_key="$(make_key .github/workflows/windows-validation.yml "${SOURCE_SHA}" "${windows_inputs}")"
+            gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f dispatch_key="${windows_key}" -f rust=true
             # Mobile, develop only (the Rust tests on the emulator and the simulator).
-            gh workflow run android-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
-            gh workflow run ios-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true
+            android_inputs="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source,rust:true}')"
+            android_key="$(make_key .github/workflows/android-validation.yml "${SOURCE_SHA}" "${android_inputs}")"
+            gh workflow run android-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f dispatch_key="${android_key}" -f rust=true
+            ios_key="$(make_key .github/workflows/ios-validation.yml "${SOURCE_SHA}" "${android_inputs}")"
+            gh workflow run ios-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f dispatch_key="${ios_key}" -f rust=true
             # The production line: the main tip, Linux only (full, no base), to keep the cost down.
             if [[ -n "${MAIN_SHA}" && "${MAIN_SHA}" != "${SOURCE_SHA}" ]]; then
-              gh workflow run linux-validation.yml --ref main -f "source_sha=${MAIN_SHA}"
+              main_inputs="$(jq -cn --arg source "${MAIN_SHA}" '{source_sha:$source,profile:"full",visual:false,gitleaks_history:false,base_sha:""}')"
+              main_key="$(make_key .github/workflows/linux-validation.yml "${MAIN_SHA}" "${main_inputs}")"
+              gh workflow run linux-validation.yml --ref main -f "source_sha=${MAIN_SHA}" -f "dispatch_key=${main_key}"
             fi
             # The Windows 2025 image, every week, alongside (never instead of) the baseline run.
             # It does not gate anything; two consecutive green weeks switch the default
             # (see the header of windows-validation.yml).
-            gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f rust=true -f windows_image=windows-2025
+            windows_2025_inputs="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source,rust:true,windows_image:"windows-2025"}')"
+            windows_2025_key="$(make_key .github/workflows/windows-validation.yml "${SOURCE_SHA}" "${windows_2025_inputs}")"
+            gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f dispatch_key="${windows_2025_key}" -f rust=true -f windows_image=windows-2025
           fi
           # openssl-src freshness: warn when a private lock is behind the newest 300.5.x
           # release on crates.io (the OpenSSL 3.5 line the production plan targets). The

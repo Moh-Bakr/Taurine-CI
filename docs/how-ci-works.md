@@ -241,13 +241,37 @@ place for unreviewed code is a ref whose cache main never reads. Hence two refs:
 
 ### Dispatching feature-branch validation
 
-Use `--ref untrusted`; everything else is unchanged:
+Protected dispatches require `dispatch_key`. It binds the exact private source SHA to the full
+public control-plane SHA/ref, workflow path and complete default-normalized workflow inputs.
+The trusted input-validation job recomputes the key before any job can read private source; a
+missing or stale key fails closed. The weekly resolver uses the same calculator and contract
+fetched at its exact public `github.sha`, without checking out a repository.
+
+For a manual Linux full run from a local checkout of this public repository, calculate the key
+against the exact control commit that will serve the dispatch and include the source input:
 
 ```bash
-sha=$(gh api repos/Moh-Bakr/Taurine/commits/<branch> -q .sha)
-gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted -f source_sha="$sha"
-gh workflow run macos-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted -f source_sha="$sha" -f rust=true
+CONTROL_SHA="$(git rev-parse origin/main)"
+SOURCE_SHA='<full private commit SHA>'
+DISPATCH_KEY="$(
+  CI_WORKFLOW_PATH=.github/workflows/linux-validation.yml \
+  CI_SOURCE_SHA="${SOURCE_SHA}" \
+  CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI \
+  CI_CONTROL_SHA="${CONTROL_SHA}" \
+  CI_CONTROL_REF=refs/heads/main \
+  CI_NORMALIZED_INPUTS="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source}')" \
+  CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb
+)"
+gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref main \
+  -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${DISPATCH_KEY}"
 ```
+
+For a feature or plan SHA, target `--ref untrusted` and calculate against the exact commit on
+`untrusted` instead. The helper fills only reviewed optional defaults from `dispatch_contracts`
+in `.github/ci-matrix.json`; it rejects unknown fields, choices and live-engine selections.
+For another workflow, use that workflow's exact input map from the same contract, including the
+source SHA. If the public tip moves before dispatch, recalculate against the new tip. Never
+reuse a key after changing an input, source SHA or control revision.
 
 Protected tips (`develop`, `uat`, `main`, and the weekly run) keep dispatching from `main`.
 

@@ -67,6 +67,8 @@ while IFS= read -r -d '' workflow; do
   fi
 done < <(find .github/workflows .github/actions -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
 
+ruby "${policy}/check-dispatch-contracts.rb"
+
 if find . -type f -not -path './.git' -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/policy/*' -not -path './.github/ci-matrix.json' -not -path './.github/dependabot.yml' -not -path './.github/tool-pins.json' -not -path './.github/egress-allowlist.txt' -not \( -path './docs/*.md' -not -path './docs/*/*' \) -not -name '.gitignore' -print -quit | grep -q .; then
   echo "Only workflow files (and an optional .gitignore) may be tracked at this bootstrap phase." >&2
   exit 1
