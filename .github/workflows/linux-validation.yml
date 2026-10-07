@@ -262,15 +262,17 @@ jobs:
       contents: read
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}
     needs: [validate-input, plan, select]
-    # Kept as ./ : the policy matches this exact form for protected reusable calls.
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix) }}
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]
     # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
     secrets:
       SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
-      concerns: ${{ needs.select.outputs.matrix || needs.plan.outputs.matrix }}
-      timeouts: ${{ needs.plan.outputs.timeouts }}
+      concern: ${{ matrix.concern }}
+      timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeouts)[matrix.concern] }}
 
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed
@@ -305,7 +307,7 @@ jobs:
           mode: table
           label: Linux
           baseline-seconds: '{"rust-app-1":1981,"rust-app-2":2100,"rust-db":839,"rust-dbx":603,"rust-domain":186,"rust-net":124,"rust-packaging":999,"rust-tls-openssl":45,"taurine-cli":206,"scan-security":853,"desktop-shard-1":626,"desktop-shard-2":701,"desktop-quality":161,"mobile-quality":146,"frontend-build-budget":118,"contracts":95,"e2e-critical":744,"e2e-a11y":356,"e2e-regression-1":892,"e2e-regression-2":852,"e2e-regression-3":891,"e2e-regression-4":734,"e2e-visual":192}'
-          name-pattern: '^validate / Linux (?<concern>.+)$'
+          name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           github-token: ${{ github.token }}
 
   # One verdict for the dispatch: every possible concern is listed, those that did not
@@ -334,7 +336,7 @@ jobs:
           label: Linux
           expected-concerns: ${{ needs.plan.outputs.expected }}
           required-concerns: ${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}
-          name-pattern: '^validate / Linux (?<concern>.+)$'
+          name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}
           selection-mode: ${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}

@@ -9,19 +9,24 @@ on:
         description: Exact 40-character commit SHA to validate from private Taurine
         required: true
         type: string
-      concerns:
-        description: 'JSON object holding the concern list to execute, of the shape {"concern": [...]}, from the dispatcher plan'
+      concern:
+        description: Independent Linux validation concern to execute
         required: true
         type: string
-      timeouts:
-        description: JSON object mapping each concern to its timeout in minutes, from the reviewed concern table
-        required: true
-        type: string
+      timeout_minutes:
+        description: Job timeout in minutes, from ci-matrix.json
+        required: false
+        default: 60
+        type: number
       suite_selection:
         description: Optional reviewed suite selection JSON ({selection_mode, selected_suite_ids, selection_digest}); empty means the full set
         required: false
         default: ''
         type: string
+    outputs:
+      suite_evidence:
+        description: Sanitized per-suite evidence projection for this concern's coverage group (empty when none was collected)
+        value: ${{ jobs.validate.outputs.suite_evidence }}
     secrets:
       SOURCE_READER_PRIVATE_KEY:
         description: The source-reader App private key, passed explicitly by the dispatcher (never inherited)
@@ -38,19 +43,17 @@ jobs:
   validate:
     permissions:
       contents: read
-    name: Linux ${{ matrix.concern }}
+    name: Linux ${{ inputs.concern }}
     environment: source-read
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        concern: ${{ fromJSON(inputs.concerns).concern }}
+    outputs:
+      suite_evidence: ${{ steps.suite-evidence.outputs.projection }}
     # The visual tier runs inside the same pinned Playwright image the Linux baselines were
     # generated in (Playwright 1.62.0, Ubuntu noble, linux/amd64; see the private
     # docs/visual-baselines.md), so hosted and local rendering are identical. Every other
     # concern runs on the runner image directly.
     # Deliberate: the image is pinned by digest; zizmor cannot see through the expression form.
-    container: ${{ matrix.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}  # zizmor: ignore[unpinned-images]
+    container: ${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}  # zizmor: ignore[unpinned-images]
     # The browser tiers start a dev server, download a browser and drive a
     # real page; the unit and contract concerns stay on the reviewed 30.
     # 45 for the Rust concern. Compiled private source is never cached; only the
@@ -66,7 +69,7 @@ jobs:
     # workstation before the command tier doubled. `rust-dbx` compiles the
     # adopted `dbx-core` tree, whose own manifest records it as roughly 490
     # crates.
-    timeout-minutes: ${{ fromJSON(inputs.timeouts)[matrix.concern] }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
     defaults:
       run:
         working-directory: src
@@ -103,7 +106,7 @@ jobs:
       # the shared composites use. Installed from the image's own Ubuntu noble archive, as root,
       # pinned to the 1.7.1 release line; it holds no source and runs before the checkout.
       - name: Install jq in the visual container
-        if: matrix.concern == 'e2e-visual'
+        if: inputs.concern == 'e2e-visual'
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
@@ -133,7 +136,7 @@ jobs:
           # Gates every cache save below: only a SHA on a protected private branch may write.
           check-protected-ancestry: 'true'
           # Only the opt-in gitleaks history scan needs the full history.
-          fetch-depth: ${{ matrix.concern == 'scan-history' && '0' || '1' }}
+          fetch-depth: ${{ inputs.concern == 'scan-history' && '0' || '1' }}
 
       # The concern's egress mode, from ci-matrix.json (`egress`): block enforces the
       # allow-list from the enforce step below; audit only records. The policy requires block
@@ -143,7 +146,7 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
         env:
-          CONCERN: ${{ matrix.concern }}
+          CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
           mode="$(jq -r --arg c "${CONCERN}" '.concerns.linux[$c].egress // empty' .github/ci-matrix.json)"
@@ -167,7 +170,7 @@ jobs:
       # root-equivalent and closes at drop-root. Only the container runs here, over the fresh
       # checkout and before any project code; the scanner step below reads its report.
       - name: Run the Semgrep container before root is removed
-        if: matrix.concern == 'scan-security'
+        if: inputs.concern == 'scan-security'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
         with:
@@ -179,7 +182,7 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/root-setup  # zizmor: ignore[self-repository]
         with:
-          concern: ${{ matrix.concern }}
+          concern: ${{ inputs.concern }}
 
       # Block mode: the filtering resolver and default-drop firewall go in here, after the
       # privileged setup has fetched its packages and before root is removed, so project code
@@ -197,7 +200,7 @@ jobs:
         uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
         with:
           # The opt-in visual tier runs in a job container as root; recorded, not dropped.
-          container-root: ${{ matrix.concern == 'e2e-visual' }}
+          container-root: ${{ inputs.concern == 'e2e-visual' }}
 
       - name: Install the shared sanitizers
         # Kept as ./ : the policy matches this exact form for local actions.
@@ -219,14 +222,14 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
         env:
-          CONCERN: ${{ matrix.concern }}
+          CONCERN: ${{ inputs.concern }}
           CI_SUITE_SELECTION: ${{ inputs.suite_selection }}
         run: |
           set -euo pipefail
           ruby .github/policy/suite-contract.rb .github/ci-matrix.json "${CONCERN}" "${GITHUB_WORKSPACE}/src" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Node.js and install the locked JavaScript dependencies
-        if: (matrix.concern != 'taurine-cli' && !startsWith(matrix.concern, 'rust-') && !startsWith(matrix.concern, 'scan-')) || matrix.concern == 'scan-security' || matrix.concern == 'rust-packaging'
+        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-security' || inputs.concern == 'rust-packaging'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
@@ -234,19 +237,19 @@ jobs:
           desktop: true
           mobile: true
           # The browser tiers are frontend-only: they do not need the vendored OpenVPN3 sources.
-          vendor-fetch: ${{ matrix.concern != 'scan-security' && matrix.concern != 'rust-packaging' && !startsWith(matrix.concern, 'e2e-') }}
+          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' && !startsWith(inputs.concern, 'e2e-') }}
 
       - name: Set up the Rust toolchain
-        if: matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-') || matrix.concern == 'scan-security'
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
         with:
           # The clippy scan compiles the workspace, so it takes the same system libraries
           # as the rust-app concern (webkit, dbus, openssl).
-          concern: ${{ matrix.concern == 'scan-security' && 'rust-app' || matrix.concern }}
+          concern: ${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
 
       - name: Fetch pinned vendored sources
-        if: matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-') || matrix.concern == 'scan-security'
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
         shell: bash
         run: |
           set -euo pipefail
@@ -269,7 +272,7 @@ jobs:
       # restored archive is re-verified against the lock checksums below.
       - name: Locate Cargo home for the third-party source cache
         id: cargo-home
-        if: ${{ matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-') || matrix.concern == 'scan-security' }}
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -287,7 +290,7 @@ jobs:
       # (github.ref == main, protected-ancestor == true) and the cache policy fails if one does not.
       - name: Restore cached third-party crate sources
         id: cargo-sources
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-') || matrix.concern == 'scan-security') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -301,7 +304,7 @@ jobs:
       # private Cargo.lock; anything that does not match, or is not in a lock at
       # all, is deleted before cargo runs. Only counts are printed.
       - name: Verify restored crate archives against Cargo.lock
-        if: ${{ matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-') || matrix.concern == 'scan-security' }}
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
         with:
@@ -319,7 +322,7 @@ jobs:
       # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
       # cargo verifies each download against the lock checksum and runs no build script.
       - name: Complete the third-party source set before saving
-        if: ${{ github.ref == 'refs/heads/main' && (matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-') || matrix.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -333,7 +336,7 @@ jobs:
           echo 'cargo-fetch: done'
 
       - name: Save verified third-party crate sources
-        if: ${{ github.ref == 'refs/heads/main' && (matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-') || matrix.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -348,7 +351,7 @@ jobs:
       # locate step only computes the key and keeps the target directory outside the private checkout.
       - name: Locate the compiled dependency cache
         id: cargo-target
-        if: ${{ startsWith(matrix.concern, 'rust-app-') }}
+        if: ${{ startsWith(inputs.concern, 'rust-app-') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -359,7 +362,7 @@ jobs:
 
       - name: Restore compiled third-party dependencies
         id: cargo-target-cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(matrix.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-app-') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -369,7 +372,7 @@ jobs:
           key: ${{ steps.cargo-target.outputs.key }}
 
       - name: Strip workspace crates from the restored dependency cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(matrix.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-app-') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -380,7 +383,7 @@ jobs:
 
       - name: Install the pinned Playwright browser
         # e2e-visual runs in the Playwright image, whose browsers are preinstalled.
-        if: startsWith(matrix.concern, 'e2e-') && matrix.concern != 'e2e-visual'
+        if: startsWith(inputs.concern, 'e2e-') && inputs.concern != 'e2e-visual'
         shell: bash
         run: |
           set -euo pipefail
@@ -398,7 +401,7 @@ jobs:
           echo 'playwright-install: passed'
 
       - name: Run the scanner
-        if: matrix.concern == 'scan-security'
+        if: inputs.concern == 'scan-security'
         # One job, five scanners (gitleaks, npm audit, Semgrep, cargo-deny, clippy): each runs as
         # its own step with its own report, so one failing scanner does not hide the others.
         # Clippy, the slow one, runs last.
@@ -410,14 +413,14 @@ jobs:
       # Enforcing fmt and clippy over the whole owned workspace (the scanner above reports
       # the security lints only). Runs after the scanner so both reports appear.
       - name: Enforce rustfmt and clippy over the owned workspace
-        if: ${{ always() && !cancelled() && matrix.concern == 'scan-security' && steps.verified-source.outcome == 'success' }}
+        if: ${{ always() && !cancelled() && inputs.concern == 'scan-security' && steps.verified-source.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]
 
       # Opt-in, report-only: gitleaks over the full git history of the exact SHA. The token was
       # revoked inside the checkout step above, before this runs.
       - name: Scan the full git history for secrets
-        if: matrix.concern == 'scan-history'
+        if: inputs.concern == 'scan-history'
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
         with:
@@ -425,34 +428,34 @@ jobs:
 
       - name: Run the isolated Linux JavaScript concern
         id: concern-js
-        if: ${{ contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), matrix.concern) }}
+        if: ${{ contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/linux-concern-js  # zizmor: ignore[self-repository]
         with:
-          concern: ${{ matrix.concern }}
+          concern: ${{ inputs.concern }}
 
       - name: Run the isolated Linux browser concern
         id: concern-e2e
-        if: ${{ startsWith(matrix.concern, 'e2e-') }}
+        if: ${{ startsWith(inputs.concern, 'e2e-') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/linux-concern-e2e  # zizmor: ignore[self-repository]
         with:
-          concern: ${{ matrix.concern }}
+          concern: ${{ inputs.concern }}
 
       - name: Run the isolated Linux Rust concern
         id: concern-rust
-        if: ${{ matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-') }}
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/linux-concern-rust  # zizmor: ignore[self-repository]
         with:
-          concern: ${{ matrix.concern }}
+          concern: ${{ inputs.concern }}
 
       # A concern no family above handles must fail loudly, never pass by omission.
       - name: Reject an unsupported concern
-        if: ${{ matrix.concern != 'scan-security' && matrix.concern != 'scan-history' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), matrix.concern) || startsWith(matrix.concern, 'e2e-') || matrix.concern == 'taurine-cli' || startsWith(matrix.concern, 'rust-')) }}
+        if: ${{ inputs.concern != 'scan-security' && inputs.concern != 'scan-history' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) || startsWith(inputs.concern, 'e2e-') || inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
         shell: bash
         env:
-          CONCERN: ${{ matrix.concern }}
+          CONCERN: ${{ inputs.concern }}
         run: |
           echo "Unsupported Linux validation concern: ${CONCERN}" >&2
           exit 2
@@ -462,7 +465,7 @@ jobs:
       # SHA, only after the concern passed and the strip-and-prove step succeeded.
       - name: Strip and prove the compiled dependency cache
         id: cargo-target-strip
-        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -471,7 +474,7 @@ jobs:
           os-label: Linux
 
       - name: Save compiled third-party dependencies
-        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -484,7 +487,7 @@ jobs:
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
-          CONCERN: ${{ matrix.concern }}
+          CONCERN: ${{ inputs.concern }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
@@ -509,7 +512,7 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/linux-test-identities  # zizmor: ignore[self-repository]
         with:
-          concern: ${{ matrix.concern }}
+          concern: ${{ inputs.concern }}
           source-sha: ${{ inputs.source_sha }}
 
       # Sanitized feature-suite evidence for this concern's coverage group,
@@ -523,7 +526,7 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
         env:
-          CONCERN: ${{ matrix.concern }}
+          CONCERN: ${{ inputs.concern }}
           SUITE_MANIFEST_PRESENT: ${{ steps.suite-contract.outputs.manifest_present }}
           SUITE_COVERAGE_REQUIREMENT_ID: ${{ steps.suite-contract.outputs.coverage_requirement_id }}
           CI_EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
