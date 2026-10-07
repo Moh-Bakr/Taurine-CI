@@ -22,8 +22,16 @@
 # Fail-closed rules: full mode, an invalid base, unknown paths, a shared
 # surface, or selector inputs (catalog or graph digests) that do not match the
 # reviewed values select the complete set. A malformed request is an error,
-# never a reduction. Unselected suites are reported per group so a dispatcher
+# never a reduction - and so is a well-formed but unknown feature ID
+# (`unknown_feature`): anything the caller names must exist in the reviewed
+# catalog and graph. Unselected suites are reported per group so a dispatcher
 # can skip them; a partial selection can never contribute a full PASS.
+#
+# Partial mode is not wired into dispatch yet: the evidence validator requires
+# not-selected suites to report zero executed cases, which only holds once the
+# concern's runner command itself filters to the selected suite IDs. No concern
+# composite is selection-aware today, so partial selections must not be passed
+# to any runner until that filtering exists; full remains the only complete mode.
 require 'digest'
 require 'json'
 
@@ -77,6 +85,24 @@ begin
   changed = request.fetch('changed_feature_ids')
   reject_selection!('request') unless changed.is_a?(Array) && changed.uniq == changed &&
                                      changed.all? { |id| id.is_a?(String) && id.match?(/\A[a-z][a-z0-9-]{0,63}\z/) }
+  # Membership, not just format: the reviewed feature set is what the catalog
+  # and the dependency graph actually define. A well-formed but unknown ID
+  # would otherwise close over nothing and silently reduce every group, so it
+  # is a named error instead - a request bug must never look like a selection.
+  reviewed_features = {}
+  catalog.fetch('suites').each do |row|
+    reject_selection!('catalog') unless row.is_a?(Hash) && row['feature'].is_a?(String)
+    reviewed_features[row.fetch('feature')] = true
+  end
+  catalog.fetch('coverage_requirements').each do |row|
+    next unless row.is_a?(Hash)
+    row.fetch('feature_ids', []).each { |feature| reviewed_features[feature] = true }
+  end
+  graph.fetch('dependency_edges').each do |edge|
+    reviewed_features[edge.fetch('from')] = true
+    reviewed_features[edge.fetch('to')] = true
+  end
+  reject_selection!('unknown_feature') unless changed.all? { |id| reviewed_features.key?(id) }
   expected_catalog = request.fetch('expected_catalog_digest')
   expected_graph = request.fetch('expected_feature_graph_digest')
   reject_selection!('request') unless expected_catalog.is_a?(String) && expected_graph.is_a?(String)

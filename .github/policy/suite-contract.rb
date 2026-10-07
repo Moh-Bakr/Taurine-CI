@@ -56,6 +56,10 @@ begin
   manifest_path = File.join(repo_root, MANIFEST_PATH)
   manifest = File.file?(manifest_path) ? read_json(manifest_path) : nil
   manifest_present = manifest.is_a?(Hash)
+  # Canonical-JSON digest of the ownership manifest. Distinct by definition
+  # from the private audit's raw-byte manifest digest over ci/feature-suites.json;
+  # the two attest different files with different hashing and must never be
+  # cross-compared.
   manifest_digest = manifest_present ? canonical_digest(manifest) : ''
 
   selection_text = ENV['CI_SUITE_SELECTION'].to_s

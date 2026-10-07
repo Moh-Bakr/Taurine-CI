@@ -138,4 +138,15 @@ expect_reject 'bad feature id' <(request partial '["SYNTHETIC-PRIVATE"]' 2222222
 expect_reject 'bad base sha' <(request partial '[]' 'nope' true false false)
 expect_reject 'bad flags' <(request partial '[]' 2222222222222222222222222222222222222222 yes no no 2>/dev/null)
 
+# A well-formed feature ID the reviewed catalog and graph do not define is an
+# error naming unknown_feature, never a confident reduced selection.
+unknown_request="$(mktemp "${RUNNER_TEMP:-/tmp}/unknown-feature.XXXXXX")"
+request partial '["not-a-feature"]' 2222222222222222222222222222222222222222 true false false > "${unknown_request}"
+expect_reject 'unknown feature id' "${unknown_request}"
+unknown_error="$(select_suites "${unknown_request}" 2>&1 1>/dev/null || true)"
+[[ "${unknown_error}" == *'unknown_feature'* ]] || {
+  echo "unknown feature id failed with an unnamed error: ${unknown_error}" >&2
+  exit 1
+}
+
 echo 'suite selection: exact closure, conservative fail-closed and digest fixtures passed'

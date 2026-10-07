@@ -191,6 +191,8 @@ begin
 
   manifest = JSON.parse(File.read(File.join(repo_root, 'scripts/ci/suite-ownership.json')))
   reject_collection!('manifest_shape') unless manifest.is_a?(Hash) && manifest['suites'].is_a?(Hash)
+  # Canonical-JSON digest (see suite-contract.rb): never cross-compare with the
+  # private audit's raw-byte digest of ci/feature-suites.json.
   manifest_digest = canonical_digest(manifest)
   ownership = manifest.fetch('suites')
 

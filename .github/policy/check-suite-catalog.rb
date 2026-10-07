@@ -63,6 +63,19 @@ def require_contract(condition)
   raise CatalogContractError unless condition
 end
 
+# The suite-catalog and feature-graph digests are recomputed by both this
+# control plane (Ruby escapes non-ASCII when canonicalising) and the private
+# audit tooling (JS emits it raw), so identical digests across languages hold
+# only while every digested string is ASCII. Non-ASCII is therefore a contract
+# violation, not a style issue: it would silently break every digest match.
+def require_ascii!(value)
+  case value
+  when String then require_contract(value.ascii_only?)
+  when Array then value.each { |item| require_ascii!(item) }
+  when Hash then value.each { |key, item| require_ascii!(key); require_ascii!(item) }
+  end
+end
+
 def expected_frontend_groups
   groups = []
   groups << {
@@ -263,6 +276,8 @@ def validate_catalog(matrix)
   catalog = matrix.fetch('suite_catalog')
   require_contract(catalog.is_a?(Hash) && catalog.keys.sort == %w[coverage_requirements suites version])
   require_contract(catalog['version'] == 1)
+  require_ascii!(catalog)
+  require_ascii!(matrix.fetch('feature_graph'))
   validate_feature_graph(matrix)
   pinned_suites, pinned_requirements = expected_records
   actual_suites = catalog['suites']

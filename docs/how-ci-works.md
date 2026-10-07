@@ -344,14 +344,25 @@ finished validation is normal, and the coordinator's ledger reconciles attempts.
   closed to the complete set when the base is invalid or missing, any changed path matched no
   reviewed rule, a shared surface changed (fixtures, aliases, setup, composition roots,
   lockfiles, toolchains, CI or selector inputs), the request's catalog or graph digests do not
-  match the bound identity, or the mode is full. A partial selection is feedback and never
-  admits a merge; the graph over-approximates by design, and unknown edges must broaden, never
-  narrow, a selection.
+  match the bound identity, the mode is full, or a requested feature ID does not exist in the
+  reviewed catalog and graph (`unknown_feature` is an error, never a silent reduction). A
+  partial selection is feedback and never admits a merge; the graph over-approximates by
+  design, and unknown edges must broaden, never narrow, a selection. Partial mode also is not
+  wired into dispatch: the evidence validator requires not-selected suites to report zero
+  executed cases, which holds only once a concern's runner command itself filters to the
+  selected suite IDs - until that runner-side filtering exists, full remains the only
+  complete mode.
 
 Each concern job then accounts for what actually ran. A pre-project-code step (after the token
 revoke, before any dependency installation) snapshots the suite contract: the catalog digest
 from this control-plane revision and the SHA-256 of the private ownership manifest at
-`scripts/ci/suite-ownership.json` in the checked-out source. After the concern ran, the trusted
+`scripts/ci/suite-ownership.json` in the checked-out source. That manifest is generated from
+the private reviewed catalog (`ci/feature-suites.json`) and records the canonical catalog
+digest it was derived from; a manifest whose recorded digest no longer matches this
+control-plane's catalog is stale and must be regenerated before its evidence is trusted. Its
+digest here is the canonical-JSON digest of the derived file, a different value from the
+private audit's raw-byte digest of the catalog manifest - the two bind different files with
+different hashing and are never cross-compared. After the concern ran, the trusted
 collector (`collect-suite-evidence.rb`) derives every count from the runner report the reviewed
 concern command wrote (vitest or Playwright JSON in `RUNNER_TEMP/test-ids/`), joins each
 executed case to exactly one primary suite through the manifest's reviewed patterns, and fails

@@ -100,6 +100,17 @@ if printf '%s' "${conflicting}" | ruby .github/policy/suite-overview.rb "${matri
   exit 1
 fi
 
+# The collector writes a bare projection, while the overview consumes the run's
+# exported wrapper shape - the concern workflow wraps before rendering. Feeding
+# the bare file (the exact pre-wrapping invocation shape) must fail loudly, so
+# a future caller cannot mistake a one-projection file for an empty export.
+bare="$(mktemp "${work}/bare-projection.XXXXXX")"
+projection desktop-vitest-default-linux '{"desktop.vitest.default.rest":"1:0"}' > "${bare}"
+if ruby .github/policy/suite-overview.rb "${matrix}" "${bare}" >/dev/null 2>&1; then
+  echo 'overview: accepted a bare projection without the evidence wrapper' >&2
+  exit 1
+fi
+
 # No projections at all renders the honest empty state and succeeds.
 empty_overview="$(printf '{}' | ruby .github/policy/suite-overview.rb "${matrix}" -)"
 [[ "${empty_overview}" == *"No suite evidence was collected"* ]] || {
