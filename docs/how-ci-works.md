@@ -412,6 +412,7 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `visual` | Linux | Adds the Playwright `e2e-visual` tier; leave off until baselines for Linux exist |
 | `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
+| `only` | Linux, macOS, Windows | Comma-separated concern names for a surgical re-run of exactly those concerns. Every other concern is reported as "not selected", so the verdict is PASS (partial) and the run never admits a merge. On Linux it is mutually exclusive with `base_sha` (refused together); an unknown name, or a Rust concern named while `rust=false` on macOS or Windows, stops the run in the plan job. A Linux opt-in concern named in `only` must also have its own input enabled (`visual`, `gitleaks_history`), or the Result fails because a required concern did not run |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
 | `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
@@ -424,10 +425,13 @@ concern the workflow can run, reads each one's conclusion from the run's job lis
 - **PASS (full)**: every possible concern ran and succeeded. This is the only verdict that
   admits a merge.
 - **PASS (partial)**: everything that ran succeeded, but some concerns were not selected
-  (quick profile, `base_sha`, or `rust=false`). They are shown as "not selected", never as
+  (quick profile, `base_sha`, `only`, or `rust=false`). They are shown as "not selected", never as
   passed. A partial verdict does not admit a merge.
 - **FAIL**: a concern that ran did not succeed, no concern ran, or a required opt-in concern did
   not run.
+
+Partial runs (quick profile, `base_sha`, `only`, `rust=false`) never admit a merge. Admission is
+always a PASS (full) on the exact 40-character source SHA: the full set of concerns, all green.
 
 Always confirm the summary names the exact 40-character SHA you requested before attributing a
 result to a commit. A `Timings` job beside it tabulates durations against committed baselines and

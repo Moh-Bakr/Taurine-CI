@@ -44,6 +44,11 @@ on:
         options:
           - windows-2022
           - windows-2025
+      only:
+        description: Optional comma-separated concern names; when set, exactly those concerns run and everything else is listed as not selected (PASS (partial), which does not admit a merge)
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -109,21 +114,94 @@ jobs:
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
-  validate:
+  # Builds the concern matrices from the `rust` and `only` inputs, mirroring the macOS
+  # plan. It holds no source, token or environment: it only emits the lists of concerns
+  # to schedule, so an unrequested or filtered concern never gets a runner at all.
+  plan:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
     needs: validate-input
+    name: Plan Windows concerns
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ts_matrix: ${{ steps.plan.outputs.ts_matrix }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Select the concerns and report the Rust cadence
+        id: plan
+        shell: bash
+        env:
+          RUST_REQUESTED: ${{ inputs.rust }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          set -euo pipefail
+          ts='["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]'
+          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
+          if [[ "${RUST_REQUESTED}" == true ]]; then
+            rust_selected="${rust}"
+            known="$(jq -cn --argjson t "${ts}" --argjson r "${rust}" '$t + $r')"
+          else
+            rust_selected='[]'
+            known="${ts}"
+          fi
+          # A surgical `only` dispatch narrows both matrices to exactly the named concerns:
+          # a re-run of the one or two concerns a previous run failed, without paying for
+          # the rest. The Result job still expects the full list, so every filtered-out
+          # concern is reported as "not selected" and the verdict is PASS (partial) — a
+          # partial run never admits a merge. An unknown name, or a Rust concern named
+          # while rust=false, stops the run here rather than scheduling nothing.
+          only_list='[]'
+          if [[ -n "${ONLY}" ]]; then
+            only_list="$(printf '%s' "${ONLY}" | jq -cR 'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | unique')"
+            if [[ "$(jq 'length' <<<"${only_list}")" -eq 0 ]]; then
+              echo 'only: no concern name given' >&2
+              exit 1
+            fi
+            unknown="$(jq -n -c --argjson only "${only_list}" --argjson known "${known}" '$only - $known | join(",")')"
+            if [[ -n "${unknown}" ]]; then
+              echo "only: not a Windows concern of this dispatch (unknown name, or rust=false): ${unknown}" >&2
+              exit 1
+            fi
+            select_only='[.[] | select(. as $c | ($only | index($c)) != null)]'
+            ts_selected="$(jq -c --argjson only "${only_list}" "${select_only}" <<<"${ts}")"
+            if [[ "${RUST_REQUESTED}" == true ]]; then
+              rust_selected="$(jq -c --argjson only "${only_list}" "${select_only}" <<<"${rust}")"
+            fi
+          else
+            ts_selected="${ts}"
+          fi
+          echo "ts_matrix=$(jq -cn --argjson c "${ts_selected}" '{concern: $c}')" >> "${GITHUB_OUTPUT}"
+          echo "rust_matrix=$(jq -cn --argjson c "${rust_selected}" '{concern: $c}')" >> "${GITHUB_OUTPUT}"
+          {
+            echo '## Windows Rust concerns'
+            echo
+            if [[ "${RUST_REQUESTED}" == true ]]; then
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging run in the validate-rust jobs.'
+            else
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+            fi
+            if [[ "${only_list}" != '[]' ]]; then
+              echo "- Only filter active: $(jq -r 'join(", ")' <<<"${only_list}"). Every other concern is not selected; the verdict cannot be PASS (full), which is the only verdict that admits a merge."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  validate:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
+    needs: [validate-input, plan]
     strategy:
       fail-fast: false
-      matrix:
-        concern:
-          - desktop-shard-1
-          - desktop-shard-2
-          - desktop-quality
-          - mobile
-          - contracts
-          - bundle-budget
+      # The TypeScript concerns, filtered by the plan job (the `only` input).
+      matrix: ${{ fromJSON(needs.plan.outputs.ts_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
     # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
@@ -149,19 +227,11 @@ jobs:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.rust
-    needs: validate-input
+    needs: [validate-input, plan]
     strategy:
       fail-fast: false
-      matrix:
-        concern:
-          - rust-domain
-          - rust-db
-          - rust-net
-          - rust-ovpn
-          - rust-app-1
-          - rust-app-2
-          - rust-packaging
-          - rust-tls-openssl
+      # The Rust crate-test concerns, filtered by the plan job (the `only` input).
+      matrix: ${{ fromJSON(needs.plan.outputs.rust_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
     # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.

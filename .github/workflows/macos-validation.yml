@@ -32,6 +32,11 @@ on:
           - prod
           - dev
           - uat
+      only:
+        description: Optional comma-separated concern names; when set, exactly those concerns run and everything else is listed as not selected (PASS (partial), which does not admit a merge)
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -85,19 +90,48 @@ jobs:
         shell: bash
         env:
           RUST_REQUESTED: ${{ inputs.rust }}
+          ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
-          base='"desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"'
-          rust='"rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"'
+          base='["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"]'
+          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
+          if [[ "${RUST_REQUESTED}" == true ]]; then
+            candidates="$(jq -cn --argjson b "${base}" --argjson r "${rust}" '$b + $r')"
+          else
+            candidates="${base}"
+          fi
+          # A surgical `only` dispatch narrows the matrix to exactly the named concerns: a
+          # re-run of the one or two concerns a previous run failed, without paying for the
+          # rest. The Result job still expects the full list, so every filtered-out concern
+          # is reported as "not selected" and the verdict is PASS (partial) — a partial run
+          # never admits a merge. An unknown name, or a Rust concern named while rust=false,
+          # stops the run here rather than scheduling nothing.
+          only_list='[]'
+          if [[ -n "${ONLY}" ]]; then
+            only_list="$(printf '%s' "${ONLY}" | jq -cR 'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | unique')"
+            if [[ "$(jq 'length' <<<"${only_list}")" -eq 0 ]]; then
+              echo 'only: no concern name given' >&2
+              exit 1
+            fi
+            unknown="$(jq -n -c --argjson only "${only_list}" --argjson candidates "${candidates}" '$only - $candidates | join(",")')"
+            if [[ -n "${unknown}" ]]; then
+              echo "only: not a macOS concern of this dispatch (unknown name, or rust=false): ${unknown}" >&2
+              exit 1
+            fi
+            candidates="$(jq -c --argjson only "${only_list}" '[.[] | select(. as $c | ($only | index($c)) != null)]' <<<"${candidates}")"
+          fi
           {
             echo '## macOS Rust concerns'
             echo
             if [[ "${RUST_REQUESTED}" == true ]]; then
-              echo "matrix={\"concern\":[${base},${rust}]}" >> "${GITHUB_OUTPUT}"
+              echo "matrix={\"concern\":${candidates}}" >> "${GITHUB_OUTPUT}"
               echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging are scheduled.'
             else
-              echo "matrix={\"concern\":[${base}]}" >> "${GITHUB_OUTPUT}"
+              echo "matrix={\"concern\":${candidates}}" >> "${GITHUB_OUTPUT}"
               echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+            fi
+            if [[ "${only_list}" != '[]' ]]; then
+              echo "- Only filter active: $(jq -r 'join(", ")' <<<"${only_list}"). Every other concern is not selected; the verdict cannot be PASS (full), which is the only verdict that admits a merge."
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 

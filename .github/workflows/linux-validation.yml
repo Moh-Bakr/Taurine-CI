@@ -33,6 +33,11 @@ on:
         required: false
         default: ''
         type: string
+      only:
+        description: Optional comma-separated concern names; when set, exactly those concerns run and everything else is listed as not selected (PASS (partial), which does not admit a merge). Mutually exclusive with base_sha
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -81,6 +86,7 @@ jobs:
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           REQUESTED_BASE_SHA: ${{ inputs.base_sha }}
+          REQUESTED_ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -89,6 +95,16 @@ jobs:
           fi
           if [[ -n "${REQUESTED_BASE_SHA}" && ! "${REQUESTED_BASE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'base_sha must be empty or a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
+          # A surgical `only` run asks for concerns by name, so a diff selection cannot
+          # narrow it further; the two are refused together rather than silently combined.
+          if [[ -n "${REQUESTED_BASE_SHA}" && -n "${REQUESTED_ONLY}" ]]; then
+            echo 'base_sha and only are mutually exclusive: a surgical only run takes no diff selection' >&2
+            exit 1
+          fi
+          if [[ -n "${REQUESTED_ONLY}" && ! "${REQUESTED_ONLY}" =~ ^[A-Za-z0-9_-]+([[:space:]]*,[[:space:]]*[A-Za-z0-9_-]+)*$ ]]; then
+            echo 'only must be a comma-separated list of concern names' >&2
             exit 1
           fi
 
@@ -159,6 +175,7 @@ jobs:
           PROFILE: ${{ inputs.profile }}
           VISUAL: ${{ inputs.visual }}
           GITLEAKS_HISTORY: ${{ inputs.gitleaks_history }}
+          ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
           # profile=quick drops the concerns the table marks full_only (the slowest ones);
@@ -176,7 +193,29 @@ jobs:
           if [[ "${GITLEAKS_HISTORY}" == true ]]; then
             filter="(${filter}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"gitleaks_history\")))"
           fi
-          echo "matrix=$(jq -c "{concern: ((${filter}) | map(.key))}" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+          candidates="$(jq -c "(${filter}) | map(.key)" .github/ci-matrix.json)"
+          # A surgical `only` dispatch narrows the matrix to exactly the named concerns: a
+          # re-run of the one or two concerns a previous run failed, without paying for the
+          # rest. The Result job still expects the full list, so every filtered-out concern
+          # is reported as "not selected" and the verdict is PASS (partial) — a partial run
+          # never admits a merge. An unknown name, or one whose opt-in input is off, stops
+          # the run here rather than scheduling nothing.
+          only_list='[]'
+          if [[ -n "${ONLY}" ]]; then
+            only_list="$(printf '%s' "${ONLY}" | jq -cR 'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | unique')"
+            unknown="$(jq -n -c --argjson only "${only_list}" --argjson candidates "${candidates}" '$only - $candidates | join(",")')"
+            if [[ -n "${unknown}" ]]; then
+              echo "only: not a concern of this dispatch (unknown name, or its opt-in input is off): ${unknown}" >&2
+              exit 1
+            fi
+            candidates="$(jq -c --argjson only "${only_list}" '[.[] | select(. as $c | ($only | index($c)) != null)]' <<<"${candidates}")"
+            {
+              echo '## Linux only filter'
+              echo
+              echo "- Only filter active: $(jq -r 'join(", ")' <<<"${only_list}"). Every other concern is not selected; the verdict cannot be PASS (full), which is the only verdict that admits a merge."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          echo "matrix=$(jq -cn --argjson c "${candidates}" '{concern: $c}')" >> "${GITHUB_OUTPUT}"
           # The Result job expects every non-opt-in concern, plus the opt-in ones enabled above,
           # so an enabled visual tier that fails (or is skipped) shows in the verdict while a
           # disabled one is not counted.
@@ -203,10 +242,12 @@ jobs:
 
   # Only with a base_sha: a source-bearing job (partial clone, history only) decides which
   # concerns the change affects. Without one this job is skipped and the full list runs.
+  # A surgical `only` dispatch never reaches here either: validate-input refuses the
+  # combination, and the `only` filter is already applied to the plan matrix above.
   select:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.base_sha != ''
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.base_sha != '' && inputs.only == ''
     needs: [validate-input, plan]
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/select-concerns.yml  # zizmor: ignore[self-repository]
