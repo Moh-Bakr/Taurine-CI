@@ -361,11 +361,12 @@ proof and the manifest stay in `RUNNER_TEMP`; only the validator's sanitized pro
 the runner: suite IDs, counts (discovered, owned, executed, compiled, ignored, quarantined,
 environment-skipped), fixed status and error classes, digests and SHAs. Compiled targets are
 evidence of compilation, never execution: a compile-only selection is `blocked`
-(`compiled_only`) and cannot merge. A projection is exported as the concern job's
-`suite_evidence` output, and the Result job renders one per-feature overview
-(selected versus full, executed versus compiled versus skipped) with `suite-overview`; the
-overview reports honestly when no evidence was collected. Existing concern coverage stays
-authoritative: the evidence pipeline observes, it does not yet narrow what a concern executes.
+(`compiled_only`) and cannot merge. Each concern leg exports its projection as a job output,
+and the validation's overview job merges the shards of every coverage group into one
+per-feature overview (selected versus full, executed versus compiled versus skipped) in the
+run summary; it reports honestly when no evidence was collected. Existing concern coverage
+stays authoritative: the evidence pipeline observes, it does not yet narrow what a concern
+executes.
 
 ### Keeping untrusted in sync with main (manual, by design)
 

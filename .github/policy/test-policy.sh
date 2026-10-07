@@ -253,7 +253,7 @@ checkout_case 'the workflow points at another repository' "  SOURCE_REPOSITORY_I
 checkout_case 'the workflow renames the repository' '  SOURCE_REPOSITORY_NAME: Taurine' '  SOURCE_REPOSITORY_NAME: Other' 'must pin SOURCE_REPOSITORY_ID, _OWNER and _NAME'
 
 # drop-root inputs are absent or the reviewed expression (rule 9).
-reviewed_container="\${{ inputs.concern == 'e2e-visual' }}"
+reviewed_container="\${{ matrix.concern == 'e2e-visual' }}"
 root="$(fresh container-root)"; cp .github/workflows/linux-validation-concern.yml "${root}/.github/workflows/"; expect_pass 'the reviewed container-root' "${root}"
 swap "${root}" .github/workflows/linux-validation-concern.yml "container-root: ${reviewed_container}" "container-root: 'true'"
 expect_fail 'an unconditional container-root' "${root}" 'drop-root container-root must be absent or the reviewed expression'
@@ -307,13 +307,13 @@ cache_expect_fail 'a target path outside the reviewed three' 'Disallowed cache p
   's#outputs\.dir \}\}/debug/build#outputs.dir }}/debug#'
 # Ref isolation: the compiled cache runs only on main for a protected source SHA.
 cache_expect_fail 'compiled cache restore without the main guard' 'runs only on main for a protected source SHA' \
-  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && startsWith\(inputs\.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && startsWith\(matrix.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
 cache_expect_fail 'compiled cache restore without protected ancestry' 'runs only on main for a protected source SHA' \
-  's/(if: \$\{\{ github\.ref == .refs\/heads\/main. && )steps\.verified-source\.outputs\.protected-ancestor == .true. && (startsWith\(inputs\.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/$1$2/'
+  's/(if: \$\{\{ github\.ref == .refs\/heads\/main. && )steps\.verified-source\.outputs\.protected-ancestor == .true. && (startsWith\(matrix.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/$1$2/'
 cache_expect_fail 'compiled cache gate re-opened by ||' 'runs only on main for a protected source SHA' \
-  's/(if: \$\{\{ github\.ref == [^\n]*startsWith\(inputs\.concern, .rust-app-.\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
+  's/(if: \$\{\{ github\.ref == [^\n]*startsWith\(matrix.concern, .rust-app-.\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
 cache_expect_fail 'compiled cache strip without the main guard' 'strip step runs only on main' \
-  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (inputs\.concern == .rust-app-2. && [^\n]*steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (matrix.concern == .rust-app-2. && [^\n]*steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
 # Findings L1-L3: the source cache holds only the verified archives, saves under the restore's
 # key, and the required save terms count only as exact top-level conjuncts.
 cache_expect_fail 'the unverified registry index' 'Disallowed cache path line' \
@@ -327,17 +327,17 @@ cache_expect_fail 'protected ancestry inside an always-true alternative' 'exact 
 cache_expect_fail 'protected ancestry negated' 'exact top-level term' \
   's/ && (steps\.verified-source\.outputs\.protected-ancestor == .true.) && steps\.cargo-sources/ \&\& !($1) \&\& steps.cargo-sources/g'
 cache_expect_fail 'the main guard inside an always-true alternative' 'main branch as a top-level term' \
-  's/if: \$\{\{ (github\.ref == .refs\/heads\/main.) && (\(inputs\.concern == .taurine-cli.)/if: \${{ ($1 || true) \&\& $2/g'
+  's/if: \$\{\{ (github\.ref == .refs\/heads\/main.) && (\(matrix.concern == .taurine-cli.)/if: \${{ ($1 || true) \&\& $2/g'
 # Ref isolation: the cargo source cache restore, its completion step and its save run only on
 # main for a protected source SHA, and a setup action's built-in cache stays off.
 cache_expect_fail 'cargo source restore without the main guard' 'cargo source cache runs only on main' \
-  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && \(inputs\.concern == .taurine-cli.[^\n]*\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && \(matrix.concern == .taurine-cli.[^\n]*\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
 cache_expect_fail 'cargo source restore gate re-opened by ||' 'cargo source cache runs only on main' \
-  's/(if: \$\{\{ github\.ref == [^\n]*\(inputs\.concern == .taurine-cli.[^\n]*\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
+  's/(if: \$\{\{ github\.ref == [^\n]*\(matrix.concern == .taurine-cli.[^\n]*\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
 cache_expect_fail 'cargo source completion step without the main guard' 'cargo source cache runs only on main' \
   's/github\.ref == .refs\/heads\/main. && ([^\n]*\n        shell: bash\n        run: \|\n          set -euo pipefail\n          while IFS= read -r lock)/$1/'
 cache_expect_fail 'cargo source restore with no condition' 'cargo source cache runs only on main' \
-  's/\n        if: \$\{\{ github\.ref == [^\n]*\(inputs\.concern == .taurine-cli.[^\n]*\) \}\}(\n        uses: actions\/cache\/restore)/$1/'
+  's/\n        if: \$\{\{ github\.ref == [^\n]*\(matrix.concern == .taurine-cli.[^\n]*\) \}\}(\n        uses: actions\/cache\/restore)/$1/'
 # A built-in setup cache: setup-node without the opt-out, or a `cache:` input.
 node_fixture="${base}/node-cache.yml"
 for mutation in 's/^( +)package-manager-cache: false\n//m' 's/^( +)package-manager-cache: false$/$1package-manager-cache: false\n$1cache: npm/m'; do

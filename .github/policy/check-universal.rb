@@ -102,7 +102,7 @@ TAURINE_SOURCE = { 'SOURCE_REPOSITORY_ID' => '1330267721', 'SOURCE_REPOSITORY_OW
 # drop-root inputs: file => input => reviewed values (absent is always allowed)
 DROP_ROOT_WITH = {
   '.github/workflows/live-proof-arm.yml' => { 'keep-docker' => ["#{E}inputs.engine == 'bastion' }}"] },
-  '.github/workflows/linux-validation-concern.yml' => { 'container-root' => ["#{E}inputs.concern == 'e2e-visual' }}"] }
+  '.github/workflows/linux-validation-concern.yml' => { 'container-root' => ["#{E}matrix.concern == 'e2e-visual' }}"] }
 }.freeze
 
 # Every expression in a parsed document: the inside of each `${{ }}`, and every `if:` value
