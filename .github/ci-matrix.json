@@ -64,6 +64,2875 @@
       }
     }
   },
+  "suite_catalog": {
+    "version": 1,
+    "suites": [
+      {
+        "id": "desktop.vitest.default.rest",
+        "feature": "rest",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.automation",
+        "feature": "automation",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.mock-docs",
+        "feature": "mock-docs",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.database",
+        "feature": "database",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.notes",
+        "feature": "notes",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.git",
+        "feature": "git",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.sync",
+        "feature": "sync",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.vault",
+        "feature": "vault",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.tools",
+        "feature": "tools",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.search-navigation",
+        "feature": "search-navigation",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.organization",
+        "feature": "organization",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.import-export",
+        "feature": "import-export",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.observability",
+        "feature": "observability",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.shell-appearance",
+        "feature": "shell-appearance",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.ai",
+        "feature": "ai",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.design",
+        "feature": "design",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.cli-orchestration",
+        "feature": "cli-orchestration",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "desktop.vitest.default.integration",
+        "feature": "integration",
+        "tier": "default",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.rest",
+        "feature": "rest",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.mock-docs",
+        "feature": "mock-docs",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.notes",
+        "feature": "notes",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.sync",
+        "feature": "sync",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.vault",
+        "feature": "vault",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.tools",
+        "feature": "tools",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.search-navigation",
+        "feature": "search-navigation",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.organization",
+        "feature": "organization",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.shell-appearance",
+        "feature": "shell-appearance",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "mobile.vitest.default.integration",
+        "feature": "integration",
+        "tier": "default",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.rest",
+        "feature": "rest",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.database",
+        "feature": "database",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.notes",
+        "feature": "notes",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.vault",
+        "feature": "vault",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.tools",
+        "feature": "tools",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.search-navigation",
+        "feature": "search-navigation",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.organization",
+        "feature": "organization",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.import-export",
+        "feature": "import-export",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.shell-appearance",
+        "feature": "shell-appearance",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.cli-orchestration",
+        "feature": "cli-orchestration",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "shared.vitest.default.integration",
+        "feature": "integration",
+        "tier": "default",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.rest",
+        "feature": "rest",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.automation",
+        "feature": "automation",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.mock-docs",
+        "feature": "mock-docs",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.database",
+        "feature": "database",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.notes",
+        "feature": "notes",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.git",
+        "feature": "git",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.sync",
+        "feature": "sync",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.vault",
+        "feature": "vault",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.tools",
+        "feature": "tools",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.search-navigation",
+        "feature": "search-navigation",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.organization",
+        "feature": "organization",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.import-export",
+        "feature": "import-export",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.observability",
+        "feature": "observability",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.shell-appearance",
+        "feature": "shell-appearance",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.ai",
+        "feature": "ai",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.design",
+        "feature": "design",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.cli-orchestration",
+        "feature": "cli-orchestration",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.feedback.integration",
+        "feature": "integration",
+        "tier": "feedback",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.rest",
+        "feature": "rest",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.automation",
+        "feature": "automation",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.mock-docs",
+        "feature": "mock-docs",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.database",
+        "feature": "database",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.notes",
+        "feature": "notes",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.git",
+        "feature": "git",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.sync",
+        "feature": "sync",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.vault",
+        "feature": "vault",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.tools",
+        "feature": "tools",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.search-navigation",
+        "feature": "search-navigation",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.organization",
+        "feature": "organization",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.import-export",
+        "feature": "import-export",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.observability",
+        "feature": "observability",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.shell-appearance",
+        "feature": "shell-appearance",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.ai",
+        "feature": "ai",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.design",
+        "feature": "design",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.cli-orchestration",
+        "feature": "cli-orchestration",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.regression.integration",
+        "feature": "integration",
+        "tier": "regression",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop.playwright.benchmark.rest",
+        "feature": "rest",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.automation",
+        "feature": "automation",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.mock-docs",
+        "feature": "mock-docs",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.database",
+        "feature": "database",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.notes",
+        "feature": "notes",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.git",
+        "feature": "git",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.sync",
+        "feature": "sync",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.vault",
+        "feature": "vault",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.tools",
+        "feature": "tools",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.search-navigation",
+        "feature": "search-navigation",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.organization",
+        "feature": "organization",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.import-export",
+        "feature": "import-export",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.observability",
+        "feature": "observability",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.shell-appearance",
+        "feature": "shell-appearance",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.ai",
+        "feature": "ai",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.design",
+        "feature": "design",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.cli-orchestration",
+        "feature": "cli-orchestration",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.benchmark.integration",
+        "feature": "integration",
+        "tier": "benchmark",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "desktop.playwright.a11y.rest",
+        "feature": "rest",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.automation",
+        "feature": "automation",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.mock-docs",
+        "feature": "mock-docs",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.database",
+        "feature": "database",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.notes",
+        "feature": "notes",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.git",
+        "feature": "git",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.sync",
+        "feature": "sync",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.vault",
+        "feature": "vault",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.tools",
+        "feature": "tools",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.search-navigation",
+        "feature": "search-navigation",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.organization",
+        "feature": "organization",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.import-export",
+        "feature": "import-export",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.observability",
+        "feature": "observability",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.shell-appearance",
+        "feature": "shell-appearance",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.ai",
+        "feature": "ai",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.design",
+        "feature": "design",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.cli-orchestration",
+        "feature": "cli-orchestration",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.a11y.integration",
+        "feature": "integration",
+        "tier": "a11y",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.rest",
+        "feature": "rest",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.automation",
+        "feature": "automation",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.mock-docs",
+        "feature": "mock-docs",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.database",
+        "feature": "database",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.notes",
+        "feature": "notes",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.git",
+        "feature": "git",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.sync",
+        "feature": "sync",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.vault",
+        "feature": "vault",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.tools",
+        "feature": "tools",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.search-navigation",
+        "feature": "search-navigation",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.organization",
+        "feature": "organization",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.import-export",
+        "feature": "import-export",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.observability",
+        "feature": "observability",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.shell-appearance",
+        "feature": "shell-appearance",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.ai",
+        "feature": "ai",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.design",
+        "feature": "design",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.cli-orchestration",
+        "feature": "cli-orchestration",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "desktop.playwright.visual.integration",
+        "feature": "integration",
+        "tier": "visual",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "mobile.playwright.smoke.integration",
+        "feature": "integration",
+        "tier": "smoke",
+        "runner": "playwright-mobile",
+        "config": "mobile-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "mobile.playwright.critical.integration",
+        "feature": "integration",
+        "tier": "critical",
+        "runner": "playwright-mobile",
+        "config": "mobile-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "critical"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      },
+      {
+        "id": "mobile.playwright.regression.integration",
+        "feature": "integration",
+        "tier": "regression",
+        "runner": "playwright-mobile",
+        "config": "mobile-playwright-projects",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "status": "candidate",
+        "mandatory": false,
+        "concerns": []
+      }
+    ],
+    "coverage_requirements": [
+      {
+        "id": "desktop-vitest-default-linux",
+        "runner": "vitest-desktop",
+        "config": "desktop-vitest-default",
+        "tier": "default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "feature_ids": [
+          "rest",
+          "automation",
+          "mock-docs",
+          "database",
+          "notes",
+          "git",
+          "sync",
+          "vault",
+          "tools",
+          "search-navigation",
+          "organization",
+          "import-export",
+          "observability",
+          "shell-appearance",
+          "ai",
+          "design",
+          "cli-orchestration",
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "desktop.vitest.default.rest",
+          "desktop.vitest.default.automation",
+          "desktop.vitest.default.mock-docs",
+          "desktop.vitest.default.database",
+          "desktop.vitest.default.notes",
+          "desktop.vitest.default.git",
+          "desktop.vitest.default.sync",
+          "desktop.vitest.default.vault",
+          "desktop.vitest.default.tools",
+          "desktop.vitest.default.search-navigation",
+          "desktop.vitest.default.organization",
+          "desktop.vitest.default.import-export",
+          "desktop.vitest.default.observability",
+          "desktop.vitest.default.shell-appearance",
+          "desktop.vitest.default.ai",
+          "desktop.vitest.default.design",
+          "desktop.vitest.default.cli-orchestration",
+          "desktop.vitest.default.integration"
+        ],
+        "mandatory": true,
+        "availability": "supported",
+        "availability_reason": null,
+        "concerns": [
+          "desktop-shard-1",
+          "desktop-shard-2"
+        ]
+      },
+      {
+        "id": "mobile-vitest-default-linux",
+        "runner": "vitest-mobile",
+        "config": "mobile-vitest-default",
+        "tier": "default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "feature_ids": [
+          "rest",
+          "mock-docs",
+          "notes",
+          "sync",
+          "vault",
+          "tools",
+          "search-navigation",
+          "organization",
+          "shell-appearance",
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "mobile.vitest.default.rest",
+          "mobile.vitest.default.mock-docs",
+          "mobile.vitest.default.notes",
+          "mobile.vitest.default.sync",
+          "mobile.vitest.default.vault",
+          "mobile.vitest.default.tools",
+          "mobile.vitest.default.search-navigation",
+          "mobile.vitest.default.organization",
+          "mobile.vitest.default.shell-appearance",
+          "mobile.vitest.default.integration"
+        ],
+        "mandatory": true,
+        "availability": "supported",
+        "availability_reason": null,
+        "concerns": [
+          "mobile-quality"
+        ]
+      },
+      {
+        "id": "shared-vitest-default-linux",
+        "runner": "vitest-shared",
+        "config": "shared-vitest-default",
+        "tier": "default",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [],
+        "feature_ids": [
+          "rest",
+          "database",
+          "notes",
+          "vault",
+          "tools",
+          "search-navigation",
+          "organization",
+          "import-export",
+          "shell-appearance",
+          "cli-orchestration",
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "shared.vitest.default.rest",
+          "shared.vitest.default.database",
+          "shared.vitest.default.notes",
+          "shared.vitest.default.vault",
+          "shared.vitest.default.tools",
+          "shared.vitest.default.search-navigation",
+          "shared.vitest.default.organization",
+          "shared.vitest.default.import-export",
+          "shared.vitest.default.shell-appearance",
+          "shared.vitest.default.cli-orchestration",
+          "shared.vitest.default.integration"
+        ],
+        "mandatory": true,
+        "availability": "supported",
+        "availability_reason": null,
+        "concerns": [
+          "contracts"
+        ]
+      },
+      {
+        "id": "desktop-playwright-feedback-linux",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "tier": "feedback",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke",
+          "critical",
+          "shell-browser"
+        ],
+        "feature_ids": [
+          "rest",
+          "automation",
+          "mock-docs",
+          "database",
+          "notes",
+          "git",
+          "sync",
+          "vault",
+          "tools",
+          "search-navigation",
+          "organization",
+          "import-export",
+          "observability",
+          "shell-appearance",
+          "ai",
+          "design",
+          "cli-orchestration",
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "desktop.playwright.feedback.rest",
+          "desktop.playwright.feedback.automation",
+          "desktop.playwright.feedback.mock-docs",
+          "desktop.playwright.feedback.database",
+          "desktop.playwright.feedback.notes",
+          "desktop.playwright.feedback.git",
+          "desktop.playwright.feedback.sync",
+          "desktop.playwright.feedback.vault",
+          "desktop.playwright.feedback.tools",
+          "desktop.playwright.feedback.search-navigation",
+          "desktop.playwright.feedback.organization",
+          "desktop.playwright.feedback.import-export",
+          "desktop.playwright.feedback.observability",
+          "desktop.playwright.feedback.shell-appearance",
+          "desktop.playwright.feedback.ai",
+          "desktop.playwright.feedback.design",
+          "desktop.playwright.feedback.cli-orchestration",
+          "desktop.playwright.feedback.integration"
+        ],
+        "mandatory": true,
+        "availability": "supported",
+        "availability_reason": null,
+        "concerns": [
+          "e2e-critical"
+        ]
+      },
+      {
+        "id": "desktop-playwright-regression-linux",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "tier": "regression",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "feature_ids": [
+          "rest",
+          "automation",
+          "mock-docs",
+          "database",
+          "notes",
+          "git",
+          "sync",
+          "vault",
+          "tools",
+          "search-navigation",
+          "organization",
+          "import-export",
+          "observability",
+          "shell-appearance",
+          "ai",
+          "design",
+          "cli-orchestration",
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "desktop.playwright.regression.rest",
+          "desktop.playwright.regression.automation",
+          "desktop.playwright.regression.mock-docs",
+          "desktop.playwright.regression.database",
+          "desktop.playwright.regression.notes",
+          "desktop.playwright.regression.git",
+          "desktop.playwright.regression.sync",
+          "desktop.playwright.regression.vault",
+          "desktop.playwright.regression.tools",
+          "desktop.playwright.regression.search-navigation",
+          "desktop.playwright.regression.organization",
+          "desktop.playwright.regression.import-export",
+          "desktop.playwright.regression.observability",
+          "desktop.playwright.regression.shell-appearance",
+          "desktop.playwright.regression.ai",
+          "desktop.playwright.regression.design",
+          "desktop.playwright.regression.cli-orchestration",
+          "desktop.playwright.regression.integration"
+        ],
+        "mandatory": true,
+        "availability": "supported",
+        "availability_reason": null,
+        "concerns": [
+          "e2e-regression-1",
+          "e2e-regression-2",
+          "e2e-regression-3",
+          "e2e-regression-4"
+        ]
+      },
+      {
+        "id": "desktop-playwright-benchmark-linux",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "tier": "benchmark",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "bench"
+        ],
+        "feature_ids": [
+          "rest",
+          "automation",
+          "mock-docs",
+          "database",
+          "notes",
+          "git",
+          "sync",
+          "vault",
+          "tools",
+          "search-navigation",
+          "organization",
+          "import-export",
+          "observability",
+          "shell-appearance",
+          "ai",
+          "design",
+          "cli-orchestration",
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "desktop.playwright.benchmark.rest",
+          "desktop.playwright.benchmark.automation",
+          "desktop.playwright.benchmark.mock-docs",
+          "desktop.playwright.benchmark.database",
+          "desktop.playwright.benchmark.notes",
+          "desktop.playwright.benchmark.git",
+          "desktop.playwright.benchmark.sync",
+          "desktop.playwright.benchmark.vault",
+          "desktop.playwright.benchmark.tools",
+          "desktop.playwright.benchmark.search-navigation",
+          "desktop.playwright.benchmark.organization",
+          "desktop.playwright.benchmark.import-export",
+          "desktop.playwright.benchmark.observability",
+          "desktop.playwright.benchmark.shell-appearance",
+          "desktop.playwright.benchmark.ai",
+          "desktop.playwright.benchmark.design",
+          "desktop.playwright.benchmark.cli-orchestration",
+          "desktop.playwright.benchmark.integration"
+        ],
+        "mandatory": false,
+        "availability": "uncovered",
+        "availability_reason": "hosted_route_missing",
+        "concerns": []
+      },
+      {
+        "id": "desktop-playwright-a11y-linux",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "tier": "a11y",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "a11y"
+        ],
+        "feature_ids": [
+          "rest",
+          "automation",
+          "mock-docs",
+          "database",
+          "notes",
+          "git",
+          "sync",
+          "vault",
+          "tools",
+          "search-navigation",
+          "organization",
+          "import-export",
+          "observability",
+          "shell-appearance",
+          "ai",
+          "design",
+          "cli-orchestration",
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "desktop.playwright.a11y.rest",
+          "desktop.playwright.a11y.automation",
+          "desktop.playwright.a11y.mock-docs",
+          "desktop.playwright.a11y.database",
+          "desktop.playwright.a11y.notes",
+          "desktop.playwright.a11y.git",
+          "desktop.playwright.a11y.sync",
+          "desktop.playwright.a11y.vault",
+          "desktop.playwright.a11y.tools",
+          "desktop.playwright.a11y.search-navigation",
+          "desktop.playwright.a11y.organization",
+          "desktop.playwright.a11y.import-export",
+          "desktop.playwright.a11y.observability",
+          "desktop.playwright.a11y.shell-appearance",
+          "desktop.playwright.a11y.ai",
+          "desktop.playwright.a11y.design",
+          "desktop.playwright.a11y.cli-orchestration",
+          "desktop.playwright.a11y.integration"
+        ],
+        "mandatory": true,
+        "availability": "supported",
+        "availability_reason": null,
+        "concerns": [
+          "e2e-a11y"
+        ]
+      },
+      {
+        "id": "desktop-playwright-visual-linux",
+        "runner": "playwright-desktop",
+        "config": "desktop-playwright-projects",
+        "tier": "visual",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "visual"
+        ],
+        "feature_ids": [
+          "rest",
+          "automation",
+          "mock-docs",
+          "database",
+          "notes",
+          "git",
+          "sync",
+          "vault",
+          "tools",
+          "search-navigation",
+          "organization",
+          "import-export",
+          "observability",
+          "shell-appearance",
+          "ai",
+          "design",
+          "cli-orchestration",
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "desktop.playwright.visual.rest",
+          "desktop.playwright.visual.automation",
+          "desktop.playwright.visual.mock-docs",
+          "desktop.playwright.visual.database",
+          "desktop.playwright.visual.notes",
+          "desktop.playwright.visual.git",
+          "desktop.playwright.visual.sync",
+          "desktop.playwright.visual.vault",
+          "desktop.playwright.visual.tools",
+          "desktop.playwright.visual.search-navigation",
+          "desktop.playwright.visual.organization",
+          "desktop.playwright.visual.import-export",
+          "desktop.playwright.visual.observability",
+          "desktop.playwright.visual.shell-appearance",
+          "desktop.playwright.visual.ai",
+          "desktop.playwright.visual.design",
+          "desktop.playwright.visual.cli-orchestration",
+          "desktop.playwright.visual.integration"
+        ],
+        "mandatory": false,
+        "availability": "supported",
+        "availability_reason": null,
+        "concerns": [
+          "e2e-visual"
+        ]
+      },
+      {
+        "id": "mobile-playwright-smoke-linux",
+        "runner": "playwright-mobile",
+        "config": "mobile-playwright-projects",
+        "tier": "smoke",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "smoke"
+        ],
+        "feature_ids": [
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "mobile.playwright.smoke.integration"
+        ],
+        "mandatory": true,
+        "availability": "uncovered",
+        "availability_reason": "hosted_route_missing",
+        "concerns": []
+      },
+      {
+        "id": "mobile-playwright-critical-linux",
+        "runner": "playwright-mobile",
+        "config": "mobile-playwright-projects",
+        "tier": "critical",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "critical"
+        ],
+        "feature_ids": [
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "mobile.playwright.critical.integration"
+        ],
+        "mandatory": true,
+        "availability": "uncovered",
+        "availability_reason": "hosted_route_missing",
+        "concerns": []
+      },
+      {
+        "id": "mobile-playwright-regression-linux",
+        "runner": "playwright-mobile",
+        "config": "mobile-playwright-projects",
+        "tier": "regression",
+        "platforms": [
+          "linux"
+        ],
+        "projects": [
+          "regression"
+        ],
+        "feature_ids": [
+          "integration"
+        ],
+        "candidate_suite_ids": [
+          "mobile.playwright.regression.integration"
+        ],
+        "mandatory": true,
+        "availability": "uncovered",
+        "availability_reason": "hosted_route_missing",
+        "concerns": []
+      }
+    ]
+  },
   "rules": {
     "full_if_any_changed": [
       "Cargo.toml",

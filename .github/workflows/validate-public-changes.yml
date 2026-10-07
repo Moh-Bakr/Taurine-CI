@@ -113,6 +113,11 @@ jobs:
         shell: bash
         run: bash .github/policy/test-run-result.sh
 
+      # The reviewed candidate universe and coverage dispositions are immutable public policy.
+      - name: Test the feature-suite catalog contract
+        shell: bash
+        run: bash .github/policy/test-suite-catalog.sh
+
       - name: Test canonical dispatch identity and input defaults
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh
