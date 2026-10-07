@@ -247,38 +247,51 @@ The trusted input-validation job recomputes the key before any job can read priv
 missing or stale key fails closed. The weekly resolver uses the same calculator and contract
 fetched at its exact public `github.sha`, without checking out a repository.
 
-For a manual Linux full run, fetch the selected public ref and calculate the key from a checkout
-whose files are exactly that commit. The helper and input contract must come from the same control
-commit whose workflow will serve the dispatch:
+Choose exactly one control-plane ref for a dispatch. For a protected private source SHA reachable
+from `develop`, `uat` or `main`, calculate the key from a clean public checkout at the current
+`main` tip:
 
 ```bash
+set -euo pipefail
+git fetch origin main
+CONTROL_SHA="$(git rev-parse origin/main)"
+test "$(git rev-parse HEAD)" = "${CONTROL_SHA}"
+git diff --quiet "${CONTROL_SHA}" -- .github/ci-matrix.json .github/policy/dispatch-identity.rb
 SOURCE_SHA='<full private commit SHA>'
 # For --ref main, SOURCE_SHA must be reachable from the protected develop/uat/main branches.
-make_dispatch_key() {
+DISPATCH_KEY="$(
   CI_WORKFLOW_PATH=.github/workflows/linux-validation.yml \
   CI_SOURCE_SHA="${SOURCE_SHA}" \
   CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI \
   CI_CONTROL_SHA="${CONTROL_SHA}" \
-  CI_CONTROL_REF="${CONTROL_REF}" \
+  CI_CONTROL_REF=refs/heads/main \
   CI_NORMALIZED_INPUTS="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source}')" \
   CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb
-}
-
-git fetch origin main
-CONTROL_REF=refs/heads/main
-CONTROL_SHA="$(git rev-parse origin/main)"
-test "$(git rev-parse HEAD)" = "${CONTROL_SHA}"
-git diff --quiet "${CONTROL_SHA}" -- .github/ci-matrix.json .github/policy/dispatch-identity.rb
-DISPATCH_KEY="$(make_dispatch_key)"
+ )"
 gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref main \
   -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${DISPATCH_KEY}"
+```
 
+For a feature or plan source SHA, use public `untrusted` instead. It accepts source SHAs that are
+not on a protected private branch. This is the alternative to the protected `main` dispatch, not
+an additional dispatch:
+
+```bash
+set -euo pipefail
 git fetch origin untrusted
-CONTROL_REF=refs/heads/untrusted
 CONTROL_SHA="$(git rev-parse origin/untrusted)"
 test "$(git rev-parse HEAD)" = "${CONTROL_SHA}"
 git diff --quiet "${CONTROL_SHA}" -- .github/ci-matrix.json .github/policy/dispatch-identity.rb
-DISPATCH_KEY="$(make_dispatch_key)"
+SOURCE_SHA='<full private commit SHA>'
+DISPATCH_KEY="$(
+  CI_WORKFLOW_PATH=.github/workflows/linux-validation.yml \
+  CI_SOURCE_SHA="${SOURCE_SHA}" \
+  CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI \
+  CI_CONTROL_SHA="${CONTROL_SHA}" \
+  CI_CONTROL_REF=refs/heads/untrusted \
+  CI_NORMALIZED_INPUTS="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source}')" \
+  CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb
+ )"
 gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted \
   -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${DISPATCH_KEY}"
 ```
