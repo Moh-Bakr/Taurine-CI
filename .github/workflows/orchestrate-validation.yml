@@ -256,4 +256,5 @@ jobs:
           expected-concerns: '["release-verification","dashboard"]'
           name-pattern: '^Orchestrate (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
+          selection-mode: full
           github-token: ${{ github.token }}

@@ -418,4 +418,5 @@ jobs:
           expected-concerns: '["ios-native","ios-rust"]'
           name-pattern: '^iOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
+          selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
           github-token: ${{ github.token }}

@@ -363,4 +363,5 @@ jobs:
           expected-concerns: '["android-native","android-rust"]'
           name-pattern: '^Android (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
+          selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
           github-token: ${{ github.token }}

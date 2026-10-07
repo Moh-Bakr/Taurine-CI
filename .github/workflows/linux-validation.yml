@@ -297,8 +297,9 @@ jobs:
         with:
           label: Linux
           expected-concerns: ${{ needs.plan.outputs.expected }}
-          required-concerns: ${{ needs.plan.outputs.optin }}
+          required-concerns: ${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}
+          selection-mode: ${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}
           github-token: ${{ github.token }}

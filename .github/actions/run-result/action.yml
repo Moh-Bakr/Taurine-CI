@@ -1,12 +1,11 @@
 name: Run result
 description: >
   One verdict for a dispatch. Lists the run's concern jobs, compares them with the
-  full list of concerns the workflow can run, and writes a summary with the exact
-  source SHA, the optional base SHA, a table (concern, conclusion) and the verdict.
-  Concerns that did not run are listed as "not selected", never as passed. The
-  verdict is PASS (full) only when every possible concern ran and succeeded; if some
-  did not run it is PASS (partial), which does not admit a merge. Any concern that
-  did not succeed, or no concern running at all, fails this step.
+  expected list and writes a summary with the exact source SHA, selection mode, a
+  table (concern, conclusion) and the verdict. Only an explicit full selection can
+  pass as full, and every expected concern must run successfully; a partial selection
+  never becomes full merely because every planned concern ran. Any failed or ambiguous
+  concern, or no concern running at all, fails this step.
 
 inputs:
   label:
@@ -29,6 +28,9 @@ inputs:
     description: The base SHA a partial selection was computed against, if any
     required: false
     default: ''
+  selection-mode:
+    description: Explicit dispatch selection contract; only reviewed full mode may attest a full run
+    required: true
   github-token:
     description: Token with actions read, for listing the run's jobs
     required: true
@@ -47,13 +49,42 @@ runs:
         NAME_PATTERN: ${{ inputs.name-pattern }}
         REQUESTED_SOURCE_SHA: ${{ inputs.source-sha }}
         BASE_SHA: ${{ inputs.base-sha }}
+        SELECTION_MODE: ${{ inputs.selection-mode }}
       run: |
         set -euo pipefail
+        case "${SELECTION_MODE}" in
+          full|partial) ;;
+          *) echo 'run-result rejected invalid selection mode' >&2; exit 1 ;;
+        esac
+        if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ || ( -n "${BASE_SHA}" && ! "${BASE_SHA}" =~ ^[0-9a-fA-F]{40}$ ) ]]; then
+          echo 'run-result rejected invalid source identity' >&2
+          exit 1
+        fi
+        if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")) and length == (unique | length)' <<<"${EXPECTED}" >/dev/null 2>&1 ||
+          ! jq -e --argjson expected "${EXPECTED}" 'type == "array" and all(.[]; . as $c | ($c | type) == "string" and ($c | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")) and ($expected | index($c) != null)) and length == (unique | length)' <<<"${REQUIRED}" >/dev/null 2>&1; then
+          echo 'run-result rejected invalid concern contract' >&2
+          exit 1
+        fi
+        if [[ "${SELECTION_MODE}" == full && -n "${BASE_SHA}" ]]; then
+          echo 'run-result rejected full mode with a base SHA' >&2
+          exit 1
+        fi
         ran="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
           | jq -r --arg re "${NAME_PATTERN}" '.jobs[]
             | select(.name | test($re))
             | [(.name | capture($re).concern), (if .conclusion == null then "running" else .conclusion end)]
             | @tsv' | sort)"
+        while IFS=$'\t' read -r matched_concern _; do
+          [[ -n "${matched_concern}" ]] || continue
+          if ! jq -e --arg c "${matched_concern}" 'index($c) != null' <<<"${EXPECTED}" >/dev/null 2>&1; then
+            echo 'run-result rejected an unexpected matching job' >&2
+            exit 1
+          fi
+        done <<<"${ran}"
+        if [[ "$(cut -f1 <<<"${ran}" | uniq -d)" != '' ]]; then
+          echo 'run-result rejected duplicate matching jobs' >&2
+          exit 1
+        fi
         not_selected=0
         failed=0
         ran_count=0
@@ -62,8 +93,8 @@ runs:
           [[ -n "${concern}" ]] || continue
           conclusion="$(awk -F'\t' -v c="${concern}" '$1 == c { print $2; exit }' <<<"${ran}")"
           if [[ -z "${conclusion}" || "${conclusion}" == skipped ]]; then
-            if jq -e --arg c "${concern}" 'index($c) != null' <<<"${REQUIRED}" >/dev/null 2>&1; then
-              # Explicitly requested, so its absence is a failure, never a quiet "not selected".
+            if [[ "${SELECTION_MODE}" == full ]] || jq -e --arg c "${concern}" 'index($c) != null' <<<"${REQUIRED}" >/dev/null 2>&1; then
+              # Explicitly requested, or required by full mode, so its absence fails.
               conclusion='REQUIRED BUT DID NOT RUN'
               failed=$((failed + 1))
             else
@@ -78,10 +109,7 @@ runs:
           fi
           table="${table}| ${concern} | ${conclusion} |"$'\n'
         done < <(jq -r '.[]' <<<"${EXPECTED}")
-        selection=full
-        if [[ "${not_selected}" -gt 0 ]]; then
-          selection=partial
-        fi
+        selection="${SELECTION_MODE}"
         verdict="PASS (${selection})"
         if [[ "${failed}" -gt 0 ]]; then
           verdict="FAIL (${failed} concern(s) did not succeed)"

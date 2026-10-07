@@ -528,4 +528,5 @@ jobs:
           expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           name-pattern: '^macOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
+          selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
           github-token: ${{ github.token }}

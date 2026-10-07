@@ -412,6 +412,7 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `visual` | Linux | Adds the Playwright `e2e-visual` tier; leave off until baselines for Linux exist |
 | `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
+| `selection-mode` | Internal result input | Each dispatcher supplies the reviewed full/partial decision; it is never inferred from the final job list |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
 | `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
@@ -419,15 +420,19 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 ## The Result verdict
 
 Each dispatcher ends with a `Result` job using the `run-result` composite. It lists every
-concern the workflow can run, reads each one's conclusion from the run's job list and writes:
+concern the workflow can run, reads each one's conclusion from the run's job list and writes.
+The dispatcher passes an explicit selection mode: Linux is full only for `profile=full` with no
+`base_sha`; macOS, Windows, Android and iOS are full only with `rust=true`; Orchestrate is full.
+The policy checks these call-site rules so a missing input cannot fall back to a guessed mode.
 
-- **PASS (full)**: every possible concern ran and succeeded. This is the only verdict that
-  admits a merge.
-- **PASS (partial)**: everything that ran succeeded, but some concerns were not selected
-  (quick profile, `base_sha`, or `rust=false`). They are shown as "not selected", never as
-  passed. A partial verdict does not admit a merge.
-- **FAIL**: a concern that ran did not succeed, no concern ran, or a required opt-in concern did
-  not run.
+- **PASS (full)**: the dispatcher explicitly requested full mode, every expected concern ran,
+  and each succeeded. This is the only concern-verdict mode that admits a merge.
+- **PASS (partial)**: the dispatcher explicitly requested partial mode and every concern that
+  ran succeeded. It stays partial even if every concern in its selected plan ran successfully;
+  quick profile, `base_sha`, and `rust=false` are always partial.
+- **FAIL**: an expected full-mode concern did not run, a required opt-in concern did not run,
+  a concern failed, the run contains duplicate or unexpected matching concern jobs, no concern
+  ran, or the selection/source contract is malformed.
 
 Always confirm the summary names the exact 40-character SHA you requested before attributing a
 result to a commit. A `Timings` job beside it tabulates durations against committed baselines and

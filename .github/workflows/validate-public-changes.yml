@@ -109,6 +109,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-selector.sh
 
+      - name: Test explicit run-result selection mode
+        shell: bash
+        run: bash .github/policy/test-run-result.sh
+
       # Release-installed tools are listed with their pins; Dependabot covers the Actions.
       - name: Check the tool pin list and Dependabot coverage
         shell: bash

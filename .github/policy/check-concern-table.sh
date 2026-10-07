@@ -19,6 +19,10 @@ unless step['with']['expected-concerns'].to_s == '$' + '{{ needs.plan.outputs.ex
   warn 'The Linux Result job must take its expected concerns from the plan job output'
   exit 1
 end
+unless step['with']['required-concerns'].to_s == '$' + '{{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}' && wf['jobs']['result']['needs'].include?('select')
+  warn 'The Linux Result job must require every concern in the selected matrix to run'
+  exit 1
+end
 opt_in = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux'].select { |_, sp| sp.key?('opt_in') }
 opt_in.each do |name, sp|
   known = (wf['on'] || wf[true])['workflow_dispatch']['inputs'].key?(sp['opt_in'])
@@ -46,6 +50,23 @@ unless problems.empty?
   exit 1
 end
 puts "concern table: #{table.length} Linux concerns (#{opt_in.length} opt-in) match the plan and the result check"
+mode_by_workflow = {
+  '.github/workflows/linux-validation.yml' => "${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}",
+  '.github/workflows/macos-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
+  '.github/workflows/windows-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
+  '.github/workflows/android-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
+  '.github/workflows/ios-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
+  '.github/workflows/orchestrate-validation.yml' => 'full'
+}
+mode_by_workflow.each do |path, expected_mode|
+  parsed = YAML.safe_load(File.read(path), aliases: false)
+  callers = parsed.fetch('jobs').values.flat_map { |job| job['steps'] || [] }.select { |step| step['uses'].to_s == './.github/actions/run-result' }
+  unless callers.length == 1 && callers.first.fetch('with', {})['selection-mode'] == expected_mode
+    warn "#{path}: run-result must use its reviewed explicit selection mode"
+    exit 1
+  end
+end
+puts 'run-result callers: all dispatchers declare their reviewed full/partial contract'
 RUBY
 # Each Linux concern's egress mode (block, or audit with its recorded reason).
 bash .github/policy/check-egress-modes.sh
