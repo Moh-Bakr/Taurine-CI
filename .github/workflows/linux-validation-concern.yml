@@ -57,7 +57,9 @@ jobs:
     # measured `cargo test -p taurine-app` at 708 s cold on a ten-core
     # workstation before the command tier doubled. `rust-dbx` compiles the
     # adopted `dbx-core` tree, whose own manifest records it as roughly 490
-    # crates.
+    # crates (a workspace member since Stage 1 task 1.5, still on its own
+    # concern because a whole-engine red must not hold the other crates'
+    # results hostage).
     timeout-minutes: ${{ inputs.timeout_minutes }}
     defaults:
       run:

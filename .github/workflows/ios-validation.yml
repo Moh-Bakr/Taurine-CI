@@ -283,6 +283,23 @@ jobs:
               mobile_run ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
               ;;
             ios-rust)
+              # Gate S1's mobile arm (plan 25): the phone links no OpenSSL.
+              # `cargo tree --invert openssl-sys` exits non-zero exactly when
+              # nothing in the graph depends on it, so the check inverts the
+              # exit: a clean run of the invert query IS the failure. The
+              # error text is pinned so a broken resolve cannot masquerade as
+              # a pass. Cheap, so it runs before the expensive test-target
+              # build and fails the concern first.
+              gate_log="${RUNNER_TEMP}/ios-openssl-absent.log"
+              if cargo tree --locked --package taurine-mobile --invert openssl-sys >"${gate_log}" 2>&1; then
+                echo "ios-openssl-absent: FAILED — openssl-sys is reachable from taurine-mobile (Gate S1, plan 25)" >&2
+                exit 1
+              fi
+              if ! grep -q "did not match any packages" "${gate_log}"; then
+                echo "ios-openssl-absent: the invert query failed for a reason other than absence (detail withheld)" >&2
+                exit 1
+              fi
+              echo "ios-openssl-absent: passed — openssl-sys is not resolvable from taurine-mobile"
               # Compile-only: build and link every test target of the mobile crate for
               # the iOS simulator triple, so the `cfg(target_os = "ios")` code and its
               # tests are type-checked and linked on a hosted runner; the next step
