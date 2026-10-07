@@ -56,7 +56,10 @@ def canonical_inputs(declared_inputs, supplied)
       when 'engine-selection'
         requested = value.gsub(/[[:space:]]/, '')
         if requested == 'all'
-          value = requested
+          # "all" and the explicit complete roster execute the same engines, so their
+          # dispatch identities must also be identical (otherwise duplicate full runs
+          # can be manufactured by changing only the spelling).
+          value = options.join(',')
         else
           selected = requested.split(',', -1)
           reject_identity('inputs_invalid') if selected.empty? || selected.any?(&:empty?)

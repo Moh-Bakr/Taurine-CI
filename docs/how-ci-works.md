@@ -247,31 +247,53 @@ The trusted input-validation job recomputes the key before any job can read priv
 missing or stale key fails closed. The weekly resolver uses the same calculator and contract
 fetched at its exact public `github.sha`, without checking out a repository.
 
-For a manual Linux full run from a local checkout of this public repository, calculate the key
-against the exact control commit that will serve the dispatch and include the source input:
+For a manual Linux full run, fetch the selected public ref and calculate the key from a checkout
+whose files are exactly that commit. The helper and input contract must come from the same control
+commit whose workflow will serve the dispatch:
 
 ```bash
-CONTROL_SHA="$(git rev-parse origin/main)"
 SOURCE_SHA='<full private commit SHA>'
-DISPATCH_KEY="$(
+# For --ref main, SOURCE_SHA must be reachable from the protected develop/uat/main branches.
+make_dispatch_key() {
   CI_WORKFLOW_PATH=.github/workflows/linux-validation.yml \
   CI_SOURCE_SHA="${SOURCE_SHA}" \
   CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI \
   CI_CONTROL_SHA="${CONTROL_SHA}" \
-  CI_CONTROL_REF=refs/heads/main \
+  CI_CONTROL_REF="${CONTROL_REF}" \
   CI_NORMALIZED_INPUTS="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source}')" \
   CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb
-)"
+}
+
+git fetch origin main
+CONTROL_REF=refs/heads/main
+CONTROL_SHA="$(git rev-parse origin/main)"
+test "$(git rev-parse HEAD)" = "${CONTROL_SHA}"
+git diff --quiet "${CONTROL_SHA}" -- .github/ci-matrix.json .github/policy/dispatch-identity.rb
+DISPATCH_KEY="$(make_dispatch_key)"
 gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref main \
+  -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${DISPATCH_KEY}"
+
+git fetch origin untrusted
+CONTROL_REF=refs/heads/untrusted
+CONTROL_SHA="$(git rev-parse origin/untrusted)"
+test "$(git rev-parse HEAD)" = "${CONTROL_SHA}"
+git diff --quiet "${CONTROL_SHA}" -- .github/ci-matrix.json .github/policy/dispatch-identity.rb
+DISPATCH_KEY="$(make_dispatch_key)"
+gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted \
   -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${DISPATCH_KEY}"
 ```
 
-For a feature or plan SHA, target `--ref untrusted` and calculate against the exact commit on
-`untrusted` instead. The helper fills only reviewed optional defaults from `dispatch_contracts`
+The helper fills only reviewed optional defaults from `dispatch_contracts`
 in `.github/ci-matrix.json`; it rejects unknown fields, choices and live-engine selections.
 For another workflow, use that workflow's exact input map from the same contract, including the
-source SHA. If the public tip moves before dispatch, recalculate against the new tip. Never
-reuse a key after changing an input, source SHA or control revision.
+source SHA. A `main` key is valid only with `CI_CONTROL_REF=refs/heads/main`; an `untrusted`
+key is valid only with `CI_CONTROL_REF=refs/heads/untrusted`. If the selected public ref moves
+before dispatch, fetch it again and recalculate from its exact new tip. Never reuse a key after
+changing an input, source SHA or control revision.
+
+The key check is a checkout-time preflight in the workflow that contains this contract. This
+feature branch is not deployed on `main` until the coordinator integrates it; existing main-ref
+dispatches do not require the key while `main` is still on its prior workflow revision.
 
 Protected tips (`develop`, `uat`, `main`, and the weekly run) keep dispatching from `main`.
 

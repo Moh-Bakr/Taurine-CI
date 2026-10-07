@@ -131,6 +131,13 @@ engine_base=(
   CI_CONTROL_REF=refs/heads/main
 )
 engine_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"postgres, doris"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
+engine_all_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"all"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
+engine_roster="$(jq -r '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options | join(",")' .github/ci-matrix.json)"
+engine_roster_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg engines "${engine_roster}" '{source_sha:$sha,engine:$engines}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
+[[ "${engine_all_key}" == "${engine_roster_key}" ]] || {
+  echo 'all engines and the explicit complete roster produced different dispatch identities' >&2
+  exit 1
+}
 engine_output="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"postgres, doris"}')" "CI_DISPATCH_KEY=${engine_key}" ruby .github/policy/dispatch-identity.rb)"
 [[ "${engine_output}" == *'"engine":"doris,postgres"'* ]] || {
   echo 'engine selection was not canonicalized to the reviewed roster order' >&2
