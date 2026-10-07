@@ -72,6 +72,24 @@ jobs:
           CI_CONTROL_REF: ${{ github.ref }}
         run: ruby .github/policy/dispatch-identity.rb
 
+      # One dispatch identity, one run: a queued or in-progress run of this
+      # workflow carrying the same dispatch key means the same source SHA and
+      # inputs are already being validated, so this duplicate stops here,
+      # before any token is minted. Nothing shared with the existing run is
+      # changed; it can never be cancelled or evicted by this check. The
+      # coordinator's ledger remains the primary dispatch discipline.
+      - name: Refuse a duplicate dispatch
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW_PATH: .github/workflows/orchestrate-validation.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_RUN_ID: ${{ github.run_id }}
+        run: ruby .github/policy/refuse-duplicate-dispatch.rb
+
+
   validate:
     permissions:
       contents: read

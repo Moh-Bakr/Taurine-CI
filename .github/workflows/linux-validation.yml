@@ -112,6 +112,24 @@ jobs:
           CI_CONTROL_REF: ${{ github.ref }}
         run: ruby .github/policy/dispatch-identity.rb
 
+      # One dispatch identity, one run: a queued or in-progress run of this
+      # workflow carrying the same dispatch key means the same source SHA and
+      # inputs are already being validated, so this duplicate stops here,
+      # before any token is minted. Nothing shared with the existing run is
+      # changed; it can never be cancelled or evicted by this check. The
+      # coordinator's ledger remains the primary dispatch discipline.
+      - name: Refuse a duplicate dispatch
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW_PATH: .github/workflows/linux-validation.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_RUN_ID: ${{ github.run_id }}
+        run: ruby .github/policy/refuse-duplicate-dispatch.rb
+
+
   # The concern list lives in .github/ci-matrix.json (one table for the selector, this
   # dispatcher and the result check). The reasons the concerns are split the way they are,
   # kept from the old inline list:
@@ -255,6 +273,10 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeouts)[matrix.concern] }}
+    # One sanitized evidence projection per concern, keyed by the concern name
+    # so the Result job can aggregate the shards of one coverage group.
+    outputs:
+      evidence_${{ matrix.concern }}: ${{ jobs.validate.outputs.suite_evidence }}
 
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed
@@ -323,3 +345,15 @@ jobs:
           base-sha: ${{ inputs.base_sha }}
           selection-mode: ${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}
           github-token: ${{ github.token }}
+
+      # One per-feature coverage overview over every sanitized evidence
+      # projection the concern jobs exported (selected versus full, executed
+      # versus compiled versus skipped). Reporting only: it never changes the
+      # verdict above, and it refuses (fails this job) if a projection is not
+      # the validator's reviewed shape.
+      - name: Aggregate the feature-suite overview
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/suite-overview  # zizmor: ignore[self-repository]
+        with:
+          evidence: ${{ toJSON(needs.validate.outputs) }}
+          label: Linux
