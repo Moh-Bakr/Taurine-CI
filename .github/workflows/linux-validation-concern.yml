@@ -322,18 +322,18 @@ jobs:
       # locate step only computes the key and keeps the target directory outside the private checkout.
       - name: Locate the compiled dependency cache
         id: cargo-target
-        if: ${{ startsWith(inputs.concern, 'rust-app-') }}
+        if: ${{ startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-packaging' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
           mode: locate
-          group: rust-app
-          features: test-default+check-openvpn
+          group: ${{ (inputs.concern == 'rust-db' && 'rust-db') || (inputs.concern == 'rust-packaging' && 'rust-packaging') || 'rust-app' }}
+          features: ${{ inputs.concern == 'rust-packaging' && 'tauri-debug-build' || (inputs.concern == 'rust-db' && 'test-default' || 'test-default+check-openvpn') }}
           os-label: Linux
 
       - name: Restore compiled third-party dependencies
         id: cargo-target-cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-packaging') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -343,7 +343,7 @@ jobs:
           key: ${{ steps.cargo-target.outputs.key }}
 
       - name: Strip workspace crates from the restored dependency cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-packaging') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -436,7 +436,7 @@ jobs:
       # SHA, only after the concern passed and the strip-and-prove step succeeded.
       - name: Strip and prove the compiled dependency cache
         id: cargo-target-strip
-        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-packaging') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -445,7 +445,7 @@ jobs:
           os-label: Linux
 
       - name: Save compiled third-party dependencies
-        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-packaging') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
