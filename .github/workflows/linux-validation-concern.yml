@@ -45,8 +45,6 @@ jobs:
       fail-fast: false
       matrix:
         concern: ${{ fromJSON(inputs.concerns).concern }}
-    outputs:
-      evidence_${{ matrix.concern }}: ${{ steps.suite-evidence.outputs.projection }}
     # The visual tier runs inside the same pinned Playwright image the Linux baselines were
     # generated in (Playwright 1.62.0, Ubuntu noble, linux/amd64; see the private
     # docs/visual-baselines.md), so hosted and local rendering are identical. Every other
@@ -526,6 +524,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           CONCERN: ${{ matrix.concern }}
+          SUITE_MANIFEST_PRESENT: ${{ steps.suite-contract.outputs.manifest_present }}
+          SUITE_COVERAGE_REQUIREMENT_ID: ${{ steps.suite-contract.outputs.coverage_requirement_id }}
           CI_EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_EXPECTED_CONTROL_SHA: ${{ github.sha }}
           CI_EXPECTED_MANIFEST_DIGEST: ${{ steps.suite-contract.outputs.manifest_digest }}
@@ -536,11 +536,11 @@ jobs:
           CI_PLATFORM: linux
         run: |
           set -euo pipefail
-          if [[ -z "${{ steps.suite-contract.outputs.coverage_requirement_id }}" ]]; then
+          if [[ -z "${SUITE_COVERAGE_REQUIREMENT_ID}" ]]; then
             echo 'suite evidence: not collected (the concern is not bound to a reviewed coverage group)'
             exit 0
           fi
-          if [[ "${{ steps.suite-contract.outputs.manifest_present }}" != 'true' ]]; then
+          if [[ "${SUITE_MANIFEST_PRESENT}" != 'true' ]]; then
             echo 'suite evidence: not collected (the reviewed ownership manifest is absent at this SHA)'
             exit 0
           fi
@@ -553,17 +553,15 @@ jobs:
           ruby .github/policy/collect-suite-evidence.rb "${CONCERN}" "${GITHUB_WORKSPACE}/src" \
             "${report}" "${RUNNER_TEMP}/suite-evidence-raw.json" "${RUNNER_TEMP}/suite-evidence.json"
           {
-            echo '### Feature-suite evidence'
+            ruby .github/policy/suite-overview.rb .github/ci-matrix.json "${RUNNER_TEMP}/suite-evidence.json"
+            echo
+            echo '<details><summary>Sanitized evidence projection</summary>'
             echo
             echo '```json'
             cat "${RUNNER_TEMP}/suite-evidence.json"
             echo '```'
+            echo '</details>'
           } >> "${GITHUB_STEP_SUMMARY}"
-          {
-            echo "projection<<SUITE_EVIDENCE_EOF"
-            cat "${RUNNER_TEMP}/suite-evidence.json"
-            echo "SUITE_EVIDENCE_EOF"
-          } >> "${GITHUB_OUTPUT}"
 
       # The job's own wall-clock time, shown next to its result; the timings job
       # tabulates it against a committed baseline.
@@ -582,29 +580,3 @@ jobs:
         with:
           phase: report
           mode: ${{ steps.egress-mode.outputs.mode }}
-
-  # One per-feature coverage overview over every sanitized evidence projection
-  # the concern legs exported (selected versus full, executed versus compiled
-  # versus skipped). Reporting only: it never changes a concern's conclusion,
-  # and it refuses anything that is not the validator's reviewed shape.
-  overview:
-    permissions:
-      contents: read
-    if: ${{ !cancelled() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate]
-    name: Feature-suite overview
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Check out public control plane
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Aggregate the feature-suite overview
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/suite-overview  # zizmor: ignore[self-repository]
-        with:
-          evidence: ${{ toJSON(needs.validate.outputs) }}
-          label: Linux
