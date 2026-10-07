@@ -58,11 +58,34 @@ mode_by_workflow = {
   '.github/workflows/ios-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
   '.github/workflows/orchestrate-validation.yml' => 'full'
 }
+required_by_workflow = {
+  '.github/workflows/linux-validation.yml' => "${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}",
+  '.github/workflows/macos-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
+  '.github/workflows/windows-validation.yml' => "${{ inputs.rust && '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\",\"rust-domain\",\"rust-db\",\"rust-net\",\"rust-ovpn\",\"rust-app-1\",\"rust-app-2\",\"rust-packaging\",\"rust-tls-openssl\"]' || '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\"]' }}",
+  '.github/workflows/android-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
+  '.github/workflows/ios-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}"
+}
+needs_by_workflow = {
+  '.github/workflows/linux-validation.yml' => %w[plan select],
+  '.github/workflows/macos-validation.yml' => %w[plan],
+  '.github/workflows/android-validation.yml' => %w[plan],
+  '.github/workflows/ios-validation.yml' => %w[plan]
+}
 mode_by_workflow.each do |path, expected_mode|
   parsed = YAML.safe_load(File.read(path), aliases: false)
   callers = parsed.fetch('jobs').values.flat_map { |job| job['steps'] || [] }.select { |step| step['uses'].to_s == './.github/actions/run-result' }
   unless callers.length == 1 && callers.first.fetch('with', {})['selection-mode'] == expected_mode
     warn "#{path}: run-result must use its reviewed explicit selection mode"
+    exit 1
+  end
+  expected_required = required_by_workflow[path]
+  if expected_required && callers.first.fetch('with', {})['required-concerns'] != expected_required
+    warn "#{path}: partial mode must require every concern in its selected matrix"
+    exit 1
+  end
+  required_needs = needs_by_workflow[path] || []
+  unless (required_needs - Array(parsed.fetch('jobs').fetch('result')['needs'])).empty?
+    warn "#{path}: Result must depend on the jobs that supply its selected concern list"
     exit 1
   end
 end

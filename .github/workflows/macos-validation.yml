@@ -506,7 +506,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate]
+    needs: [plan, validate]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -526,6 +526,7 @@ jobs:
         with:
           label: macOS
           expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
+          required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}
           name-pattern: '^macOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           selection-mode: ${{ inputs.rust && 'full' || 'partial' }}

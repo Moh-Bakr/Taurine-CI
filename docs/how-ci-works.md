@@ -430,7 +430,7 @@ The policy checks these call-site rules so a missing input cannot fall back to a
 - **PASS (partial)**: the dispatcher explicitly requested partial mode and every concern that
   ran succeeded. It stays partial even if every concern in its selected plan ran successfully;
   quick profile, `base_sha`, and `rust=false` are always partial.
-- **FAIL**: an expected full-mode concern did not run, a required opt-in concern did not run,
+- **FAIL**: an expected full-mode concern or a concern selected by a partial plan did not run,
   a concern failed, the run contains duplicate or unexpected matching concern jobs, no concern
   ran, or the selection/source contract is malformed.
 

@@ -330,7 +330,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate]
+    needs: [plan, validate]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -361,6 +361,7 @@ jobs:
         with:
           label: Android
           expected-concerns: '["android-native","android-rust"]'
+          required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}
           name-pattern: '^Android (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
