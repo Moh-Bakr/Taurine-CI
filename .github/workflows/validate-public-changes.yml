@@ -118,6 +118,22 @@ jobs:
         shell: bash
         run: bash .github/policy/test-suite-catalog.sh
 
+      - name: Test the exact suite-selection policy on synthetic changes
+        shell: bash
+        run: bash .github/policy/test-suite-selection.sh
+
+      - name: Test the sanitized feature-suite evidence contract
+        shell: bash
+        run: bash .github/policy/test-suite-evidence.sh
+
+      - name: Test the trusted suite-evidence collector on synthetic reports
+        shell: bash
+        run: bash .github/policy/test-suite-collector.sh
+
+      - name: Test the aggregate feature-suite overview
+        shell: bash
+        run: bash .github/policy/test-suite-overview.sh
+
       - name: Test canonical dispatch identity and input defaults
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh
