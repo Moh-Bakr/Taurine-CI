@@ -45,6 +45,8 @@ check_action_references() {
       ./.github/actions/verify-cargo-cache) ;;
       ./.github/actions/linux-test-identities) ;;
       ./.github/actions/rust-target-cache) ;;
+      # Sanitized feature-suite evidence collection and aggregation.
+      ./.github/actions/suite-overview) ;;
       ./.github/workflows/live-proof-arm.yml) ;;
       ./.github/actions/mobile-report) ;;
       ./.github/actions/android-sdk-setup) ;;

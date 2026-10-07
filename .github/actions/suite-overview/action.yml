@@ -1,0 +1,37 @@
+name: Aggregate feature-suite overview
+description: >
+  Renders one per-feature coverage overview (selected versus full, executed
+  versus compiled versus skipped) from the sanitized evidence projections the
+  concern jobs exported. Reads only the reviewed sanitized fields; raw reports,
+  test identities and paths never enter this step. The overview is reporting:
+  it cannot change a verdict, and a run with no projections still renders an
+  honest "no evidence collected" section.
+
+inputs:
+  evidence:
+    description: toJSON of the validate job's outputs, holding one evidence_<concern> projection per concern that collected evidence
+    required: true
+  label:
+    description: Platform label for the heading
+    required: true
+  matrix-path:
+    description: Path to the reviewed catalog
+    required: false
+    default: .github/ci-matrix.json
+
+runs:
+  using: composite
+  steps:
+    - name: Write the feature-suite overview
+      shell: bash
+      env:
+        EVIDENCE: ${{ inputs.evidence }}
+        LABEL: ${{ inputs.label }}
+        MATRIX_PATH: ${{ inputs.matrix-path }}
+      run: |
+        set -euo pipefail
+        overview="${RUNNER_TEMP}/suite-overview.md"
+        printf '%s' "${EVIDENCE}" | ruby .github/policy/suite-overview.rb "${MATRIX_PATH}" - > "${overview}"
+        sed -i "1s/^## Feature-suite overview$/## ${LABEL} feature-suite overview/" "${overview}"
+        cat "${overview}" >> "${GITHUB_STEP_SUMMARY}"
+        cat "${overview}"
