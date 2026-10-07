@@ -207,10 +207,12 @@ jobs:
             gh api -H 'Accept: application/vnd.github.raw+json' \
               "repos/${GH_REPO}/contents/.github/policy/dispatch-identity.rb?ref=${CONTROL_SHA}" \
               > "${RUNNER_TEMP}/dispatch-identity.rb"
-            contract_json="$(jq -c '.dispatch_contracts' "${RUNNER_TEMP}/ci-matrix.json")"
+            # Pass the complete reviewed matrix so the key calculator binds both workflow
+            # inputs and the suite catalog at this exact control-plane SHA.
+            matrix_json="$(jq -c . "${RUNNER_TEMP}/ci-matrix.json")"
             make_key() {
               local workflow_path="$1" source_sha="$2" normalized_inputs="$3"
-              CI_DISPATCH_CONTRACT_JSON="${contract_json}" \
+              CI_DISPATCH_CONTRACT_JSON="${matrix_json}" \
               CI_WORKFLOW_PATH="${workflow_path}" \
               CI_SOURCE_SHA="${source_sha}" \
               CI_CONTROL_REPOSITORY="${GH_REPO}" \

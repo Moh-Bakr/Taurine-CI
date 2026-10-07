@@ -94,6 +94,16 @@ rescue StandardError
   failures << '.github/ci-matrix.json: dispatch contract JSON is invalid'
   {}
 end
+catalog = matrix['suite_catalog']
+unless catalog.is_a?(Hash) && catalog.keys.sort == %w[coverage_requirements suites version] &&
+       catalog['version'] == 1 && catalog['coverage_requirements'].is_a?(Array) && catalog['suites'].is_a?(Array)
+  failures << '.github/ci-matrix.json: the version-1 suite catalog required by dispatch identity is missing or malformed'
+end
+graph = matrix['feature_graph']
+unless graph.is_a?(Hash) && graph.keys.sort == %w[comment dependency_edges version] &&
+       graph['version'] == 1 && graph['dependency_edges'].is_a?(Array) && !graph['dependency_edges'].empty?
+  failures << '.github/ci-matrix.json: the version-1 feature dependency graph required by dispatch identity is missing or malformed'
+end
 contract = matrix['dispatch_contracts']
 unless contract.is_a?(Hash) && contract['version'] == 1 &&
        contract['source_repository'] == 'Moh-Bakr/Taurine' &&
@@ -199,6 +209,48 @@ workflows.each do |path, spec|
   ]
   expected_prefix << SOURCE_SHA_STEPS.fetch(path) if SOURCE_SHA_STEPS.key?(path)
   failures << "#{path}: dispatch identity must precede every non-validation action or command" unless steps[0...index] == expected_prefix
+
+  # The dedup guard is the reviewed step immediately after the identity proof:
+  # one duplicate queued/in-progress dispatch is refused in the pre-source job,
+  # never cancelled after it started.
+  dedup = steps[index + 1]
+  expected_dedup = {
+    'name' => 'Refuse a duplicate dispatch',
+    'shell' => 'bash',
+    'working-directory' => '${{ github.workspace }}',
+    'env' => {
+      'GH_TOKEN' => '${{ github.token }}',
+      'CI_WORKFLOW_PATH' => path,
+      'CI_SOURCE_SHA' => '${{ inputs.source_sha }}',
+      'CI_DISPATCH_KEY' => '${{ inputs.dispatch_key }}',
+      'CI_RUN_ID' => '${{ github.run_id }}'
+    },
+    'run' => 'ruby .github/policy/refuse-duplicate-dispatch.rb'
+  }
+  failures << "#{path}: the duplicate-dispatch guard must follow the identity proof with its fixed trusted command" unless dedup == expected_dedup
+end
+
+# The no-checkout scheduled helper retrieves the exact control commit's full matrix
+# and calculator. Passing only dispatch_contracts would omit suite_catalog_digest
+# from scheduled dispatch identities.
+weekly = load_yaml(File.join(ROOT, '.github/workflows/weekly-validation.yml'))
+weekly_dispatch_steps = weekly.dig('jobs', 'dispatch', 'steps') if weekly.is_a?(Hash)
+weekly_step = weekly_dispatch_steps&.find do |step|
+  step.is_a?(Hash) && step['name'] == 'Dispatch the protected validations for the resolved SHAs'
+end
+weekly_run = weekly_step.is_a?(Hash) ? weekly_step['run'].to_s : ''
+weekly_required = [
+  'repos/${GH_REPO}/contents/.github/ci-matrix.json?ref=${CONTROL_SHA}',
+  'repos/${GH_REPO}/contents/.github/policy/dispatch-identity.rb?ref=${CONTROL_SHA}',
+  'matrix_json="$(jq -c . "${RUNNER_TEMP}/ci-matrix.json")"',
+  'CI_DISPATCH_CONTRACT_JSON="${matrix_json}"',
+  'CI_CONTROL_SHA="${CONTROL_SHA}"',
+  'CI_CONTROL_REF="${CONTROL_REF}"',
+  'CI_GENERATE_ONLY=true ruby "${RUNNER_TEMP}/dispatch-identity.rb"'
+]
+unless weekly_required.all? { |fragment| weekly_run.include?(fragment) } &&
+       !weekly_run.include?("jq -c '.dispatch_contracts'")
+  failures << '.github/workflows/weekly-validation.yml: scheduled dispatch identity must use the full matrix and calculator from the exact control SHA'
 end
 
 if failures.empty?

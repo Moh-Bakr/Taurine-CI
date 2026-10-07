@@ -86,10 +86,18 @@ begin
   table_json = ENV['CI_DISPATCH_CONTRACT_JSON']
   table_json = nil if table_json.to_s.empty?
   table = JSON.parse(table_json || File.read('.github/ci-matrix.json'))
-  if table.is_a?(Hash) && !table.key?('dispatch_contracts') && table.key?('workflows')
-    table = { 'dispatch_contracts' => table }
-  end
   reject_identity('contract_invalid') unless table.is_a?(Hash) && table['dispatch_contracts'].is_a?(Hash)
+  catalog = table['suite_catalog']
+  reject_identity('contract_invalid') unless catalog.is_a?(Hash) &&
+    catalog.keys.sort == %w[coverage_requirements suites version] && catalog['version'] == 1 &&
+    catalog['coverage_requirements'].is_a?(Array) && catalog['suites'].is_a?(Array)
+  catalog_canonical = JSON.generate(sort_json(catalog), ascii_only: true)
+  catalog_digest = Digest::SHA256.hexdigest(catalog_canonical)
+  graph = table['feature_graph']
+  reject_identity('contract_invalid') unless graph.is_a?(Hash) && graph['version'] == 1 &&
+                                             graph['dependency_edges'].is_a?(Array)
+  graph_canonical = JSON.generate(sort_json(graph), ascii_only: true)
+  graph_digest = Digest::SHA256.hexdigest(graph_canonical)
   contract = table.fetch('dispatch_contracts')
   path = ENV.fetch('CI_WORKFLOW_PATH')
   workflows = contract['workflows']
@@ -121,6 +129,8 @@ begin
     'control_sha' => control_sha,
     'control_ref' => control_ref,
     'workflow_path' => path,
+    'suite_catalog_digest' => catalog_digest,
+    'feature_graph_digest' => graph_digest,
     'inputs' => normalized_inputs
   }
   canonical = JSON.generate(sort_json(identity), ascii_only: true)

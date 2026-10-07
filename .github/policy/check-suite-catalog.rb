@@ -245,10 +245,25 @@ def validate_new_requirement(record, suites, matrix)
   end
 end
 
+def validate_feature_graph(matrix)
+  graph = matrix['feature_graph']
+  require_contract(graph.is_a?(Hash) && graph.keys.sort == %w[comment dependency_edges version])
+  require_contract(graph['version'] == 1)
+  edges = graph['dependency_edges']
+  require_contract(edges.is_a?(Array) && !edges.empty? &&
+                   edges.all? { |edge| edge.is_a?(Hash) && edge.keys.sort == %w[from to] })
+  pairs = edges.map { |edge| [edge.fetch('from'), edge.fetch('to')] }
+  # Conservative over-approximation contract: edges run between reviewed
+  # features only, never self-referential, never duplicated.
+  require_contract(pairs.all? { |from, to| FEATURES.include?(from) && FEATURES.include?(to) && from != to })
+  require_contract(pairs.uniq.length == pairs.length)
+end
+
 def validate_catalog(matrix)
   catalog = matrix.fetch('suite_catalog')
   require_contract(catalog.is_a?(Hash) && catalog.keys.sort == %w[coverage_requirements suites version])
   require_contract(catalog['version'] == 1)
+  validate_feature_graph(matrix)
   pinned_suites, pinned_requirements = expected_records
   actual_suites = catalog['suites']
   actual_requirements = catalog['coverage_requirements']

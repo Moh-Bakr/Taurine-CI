@@ -243,6 +243,11 @@ place for unreviewed code is a ref whose cache main never reads. Hence two refs:
 
 Protected dispatches require `dispatch_key`. It binds the exact private source SHA to the full
 public control-plane SHA/ref, workflow path and complete default-normalized workflow inputs.
+It also binds the SHA-256 digest of canonical JSON for the public `suite_catalog` in
+`.github/ci-matrix.json` (object keys sorted recursively, array order preserved). A catalog
+change therefore invalidates a key even when all dispatch inputs are unchanged. The weekly
+resolver fetches the complete matrix and calculator from its exact control SHA and uses the
+same digest calculation without checking out a repository.
 The trusted input-validation job recomputes the key before any job can read private source; a
 missing or stale key fails closed. The weekly resolver uses the same calculator and contract
 fetched at its exact public `github.sha`, without checking out a repository.
@@ -265,6 +270,7 @@ DISPATCH_KEY="$(
   CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI \
   CI_CONTROL_SHA="${CONTROL_SHA}" \
   CI_CONTROL_REF=refs/heads/main \
+  CI_DISPATCH_CONTRACT_JSON='' \
   CI_NORMALIZED_INPUTS="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source}')" \
   CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb
  )"
@@ -289,6 +295,7 @@ DISPATCH_KEY="$(
   CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI \
   CI_CONTROL_SHA="${CONTROL_SHA}" \
   CI_CONTROL_REF=refs/heads/untrusted \
+  CI_DISPATCH_CONTRACT_JSON='' \
   CI_NORMALIZED_INPUTS="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source}')" \
   CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb
  )"
@@ -296,8 +303,9 @@ gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted 
   -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${DISPATCH_KEY}"
 ```
 
-The helper fills only reviewed optional defaults from `dispatch_contracts`
-in `.github/ci-matrix.json`; it rejects unknown fields, choices and live-engine selections.
+The helper fills only reviewed optional defaults from `dispatch_contracts` in
+`.github/ci-matrix.json`; it rejects unknown fields, choices and live-engine selections, and
+requires the version-1 public suite catalog to calculate its digest.
 For another workflow, use that workflow's exact input map from the same contract, including the
 source SHA. A `main` key is valid only with `CI_CONTROL_REF=refs/heads/main`; an `untrusted`
 key is valid only with `CI_CONTROL_REF=refs/heads/untrusted`. If the selected public ref moves
@@ -309,6 +317,55 @@ feature branch is not deployed on `main` until the coordinator integrates it; ex
 dispatches do not require the key while `main` is still on its prior workflow revision.
 
 Protected tips (`develop`, `uat`, `main`, and the weekly run) keep dispatching from `main`.
+
+### Duplicate dispatches
+
+The coordinator's ledger is the primary dispatch discipline, and each dispatcher's trusted
+pre-source job now enforces it a second time: straight after the identity proof it lists this
+workflow's queued and in-progress runs and refuses to start when another run's title carries the
+same dispatch key - the key binds the exact source SHA, control-plane revision and normalized
+inputs, so a title match is the same validation already waiting or running. The guard stops the
+NEW run before any token is minted; it never cancels or evicts the existing one (the two runs
+share nothing and the concurrency rules are unchanged), and if the run list cannot be read it
+fails closed instead of dispatching blind. Completed duplicates are allowed: re-running a
+finished validation is normal, and the coordinator's ledger reconciles attempts.
+
+### Feature-suite evidence, selection and overview
+
+`.github/ci-matrix.json` carries two reviewed contracts beside the concern table:
+
+- **`suite_catalog`** - the reviewed candidate suites (id, feature, tier, runner, config,
+  platforms, concerns) and the coverage requirements that bind each runner/config/tier/platform
+  to its features and candidate suites. The catalog's canonical JSON digest is part of every
+  dispatch identity, so a catalog edit invalidates outstanding dispatch keys.
+- **`feature_graph`** - conservative feature consumption edges. A change in one feature selects
+  every transitively reachable consumer. `select-suites.rb` computes the exact selection per
+  coverage requirement from a selection request the source-side classifier produces, and fails
+  closed to the complete set when the base is invalid or missing, any changed path matched no
+  reviewed rule, a shared surface changed (fixtures, aliases, setup, composition roots,
+  lockfiles, toolchains, CI or selector inputs), the request's catalog or graph digests do not
+  match the bound identity, or the mode is full. A partial selection is feedback and never
+  admits a merge; the graph over-approximates by design, and unknown edges must broaden, never
+  narrow, a selection.
+
+Each concern job then accounts for what actually ran. A pre-project-code step (after the token
+revoke, before any dependency installation) snapshots the suite contract: the catalog digest
+from this control-plane revision and the SHA-256 of the private ownership manifest at
+`scripts/ci/suite-ownership.json` in the checked-out source. After the concern ran, the trusted
+collector (`collect-suite-evidence.rb`) derives every count from the runner report the reviewed
+concern command wrote (vitest or Playwright JSON in `RUNNER_TEMP/test-ids/`), joins each
+executed case to exactly one primary suite through the manifest's reviewed patterns, and fails
+closed on unowned or multiply-owned cases, report/total mismatches, a project outside the
+group's scope, or anything it cannot parse. It never trusts a private script's counts. The raw
+proof and the manifest stay in `RUNNER_TEMP`; only the validator's sanitized projection leaves
+the runner: suite IDs, counts (discovered, owned, executed, compiled, ignored, quarantined,
+environment-skipped), fixed status and error classes, digests and SHAs. Compiled targets are
+evidence of compilation, never execution: a compile-only selection is `blocked`
+(`compiled_only`) and cannot merge. A projection is exported as the concern job's
+`suite_evidence` output, and the Result job renders one per-feature overview
+(selected versus full, executed versus compiled versus skipped) with `suite-overview`; the
+overview reports honestly when no evidence was collected. Existing concern coverage stays
+authoritative: the evidence pipeline observes, it does not yet narrow what a concern executes.
 
 ### Keeping untrusted in sync with main (manual, by design)
 
@@ -449,8 +506,9 @@ Only Linux uses `base_sha`; the other platforms always run their whole list.
 Every source-bearing workflow gives each run its own concurrency group (it contains
 `github.run_id`) and `cancel-in-progress` is false. GitHub keeps only one *pending* run per
 group, so a shared per-SHA group let a later dispatch silently cancel an earlier queued run; that
-is why groups are per run. Nothing deduplicates runs: two dispatches for the same SHA both run.
-Lanes must therefore check for an existing run before dispatching:
+is why groups are per run. Nothing cancels a run: the duplicate-dispatch guard above stops a NEW
+dispatch in its pre-source job when the same identity is already queued or running; two
+completed runs of one identity are allowed and reconciled by the coordinator's ledger:
 
 ```bash
 gh run list -R Moh-Bakr/Taurine-CI --workflow linux-validation.yml --status queued

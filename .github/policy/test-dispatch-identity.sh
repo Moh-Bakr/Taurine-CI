@@ -4,12 +4,12 @@ set -euo pipefail
 
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dispatch-identity-test.XXXXXX")"
 trap 'rm -rf "${work}"' EXIT
-contract="$(jq -c '.dispatch_contracts' .github/ci-matrix.json)"
+matrix="$(jq -c . .github/ci-matrix.json)"
 source_sha=1111111111111111111111111111111111111111
 control_sha=2222222222222222222222222222222222222222
 workflow=.github/workflows/linux-validation.yml
 base_env=(
-  "CI_DISPATCH_CONTRACT_JSON=${contract}"
+  "CI_DISPATCH_CONTRACT_JSON=${matrix}"
   "CI_WORKFLOW_PATH=${workflow}"
   "CI_SOURCE_SHA=${source_sha}"
   CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI
@@ -19,6 +19,15 @@ base_env=(
 
 generate() {
   env "${base_env[@]}" "CI_NORMALIZED_INPUTS=$1" CI_GENERATE_ONLY=true \
+    ruby .github/policy/dispatch-identity.rb
+}
+
+generate_with_matrix() {
+  local supplied_matrix="$1" normalized="$2"
+  env "CI_DISPATCH_CONTRACT_JSON=${supplied_matrix}" \
+    "CI_WORKFLOW_PATH=${workflow}" "CI_SOURCE_SHA=${source_sha}" \
+    CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" \
+    CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=${normalized}" CI_GENERATE_ONLY=true \
     ruby .github/policy/dispatch-identity.rb
 }
 
@@ -39,16 +48,59 @@ valid_output="$(validate "$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha}'
   echo 'dispatch identity proof was not emitted for a valid key' >&2
   exit 1
 }
-ruby -rjson -e '
+ruby -rdigest -rjson -e '
   proof = JSON.parse(ARGV.fetch(0).sub(/\ACI_DISPATCH_IDENTITY=/, ""))
   identity = proof.fetch("identity")
   abort "wrong synthetic source echo" unless identity.fetch("source_sha") == ARGV.fetch(1)
   abort "wrong control SHA" unless identity.fetch("control_sha") == ARGV.fetch(2)
+  sort_json = lambda { |value| value.is_a?(Hash) ? value.keys.sort.to_h { |key| [key, sort_json.call(value.fetch(key))] } : value.is_a?(Array) ? value.map { |item| sort_json.call(item) } : value }
+  expected_catalog = Digest::SHA256.hexdigest(JSON.generate(sort_json.call(JSON.parse(ARGV.fetch(3)).fetch("suite_catalog")), ascii_only: true))
+  abort "suite catalog digest missing or incorrect" unless identity.fetch("suite_catalog_digest") == expected_catalog
   abort "defaults missing from proof" unless identity.fetch("inputs") == {
     "base_sha" => "", "gitleaks_history" => false, "profile" => "full",
     "source_sha" => ARGV.fetch(1), "visual" => false
   }
-' "${valid_output}" "${source_sha}" "${control_sha}"
+' "${valid_output}" "${source_sha}" "${control_sha}" "${matrix}"
+
+normalized_defaults="$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha}')"
+sorted_matrix="$(jq -S -c . .github/ci-matrix.json)"
+sorted_key="$(generate_with_matrix "${sorted_matrix}" "${normalized_defaults}")"
+[[ "${sorted_key}" == "${defaults_key}" ]] || {
+  echo 'object-key formatting changed the canonical suite catalog identity' >&2
+  exit 1
+}
+changed_catalog="$(jq -c '.suite_catalog.suites[0].concerns += ["synthetic-review"]' .github/ci-matrix.json)"
+changed_catalog_key="$(generate_with_matrix "${changed_catalog}" "${normalized_defaults}")"
+[[ "${changed_catalog_key}" != "${defaults_key}" ]] || {
+  echo 'suite catalog edits did not change the dispatch identity' >&2
+  exit 1
+}
+reordered_catalog="$(jq -c '.suite_catalog.suites |= reverse' .github/ci-matrix.json)"
+reordered_catalog_key="$(generate_with_matrix "${reordered_catalog}" "${normalized_defaults}")"
+[[ "${reordered_catalog_key}" != "${defaults_key}" ]] || {
+  echo 'suite catalog array order was not preserved in the dispatch identity' >&2
+  exit 1
+}
+
+# The dispatch identity also binds the conservative feature dependency graph:
+# proof check plus key change under a graph edit, and refusal without it.
+ruby -rdigest -rjson -e '
+  proof = JSON.parse(ARGV.fetch(0).sub(/\ACI_DISPATCH_IDENTITY=/, ""))
+  sort_json = lambda { |value| value.is_a?(Hash) ? value.keys.sort.to_h { |key| [key, sort_json.call(value.fetch(key))] } : value.is_a?(Array) ? value.map { |item| sort_json.call(item) } : value }
+  expected = Digest::SHA256.hexdigest(JSON.generate(sort_json.call(JSON.parse(ARGV.fetch(1)).fetch("feature_graph")), ascii_only: true))
+  abort "feature graph digest missing or incorrect" unless proof.fetch("identity").fetch("feature_graph_digest") == expected
+' "${valid_output}" "${matrix}"
+changed_graph="$(jq -c '.feature_graph.dependency_edges[0].to = "synthetic-review-consumer"' .github/ci-matrix.json)"
+changed_graph_key="$(generate_with_matrix "${changed_graph}" "${normalized_defaults}")"
+[[ "${changed_graph_key}" != "${defaults_key}" ]] || {
+  echo 'feature dependency graph edits did not change the dispatch identity' >&2
+  exit 1
+}
+graphless="$(jq -c 'del(.feature_graph)' .github/ci-matrix.json)"
+if generate_with_matrix "${graphless}" "${normalized_defaults}" >/dev/null 2>&1; then
+  echo 'a matrix without the feature dependency graph produced an identity' >&2
+  exit 1
+fi
 
 # The workflow's pinned environment deliberately supplies an empty override, so the trusted
 # checker must load only the committed policy contract in its working tree.
@@ -123,7 +175,7 @@ expect_reject 'unknown input' inputs_invalid \
 
 engine_workflow=.github/workflows/live-proofs.yml
 engine_base=(
-  "CI_DISPATCH_CONTRACT_JSON=${contract}"
+  "CI_DISPATCH_CONTRACT_JSON=${matrix}"
   "CI_WORKFLOW_PATH=${engine_workflow}"
   "CI_SOURCE_SHA=${source_sha}"
   CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI

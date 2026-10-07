@@ -49,4 +49,19 @@ ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch
   "${work}/tree/.github/ci-matrix.json"
 expect_policy_rejects 'unbound declared input'
 
+reset_fixture
+ruby -e 'path=ARGV.fetch(0); text=File.read(path); old=%q{matrix_json="$(jq -c . "${RUNNER_TEMP}/ci-matrix.json")"}; new=%q{matrix_json="$(jq -c '\'' .dispatch_contracts '\'' "${RUNNER_TEMP}/ci-matrix.json")"}; abort unless text.include?(old); File.write(path,text.sub(old,new))' \
+  "${work}/tree/.github/workflows/weekly-validation.yml"
+expect_policy_rejects 'scheduled helper dropping the suite catalog from its identity input'
+
+reset_fixture
+ruby -e 'path=ARGV.fetch(0); text=File.read(path); marker="      - name: Refuse a duplicate dispatch\n"; abort unless text.include?(marker); File.write(path,text.sub(marker, ""))' \
+  "${work}/tree/.github/workflows/linux-validation.yml"
+expect_policy_rejects 'a dispatcher losing its duplicate-dispatch guard'
+
+reset_fixture
+ruby -e 'path=ARGV.fetch(0); text=File.read(path); old=%q{run: ruby .github/policy/refuse-duplicate-dispatch.rb}; new=%q{run: ruby .github/policy/refuse-duplicate-dispatch.rb || true}; abort unless text.include?(old); File.write(path,text.sub(old,new))' \
+  "${work}/tree/.github/workflows/linux-validation.yml"
+expect_policy_rejects 'a duplicate-dispatch guard that cannot fail'
+
 echo 'dispatch contracts: mutations for conditional, bypassed and mismapped proofs were rejected'
