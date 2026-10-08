@@ -86,7 +86,9 @@ jobs:
             echo 'live-proofs must run only from the protected main or untrusted branch' >&2
             exit 1
           fi
-          if [[ ! "${REQUESTED_ENGINE}" =~ ^[a-z0-9]+$ ]]; then
+          # Dashes are allowed (pg-dbx, tls-legacy): an arm name is lower-case
+          # words joined by single dashes, from the dispatcher roster.
+          if [[ ! "${REQUESTED_ENGINE}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
             echo 'engine must be a lower-case arm name from the dispatcher roster' >&2
             exit 1
           fi
@@ -185,7 +187,7 @@ jobs:
           engine: ${{ inputs.engine }}
 
       - name: Start the PostgreSQL, TLS or bastion servers
-        if: ${{ inputs.engine == 'postgres' || inputs.engine == 'pgtls' || inputs.engine == 'bastion' }}
+        if: ${{ inputs.engine == 'postgres' || inputs.engine == 'pg-dbx' || inputs.engine == 'pgtls' || inputs.engine == 'bastion' }}
         uses: ./.github/actions/live-start-pg  # zizmor: ignore[self-repository]
         with:
           engine: ${{ inputs.engine }}
