@@ -216,10 +216,13 @@ reviews="$(grep '^suite_reviews=' "${output}" | cut -d= -f2-)"
 expected_concerns="$(jq -r '[.suite_catalog.coverage_requirements[] | select(.availability == "supported") | .concerns[]] | unique | sort | join("\n")' "${matrix}")"
 [[ "$(jq -r 'keys | sort | join("\n")' <<<"${reviews}")" == "${expected_concerns}" ]]
 [[ "$(jq -r '.["rust-app-1"] // "absent"' <<<"${reviews}")" == "absent" ]]
-# The desktop payloads carry the rest closure only, marked shadow.
+# The desktop payloads carry the derived rest closure, marked shadow: rest's
+# consumers from the reviewed model include notes and vault through the
+# depends_on projection, while organization consumes nothing of rest's.
 vitest_selected="$(jq -r '.["desktop-shard-1"].selected_suite_ids | join(" ")' <<<"${reviews}")"
 [[ "${vitest_selected}" == *"desktop.vitest.default.rest"* && "${vitest_selected}" == *"desktop.vitest.default.automation"* &&
-   "${vitest_selected}" != *"desktop.vitest.default.notes"* ]]
+   "${vitest_selected}" == *"desktop.vitest.default.notes"* && "${vitest_selected}" == *"desktop.vitest.default.vault"* &&
+   "${vitest_selected}" != *"desktop.vitest.default.organization"* ]]
 jq -e '.["desktop-shard-1"] | .review == "shadow" and .selection_mode == "partial" and (.selection_digest | test("^[0-9a-f]{64}$"))' <<<"${reviews}" >/dev/null
 # The same payload goes to both shards of the group.
 [[ "$(jq -r '.["desktop-shard-1"].selected_suite_ids' <<<"${reviews}")" == "$(jq -r '.["desktop-shard-2"].selected_suite_ids' <<<"${reviews}")" ]]

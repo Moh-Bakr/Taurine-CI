@@ -26,9 +26,12 @@
 # surface, or selector inputs (catalog or graph digests) that do not match the
 # reviewed values select the complete set. A malformed request is an error,
 # never a reduction - and so is a well-formed but unknown feature ID
-# (`unknown_feature`): anything the caller names must exist in the reviewed
-# catalog and graph. Unselected suites are reported per group so a dispatcher
-# can skip them; a partial selection can never contribute a full PASS.
+# (`unknown_feature`) or a partial request that names no feature and carries
+# no broadening reason (`selection_empty`): anything the caller names must
+# exist in the reviewed catalog and graph, and a request bug must never look
+# like a confident all-zero selection. Unselected suites are reported per
+# group so a dispatcher can skip them; a partial selection can never
+# contribute a full PASS.
 #
 # Partial mode is wired into dispatch as a shadow review only: the dispatcher
 # computes the per-group selection and carries it to the concern workflows,
@@ -128,6 +131,15 @@ begin
   reasons << 'selector_inputs_changed' if expected_catalog != canonical_digest(catalog) ||
                                           expected_graph != graph_digest
   complete = reasons.any?
+
+  # A well-formed partial request that names no feature and carries no
+  # broadening reason would otherwise close to a confident all-zero reduction
+  # in every group - the empty-set sibling of `unknown_feature` (delta review
+  # #2, D8). The classifier always names at least one changed feature or one
+  # broadening reason, so this request shape is a bug: a named error, never a
+  # reduction. An empty set beside a broadening reason still selects the
+  # complete set above.
+  reject_selection!('selection_empty') if !complete && changed.empty?
 
   # Conservative closure: every transitively reachable consumer of a changed
   # feature joins the selection; nothing else is removed.

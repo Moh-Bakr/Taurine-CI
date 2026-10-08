@@ -258,6 +258,56 @@ def validate_new_requirement(record, suites, matrix)
   end
 end
 
+# The reviewed derived dependency graph, in the selector's implemented
+# semantics (an edge from -> to selects to when from changes): the reversal of
+# the private reviewed model's depends_on, plus the cross-feature tier rule
+# that every source-bearing feature selects integration. This table is
+# REGENERATED, never hand-edited: it is the output of the private reviewed
+# model's derivation (generate-suite-ownership.mjs, which also emits the
+# digest-bound artifact and whose cross-model fixture proves every edge's
+# direction against the model). A graph edit that does not match this table is
+# an unreviewed contract change; the canonical digest of the whole
+# feature_graph object is part of every dispatch identity.
+DERIVED_DEPENDENCY_EDGES = [
+  ['ai', 'integration'],
+  ['automation', 'integration'],
+  ['cli-orchestration', 'integration'],
+  ['database', 'ai'],
+  ['database', 'git'],
+  ['database', 'import-export'],
+  ['database', 'integration'],
+  ['design', 'integration'],
+  ['git', 'integration'],
+  ['import-export', 'integration'],
+  ['integration', 'cli-orchestration'],
+  ['integration', 'shell-appearance'],
+  ['mock-docs', 'integration'],
+  ['notes', 'git'],
+  ['notes', 'import-export'],
+  ['notes', 'integration'],
+  ['observability', 'integration'],
+  ['organization', 'integration'],
+  ['organization', 'search-navigation'],
+  ['rest', 'ai'],
+  ['rest', 'automation'],
+  ['rest', 'database'],
+  ['rest', 'import-export'],
+  ['rest', 'integration'],
+  ['rest', 'mock-docs'],
+  ['rest', 'observability'],
+  ['rest', 'tools'],
+  ['rest', 'vault'],
+  ['search-navigation', 'integration'],
+  ['shell-appearance', 'design'],
+  ['shell-appearance', 'integration'],
+  ['sync', 'git'],
+  ['sync', 'integration'],
+  ['tools', 'integration'],
+  ['vault', 'integration'],
+  ['vault', 'notes'],
+  ['vault', 'sync'],
+].freeze
+
 def validate_feature_graph(matrix)
   graph = matrix['feature_graph']
   require_contract(graph.is_a?(Hash) && graph.keys.sort == %w[comment dependency_edges version])
@@ -270,6 +320,11 @@ def validate_feature_graph(matrix)
   # features only, never self-referential, never duplicated.
   require_contract(pairs.all? { |from, to| FEATURES.include?(from) && FEATURES.include?(to) && from != to })
   require_contract(pairs.uniq.length == pairs.length)
+  # The graph is a derived artifact of the private reviewed model: the
+  # committed edges must be exactly the last reviewed derivation (D7), so a
+  # hand edit or a stale regeneration fails here instead of narrowing a
+  # future enforce-mode selection against a graph the model does not define.
+  require_contract(pairs.sort == DERIVED_DEPENDENCY_EDGES)
 end
 
 def validate_catalog(matrix)

@@ -338,20 +338,31 @@ finished validation is normal, and the coordinator's ledger reconciles attempts.
   platforms, concerns) and the coverage requirements that bind each runner/config/tier/platform
   to its features and candidate suites. The catalog's canonical JSON digest is part of every
   dispatch identity, so a catalog edit invalidates outstanding dispatch keys.
-- **`feature_graph`** - conservative feature consumption edges. A change in one feature selects
-  every transitively reachable consumer. `select-suites.rb` computes the exact selection per
+- **`feature_graph`** - the derived feature-consumption graph. An edge `from -> to` selects
+  `to`'s suites when `from` changes - the reversal of the private reviewed dependency model's
+  `depends_on` - plus the cross-feature tier rule that every source-bearing feature selects
+  `integration`, whose own consumers (the composition and CLI tiers) join every partial
+  selection accordingly. The graph is a derived artifact, regenerated never hand-edited: the
+  private reviewed model's generator emits it beside the suite-ownership manifest, digest-bound
+  to the same catalog digest, and a cross-model fixture proves every edge's direction against
+  the model; this repo's policy pins the reviewed derivation table (a graph edit that does not
+  match it is an unreviewed contract change), and the graph's canonical JSON digest is part of
+  every dispatch identity, so a regeneration invalidates outstanding dispatch keys.
+  `select-suites.rb` computes the exact selection per
   coverage requirement from a selection request the source-side classifier produces, and fails
   closed to the complete set when the base is invalid or missing, any changed path matched no
   reviewed rule, a shared surface changed (fixtures, aliases, setup, composition roots,
   lockfiles, toolchains, CI or selector inputs), the request's catalog or graph digests do not
-  match the bound identity, the mode is full, or a requested feature ID does not exist in the
-  reviewed catalog and graph (`unknown_feature` is an error, never a silent reduction). A
+  match the bound identity, the mode is full, a requested feature ID does not exist in the
+  reviewed catalog and graph, or a partial request names no changed feature and carries no
+  broadening reason (`unknown_feature` and `selection_empty` are errors, never a silent
+  reduction). A
   partial selection is feedback and never admits a merge; the graph over-approximates by
-  design, and unknown edges must broaden, never narrow, a selection. Partial mode also is not
-  wired into dispatch: the evidence validator requires not-selected suites to report zero
+  design, and unknown edges must broaden, never narrow, a selection. Partial mode never
+  reduces a dispatched round: the evidence validator requires not-selected suites to report zero
   executed cases, which holds only once a concern's runner command itself filters to the
   selected suite IDs - until that runner-side filtering exists, full remains the only
-  complete mode.
+  complete mode, and wiring any reduction (enforce) is gated on the derivation fixture above.
 
 What dispatch does wire today is the shadow review. The Linux dispatcher accepts the
 classifier's request as an identity-bound `suite_selection` input (mutually exclusive with
