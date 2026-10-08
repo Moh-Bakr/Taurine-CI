@@ -157,11 +157,13 @@ jobs:
       # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2,
       # one runner each so a slow one cannot hold the others back) only when the
       # dispatch set rust=true. They are the macOS counterparts of the Linux
-      # rust-* concerns. rust-dbx is not repeated here: dbx-core's engine and
-      # protocol tests are platform-neutral and stay on Linux; its OS-keyring
-      # feature is opt-in (not built by `npm run test:dbx-core`), its Postgres
-      # tests need a Docker daemon that macOS hosted runners do not have, and its
-      # vendored OpenSSL is a from-source C build with no macOS-only code.
+      # rust-* concerns. rust-dbx is not repeated here: the dbx member crates'
+      # engine and protocol tests are platform-neutral and stay on Linux;
+      # dbx-core's OS-keyring feature is opt-in (no default build enables it),
+      # its Postgres tests need a Docker daemon that macOS hosted runners do
+      # not have, and its vendored OpenSSL is a from-source C build with no
+      # macOS-only code. This OS compiles the keyring half through the
+      # `rust-domain` library check.
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:

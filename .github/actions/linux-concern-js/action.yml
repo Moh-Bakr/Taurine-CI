@@ -46,15 +46,15 @@ runs:
             run_deferred quarantine-check npm run check:quarantine
             # The notices generator runs `cargo metadata --offline`, so every crate of every
             # graph it reads must already be downloaded: a developer machine has them, a fresh
-            # runner does not, which is why this passed locally and failed here. The generator
-            # reads the root graph AND the standalone sub-workspace graphs behind its extra
-            # manifests (the taurine-tls-openssl door, whose `openssl` family is in no other
-            # lock), so fetch every committed Cargo.lock's graph — the same enumeration the
-            # advisory sweep below uses, which cannot drift from the set the generator reads.
-            # Per-lock failures are noted, not fatal (the third-party-source cache completion
-            # above does the same): some committed locks are not fetchable manifests at all —
-            # the vendored rumqttc fork carries a lock but no [workspace] table, so cargo
-            # refuses to load it standalone — and a missing graph the generator does read
+            # runner does not, which is why this passed locally and failed here. Since the
+            # dbx membership (Stage 1 task 1.5) the generator reads the root graph only — the
+            # door crate joined the workspace, its standalone lock is gone, and the extra
+            # manifest list is empty — so fetch every committed Cargo.lock's graph anyway,
+            # the same enumeration the advisory sweep below uses: it cannot drift from the
+            # set of locks the source commits, and it keeps covering whatever standalone
+            # graphs a future source carries. Per-lock failures are noted, not fatal (the
+            # third-party-source cache completion above does the same): some committed locks
+            # are not fetchable manifests at all, and a missing graph the generator does read
             # fails closed one sub-step later, at notices-check.
             run_deferred notices-fetch bash -c '
               set -euo pipefail

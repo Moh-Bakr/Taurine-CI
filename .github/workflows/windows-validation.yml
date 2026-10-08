@@ -217,12 +217,14 @@ jobs:
   # job here means "not requested", as the cadence report above states.
   # rust-ovpn is split from rust-net because its vcpkg dependency build
   # dominates the runtime.
-  # rust-dbx is not repeated here: dbx-core's engine and protocol tests
-  # are platform-neutral and stay on Linux; its OS-keyring feature is
-  # opt-in (not built by `npm run test:dbx-core`), its Postgres tests
-  # need a Linux container daemon that Windows hosted runners do not
-  # have, and its vendored OpenSSL is a from-source build that needs
-  # Perl and NASM on MSVC for code with no Windows-only paths.
+  # rust-dbx is not repeated here: the dbx member crates' engine and
+  # protocol tests are platform-neutral and stay on Linux; dbx-core's
+  # OS-keyring feature is opt-in (no default build enables it), its
+  # Postgres tests need a Linux container daemon that Windows hosted
+  # runners do not have, and its vendored OpenSSL is a from-source build
+  # that needs Perl and NASM on MSVC for code with no Windows-only
+  # paths. This OS compiles the `cfg(windows)` storage and credential
+  # paths through the `rust-domain` library check.
   validate-rust:
     permissions:
       contents: read

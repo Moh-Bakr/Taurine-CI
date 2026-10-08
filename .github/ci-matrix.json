@@ -32,21 +32,6 @@
     ],
     "max_changed_files_before_full": 3000
   },
-  "excluded_trees": {
-    "taurine-backend/dbx-core": [
-      "rust-dbx",
-      "rust-app-1",
-      "rust-app-2"
-    ],
-    "taurine-backend/dbx-mongo-shell": [
-      "rust-dbx",
-      "rust-app-1",
-      "rust-app-2"
-    ],
-    "taurine-backend/taurine-tls-openssl": [
-      "rust-tls-openssl"
-    ]
-  },
   "concerns": {
     "linux": {
       "contracts": {
@@ -178,9 +163,10 @@
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
       "rust-dbx": {
-        "excluded_trees": [
-          "taurine-backend/dbx-core",
-          "taurine-backend/dbx-mongo-shell"
+        "rust_packages": [
+          "dbx-core",
+          "dbx-sqlite-worker",
+          "dbx-mongo-shell"
         ],
         "full_only": true,
         "timeout": 90,
@@ -259,11 +245,11 @@
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
       "rust-tls-openssl": {
+        "rust_packages": [
+          "taurine-tls-openssl"
+        ],
         "full_only": true,
         "timeout": 60,
-        "excluded_trees": [
-          "taurine-backend/taurine-tls-openssl"
-        ],
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
