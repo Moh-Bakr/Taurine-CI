@@ -307,13 +307,13 @@ cache_expect_fail 'a target path outside the reviewed three' 'Disallowed cache p
   's#outputs\.dir \}\}/debug/build#outputs.dir }}/debug#'
 # Ref isolation: the compiled cache runs only on main for a protected source SHA.
 cache_expect_fail 'compiled cache restore without the main guard' 'runs only on main for a protected source SHA' \
-  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && startsWith\(inputs\.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (steps\.verified-source\.outputs\.protected-ancestor == .true. && (?:\(startsWith\(inputs\.concern, .rust-app-.\)[^\n]*|startsWith\(inputs\.concern, .rust-app-.\)) \}\}\n        uses: actions\/cache\/restore)/if: \$\{\{ $1/'
 cache_expect_fail 'compiled cache restore without protected ancestry' 'runs only on main for a protected source SHA' \
-  's/(if: \$\{\{ github\.ref == .refs\/heads\/main. && )steps\.verified-source\.outputs\.protected-ancestor == .true. && (startsWith\(inputs\.concern, .rust-app-.\) \}\}\n        uses: actions\/cache\/restore)/$1$2/'
+  's/(if: \$\{\{ github\.ref == .refs\/heads\/main. && )steps\.verified-source\.outputs\.protected-ancestor == .true. && ((?:\(startsWith\(inputs\.concern, .rust-app-.\)[^\n]*|startsWith\(inputs\.concern, .rust-app-.\)) \}\}\n        uses: actions\/cache\/restore)/$1$2/'
 cache_expect_fail 'compiled cache gate re-opened by ||' 'runs only on main for a protected source SHA' \
-  's/(if: \$\{\{ github\.ref == [^\n]*startsWith\(inputs\.concern, .rust-app-.\)) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
+  's/(if: \$\{\{ github\.ref == [^\n]*(?:\(startsWith\(inputs\.concern, .rust-app-.\)[^\n]*|startsWith\(inputs\.concern, .rust-app-.\))) \}\}(\n        uses: actions\/cache\/restore)/$1 || true }}$2/'
 cache_expect_fail 'compiled cache strip without the main guard' 'strip step runs only on main' \
-  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && (inputs\.concern == .rust-app-2. && [^\n]*steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
+  's/if: \$\{\{ github\.ref == .refs\/heads\/main. && ((?:\(inputs\.concern == .rust-app-2.[^\n]*|inputs\.concern == .rust-app-2. && [^\n]*)steps\.concern-rust\.outcome)/if: \$\{\{ $1/'
 # Findings L1-L3: the source cache holds only the verified archives, saves under the restore's
 # key, and the required save terms count only as exact top-level conjuncts.
 cache_expect_fail 'the unverified registry index' 'Disallowed cache path line' \
