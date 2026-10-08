@@ -26,12 +26,14 @@ EXPECTED_RUN_NAME = 'Taurine validation ${{ inputs.source_sha }} ${{ inputs.disp
 SHA40 = { 'type' => 'string', 'required' => true, 'format' => 'sha40', 'digest_include' => true }.freeze
 DISPATCH_KEY = { 'type' => 'string', 'required' => true, 'format' => 'sha256', 'digest_include' => false }.freeze
 BOOLEAN_FALSE = { 'type' => 'boolean', 'required' => false, 'default' => false, 'digest_include' => true }.freeze
+STRING_DEFAULT_EMPTY = { 'type' => 'string', 'required' => false, 'default' => '', 'digest_include' => true }.freeze
 EXPECTED_INPUTS = {
   '.github/workflows/linux-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY,
     'profile' => { 'type' => 'choice', 'required' => false, 'default' => 'full', 'options' => %w[full quick], 'digest_include' => true },
     'visual' => BOOLEAN_FALSE, 'gitleaks_history' => BOOLEAN_FALSE,
-    'base_sha' => { 'type' => 'string', 'required' => false, 'default' => '', 'format' => 'optional-sha40', 'digest_include' => true }
+    'base_sha' => { 'type' => 'string', 'required' => false, 'default' => '', 'format' => 'optional-sha40', 'digest_include' => true },
+    'suite_selection' => STRING_DEFAULT_EMPTY
   },
   '.github/workflows/macos-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE,
@@ -58,20 +60,36 @@ SOURCE_SHA_RUN = <<~'SH'.freeze
   fi
 SH
 LINUX_SOURCE_SHA_RUN = <<~'SH'.freeze
-  set -euo pipefail
-  if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-    echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
-    exit 1
-  fi
-  if [[ -n "${REQUESTED_BASE_SHA}" && ! "${REQUESTED_BASE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-    echo 'base_sha must be empty or a full 40-character hexadecimal commit SHA' >&2
-    exit 1
-  fi
+set -euo pipefail
+if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+  exit 1
+fi
+if [[ -n "${REQUESTED_BASE_SHA}" && ! "${REQUESTED_BASE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo 'base_sha must be empty or a full 40-character hexadecimal commit SHA' >&2
+  exit 1
+fi
+# One selection mechanism per dispatch: the concern-level diff
+# selection and the feature-level suite selection are different
+# partial layers, so they are refused together rather than silently
+# combined.
+if [[ -n "${REQUESTED_BASE_SHA}" && -n "${REQUESTED_SUITE_SELECTION}" ]]; then
+  echo 'base_sha and suite_selection are mutually exclusive: one selection mechanism per dispatch' >&2
+  exit 1
+fi
+# The request is the classifier's single-line JSON. The selector
+# validates its content; here only the transport shape is checked so
+# nothing multiline can reach the summary or the outputs.
+if [[ -n "${REQUESTED_SUITE_SELECTION}" && ! "${REQUESTED_SUITE_SELECTION}" =~ ^[[:print:]]+$ ]]; then
+  echo 'suite_selection must be a single line of printable ASCII (the classifier request JSON)' >&2
+  exit 1
+fi
 SH
 SOURCE_SHA_STEPS = {
   '.github/workflows/linux-validation.yml' => {
     'name' => 'Validate exact source SHA', 'shell' => 'bash',
-    'env' => { 'REQUESTED_SOURCE_SHA' => '${{ inputs.source_sha }}', 'REQUESTED_BASE_SHA' => '${{ inputs.base_sha }}' },
+    'env' => { 'REQUESTED_SOURCE_SHA' => '${{ inputs.source_sha }}', 'REQUESTED_BASE_SHA' => '${{ inputs.base_sha }}',
+               'REQUESTED_SUITE_SELECTION' => '${{ inputs.suite_selection }}' },
     'run' => LINUX_SOURCE_SHA_RUN
   },
   '.github/workflows/windows-validation.yml' => {

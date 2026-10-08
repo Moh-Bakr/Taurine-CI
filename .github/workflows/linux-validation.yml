@@ -38,6 +38,11 @@ on:
         required: false
         default: ''
         type: string
+      suite_selection:
+        description: Optional reviewed suite selection request (single-line JSON the source-side classifier produced); the selection is computed and reported as a shadow review while the complete set runs. Mutually exclusive with base_sha
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -86,6 +91,7 @@ jobs:
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           REQUESTED_BASE_SHA: ${{ inputs.base_sha }}
+          REQUESTED_SUITE_SELECTION: ${{ inputs.suite_selection }}
         run: |
           set -euo pipefail
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -96,6 +102,21 @@ jobs:
             echo 'base_sha must be empty or a full 40-character hexadecimal commit SHA' >&2
             exit 1
           fi
+          # One selection mechanism per dispatch: the concern-level diff
+          # selection and the feature-level suite selection are different
+          # partial layers, so they are refused together rather than silently
+          # combined.
+          if [[ -n "${REQUESTED_BASE_SHA}" && -n "${REQUESTED_SUITE_SELECTION}" ]]; then
+            echo 'base_sha and suite_selection are mutually exclusive: one selection mechanism per dispatch' >&2
+            exit 1
+          fi
+          # The request is the classifier's single-line JSON. The selector
+          # validates its content; here only the transport shape is checked so
+          # nothing multiline can reach the summary or the outputs.
+          if [[ -n "${REQUESTED_SUITE_SELECTION}" && ! "${REQUESTED_SUITE_SELECTION}" =~ ^[[:print:]]+$ ]]; then
+            echo 'suite_selection must be a single line of printable ASCII (the classifier request JSON)' >&2
+            exit 1
+          fi
 
       - name: Verify the coordinator dispatch identity
         shell: bash
@@ -104,7 +125,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/linux-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"base_sha":{0},"gitleaks_history":{1},"profile":{2},"source_sha":{3},"visual":{4}}}', toJSON(inputs.base_sha), toJSON(inputs.gitleaks_history), toJSON(inputs.profile), toJSON(inputs.source_sha), toJSON(inputs.visual)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"base_sha":{0},"gitleaks_history":{1},"profile":{2},"source_sha":{3},"suite_selection":{4},"visual":{5}}}', toJSON(inputs.base_sha), toJSON(inputs.gitleaks_history), toJSON(inputs.profile), toJSON(inputs.source_sha), toJSON(inputs.suite_selection), toJSON(inputs.visual)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -183,6 +204,7 @@ jobs:
       timeouts: ${{ steps.plan.outputs.timeouts }}
       expected: ${{ steps.plan.outputs.expected }}
       optin: ${{ steps.plan.outputs.optin }}
+      suite_reviews: ${{ steps.suite-review.outputs.suite_reviews || '{}' }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -239,6 +261,70 @@ jobs:
           # Per-concern timeouts (minutes) come from the same table.
           echo "timeouts=$(jq -c '.concerns.linux | map_values(.timeout)' .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
 
+      # With a suite_selection request (the reviewed source-side classifier's
+      # output, bound to this dispatch's identity): compute the exact suite
+      # selection and carry a shadow review to the bound concerns. The matrix
+      # below is never narrowed here - a selection only reduces a round once
+      # the concern commands filter their runners to the selected suite IDs -
+      # and the fail-closed rule is the selector's: a request it rejects (or
+      # one that already closes to the complete set) dispatches everything.
+      - name: Compute the suite selection review
+        id: suite-review
+        if: inputs.suite_selection != ''
+        shell: bash
+        env:
+          SUITE_SELECTION: ${{ inputs.suite_selection }}
+        run: |
+          set -euo pipefail
+          request="${RUNNER_TEMP}/suite-selection-request.json"
+          printf '%s' "${SUITE_SELECTION}" > "${request}"
+          if ! result="$(ruby .github/policy/select-suites.rb .github/ci-matrix.json "${request}" 2>"${RUNNER_TEMP}/suite-selection-rejection.txt")"; then
+            {
+              echo '## Suite selection review'
+              echo
+              echo 'The selection request was rejected, so the complete set runs. Rejection (fixed code only):'
+              echo
+              echo '```'
+              cat "${RUNNER_TEMP}/suite-selection-rejection.txt"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo 'suite_reviews={}' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "$(jq -r .complete <<<"${result}")" == 'true' ]]; then
+            # The reviewed selection is already the complete set (full mode or
+            # a fail-closed reason): there is nothing to review.
+            echo 'suite_reviews={}' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # Shadow review: one payload per bound concern carrying what the
+          # selection would run. Only reviewed vocabulary leaves here - group
+          # IDs, suite IDs, the selection digest and fixed reason words.
+          echo "suite_reviews=$(jq -c '
+            . as $result
+            | [ $result.groups[] | . as $group | $group.concerns[]
+                | { key: .,
+                    value: { review: "shadow", selection_mode: "partial",
+                             selected_suite_ids: $group.selected_suite_ids,
+                             selection_digest: $result.selection_digest } } ]
+            | from_entries' <<<"${result}")" >> "${GITHUB_OUTPUT}"
+          {
+            echo '## Suite selection review (shadow — the complete set runs)'
+            echo
+            echo 'Every concern still runs its full suite set. Each bound concern reports in its own summary what a partial selection would have run, so selections are validated against full rounds before one ever reduces a round.'
+            echo
+            echo "| Coverage group | Reasons | Would select |"
+            echo "| --- | --- | --- |"
+            reasons="$(jq -c .reasons <<<"${result}")"
+            jq -r --argjson reasons "${reasons}" '.groups | to_entries[] | "| \(.key) | " + ($reasons | join(", ")) + " | " + (.value.selected_suite_ids | length | tostring) + " |"' <<<"${result}"
+            echo
+            echo 'Suite IDs per group:'
+            echo
+            echo '```'
+            jq -r '.groups | to_entries[] | "\(.key): \(.value.selected_suite_ids | join(", "))"' <<<"${result}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   # Only with a base_sha: a source-bearing job (partial clone, history only) decides which
   # concerns the change affects. Without one this job is skipped and the full list runs.
   select:
@@ -273,6 +359,11 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeouts)[matrix.concern] }}
+      # The shadow review this concern's coverage group would run under a
+      # partial selection (empty for unbound concerns and for complete-set
+      # outcomes): the concern reports it in its summary while its full suite
+      # set executes.
+      suite_selection: ${{ fromJSON(needs.plan.outputs.suite_reviews)[matrix.concern] || '' }}
 
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed

@@ -353,17 +353,32 @@ finished validation is normal, and the coordinator's ledger reconciles attempts.
   selected suite IDs - until that runner-side filtering exists, full remains the only
   complete mode.
 
+What dispatch does wire today is the shadow review. The Linux dispatcher accepts the
+classifier's request as an identity-bound `suite_selection` input (mutually exclusive with
+`base_sha`: one selection mechanism per dispatch), runs `select-suites.rb` over it in its
+plan job, and carries the per-group result to the bound concern workflows. Two rules keep
+that plumbing honest. First, fail-closed: a request the selector rejects - malformed, an
+unknown feature ID, an unreviewed review mode - dispatches the complete set, with the fixed
+rejection code recorded in the run summary; a selection bug must never look like a
+reduction. Second, shadow only: the complete matrix still runs, and each bound concern
+reports in its own summary which suites a partial selection would have run beside the
+projection it collected under the full set. Shadow rounds are how a selection earns trust
+against full rounds; letting it reduce a round waits for the runner-side filtering above.
+
 Each concern job then accounts for what actually ran. A pre-project-code step (after the token
 revoke, before any dependency installation) snapshots the suite contract: the catalog digest
 from this control-plane revision and the SHA-256 of the private ownership manifest at
 `scripts/ci/suite-ownership.json` in the checked-out source. That manifest is generated from
-the private reviewed catalog (`ci/feature-suites.json`) and records the canonical catalog
-digest it was derived from; a manifest whose recorded digest no longer matches this
-control-plane's catalog is stale and must be regenerated before its evidence is trusted. Its
-digest here is the canonical-JSON digest of the derived file, a different value from the
-private audit's raw-byte digest of the catalog manifest - the two bind different files with
-different hashing and are never cross-compared. After the concern ran, the trusted
-collector (`collect-suite-evidence.rb`) derives every count from the runner report the reviewed
+the private reviewed catalog and records the canonical catalog digest it was derived from.
+Staleness is enforced on the private side, where the manifest generator's check mode runs in
+the private test lanes: a catalog or test-layout change that has not been regenerated into
+the manifest fails those lanes, so a manifest a dispatch checks out is fresh by construction.
+This control plane never sees the private catalog and cannot re-derive that comparison; it
+binds the manifest found at the exact source SHA, and the recorded digest documents what the
+manifest was derived from. The manifest's digest here is the canonical-JSON digest of the
+derived file, a different value from the private audit's raw-byte digest of the reviewed
+catalog - the two bind different files with different hashing and are never cross-compared.
+After the concern ran, the trusted collector (`collect-suite-evidence.rb`) derives every count from the runner report the reviewed
 concern command wrote (vitest or Playwright JSON in `RUNNER_TEMP/test-ids/`), joins each
 executed case to exactly one primary suite through the manifest's reviewed patterns, and fails
 closed on unowned or multiply-owned cases, report/total mismatches, a project outside the

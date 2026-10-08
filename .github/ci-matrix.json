@@ -16,7 +16,8 @@
           "profile": {"type": "choice", "required": false, "default": "full", "options": ["full", "quick"], "digest_include": true},
           "visual": {"type": "boolean", "required": false, "default": false, "digest_include": true},
           "gitleaks_history": {"type": "boolean", "required": false, "default": false, "digest_include": true},
-          "base_sha": {"type": "string", "required": false, "default": "", "format": "optional-sha40", "digest_include": true}
+          "base_sha": {"type": "string", "required": false, "default": "", "format": "optional-sha40", "digest_include": true},
+          "suite_selection": {"type": "string", "required": false, "default": "", "digest_include": true}
         }
       },
       ".github/workflows/macos-validation.yml": {

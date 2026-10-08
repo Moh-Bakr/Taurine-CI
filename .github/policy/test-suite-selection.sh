@@ -149,4 +149,20 @@ unknown_error="$(select_suites "${unknown_request}" 2>&1 1>/dev/null || true)"
   exit 1
 }
 
+# The dispatch review mode word travels inside the request. The reviewed value
+# `shadow` never changes the selection - the same closure, the same per-group
+# sets, the same selection digest - while any other word (including the
+# not-yet-wired `enforce`) is an error, so an unsupported mode fails the
+# dispatcher back to the complete set instead of reducing anything.
+shadow="$(select_suites <(jq -c '. + {review:"shadow"}' <(request partial '["rest"]' 2222222222222222222222222222222222222222 true false false)))"
+jq -e '.complete == false and .reasons == ["feature_closure"] and .selection_mode == "partial"' <<<"${shadow}" >/dev/null
+[[ "$(jq -r .selection_digest <<<"${shadow}")" == "${digest_one}" ]] || {
+  echo 'the shadow review word changed the selection or its digest' >&2
+  exit 1
+}
+for mode in enforce report fully shadowy; do
+  expect_reject "unreviewed review mode ${mode}" \
+    <(jq -c --arg mode "${mode}" '. + {review:$mode}' <(request partial '["rest"]' 2222222222222222222222222222222222222222 true false false))
+done
+
 echo 'suite selection: exact closure, conservative fail-closed and digest fixtures passed'

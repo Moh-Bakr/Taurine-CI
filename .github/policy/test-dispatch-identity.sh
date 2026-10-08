@@ -58,7 +58,7 @@ ruby -rdigest -rjson -e '
   abort "suite catalog digest missing or incorrect" unless identity.fetch("suite_catalog_digest") == expected_catalog
   abort "defaults missing from proof" unless identity.fetch("inputs") == {
     "base_sha" => "", "gitleaks_history" => false, "profile" => "full",
-    "source_sha" => ARGV.fetch(1), "visual" => false
+    "source_sha" => ARGV.fetch(1), "suite_selection" => "", "visual" => false
   }
 ' "${valid_output}" "${source_sha}" "${control_sha}" "${matrix}"
 

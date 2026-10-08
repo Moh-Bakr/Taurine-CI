@@ -134,6 +134,13 @@ jobs:
         shell: bash
         run: bash .github/policy/test-suite-overview.sh
 
+      # The shadow selection review: the concern contract under a shadow
+      # payload, the honest not-collected state of the evidence step, and the
+      # dispatcher's fail-closed selection-review step.
+      - name: Test the suite-selection dispatch review
+        shell: bash
+        run: bash .github/policy/test-suite-dispatch-review.sh
+
       - name: Test canonical dispatch identity and input defaults
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh
