@@ -204,7 +204,10 @@ runs:
               npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
             packaging_identifier_check() {
               local plist found=''
-              plist="$(find . -path '*/bundle/macos/*.app/Contents/Info.plist' -not -path './node_modules/*' 2>/dev/null | head -n 1)"
+              # The build's target dir lives outside the checkout (rust-target-cache
+              # moves it to the runner's home), so the bundled app is not under `.`.
+              # Search the checkout and the target dir's debug bundle output alike.
+              plist="$(find . "${CARGO_TARGET_DIR:-.}/debug/bundle" -path '*bundle/macos/*.app/Contents/Info.plist' -not -path './node_modules/*' 2>/dev/null | head -n 1)"
               if [[ -n "${plist}" ]]; then
                 found="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${plist}" 2>/dev/null || true)"
               fi
