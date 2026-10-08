@@ -57,7 +57,7 @@ ruby -rdigest -rjson -e '
   expected_catalog = Digest::SHA256.hexdigest(JSON.generate(sort_json.call(JSON.parse(ARGV.fetch(3)).fetch("suite_catalog")), ascii_only: true))
   abort "suite catalog digest missing or incorrect" unless identity.fetch("suite_catalog_digest") == expected_catalog
   abort "defaults missing from proof" unless identity.fetch("inputs") == {
-    "base_sha" => "", "gitleaks_history" => false, "profile" => "full",
+    "base_sha" => "", "gitleaks_history" => false, "only" => "", "profile" => "full",
     "source_sha" => ARGV.fetch(1), "suite_selection" => "", "visual" => false
   }
 ' "${valid_output}" "${source_sha}" "${control_sha}" "${matrix}"

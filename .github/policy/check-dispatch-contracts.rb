@@ -33,14 +33,17 @@ EXPECTED_INPUTS = {
     'profile' => { 'type' => 'choice', 'required' => false, 'default' => 'full', 'options' => %w[full quick], 'digest_include' => true },
     'visual' => BOOLEAN_FALSE, 'gitleaks_history' => BOOLEAN_FALSE,
     'base_sha' => { 'type' => 'string', 'required' => false, 'default' => '', 'format' => 'optional-sha40', 'digest_include' => true },
+    'only' => STRING_DEFAULT_EMPTY,
     'suite_selection' => STRING_DEFAULT_EMPTY
   },
   '.github/workflows/macos-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE,
+    'only' => STRING_DEFAULT_EMPTY,
     'flavor' => { 'type' => 'choice', 'required' => false, 'default' => 'prod', 'options' => %w[prod dev uat], 'digest_include' => true }
   },
   '.github/workflows/windows-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE,
+    'only' => STRING_DEFAULT_EMPTY,
     'windows_image' => { 'type' => 'choice', 'required' => false, 'default' => 'windows-2022', 'options' => %w[windows-2022 windows-2025], 'digest_include' => true }
   },
   '.github/workflows/android-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE },
@@ -69,12 +72,26 @@ if [[ -n "${REQUESTED_BASE_SHA}" && ! "${REQUESTED_BASE_SHA}" =~ ^[0-9a-fA-F]{40
   echo 'base_sha must be empty or a full 40-character hexadecimal commit SHA' >&2
   exit 1
 fi
+# A surgical `only` run asks for concerns by name, so a diff selection cannot
+# narrow it further; the two are refused together rather than silently combined.
+if [[ -n "${REQUESTED_BASE_SHA}" && -n "${REQUESTED_ONLY}" ]]; then
+  echo 'base_sha and only are mutually exclusive: a surgical only run takes no diff selection' >&2
+  exit 1
+fi
+if [[ -n "${REQUESTED_ONLY}" && ! "${REQUESTED_ONLY}" =~ ^[A-Za-z0-9_-]+([[:space:]]*,[[:space:]]*[A-Za-z0-9_-]+)*$ ]]; then
+  echo 'only must be a comma-separated list of concern names' >&2
+  exit 1
+fi
 # One selection mechanism per dispatch: the concern-level diff
-# selection and the feature-level suite selection are different
-# partial layers, so they are refused together rather than silently
-# combined.
+# selection, the surgical only list and the feature-level suite
+# selection are different partial layers, so they are refused
+# together rather than silently combined.
 if [[ -n "${REQUESTED_BASE_SHA}" && -n "${REQUESTED_SUITE_SELECTION}" ]]; then
   echo 'base_sha and suite_selection are mutually exclusive: one selection mechanism per dispatch' >&2
+  exit 1
+fi
+if [[ -n "${REQUESTED_ONLY}" && -n "${REQUESTED_SUITE_SELECTION}" ]]; then
+  echo 'only and suite_selection are mutually exclusive: a surgical only run takes no selection review' >&2
   exit 1
 fi
 # The request is the classifier's single-line JSON. The selector
@@ -89,6 +106,7 @@ SOURCE_SHA_STEPS = {
   '.github/workflows/linux-validation.yml' => {
     'name' => 'Validate exact source SHA', 'shell' => 'bash',
     'env' => { 'REQUESTED_SOURCE_SHA' => '${{ inputs.source_sha }}', 'REQUESTED_BASE_SHA' => '${{ inputs.base_sha }}',
+               'REQUESTED_ONLY' => '${{ inputs.only }}',
                'REQUESTED_SUITE_SELECTION' => '${{ inputs.suite_selection }}' },
     'run' => LINUX_SOURCE_SHA_RUN
   },

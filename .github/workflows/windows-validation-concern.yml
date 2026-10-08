@@ -268,20 +268,25 @@ jobs:
       # from the untrusted ref, whose scope main never reads), that is protected code only. Every
       # restore, strip and save step carries both top-level terms and the cache policy enforces it. The
       # locate step only computes the key and keeps the target directory outside the private checkout.
+      # One group per measured compile-bound concern family: rust-app (the two shards share one
+      # build), rust-db (measured 953 s compile against 124 s of tests), rust-domain and
+      # rust-packaging. Each single-job group is its own designated saver. rust-ovpn stays outside
+      # on purpose (its vcpkg dependency build, not the cargo target directory, dominates it) and
+      # rust-tls-openssl keeps its own Cargo.lock, which the strip and proof cannot classify against.
       - name: Locate the compiled dependency cache
         id: cargo-target
-        if: ${{ startsWith(inputs.concern, 'rust-app-') }}
+        if: ${{ startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
           mode: locate
-          group: rust-app
-          features: test-default
+          group: ${{ (inputs.concern == 'rust-db' && 'rust-db') || (inputs.concern == 'rust-domain' && 'rust-domain') || (inputs.concern == 'rust-packaging' && 'rust-packaging') || 'rust-app' }}
+          features: ${{ inputs.concern == 'rust-packaging' && 'tauri-debug-build' || 'test-default' }}
           os-label: Windows
 
       - name: Restore compiled third-party dependencies
         id: cargo-target-cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -291,7 +296,7 @@ jobs:
           key: ${{ steps.cargo-target.outputs.key }}
 
       - name: Strip workspace crates from the restored dependency cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -374,10 +379,12 @@ jobs:
 
       # Disabled with the restore above (finding H1). When re-enabled: only the build that
       # runs everything the key covers saves it, only on a miss, only for a protected source
-      # SHA, only after the concern passed and the strip-and-prove step succeeded.
+      # SHA, only after the concern passed and the strip-and-prove step succeeded. One
+      # designated saver per group: rust-app-2 for the rust-app shards, and each single-job
+      # group its own concern.
       - name: Strip and prove the compiled dependency cache
         id: cargo-target-strip
-        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -386,7 +393,7 @@ jobs:
           os-label: Windows
 
       - name: Save compiled third-party dependencies
-        if: ${{ github.ref == 'refs/heads/main' && inputs.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

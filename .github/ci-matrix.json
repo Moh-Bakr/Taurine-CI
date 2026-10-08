@@ -17,6 +17,7 @@
           "visual": {"type": "boolean", "required": false, "default": false, "digest_include": true},
           "gitleaks_history": {"type": "boolean", "required": false, "default": false, "digest_include": true},
           "base_sha": {"type": "string", "required": false, "default": "", "format": "optional-sha40", "digest_include": true},
+          "only": {"type": "string", "required": false, "default": "", "digest_include": true},
           "suite_selection": {"type": "string", "required": false, "default": "", "digest_include": true}
         }
       },
@@ -25,6 +26,7 @@
           "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
           "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false},
           "rust": {"type": "boolean", "required": false, "default": false, "digest_include": true},
+          "only": {"type": "string", "required": false, "default": "", "digest_include": true},
           "flavor": {"type": "choice", "required": false, "default": "prod", "options": ["prod", "dev", "uat"], "digest_include": true}
         }
       },
@@ -33,6 +35,7 @@
           "source_sha": {"type": "string", "required": true, "format": "sha40", "digest_include": true},
           "dispatch_key": {"type": "string", "required": true, "format": "sha256", "digest_include": false},
           "rust": {"type": "boolean", "required": false, "default": false, "digest_include": true},
+          "only": {"type": "string", "required": false, "default": "", "digest_include": true},
           "windows_image": {"type": "choice", "required": false, "default": "windows-2022", "options": ["windows-2022", "windows-2025"], "digest_include": true}
         }
       },
@@ -2966,21 +2969,6 @@
     ],
     "max_changed_files_before_full": 3000
   },
-  "excluded_trees": {
-    "taurine-backend/dbx-core": [
-      "rust-dbx",
-      "rust-app-1",
-      "rust-app-2"
-    ],
-    "taurine-backend/dbx-mongo-shell": [
-      "rust-dbx",
-      "rust-app-1",
-      "rust-app-2"
-    ],
-    "taurine-backend/taurine-tls-openssl": [
-      "rust-tls-openssl"
-    ]
-  },
   "concerns": {
     "linux": {
       "contracts": {
@@ -3112,9 +3100,10 @@
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
       "rust-dbx": {
-        "excluded_trees": [
-          "taurine-backend/dbx-core",
-          "taurine-backend/dbx-mongo-shell"
+        "rust_packages": [
+          "dbx-core",
+          "dbx-sqlite-worker",
+          "dbx-mongo-shell"
         ],
         "full_only": true,
         "timeout": 90,
@@ -3193,11 +3182,11 @@
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
       "rust-tls-openssl": {
+        "rust_packages": [
+          "taurine-tls-openssl"
+        ],
         "full_only": true,
         "timeout": 60,
-        "excluded_trees": [
-          "taurine-backend/taurine-tls-openssl"
-        ],
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },

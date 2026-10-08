@@ -38,8 +38,13 @@ on:
         required: false
         default: ''
         type: string
+      only:
+        description: Optional comma-separated concern names; when set, exactly those concerns run and everything else is listed as not selected (PASS (partial), which does not admit a merge). Mutually exclusive with base_sha
+        required: false
+        default: ''
+        type: string
       suite_selection:
-        description: Optional reviewed suite selection request (single-line JSON the source-side classifier produced); the selection is computed and reported as a shadow review while the complete set runs. Mutually exclusive with base_sha
+        description: Optional reviewed suite selection request (single-line JSON the source-side classifier produced); the selection is computed and reported as a shadow review while the complete set runs. Mutually exclusive with base_sha and only
         required: false
         default: ''
         type: string
@@ -91,6 +96,7 @@ jobs:
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           REQUESTED_BASE_SHA: ${{ inputs.base_sha }}
+          REQUESTED_ONLY: ${{ inputs.only }}
           REQUESTED_SUITE_SELECTION: ${{ inputs.suite_selection }}
         run: |
           set -euo pipefail
@@ -102,12 +108,26 @@ jobs:
             echo 'base_sha must be empty or a full 40-character hexadecimal commit SHA' >&2
             exit 1
           fi
+          # A surgical `only` run asks for concerns by name, so a diff selection cannot
+          # narrow it further; the two are refused together rather than silently combined.
+          if [[ -n "${REQUESTED_BASE_SHA}" && -n "${REQUESTED_ONLY}" ]]; then
+            echo 'base_sha and only are mutually exclusive: a surgical only run takes no diff selection' >&2
+            exit 1
+          fi
+          if [[ -n "${REQUESTED_ONLY}" && ! "${REQUESTED_ONLY}" =~ ^[A-Za-z0-9_-]+([[:space:]]*,[[:space:]]*[A-Za-z0-9_-]+)*$ ]]; then
+            echo 'only must be a comma-separated list of concern names' >&2
+            exit 1
+          fi
           # One selection mechanism per dispatch: the concern-level diff
-          # selection and the feature-level suite selection are different
-          # partial layers, so they are refused together rather than silently
-          # combined.
+          # selection, the surgical only list and the feature-level suite
+          # selection are different partial layers, so they are refused
+          # together rather than silently combined.
           if [[ -n "${REQUESTED_BASE_SHA}" && -n "${REQUESTED_SUITE_SELECTION}" ]]; then
             echo 'base_sha and suite_selection are mutually exclusive: one selection mechanism per dispatch' >&2
+            exit 1
+          fi
+          if [[ -n "${REQUESTED_ONLY}" && -n "${REQUESTED_SUITE_SELECTION}" ]]; then
+            echo 'only and suite_selection are mutually exclusive: a surgical only run takes no selection review' >&2
             exit 1
           fi
           # The request is the classifier's single-line JSON. The selector
@@ -125,7 +145,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/linux-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"base_sha":{0},"gitleaks_history":{1},"profile":{2},"source_sha":{3},"suite_selection":{4},"visual":{5}}}', toJSON(inputs.base_sha), toJSON(inputs.gitleaks_history), toJSON(inputs.profile), toJSON(inputs.source_sha), toJSON(inputs.suite_selection), toJSON(inputs.visual)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"base_sha":{0},"gitleaks_history":{1},"only":{2},"profile":{3},"source_sha":{4},"suite_selection":{5},"visual":{6}}}', toJSON(inputs.base_sha), toJSON(inputs.gitleaks_history), toJSON(inputs.only), toJSON(inputs.profile), toJSON(inputs.source_sha), toJSON(inputs.suite_selection), toJSON(inputs.visual)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -149,7 +169,6 @@ jobs:
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
           CI_RUN_ID: ${{ github.run_id }}
         run: ruby .github/policy/refuse-duplicate-dispatch.rb
-
 
   # The concern list lives in .github/ci-matrix.json (one table for the selector, this
   # dispatcher and the result check). The reasons the concerns are split the way they are,
@@ -178,12 +197,15 @@ jobs:
   #   targets skip without a server and stay with live-proofs.yml;
   # - rust-net: the dialer, verifier and openvpn3 shim (C++);
   # - rust-app: the Tauri command tier and both shells (webkit2gtk);
-  # - rust-dbx: the excluded `dbx-core`/`dbx-mongo-shell` trees, each on
-  #   its own lock.
-  # The concern workflow names, with the measured reason, the two test
-  # runs no concern makes (`dbx-sqlite-worker`, `vendor/boringtun`
-  # standalone), and fails `rust-domain` if a workspace member is added
-  # without being assigned to one of these.
+  # - rust-dbx: the dbx member crates (`dbx-core`, `dbx-sqlite-worker`,
+  #   `dbx-mongo-shell` — workspace members since Stage 1 task 1.5), on the
+  #   workspace lock, in the same two-pass shape the retired private
+  #   `test:dbx-core` script had;
+  # - rust-tls-openssl: the OpenSSL door crate.
+  # The concern workflow names, with the measured reason, the one test
+  # run no concern makes (`vendor/boringtun` standalone — its lock is
+  # generated, not committed), and fails `rust-domain` if a workspace
+  # member is added without being assigned to one of these.
   # Browser tiers. Until these existed the Playwright suite ran only on
   # a contributor's laptop, so `verification.md`'s "hosted desktop
   # concern with pointer and keyboard coverage" had no runner behind it.
@@ -219,6 +241,7 @@ jobs:
           PROFILE: ${{ inputs.profile }}
           VISUAL: ${{ inputs.visual }}
           GITLEAKS_HISTORY: ${{ inputs.gitleaks_history }}
+          ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
           # profile=quick drops the concerns the table marks full_only (the slowest ones);
@@ -236,7 +259,29 @@ jobs:
           if [[ "${GITLEAKS_HISTORY}" == true ]]; then
             filter="(${filter}) + (.concerns.linux | to_entries | map(select(.value.opt_in == \"gitleaks_history\")))"
           fi
-          echo "matrix=$(jq -c "{concern: ((${filter}) | map(.key))}" .github/ci-matrix.json)" >> "${GITHUB_OUTPUT}"
+          candidates="$(jq -c "(${filter}) | map(.key)" .github/ci-matrix.json)"
+          # A surgical `only` dispatch narrows the matrix to exactly the named concerns: a
+          # re-run of the one or two concerns a previous run failed, without paying for the
+          # rest. The Result job still expects the full list, so every filtered-out concern
+          # is reported as "not selected" and the verdict is PASS (partial) — a partial run
+          # never admits a merge. An unknown name, or one whose opt-in input is off, stops
+          # the run here rather than scheduling nothing.
+          only_list='[]'
+          if [[ -n "${ONLY}" ]]; then
+            only_list="$(printf '%s' "${ONLY}" | jq -cR 'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | unique')"
+            unknown="$(jq -n -c --argjson only "${only_list}" --argjson candidates "${candidates}" '$only - $candidates | join(",")')"
+            if [[ -n "${unknown}" ]]; then
+              echo "only: not a concern of this dispatch (unknown name, or its opt-in input is off): ${unknown}" >&2
+              exit 1
+            fi
+            candidates="$(jq -c --argjson only "${only_list}" '[.[] | select(. as $c | ($only | index($c)) != null)]' <<<"${candidates}")"
+            {
+              echo '## Linux only filter'
+              echo
+              echo "- Only filter active: $(jq -r 'join(", ")' <<<"${only_list}"). Every other concern is not selected; the verdict cannot be PASS (full), which is the only verdict that admits a merge."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          echo "matrix=$(jq -cn --argjson c "${candidates}" '{concern: $c}')" >> "${GITHUB_OUTPUT}"
           # The Result job expects every non-opt-in concern, plus the opt-in ones enabled above,
           # so an enabled visual tier that fails (or is skipped) shows in the verdict while a
           # disabled one is not counted.
@@ -327,10 +372,12 @@ jobs:
 
   # Only with a base_sha: a source-bearing job (partial clone, history only) decides which
   # concerns the change affects. Without one this job is skipped and the full list runs.
+  # A surgical `only` dispatch never reaches here either: validate-input refuses the
+  # combination, and the `only` filter is already applied to the plan matrix above.
   select:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.base_sha != ''
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.base_sha != '' && inputs.only == ''
     needs: [validate-input, plan]
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/select-concerns.yml  # zizmor: ignore[self-repository]

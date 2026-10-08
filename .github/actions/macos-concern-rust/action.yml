@@ -102,7 +102,12 @@ runs:
             case " ${rust_domain_packages[*]} ${rust_net_packages[*]} ${rust_ovpn_packages[*]} ${rust_app_packages[*]} " in
               *" ${member} "*) continue ;;
             esac
-            [[ "${member}" == taurine-db* ]] && continue
+            # The dbx member crates and the OpenSSL door (Stage 1 task 1.5) are
+            # Linux-tested: `rust-dbx` and `rust-tls-openssl` stay Linux concerns
+            # because dbx-core's engine and protocol tests are platform-neutral.
+            # This OS compiles the OS-keyring half through the `rust-domain`
+            # library check below.
+            [[ "${member}" == taurine-db* || "${member}" == dbx-* || "${member}" == taurine-tls-openssl ]] && continue
             echo "error: workspace member ${member} is tested by no ${OS_LABEL} Rust concern" >&2
             missing=1
           done <<<"${members}"
@@ -129,8 +134,10 @@ runs:
             # dbx-core's `os-keyring` feature takes the keyring crate's Apple backend on
             # macOS; no hosted job compiles it (the dbx-core tests run on Linux without
             # the feature). A non-test library check does, without running anything.
+            # The crate is a workspace member since Stage 1 task 1.5, so this is an
+            # ordinary package selection on the root lock.
             run_deferred rust-dbx-core-keyring-check \
-              cargo check --locked --lib --manifest-path taurine-backend/dbx-core/Cargo.toml --features os-keyring
+              cargo check --locked --lib --package dbx-core --features os-keyring
             ;;
           rust-db)
             # Every `taurine-db*` crate. Platform-neutral engines, but the family has
@@ -209,15 +216,15 @@ runs:
             run_deferred rust-packaging-identifier packaging_identifier_check
             ;;
           rust-tls-openssl)
-            # The standalone OpenSSL TLS spike crate (its own workspace, outside the root
-            # one). Present only on sources that carry it; otherwise a note and a pass,
-            # not a silent skip of a concern the source never had.
-            tls_manifest=taurine-backend/taurine-tls-openssl/Cargo.toml
-            if [[ -f "${tls_manifest}" ]]; then
+            # The OpenSSL door crate — a workspace member since Stage 1 task 1.5,
+            # so an ordinary package selection on the root lock. Present only on
+            # sources that carry it; otherwise a note and a pass, not a silent
+            # skip of a concern the source never had.
+            if cargo metadata --no-deps --format-version 1 | grep -q '"name": *"taurine-tls-openssl"'; then
               run_deferred rust-tls-openssl-tests \
-                cargo test --locked --manifest-path "${tls_manifest}"
+                cargo test --locked --package taurine-tls-openssl
             else
-              echo "rust-tls-openssl: the source has no ${tls_manifest}; nothing to build"
+              echo "rust-tls-openssl: the source has no taurine-tls-openssl workspace member; nothing to build"
               run_deferred rust-tls-openssl-absent true
             fi
             ;;
