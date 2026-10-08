@@ -135,9 +135,25 @@ runs:
             # macOS; no hosted job compiles it (the dbx-core tests run on Linux without
             # the feature). A non-test library check does, without running anything.
             # The crate is a workspace member since Stage 1 task 1.5, so this is an
-            # ordinary package selection on the root lock.
-            run_deferred rust-dbx-core-keyring-check \
-              cargo check --locked --lib --package dbx-core --features os-keyring
+            # ordinary package selection on the root lock. A source still on the
+            # pre-membership arrangement (dbx-core in the workspace `exclude` list)
+            # has nothing to check — the selection would fail with "package ID
+            # specification did not match any packages" — so the sub-step records
+            # the absence and moves on; a member that is present is checked exactly
+            # as below, and a real failure still fails the concern. The member list
+            # load is fail-closed: a manifest cargo cannot read fails the concern
+            # rather than reading as an absence.
+            if ! dbx_members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort -u)" || [[ -z "${dbx_members}" ]]; then
+              echo 'error: failed to load the workspace member list' >&2
+              deferred_results+=('rust-dbx-core-keyring-check|failed: not run (the workspace member list could not be loaded)')
+              deferred_failed=1
+            elif grep -qx 'dbx-core' <<<"${dbx_members}"; then
+              run_deferred rust-dbx-core-keyring-check \
+                cargo check --locked --lib --package dbx-core --features os-keyring
+            else
+              echo 'rust-dbx-core-keyring-check: skipped: dbx-core is not a workspace member on this branch'
+              deferred_results+=('rust-dbx-core-keyring-check|skipped: dbx-core is not a workspace member on this branch')
+            fi
             ;;
           rust-db)
             # Every `taurine-db*` crate. Platform-neutral engines, but the family has

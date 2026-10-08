@@ -259,22 +259,56 @@ runs:
             # standalone run stays outside every concern (its lock is
             # generated, not committed); the patched copy the product links is
             # exercised by taurine-net under the workspace lock.
-            run_deferred rust-dbx-core-tests \
-              env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core
-            run_deferred rust-dbx-sqlite-worker-tests \
-              env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-sqlite-worker
-            run_deferred rust-dbx-mongo-shell-tests \
-              env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-mongo-shell
-            run_deferred rust-dbx-core-legacy-tls-tests \
-              env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core --features legacy-tls
-            # The Linux Secret Service half of dbx-core's `os-keyring` feature
-            # (`all(feature = "os-keyring", target_os = "linux", not(test))`) is
-            # compiled by no other job: the tests above run without the feature and
-            # neither shell enables it. A non-test library check compiles it. The
-            # Secret Service client is pure Rust (zbus), so no system library is
-            # needed beyond what this concern already installs.
-            run_deferred rust-dbx-core-keyring-check \
-              cargo check --locked --lib --package dbx-core --features os-keyring
+            #
+            # Each crate's sub-steps run only when that crate is a workspace
+            # member: a source still on the pre-membership arrangement (the
+            # crates in the workspace `exclude` list) selects this concern
+            # through older matrix state, and a package selection against an
+            # absent crate would fail with "package ID specification did not
+            # match any packages". Each skip is recorded on its sub-step's
+            # summary row; a member that is present is tested exactly as
+            # below, and a real test failure still fails the concern. The
+            # member list load is fail-closed: a manifest cargo cannot read
+            # fails the concern rather than reading as an absence.
+            if ! dbx_members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)" || [[ -z "${dbx_members}" ]]; then
+              echo 'error: failed to load the workspace member list' >&2
+              deferred_results+=('rust-dbx-member-list|failed: not run (the workspace member list could not be loaded)')
+              deferred_failed=1
+            else
+              if grep -qx 'dbx-core' <<<"${dbx_members}"; then
+                run_deferred rust-dbx-core-tests \
+                  env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core
+                run_deferred rust-dbx-core-legacy-tls-tests \
+                  env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core --features legacy-tls
+                # The Linux Secret Service half of dbx-core's `os-keyring` feature
+                # (`all(feature = "os-keyring", target_os = "linux", not(test))`) is
+                # compiled by no other job: the tests above run without the feature and
+                # neither shell enables it. A non-test library check compiles it. The
+                # Secret Service client is pure Rust (zbus), so no system library is
+                # needed beyond what this concern already installs.
+                run_deferred rust-dbx-core-keyring-check \
+                  cargo check --locked --lib --package dbx-core --features os-keyring
+              else
+                echo 'rust-dbx: skipped: dbx-core is not a workspace member on this branch'
+                deferred_results+=('rust-dbx-core-tests|skipped: dbx-core is not a workspace member on this branch')
+                deferred_results+=('rust-dbx-core-legacy-tls-tests|skipped: dbx-core is not a workspace member on this branch')
+                deferred_results+=('rust-dbx-core-keyring-check|skipped: dbx-core is not a workspace member on this branch')
+              fi
+              if grep -qx 'dbx-sqlite-worker' <<<"${dbx_members}"; then
+                run_deferred rust-dbx-sqlite-worker-tests \
+                  env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-sqlite-worker
+              else
+                echo 'rust-dbx: skipped: dbx-sqlite-worker is not a workspace member on this branch'
+                deferred_results+=('rust-dbx-sqlite-worker-tests|skipped: dbx-sqlite-worker is not a workspace member on this branch')
+              fi
+              if grep -qx 'dbx-mongo-shell' <<<"${dbx_members}"; then
+                run_deferred rust-dbx-mongo-shell-tests \
+                  env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-mongo-shell
+              else
+                echo 'rust-dbx: skipped: dbx-mongo-shell is not a workspace member on this branch'
+                deferred_results+=('rust-dbx-mongo-shell-tests|skipped: dbx-mongo-shell is not a workspace member on this branch')
+              fi
+            fi
             ;;
           *)
             # Another family's concern: nothing to do here.
