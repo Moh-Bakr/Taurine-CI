@@ -203,7 +203,18 @@ runs:
               npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
             packaging_identifier_check() {
               local plist found=''
-              plist="$(find . -path '*/bundle/macos/*.app/Contents/Info.plist' -not -path './node_modules/*' 2>/dev/null | head -n 1)"
+              # The bundle is written to the build's cargo target directory: the
+              # checkout's `target/` on the default layout, and the directory
+              # CARGO_TARGET_DIR names when one is set — the compiled-dependency
+              # cache moves it outside the checkout (rust-packaging joined that
+              # cache on macOS and Windows). Search the checkout first, then the
+              # target directory when it exists, so both layouts read the app the
+              # smoke just built.
+              local roots=('.')
+              if [[ -n "${CARGO_TARGET_DIR:-}" && -d "${CARGO_TARGET_DIR}" ]]; then
+                roots+=("${CARGO_TARGET_DIR}")
+              fi
+              plist="$(find "${roots[@]}" -path '*/bundle/macos/*.app/Contents/Info.plist' -not -path './node_modules/*' 2>/dev/null | head -n 1)"
               if [[ -n "${plist}" ]]; then
                 found="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${plist}" 2>/dev/null || true)"
               fi
