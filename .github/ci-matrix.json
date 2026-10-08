@@ -101,6 +101,8 @@
       "rust-domain": {
         "rust_packages": [
           "taurine-model",
+          "taurine-ade-model",
+          "taurine-ade-log",
           "taurine-atomic",
           "taurine-auth",
           "taurine-crypt",
