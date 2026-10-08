@@ -6,6 +6,13 @@
 # reviewed workflow script itself (extract-step), never a copy.
 set -euo pipefail
 
+# A silent assertion failure costs a hosted round-trip: every expectation and
+# every early death names itself.
+fail() { echo "dispatch-review fixture: ${*}" >&2; exit 1; }
+trap 'status=$?; [[ ${status} -ne 0 ]] && echo "dispatch-review fixture: died at line ${LINENO} (exit ${status})" >&2 || true' ERR
+
+expect_grep() { local label="$1" pattern="$2" file="$3"; grep -q "${pattern}" "${file}" || fail "${label}: pattern not found: ${pattern}"; }
+
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/suite-dispatch-review-test.XXXXXX")"
 trap 'rm -rf "${work}"' EXIT
 matrix="$(pwd)/.github/ci-matrix.json"
@@ -106,18 +113,18 @@ contract_env() {
   env -u CI_SUITE_SELECTION CI_SUITE_SELECTION="$1" ruby .github/policy/suite-contract.rb \
     "${matrix}" desktop-shard-1 "${source_root}"
 }
-shadow_payload="$(jq -c --argjson selected "$(jq -c '.[0:3]' <<<"${group_candidates}")" \
+shadow_payload="$(jq -cn --argjson selected "$(jq -c '.[0:3]' <<<"${group_candidates}")" \
   '{review:"shadow", selection_mode:"partial", selected_suite_ids:$selected, selection_digest:"'"$(printf 'a%.0s' $(seq 64))"'"}')"
 shadow_contract="$(contract_env "${shadow_payload}")"
 plain_contract="$(contract_env '')"
-grep -q '^selection_mode=full$' <<<"${shadow_contract}"
-grep -qF "selected_suite_ids=${group_candidates}" <<<"${shadow_contract}"
-[[ "$(grep '^shadow_selected_suite_ids=' <<<"${shadow_contract}" | cut -d= -f2-)" == "$(jq -c '.[0:3] | sort' <<<"${group_candidates}")" ]]
-[[ "$(grep '^selection_digest=' <<<"${shadow_contract}" | cut -d= -f2-)" == "$(grep '^selection_digest=' <<<"${plain_contract}" | cut -d= -f2-)" ]]
+grep -q '^selection_mode=full$' <<<"${shadow_contract}" || fail "shadow contract: selection_mode line missing in: ${shadow_contract}"
+grep -qF "selected_suite_ids=${group_candidates}" <<<"${shadow_contract}" || fail "shadow contract: full candidate set missing in: ${shadow_contract}"
+[[ "$(grep '^shadow_selected_suite_ids=' <<<"${shadow_contract}" | cut -d= -f2-)" == "$(jq -c '.[0:3] | sort' <<<"${group_candidates}")" ]] || fail "shadow contract: shadow ids wrong: $(grep '^shadow_selected_suite_ids=' <<<"${shadow_contract}") vs $(jq -c '.[0:3] | sort' <<<"${group_candidates}")"
+[[ "$(grep '^selection_digest=' <<<"${shadow_contract}" | cut -d= -f2-)" == "$(grep '^selection_digest=' <<<"${plain_contract}" | cut -d= -f2-)" ]] || fail "shadow contract: selection digest differs from the full contract"
 # A plain partial contract (the future enforce path) is unchanged: partial mode,
 # the supplied subset, the digest of the request itself.
 partial_contract="$(contract_env '{"selection_mode":"partial","selected_suite_ids":'"$(jq -c '.[0:2]' <<<"${group_candidates}")"'}')"
-grep -q '^selection_mode=partial$' <<<"${partial_contract}"
+grep -q '^selection_mode=partial$' <<<"${partial_contract}" || fail "plain contract: selection_mode not partial in: ${partial_contract}"
 # An unreviewed review word is an error, never a contract.
 if contract_env '{"review":"enforce","selection_mode":"partial","selected_suite_ids":[]}' >/dev/null 2>&1; then
   echo 'contract: accepted an unreviewed dispatch review mode' >&2
@@ -132,8 +139,8 @@ fi
 write_env_map desktop-shard-1 true desktop-vitest-default-linux ''
 rm -f "${report}" "${runner_temp}/suite-evidence.json" "${runner_temp}/suite-evidence-export.json"
 run_step .github/workflows/linux-validation-concern.yml 'Collect the sanitized suite evidence' "${work}/env-map.json"
-[[ -s "${summary}" ]] || { echo 'no-report path: the step summary is empty' >&2; exit 1; }
-grep -q 'suite evidence: not collected (the concern produced no runner report)' "${summary}"
+[[ -s "${summary}" ]] || fail "no-report path: the step summary is empty" 
+grep -q 'suite evidence: not collected (the concern produced no runner report)' "${summary}" || fail "no-report path: honest line missing from summary: $(cat "${summary}")"
 [[ ! -f "${runner_temp}/suite-evidence-export.json" ]] || {
   echo 'no-report path: an export was produced without a projection' >&2
   exit 1
