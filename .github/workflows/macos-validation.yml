@@ -37,6 +37,11 @@ on:
           - prod
           - dev
           - uat
+      only:
+        description: Optional comma-separated concern names; when set, exactly those concerns run and everything else is listed as not selected (PASS (partial), which does not admit a merge)
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -92,7 +97,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/macos-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"flavor":{0},"rust":{1},"source_sha":{2}}}', toJSON(inputs.flavor), toJSON(inputs.rust), toJSON(inputs.source_sha)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"flavor":{0},"only":{1},"rust":{2},"source_sha":{3}}}', toJSON(inputs.flavor), toJSON(inputs.only), toJSON(inputs.rust), toJSON(inputs.source_sha)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -123,19 +128,48 @@ jobs:
         shell: bash
         env:
           RUST_REQUESTED: ${{ inputs.rust }}
+          ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
-          base='"desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"'
-          rust='"rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"'
+          base='["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"]'
+          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
+          if [[ "${RUST_REQUESTED}" == true ]]; then
+            candidates="$(jq -cn --argjson b "${base}" --argjson r "${rust}" '$b + $r')"
+          else
+            candidates="${base}"
+          fi
+          # A surgical `only` dispatch narrows the matrix to exactly the named concerns: a
+          # re-run of the one or two concerns a previous run failed, without paying for the
+          # rest. The Result job still expects the full list, so every filtered-out concern
+          # is reported as "not selected" and the verdict is PASS (partial) — a partial run
+          # never admits a merge. An unknown name, or a Rust concern named while rust=false,
+          # stops the run here rather than scheduling nothing.
+          only_list='[]'
+          if [[ -n "${ONLY}" ]]; then
+            only_list="$(printf '%s' "${ONLY}" | jq -cR 'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | unique')"
+            if [[ "$(jq 'length' <<<"${only_list}")" -eq 0 ]]; then
+              echo 'only: no concern name given' >&2
+              exit 1
+            fi
+            unknown="$(jq -n -c --argjson only "${only_list}" --argjson candidates "${candidates}" '$only - $candidates | join(",")')"
+            if [[ -n "${unknown}" ]]; then
+              echo "only: not a macOS concern of this dispatch (unknown name, or rust=false): ${unknown}" >&2
+              exit 1
+            fi
+            candidates="$(jq -c --argjson only "${only_list}" '[.[] | select(. as $c | ($only | index($c)) != null)]' <<<"${candidates}")"
+          fi
           {
             echo '## macOS Rust concerns'
             echo
             if [[ "${RUST_REQUESTED}" == true ]]; then
-              echo "matrix={\"concern\":[${base},${rust}]}" >> "${GITHUB_OUTPUT}"
+              echo "matrix={\"concern\":${candidates}}" >> "${GITHUB_OUTPUT}"
               echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging are scheduled.'
             else
-              echo "matrix={\"concern\":[${base}]}" >> "${GITHUB_OUTPUT}"
+              echo "matrix={\"concern\":${candidates}}" >> "${GITHUB_OUTPUT}"
               echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+            fi
+            if [[ "${only_list}" != '[]' ]]; then
+              echo "- Only filter active: $(jq -r 'join(", ")' <<<"${only_list}"). Every other concern is not selected; the verdict cannot be PASS (full), which is the only verdict that admits a merge."
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
@@ -161,11 +195,13 @@ jobs:
       # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2,
       # one runner each so a slow one cannot hold the others back) only when the
       # dispatch set rust=true. They are the macOS counterparts of the Linux
-      # rust-* concerns. rust-dbx is not repeated here: dbx-core's engine and
-      # protocol tests are platform-neutral and stay on Linux; its OS-keyring
-      # feature is opt-in (not built by `npm run test:dbx-core`), its Postgres
-      # tests need a Docker daemon that macOS hosted runners do not have, and its
-      # vendored OpenSSL is a from-source C build with no macOS-only code.
+      # rust-* concerns. rust-dbx is not repeated here: the dbx member crates'
+      # engine and protocol tests are platform-neutral and stay on Linux;
+      # dbx-core's OS-keyring feature is opt-in (no default build enables it),
+      # its Postgres tests need a Docker daemon that macOS hosted runners do
+      # not have, and its vendored OpenSSL is a from-source C build with no
+      # macOS-only code. This OS compiles the keyring half through the
+      # `rust-domain` library check.
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:
@@ -350,20 +386,25 @@ jobs:
       # from the untrusted ref, whose scope main never reads), that is protected code only. Every
       # restore, strip and save step carries both top-level terms and the cache policy enforces it. The
       # locate step only computes the key and keeps the target directory outside the private checkout.
+      # One group per measured compile-bound concern family: rust-app (the two shards share one
+      # build), rust-db (measured 1016 s compile against 133 s of tests), rust-domain and
+      # rust-packaging. Each single-job group is its own designated saver. Short concerns
+      # (rust-net, rust-ovpn) and rust-tls-openssl (its own Cargo.lock, which the strip and
+      # proof cannot classify against) stay outside on purpose.
       - name: Locate the compiled dependency cache
         id: cargo-target
-        if: ${{ startsWith(matrix.concern, 'rust-app-') }}
+        if: ${{ startsWith(matrix.concern, 'rust-app-') || matrix.concern == 'rust-db' || matrix.concern == 'rust-domain' || matrix.concern == 'rust-packaging' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
           mode: locate
-          group: rust-app
-          features: test-default
+          group: ${{ (matrix.concern == 'rust-db' && 'rust-db') || (matrix.concern == 'rust-domain' && 'rust-domain') || (matrix.concern == 'rust-packaging' && 'rust-packaging') || 'rust-app' }}
+          features: ${{ matrix.concern == 'rust-packaging' && 'tauri-debug-build' || 'test-default' }}
           os-label: macOS
 
       - name: Restore compiled third-party dependencies
         id: cargo-target-cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(matrix.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(matrix.concern, 'rust-app-') || matrix.concern == 'rust-db' || matrix.concern == 'rust-domain' || matrix.concern == 'rust-packaging') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -373,7 +414,7 @@ jobs:
           key: ${{ steps.cargo-target.outputs.key }}
 
       - name: Strip workspace crates from the restored dependency cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(matrix.concern, 'rust-app-') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(matrix.concern, 'rust-app-') || matrix.concern == 'rust-db' || matrix.concern == 'rust-domain' || matrix.concern == 'rust-packaging') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -401,10 +442,12 @@ jobs:
 
       # Disabled with the restore above (finding H1). When re-enabled: only the build that
       # runs everything the key covers saves it, only on a miss, only for a protected source
-      # SHA, only after the concern passed and the strip-and-prove step succeeded.
+      # SHA, only after the concern passed and the strip-and-prove step succeeded. One
+      # designated saver per group: rust-app-2 for the rust-app shards (doctests skipped
+      # there), and each single-job group its own concern.
       - name: Strip and prove the compiled dependency cache
         id: cargo-target-strip
-        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && (matrix.concern == 'rust-app-2' || matrix.concern == 'rust-db' || matrix.concern == 'rust-domain' || matrix.concern == 'rust-packaging') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -413,7 +456,7 @@ jobs:
           os-label: macOS
 
       - name: Save compiled third-party dependencies
-        if: ${{ github.ref == 'refs/heads/main' && matrix.concern == 'rust-app-2' && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        if: ${{ github.ref == 'refs/heads/main' && (matrix.concern == 'rust-app-2' || matrix.concern == 'rust-db' || matrix.concern == 'rust-domain' || matrix.concern == 'rust-packaging') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

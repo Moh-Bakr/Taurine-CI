@@ -338,32 +338,58 @@ finished validation is normal, and the coordinator's ledger reconciles attempts.
   platforms, concerns) and the coverage requirements that bind each runner/config/tier/platform
   to its features and candidate suites. The catalog's canonical JSON digest is part of every
   dispatch identity, so a catalog edit invalidates outstanding dispatch keys.
-- **`feature_graph`** - conservative feature consumption edges. A change in one feature selects
-  every transitively reachable consumer. `select-suites.rb` computes the exact selection per
+- **`feature_graph`** - the derived feature-consumption graph. An edge `from -> to` selects
+  `to`'s suites when `from` changes - the reversal of the private reviewed dependency model's
+  `depends_on` - plus the cross-feature tier rule that every source-bearing feature selects
+  `integration`, whose own consumers (the composition and CLI tiers) join every partial
+  selection accordingly. The graph is a derived artifact, regenerated never hand-edited: the
+  private reviewed model's generator emits it beside the suite-ownership manifest, digest-bound
+  to the same catalog digest, and a cross-model fixture proves every edge's direction against
+  the model; this repo's policy pins the reviewed derivation table (a graph edit that does not
+  match it is an unreviewed contract change), and the graph's canonical JSON digest is part of
+  every dispatch identity, so a regeneration invalidates outstanding dispatch keys.
+  `select-suites.rb` computes the exact selection per
   coverage requirement from a selection request the source-side classifier produces, and fails
   closed to the complete set when the base is invalid or missing, any changed path matched no
   reviewed rule, a shared surface changed (fixtures, aliases, setup, composition roots,
   lockfiles, toolchains, CI or selector inputs), the request's catalog or graph digests do not
-  match the bound identity, the mode is full, or a requested feature ID does not exist in the
-  reviewed catalog and graph (`unknown_feature` is an error, never a silent reduction). A
+  match the bound identity, the mode is full, a requested feature ID does not exist in the
+  reviewed catalog and graph, or a partial request names no changed feature and carries no
+  broadening reason (`unknown_feature` and `selection_empty` are errors, never a silent
+  reduction). A
   partial selection is feedback and never admits a merge; the graph over-approximates by
-  design, and unknown edges must broaden, never narrow, a selection. Partial mode also is not
-  wired into dispatch: the evidence validator requires not-selected suites to report zero
+  design, and unknown edges must broaden, never narrow, a selection. Partial mode never
+  reduces a dispatched round: the evidence validator requires not-selected suites to report zero
   executed cases, which holds only once a concern's runner command itself filters to the
   selected suite IDs - until that runner-side filtering exists, full remains the only
-  complete mode.
+  complete mode, and wiring any reduction (enforce) is gated on the derivation fixture above.
+
+What dispatch does wire today is the shadow review. The Linux dispatcher accepts the
+classifier's request as an identity-bound `suite_selection` input (mutually exclusive with
+`base_sha`: one selection mechanism per dispatch), runs `select-suites.rb` over it in its
+plan job, and carries the per-group result to the bound concern workflows. Two rules keep
+that plumbing honest. First, fail-closed: a request the selector rejects - malformed, an
+unknown feature ID, an unreviewed review mode - dispatches the complete set, with the fixed
+rejection code recorded in the run summary; a selection bug must never look like a
+reduction. Second, shadow only: the complete matrix still runs, and each bound concern
+reports in its own summary which suites a partial selection would have run beside the
+projection it collected under the full set. Shadow rounds are how a selection earns trust
+against full rounds; letting it reduce a round waits for the runner-side filtering above.
 
 Each concern job then accounts for what actually ran. A pre-project-code step (after the token
 revoke, before any dependency installation) snapshots the suite contract: the catalog digest
 from this control-plane revision and the SHA-256 of the private ownership manifest at
 `scripts/ci/suite-ownership.json` in the checked-out source. That manifest is generated from
-the private reviewed catalog (`ci/feature-suites.json`) and records the canonical catalog
-digest it was derived from; a manifest whose recorded digest no longer matches this
-control-plane's catalog is stale and must be regenerated before its evidence is trusted. Its
-digest here is the canonical-JSON digest of the derived file, a different value from the
-private audit's raw-byte digest of the catalog manifest - the two bind different files with
-different hashing and are never cross-compared. After the concern ran, the trusted
-collector (`collect-suite-evidence.rb`) derives every count from the runner report the reviewed
+the private reviewed catalog and records the canonical catalog digest it was derived from.
+Staleness is enforced on the private side, where the manifest generator's check mode runs in
+the private test lanes: a catalog or test-layout change that has not been regenerated into
+the manifest fails those lanes, so a manifest a dispatch checks out is fresh by construction.
+This control plane never sees the private catalog and cannot re-derive that comparison; it
+binds the manifest found at the exact source SHA, and the recorded digest documents what the
+manifest was derived from. The manifest's digest here is the canonical-JSON digest of the
+derived file, a different value from the private audit's raw-byte digest of the reviewed
+catalog - the two bind different files with different hashing and are never cross-compared.
+After the concern ran, the trusted collector (`collect-suite-evidence.rb`) derives every count from the runner report the reviewed
 concern command wrote (vitest or Playwright JSON in `RUNNER_TEMP/test-ids/`), joins each
 executed case to exactly one primary suite through the manifest's reviewed patterns, and fails
 closed on unowned or multiply-owned cases, report/total mismatches, a project outside the
@@ -542,6 +568,8 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `visual` | Linux | Adds the Playwright `e2e-visual` tier; leave off until baselines for Linux exist |
 | `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
+| `only` | Linux, macOS, Windows | Comma-separated concern names for a surgical re-run of exactly those concerns. Every other concern is reported as "not selected", so the verdict is PASS (partial) and the run never admits a merge. On Linux it is mutually exclusive with `base_sha` (refused together); an unknown name, or a Rust concern named while `rust=false` on macOS or Windows, stops the run in the plan job. A Linux opt-in concern named in `only` must also have its own input enabled (`visual`, `gitleaks_history`), or the Result fails because a required concern did not run |
+| `suite_selection` | Linux | The reviewed source-side classifier's suite selection request (single-line JSON, identity-bound). The plan job computes the exact selection with `select-suites.rb` and fails closed to the complete set when the selector rejects the request; the carried selection is a shadow review - the complete set runs and each bound concern reports what a partial selection would have run. Mutually exclusive with `base_sha` and `only` |
 | `selection-mode` | Internal result input | Each dispatcher supplies the reviewed full/partial decision; it is never inferred from the final job list |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
@@ -559,10 +587,13 @@ The policy checks these call-site rules so a missing input cannot fall back to a
   and each succeeded. This is the only concern-verdict mode that admits a merge.
 - **PASS (partial)**: the dispatcher explicitly requested partial mode and every concern that
   ran succeeded. It stays partial even if every concern in its selected plan ran successfully;
-  quick profile, `base_sha`, and `rust=false` are always partial.
+  quick profile, `base_sha`, `only`, and `rust=false` are always partial.
 - **FAIL**: an expected full-mode concern or a concern selected by a partial plan did not run,
   a concern failed, the run contains duplicate or unexpected matching concern jobs, no concern
   ran, or the selection/source contract is malformed.
+
+Partial runs (quick profile, `base_sha`, `only`, `rust=false`) never admit a merge. Admission is
+always a PASS (full) on the exact 40-character source SHA: the full set of concerns, all green.
 
 Always confirm the summary names the exact 40-character SHA you requested before attributing a
 result to a commit. A `Timings` job beside it tabulates durations against committed baselines and

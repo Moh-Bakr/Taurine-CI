@@ -47,9 +47,12 @@ total_supported="$(jq '[.suite_catalog.coverage_requirements[] | select(.availab
   exit 1
 }
 
-# A partial change to one leaf feature selects exactly its owning suites plus
-# the conservative consumer closure (rest -> automation, ai -> integration),
-# and never marks the result complete.
+# A partial change to one feature selects exactly its owning suites plus the
+# derived consumer closure: everything the reviewed model consumes from it,
+# the integration tier, and the tiers that integrate the tier - and never
+# marks the result complete. rest's closure reaches notes, vault, sync, git
+# and import-export through the reviewed depends_on projection; organization
+# consumes nothing of rest's and stays out.
 partial="$(select_suites <(request partial '["rest"]' 2222222222222222222222222222222222222222 true false false))"
 jq -e '.complete == false and .reasons == ["feature_closure"] and .selection_mode == "partial"' <<<"${partial}" >/dev/null
 for group in $(jq -r '.groups | keys[]' <<<"${partial}"); do
@@ -58,13 +61,18 @@ for group in $(jq -r '.groups | keys[]' <<<"${partial}"); do
     desktop-vitest-default-linux)
       [[ "${selected}" == *"desktop.vitest.default.rest"* && "${selected}" == *"desktop.vitest.default.automation"* &&
          "${selected}" == *"desktop.vitest.default.ai"* && "${selected}" == *"desktop.vitest.default.integration"* &&
-         "${selected}" != *"desktop.vitest.default.notes"* ]] || {
+         "${selected}" == *"desktop.vitest.default.vault"* && "${selected}" == *"desktop.vitest.default.notes"* &&
+         "${selected}" == *"desktop.vitest.default.sync"* && "${selected}" == *"desktop.vitest.default.git"* &&
+         "${selected}" == *"desktop.vitest.default.import-export"* &&
+         "${selected}" != *"desktop.vitest.default.organization"* &&
+         "${selected}" != *"desktop.vitest.default.search-navigation"* ]] || {
         echo "rest closure wrong in ${group}: ${selected}" >&2
         exit 1
       }
       ;;
     desktop-playwright-regression-linux)
-      [[ "${selected}" == *"desktop.playwright.regression.rest"* && "${selected}" != *"desktop.playwright.regression.notes"* ]] || {
+      [[ "${selected}" == *"desktop.playwright.regression.rest"* && "${selected}" == *"desktop.playwright.regression.notes"* &&
+         "${selected}" != *"desktop.playwright.regression.organization"* ]] || {
         echo "rest closure wrong in ${group}: ${selected}" >&2
         exit 1
       }
@@ -76,14 +84,18 @@ done
   exit 1
 }
 
-# A transitive consumer closes over intermediate features: import-export
-# selects notes, database and, through the graph, ai and integration.
-transitive="$(select_suites <(request partial '["import-export"]' 2222222222222222222222222222222222222222 true false false))"
+# A transitive consumer closes over intermediate features: a vault change
+# selects its direct consumers (notes, sync), their consumers (git through
+# sync, import-export through notes) and the integration tier - while
+# features the model does not derive from vault stay out.
+transitive="$(select_suites <(request partial '["vault"]' 2222222222222222222222222222222222222222 true false false))"
 vitest_selected="$(jq -r '.groups["desktop-vitest-default-linux"].selected_suite_ids | join(" ")' <<<"${transitive}")"
-[[ "${vitest_selected}" == *"desktop.vitest.default.notes"* && "${vitest_selected}" == *"desktop.vitest.default.database"* &&
-   "${vitest_selected}" == *"desktop.vitest.default.ai"* && "${vitest_selected}" == *"desktop.vitest.default.integration"* &&
-   "${vitest_selected}" != *"desktop.vitest.default.vault"* ]] || {
-  echo "import-export closure wrong: ${vitest_selected}" >&2
+[[ "${vitest_selected}" == *"desktop.vitest.default.notes"* && "${vitest_selected}" == *"desktop.vitest.default.sync"* &&
+   "${vitest_selected}" == *"desktop.vitest.default.git"* && "${vitest_selected}" == *"desktop.vitest.default.import-export"* &&
+   "${vitest_selected}" == *"desktop.vitest.default.integration"* &&
+   "${vitest_selected}" != *"desktop.vitest.default.rest"* && "${vitest_selected}" != *"desktop.vitest.default.ai"* &&
+   "${vitest_selected}" != *"desktop.vitest.default.organization"* ]] || {
+  echo "vault closure wrong: ${vitest_selected}" >&2
   exit 1
 }
 
@@ -148,5 +160,35 @@ unknown_error="$(select_suites "${unknown_request}" 2>&1 1>/dev/null || true)"
   echo "unknown feature id failed with an unnamed error: ${unknown_error}" >&2
   exit 1
 }
+
+# The empty-set sibling (delta review #2, D8): a well-formed partial request
+# that names no changed feature and carries no broadening reason is a named
+# error (selection_empty), never a confident all-zero reduction. An empty set
+# beside a broadening reason keeps selecting the complete set (proven by the
+# fail-closed cases above, which all pass []).
+empty_request="$(mktemp "${RUNNER_TEMP:-/tmp}/selection-empty.XXXXXX")"
+request partial '[]' 2222222222222222222222222222222222222222 true false false > "${empty_request}"
+expect_reject 'empty changed feature set' "${empty_request}"
+empty_error="$(select_suites "${empty_request}" 2>&1 1>/dev/null || true)"
+[[ "${empty_error}" == *'selection_empty'* ]] || {
+  echo "empty changed feature set failed with an unnamed error: ${empty_error}" >&2
+  exit 1
+}
+
+# The dispatch review mode word travels inside the request. The reviewed value
+# `shadow` never changes the selection - the same closure, the same per-group
+# sets, the same selection digest - while any other word (including the
+# not-yet-wired `enforce`) is an error, so an unsupported mode fails the
+# dispatcher back to the complete set instead of reducing anything.
+shadow="$(select_suites <(jq -c '. + {review:"shadow"}' <(request partial '["rest"]' 2222222222222222222222222222222222222222 true false false)))"
+jq -e '.complete == false and .reasons == ["feature_closure"] and .selection_mode == "partial"' <<<"${shadow}" >/dev/null
+[[ "$(jq -r .selection_digest <<<"${shadow}")" == "${digest_one}" ]] || {
+  echo 'the shadow review word changed the selection or its digest' >&2
+  exit 1
+}
+for mode in enforce report fully shadowy; do
+  expect_reject "unreviewed review mode ${mode}" \
+    <(jq -c --arg mode "${mode}" '. + {review:$mode}' <(request partial '["rest"]' 2222222222222222222222222222222222222222 true false false))
+done
 
 echo 'suite selection: exact closure, conservative fail-closed and digest fixtures passed'

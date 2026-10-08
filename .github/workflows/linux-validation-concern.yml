@@ -66,7 +66,9 @@ jobs:
     # measured `cargo test -p taurine-app` at 708 s cold on a ten-core
     # workstation before the command tier doubled. `rust-dbx` compiles the
     # adopted `dbx-core` tree, whose own manifest records it as roughly 490
-    # crates.
+    # crates (a workspace member since Stage 1 task 1.5, still on its own
+    # concern because a whole-engine red must not hold the other crates'
+    # results hostage).
     timeout-minutes: ${{ inputs.timeout_minutes }}
     defaults:
       run:
@@ -537,6 +539,7 @@ jobs:
           CI_EXPECTED_SELECTION_DIGEST: ${{ steps.suite-contract.outputs.selection_digest }}
           CI_EXPECTED_SELECTION_MODE: ${{ steps.suite-contract.outputs.selection_mode }}
           CI_EXPECTED_SELECTED_SUITE_IDS: ${{ steps.suite-contract.outputs.selected_suite_ids }}
+          SHADOW_SELECTED_SUITE_IDS: ${{ steps.suite-contract.outputs.shadow_selected_suite_ids }}
           CI_PLATFORM: linux
         run: |
           set -euo pipefail
@@ -556,6 +559,16 @@ jobs:
           esac
           ruby .github/policy/collect-suite-evidence.rb "${CONCERN}" "${GITHUB_WORKSPACE}/src" \
             "${report}" "${RUNNER_TEMP}/suite-evidence-raw.json" "${RUNNER_TEMP}/suite-evidence.json"
+          # The collector's "no runner report" state is honest reporting, not an
+          # error: it exits 0 without writing a projection, so the wrap and
+          # render below must record that state in the summary instead of
+          # failing the job after the collector already spoke.
+          if [[ ! -f "${RUNNER_TEMP}/suite-evidence.json" ]]; then
+            {
+              echo 'suite evidence: not collected (the concern produced no runner report)'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
           # suite-overview.rb merges the exported projections of a run, each
           # wrapped as {"evidence_<job>": <projection>}; the collector writes a
           # bare projection, so wrap it under this job's name before rendering.
@@ -570,6 +583,10 @@ jobs:
             cat "${RUNNER_TEMP}/suite-evidence.json"
             echo '```'
             echo '</details>'
+            if [[ -n "${SHADOW_SELECTED_SUITE_IDS:-}" && "${SHADOW_SELECTED_SUITE_IDS}" != '[]' ]]; then
+              echo
+              echo "> **Suite selection review (shadow)** — this concern ran its complete suite set; a partial selection would have run $(jq -r 'length' <<<"${SHADOW_SELECTED_SUITE_IDS}") of $(jq -r '.suites | length' "${RUNNER_TEMP}/suite-evidence.json") suites of this group: $(jq -r 'join(", ")' <<<"${SHADOW_SELECTED_SUITE_IDS}")"
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
       # The job's own wall-clock time, shown next to its result; the timings job

@@ -57,7 +57,7 @@ begin
   manifest = File.file?(manifest_path) ? read_json(manifest_path) : nil
   manifest_present = manifest.is_a?(Hash)
   # Canonical-JSON digest of the ownership manifest. Distinct by definition
-  # from the private audit's raw-byte manifest digest over ci/feature-suites.json;
+  # from the private audit's raw-byte digest over the private reviewed catalog;
   # the two attest different files with different hashing and must never be
   # cross-compared.
   manifest_digest = manifest_present ? canonical_digest(manifest) : ''
@@ -72,6 +72,11 @@ begin
   reject_contract!('selection') unless selection.is_a?(Hash)
   mode = selection.fetch('selection_mode', 'full')
   reject_contract!('selection') unless %w[full partial].include?(mode)
+  # The dispatch review mode travels inside the selection. `shadow` is the only
+  # reviewed value today: the complete set runs and the selection is reported,
+  # so anything else is refused rather than guessed at.
+  review = selection.fetch('review', nil)
+  reject_contract!('selection') unless review.nil? || review == 'shadow'
   supplied_ids = selection.fetch('selected_suite_ids', [])
   reject_contract!('selection') unless supplied_ids.is_a?(Array) &&
                                        supplied_ids.all? { |id| id.is_a?(String) && id.match?(/\A[a-z][a-z0-9.-]{1,127}\z/) } &&
@@ -110,13 +115,29 @@ begin
                selected
              end
 
+  # A shadow review reports what a partial selection would run while the
+  # complete set actually executes, so the evidence contract stays the full
+  # set: the projection collected under a shadow round is identical to a full
+  # round's, and the would-be selection leaves only through the shadow output
+  # below, into the job's summary - never into the sanitized projection.
+  shadow_selected = review == 'shadow' ? selected : nil
+  if review == 'shadow'
+    mode = 'full'
+    selected = candidates
+  end
+
   puts "catalog_digest=#{catalog_digest}"
   puts "manifest_present=#{manifest_present}"
   puts "manifest_digest=#{manifest_digest}"
   puts "coverage_requirement_id=#{group.fetch('id')}"
   puts "selection_mode=#{mode}"
   puts "selected_suite_ids=#{JSON.generate(selected)}"
-  puts "selection_digest=#{selection_text.empty? ? canonical_digest('mode' => 'full', 'selected_suite_ids' => candidates) : canonical_digest(selection)}"
+  puts "shadow_selected_suite_ids=#{JSON.generate(shadow_selected.sort)}" unless shadow_selected.nil?
+  puts "selection_digest=#{if selection_text.empty? || shadow_selected
+                             canonical_digest('mode' => 'full', 'selected_suite_ids' => candidates)
+                           else
+                             canonical_digest(selection)
+                           end}"
 rescue SuiteContractError => error
   warn "suite contract: rejected (#{error.message})"
   exit 1

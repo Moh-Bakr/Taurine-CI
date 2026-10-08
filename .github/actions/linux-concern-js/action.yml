@@ -44,10 +44,28 @@ runs:
             # The flaky-test quarantine list must have no expired entry, and the third-party
             # notices must match the lockfiles; both are static checks of the source.
             run_deferred quarantine-check npm run check:quarantine
-            # The notices generator runs `cargo metadata --offline`, so every crate must already
-            # be downloaded: a developer machine has them, a fresh runner does not, which is
-            # why this passed locally and failed here. Fetch them (locked) first.
-            run_deferred notices-fetch cargo fetch --locked
+            # The notices generator runs `cargo metadata --offline`, so every crate of every
+            # graph it reads must already be downloaded: a developer machine has them, a fresh
+            # runner does not, which is why this passed locally and failed here. Since the
+            # dbx membership (Stage 1 task 1.5) the generator reads the root graph only — the
+            # door crate joined the workspace, its standalone lock is gone, and the extra
+            # manifest list is empty — so fetch every committed Cargo.lock's graph anyway,
+            # the same enumeration the advisory sweep below uses: it cannot drift from the
+            # set of locks the source commits, and it keeps covering whatever standalone
+            # graphs a future source carries. Per-lock failures are noted, not fatal (the
+            # third-party-source cache completion above does the same): some committed locks
+            # are not fetchable manifests at all, and a missing graph the generator does read
+            # fails closed one sub-step later, at notices-check.
+            run_deferred notices-fetch bash -c '
+              set -euo pipefail
+              while IFS= read -r lock; do
+                manifest="$(dirname "${lock}")/Cargo.toml"
+                [[ -f "${manifest}" ]] || continue
+                if ! cargo fetch --locked --manifest-path "${manifest}"; then
+                  echo "notices-fetch: ${lock}: could not be fetched completely (detail withheld)" >&2
+                fi
+              done < <(find . -name Cargo.lock -not -path "*/target/*" -not -path "*/node_modules/*" | sort)
+            '
             run_deferred notices-check npm run check:notices
             if [[ "${deferred_results[*]}" == *"notices-check|failed"* ]]; then
               # Say why: whether the graph could not be read at all, or how many crate and

@@ -12,7 +12,10 @@
 #     "shared_surface": true|false,      // true: fixture, alias, setup, config, lockfile, toolchain,
 #                                        //      CI/scanner/selector input or composition root changed
 #     "expected_catalog_digest": sha256, // the dispatch identity's bound catalog digest
-#     "expected_feature_graph_digest": sha256
+#     "expected_feature_graph_digest": sha256,
+#     "review": "shadow"                 // optional; the only reviewed dispatch review mode
+#                                        //      today: the complete set runs and the
+#                                        //      selection is reported (see below)
 #   }
 #
 # Output (JSON on stdout):
@@ -23,15 +26,20 @@
 # surface, or selector inputs (catalog or graph digests) that do not match the
 # reviewed values select the complete set. A malformed request is an error,
 # never a reduction - and so is a well-formed but unknown feature ID
-# (`unknown_feature`): anything the caller names must exist in the reviewed
-# catalog and graph. Unselected suites are reported per group so a dispatcher
-# can skip them; a partial selection can never contribute a full PASS.
+# (`unknown_feature`) or a partial request that names no feature and carries
+# no broadening reason (`selection_empty`): anything the caller names must
+# exist in the reviewed catalog and graph, and a request bug must never look
+# like a confident all-zero selection. Unselected suites are reported per
+# group so a dispatcher can skip them; a partial selection can never
+# contribute a full PASS.
 #
-# Partial mode is not wired into dispatch yet: the evidence validator requires
-# not-selected suites to report zero executed cases, which only holds once the
-# concern's runner command itself filters to the selected suite IDs. No concern
-# composite is selection-aware today, so partial selections must not be passed
-# to any runner until that filtering exists; full remains the only complete mode.
+# Partial mode is wired into dispatch as a shadow review only: the dispatcher
+# computes the per-group selection and carries it to the concern workflows,
+# which report what a partial round would run while the complete set actually
+# executes. Letting a selection reduce a round waits until the evidence
+# validator's zero-executed rule can hold - the concern's runner command itself
+# must filter to the selected suite IDs first - and no concern composite is
+# selection-aware today; full remains the only complete mode.
 require 'digest'
 require 'json'
 
@@ -76,6 +84,12 @@ begin
                                         .all? { |key| request.key?(key) }
   mode = request.fetch('selection_mode')
   reject_selection!('request') unless %w[full partial].include?(mode)
+  # The dispatch review mode word travels with the request. `shadow` (report
+  # the selection while the complete set runs) is the only reviewed value
+  # today; anything else - including the not-yet-wired `enforce` - is an
+  # error, so the dispatcher falls back to the complete set.
+  review = request.fetch('review', nil)
+  reject_selection!('request') unless review.nil? || review == 'shadow'
   base_sha = request.fetch('base_sha')
   reject_selection!('request') unless base_sha == '' || (base_sha.is_a?(String) && base_sha.match?(SHA1))
   base_valid = request.fetch('base_valid')
@@ -117,6 +131,15 @@ begin
   reasons << 'selector_inputs_changed' if expected_catalog != canonical_digest(catalog) ||
                                           expected_graph != graph_digest
   complete = reasons.any?
+
+  # A well-formed partial request that names no feature and carries no
+  # broadening reason would otherwise close to a confident all-zero reduction
+  # in every group - the empty-set sibling of `unknown_feature` (delta review
+  # #2, D8). The classifier always names at least one changed feature or one
+  # broadening reason, so this request shape is a bug: a named error, never a
+  # reduction. An empty set beside a broadening reason still selects the
+  # complete set above.
+  reject_selection!('selection_empty') if !complete && changed.empty?
 
   # Conservative closure: every transitively reachable consumer of a changed
   # feature joins the selection; nothing else is removed.
