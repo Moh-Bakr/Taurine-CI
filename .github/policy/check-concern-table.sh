@@ -19,6 +19,10 @@ unless step['with']['expected-concerns'].to_s == '$' + '{{ needs.plan.outputs.ex
   warn 'The Linux Result job must take its expected concerns from the plan job output'
   exit 1
 end
+unless step['with']['required-concerns'].to_s == '$' + '{{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}' && wf['jobs']['result']['needs'].include?('select')
+  warn 'The Linux Result job must require every concern in the selected matrix to run'
+  exit 1
+end
 opt_in = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux'].select { |_, sp| sp.key?('opt_in') }
 opt_in.each do |name, sp|
   known = (wf['on'] || wf[true])['workflow_dispatch']['inputs'].key?(sp['opt_in'])
@@ -46,6 +50,46 @@ unless problems.empty?
   exit 1
 end
 puts "concern table: #{table.length} Linux concerns (#{opt_in.length} opt-in) match the plan and the result check"
+mode_by_workflow = {
+  '.github/workflows/linux-validation.yml' => "${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}",
+  '.github/workflows/macos-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
+  '.github/workflows/windows-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
+  '.github/workflows/android-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
+  '.github/workflows/ios-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
+  '.github/workflows/orchestrate-validation.yml' => 'full'
+}
+required_by_workflow = {
+  '.github/workflows/linux-validation.yml' => "${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}",
+  '.github/workflows/macos-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
+  '.github/workflows/windows-validation.yml' => "${{ inputs.rust && '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\",\"rust-domain\",\"rust-db\",\"rust-net\",\"rust-ovpn\",\"rust-app-1\",\"rust-app-2\",\"rust-packaging\",\"rust-tls-openssl\"]' || '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\"]' }}",
+  '.github/workflows/android-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
+  '.github/workflows/ios-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}"
+}
+needs_by_workflow = {
+  '.github/workflows/linux-validation.yml' => %w[plan select],
+  '.github/workflows/macos-validation.yml' => %w[plan],
+  '.github/workflows/android-validation.yml' => %w[plan],
+  '.github/workflows/ios-validation.yml' => %w[plan]
+}
+mode_by_workflow.each do |path, expected_mode|
+  parsed = YAML.safe_load(File.read(path), aliases: false)
+  callers = parsed.fetch('jobs').values.flat_map { |job| job['steps'] || [] }.select { |step| step['uses'].to_s == './.github/actions/run-result' }
+  unless callers.length == 1 && callers.first.fetch('with', {})['selection-mode'] == expected_mode
+    warn "#{path}: run-result must use its reviewed explicit selection mode"
+    exit 1
+  end
+  expected_required = required_by_workflow[path]
+  if expected_required && callers.first.fetch('with', {})['required-concerns'] != expected_required
+    warn "#{path}: partial mode must require every concern in its selected matrix"
+    exit 1
+  end
+  required_needs = needs_by_workflow[path] || []
+  unless (required_needs - Array(parsed.fetch('jobs').fetch('result')['needs'])).empty?
+    warn "#{path}: Result must depend on the jobs that supply its selected concern list"
+    exit 1
+  end
+end
+puts 'run-result callers: all dispatchers declare their reviewed full/partial contract'
 RUBY
 # Each Linux concern's egress mode (block, or audit with its recorded reason).
 bash .github/policy/check-egress-modes.sh

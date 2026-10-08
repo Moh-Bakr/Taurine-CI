@@ -18,6 +18,15 @@ on:
         required: false
         default: 60
         type: number
+      suite_selection:
+        description: Optional reviewed suite selection JSON ({selection_mode, selected_suite_ids, selection_digest}); empty means the full set
+        required: false
+        default: ''
+        type: string
+    # Deliberately no workflow outputs: the sanitized projection stays in this
+    # job's step summary and RUNNER_TEMP. GitHub has no artifact-free transport
+    # from matrix legs to a sibling job, so the run-level aggregate overview is
+    # assembled off-runner from the coordinator's ledger with suite-overview.rb.
     secrets:
       SOURCE_READER_PRIVATE_KEY:
         description: The source-reader App private key, passed explicitly by the dispatcher (never inherited)
@@ -198,6 +207,24 @@ jobs:
       - name: Install the shared concern reporting
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
+
+      # Trusted suite-contract snapshot, taken after the exact-SHA checkout and
+      # token revocation but BEFORE any dependency installation or project
+      # command: the catalog digest from this control-plane revision and the
+      # private ownership manifest digest at this source SHA. The evidence
+      # collector runs later, after project code, and must recompute both and
+      # match them against these values, so a manifest or catalog tampered in
+      # between fails the match instead of being attested.
+      - name: Read the suite contract for this concern
+        id: suite-contract
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          CONCERN: ${{ inputs.concern }}
+          CI_SUITE_SELECTION: ${{ inputs.suite_selection }}
+        run: |
+          set -euo pipefail
+          ruby .github/policy/suite-contract.rb .github/ci-matrix.json "${CONCERN}" "${GITHUB_WORKSPACE}/src" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Node.js and install the locked JavaScript dependencies
         if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-security' || inputs.concern == 'rust-packaging'
@@ -485,6 +512,65 @@ jobs:
         with:
           concern: ${{ inputs.concern }}
           source-sha: ${{ inputs.source_sha }}
+
+      # Sanitized feature-suite evidence for this concern's coverage group,
+      # derived only from the runner report the reviewed concern command wrote,
+      # the reviewed catalog and the ownership manifest bound above. The
+      # overview script consumes the run's projections under their
+      # evidence_<job> names, so this single-projection job wraps its bare
+      # collector output before rendering; it never names test files, paths or
+      # titles, and nothing is exported between jobs (the run-level aggregate
+      # is assembled off-runner from the coordinator's ledger).
+      - name: Collect the sanitized suite evidence
+        id: suite-evidence
+        if: ${{ always() && !cancelled() && steps.verified-source.outcome == 'success' && steps.suite-contract.outcome == 'success' && (contains(fromJSON('["success","failure"]'), steps.concern-js.outcome) || contains(fromJSON('["success","failure"]'), steps.concern-e2e.outcome) || contains(fromJSON('["success","failure"]'), steps.concern-rust.outcome)) }}
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          CONCERN: ${{ inputs.concern }}
+          SUITE_MANIFEST_PRESENT: ${{ steps.suite-contract.outputs.manifest_present }}
+          SUITE_COVERAGE_REQUIREMENT_ID: ${{ steps.suite-contract.outputs.coverage_requirement_id }}
+          CI_EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_EXPECTED_CONTROL_SHA: ${{ github.sha }}
+          CI_EXPECTED_MANIFEST_DIGEST: ${{ steps.suite-contract.outputs.manifest_digest }}
+          CI_EXPECTED_CATALOG_DIGEST: ${{ steps.suite-contract.outputs.catalog_digest }}
+          CI_EXPECTED_SELECTION_DIGEST: ${{ steps.suite-contract.outputs.selection_digest }}
+          CI_EXPECTED_SELECTION_MODE: ${{ steps.suite-contract.outputs.selection_mode }}
+          CI_EXPECTED_SELECTED_SUITE_IDS: ${{ steps.suite-contract.outputs.selected_suite_ids }}
+          CI_PLATFORM: linux
+        run: |
+          set -euo pipefail
+          if [[ -z "${SUITE_COVERAGE_REQUIREMENT_ID}" ]]; then
+            echo 'suite evidence: not collected (the concern is not bound to a reviewed coverage group)'
+            exit 0
+          fi
+          if [[ "${SUITE_MANIFEST_PRESENT}" != 'true' ]]; then
+            echo 'suite evidence: not collected (the reviewed ownership manifest is absent at this SHA)'
+            exit 0
+          fi
+          case "${CONCERN}" in
+            contracts) report="${RUNNER_TEMP}/test-ids/packages.json" ;;
+            mobile-quality) report="${RUNNER_TEMP}/test-ids/mobile.json" ;;
+            desktop-shard-1|desktop-shard-2|e2e-*) report="${RUNNER_TEMP}/test-ids/${CONCERN}.json" ;;
+            *) echo "suite evidence: not collected (the concern runs no reviewed runner report)" >&2; exit 0 ;;
+          esac
+          ruby .github/policy/collect-suite-evidence.rb "${CONCERN}" "${GITHUB_WORKSPACE}/src" \
+            "${report}" "${RUNNER_TEMP}/suite-evidence-raw.json" "${RUNNER_TEMP}/suite-evidence.json"
+          # suite-overview.rb merges the exported projections of a run, each
+          # wrapped as {"evidence_<job>": <projection>}; the collector writes a
+          # bare projection, so wrap it under this job's name before rendering.
+          jq -n --arg job "${CONCERN}" --rawfile projection "${RUNNER_TEMP}/suite-evidence.json" \
+            '{($job | "evidence_" + .): $projection}' > "${RUNNER_TEMP}/suite-evidence-export.json"
+          {
+            ruby .github/policy/suite-overview.rb .github/ci-matrix.json "${RUNNER_TEMP}/suite-evidence-export.json"
+            echo
+            echo '<details><summary>Sanitized evidence projection</summary>'
+            echo
+            echo '```json'
+            cat "${RUNNER_TEMP}/suite-evidence.json"
+            echo '```'
+            echo '</details>'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       # The job's own wall-clock time, shown next to its result; the timings job
       # tabulates it against a committed baseline.

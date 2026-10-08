@@ -241,15 +241,144 @@ place for unreviewed code is a ref whose cache main never reads. Hence two refs:
 
 ### Dispatching feature-branch validation
 
-Use `--ref untrusted`; everything else is unchanged:
+Protected dispatches require `dispatch_key`. It binds the exact private source SHA to the full
+public control-plane SHA/ref, workflow path and complete default-normalized workflow inputs.
+It also binds the SHA-256 digest of canonical JSON for the public `suite_catalog` in
+`.github/ci-matrix.json` (object keys sorted recursively, array order preserved). A catalog
+change therefore invalidates a key even when all dispatch inputs are unchanged. The weekly
+resolver fetches the complete matrix and calculator from its exact control SHA and uses the
+same digest calculation without checking out a repository.
+The trusted input-validation job recomputes the key before any job can read private source; a
+missing or stale key fails closed. The weekly resolver uses the same calculator and contract
+fetched at its exact public `github.sha`, without checking out a repository.
+
+Choose exactly one control-plane ref for a dispatch. For a protected private source SHA reachable
+from `develop`, `uat` or `main`, calculate the key from a clean public checkout at the current
+`main` tip:
 
 ```bash
-sha=$(gh api repos/Moh-Bakr/Taurine/commits/<branch> -q .sha)
-gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted -f source_sha="$sha"
-gh workflow run macos-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted -f source_sha="$sha" -f rust=true
+set -euo pipefail
+git fetch origin main
+CONTROL_SHA="$(git rev-parse origin/main)"
+test "$(git rev-parse HEAD)" = "${CONTROL_SHA}"
+git diff --quiet "${CONTROL_SHA}" -- .github/ci-matrix.json .github/policy/dispatch-identity.rb
+SOURCE_SHA='<full private commit SHA>'
+# For --ref main, SOURCE_SHA must be reachable from the protected develop/uat/main branches.
+DISPATCH_KEY="$(
+  CI_WORKFLOW_PATH=.github/workflows/linux-validation.yml \
+  CI_SOURCE_SHA="${SOURCE_SHA}" \
+  CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI \
+  CI_CONTROL_SHA="${CONTROL_SHA}" \
+  CI_CONTROL_REF=refs/heads/main \
+  CI_DISPATCH_CONTRACT_JSON='' \
+  CI_NORMALIZED_INPUTS="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source}')" \
+  CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb
+ )"
+gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref main \
+  -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${DISPATCH_KEY}"
 ```
 
+For a feature or plan source SHA, use public `untrusted` instead. It accepts source SHAs that are
+not on a protected private branch. This is the alternative to the protected `main` dispatch, not
+an additional dispatch:
+
+```bash
+set -euo pipefail
+git fetch origin untrusted
+CONTROL_SHA="$(git rev-parse origin/untrusted)"
+test "$(git rev-parse HEAD)" = "${CONTROL_SHA}"
+git diff --quiet "${CONTROL_SHA}" -- .github/ci-matrix.json .github/policy/dispatch-identity.rb
+SOURCE_SHA='<full private commit SHA>'
+DISPATCH_KEY="$(
+  CI_WORKFLOW_PATH=.github/workflows/linux-validation.yml \
+  CI_SOURCE_SHA="${SOURCE_SHA}" \
+  CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI \
+  CI_CONTROL_SHA="${CONTROL_SHA}" \
+  CI_CONTROL_REF=refs/heads/untrusted \
+  CI_DISPATCH_CONTRACT_JSON='' \
+  CI_NORMALIZED_INPUTS="$(jq -cn --arg source "${SOURCE_SHA}" '{source_sha:$source}')" \
+  CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb
+ )"
+gh workflow run linux-validation.yml --repo Moh-Bakr/Taurine-CI --ref untrusted \
+  -f "source_sha=${SOURCE_SHA}" -f "dispatch_key=${DISPATCH_KEY}"
+```
+
+The helper fills only reviewed optional defaults from `dispatch_contracts` in
+`.github/ci-matrix.json`; it rejects unknown fields, choices and live-engine selections, and
+requires the version-1 public suite catalog to calculate its digest.
+For another workflow, use that workflow's exact input map from the same contract, including the
+source SHA. A `main` key is valid only with `CI_CONTROL_REF=refs/heads/main`; an `untrusted`
+key is valid only with `CI_CONTROL_REF=refs/heads/untrusted`. If the selected public ref moves
+before dispatch, fetch it again and recalculate from its exact new tip. Never reuse a key after
+changing an input, source SHA or control revision.
+
+The key check is a checkout-time preflight in the workflow that contains this contract. This
+feature branch is not deployed on `main` until the coordinator integrates it; existing main-ref
+dispatches do not require the key while `main` is still on its prior workflow revision.
+
 Protected tips (`develop`, `uat`, `main`, and the weekly run) keep dispatching from `main`.
+
+### Duplicate dispatches
+
+The coordinator's ledger is the primary dispatch discipline, and each dispatcher's trusted
+pre-source job now enforces it a second time: straight after the identity proof it lists this
+workflow's queued and in-progress runs and refuses to start when another run's title carries the
+same dispatch key - the key binds the exact source SHA, control-plane revision and normalized
+inputs, so a title match is the same validation already waiting or running. The guard stops the
+NEW run before any token is minted; it never cancels or evicts the existing one (the two runs
+share nothing and the concurrency rules are unchanged), and if the run list cannot be read it
+fails closed instead of dispatching blind. Completed duplicates are allowed: re-running a
+finished validation is normal, and the coordinator's ledger reconciles attempts.
+
+### Feature-suite evidence, selection and overview
+
+`.github/ci-matrix.json` carries two reviewed contracts beside the concern table:
+
+- **`suite_catalog`** - the reviewed candidate suites (id, feature, tier, runner, config,
+  platforms, concerns) and the coverage requirements that bind each runner/config/tier/platform
+  to its features and candidate suites. The catalog's canonical JSON digest is part of every
+  dispatch identity, so a catalog edit invalidates outstanding dispatch keys.
+- **`feature_graph`** - conservative feature consumption edges. A change in one feature selects
+  every transitively reachable consumer. `select-suites.rb` computes the exact selection per
+  coverage requirement from a selection request the source-side classifier produces, and fails
+  closed to the complete set when the base is invalid or missing, any changed path matched no
+  reviewed rule, a shared surface changed (fixtures, aliases, setup, composition roots,
+  lockfiles, toolchains, CI or selector inputs), the request's catalog or graph digests do not
+  match the bound identity, the mode is full, or a requested feature ID does not exist in the
+  reviewed catalog and graph (`unknown_feature` is an error, never a silent reduction). A
+  partial selection is feedback and never admits a merge; the graph over-approximates by
+  design, and unknown edges must broaden, never narrow, a selection. Partial mode also is not
+  wired into dispatch: the evidence validator requires not-selected suites to report zero
+  executed cases, which holds only once a concern's runner command itself filters to the
+  selected suite IDs - until that runner-side filtering exists, full remains the only
+  complete mode.
+
+Each concern job then accounts for what actually ran. A pre-project-code step (after the token
+revoke, before any dependency installation) snapshots the suite contract: the catalog digest
+from this control-plane revision and the SHA-256 of the private ownership manifest at
+`scripts/ci/suite-ownership.json` in the checked-out source. That manifest is generated from
+the private reviewed catalog (`ci/feature-suites.json`) and records the canonical catalog
+digest it was derived from; a manifest whose recorded digest no longer matches this
+control-plane's catalog is stale and must be regenerated before its evidence is trusted. Its
+digest here is the canonical-JSON digest of the derived file, a different value from the
+private audit's raw-byte digest of the catalog manifest - the two bind different files with
+different hashing and are never cross-compared. After the concern ran, the trusted
+collector (`collect-suite-evidence.rb`) derives every count from the runner report the reviewed
+concern command wrote (vitest or Playwright JSON in `RUNNER_TEMP/test-ids/`), joins each
+executed case to exactly one primary suite through the manifest's reviewed patterns, and fails
+closed on unowned or multiply-owned cases, report/total mismatches, a project outside the
+group's scope, or anything it cannot parse. It never trusts a private script's counts. The raw
+proof and the manifest stay in `RUNNER_TEMP`; only the validator's sanitized projection leaves
+the runner: suite IDs, counts (discovered, owned, executed, compiled, ignored, quarantined,
+environment-skipped), fixed status and error classes, digests and SHAs. Compiled targets are
+evidence of compilation, never execution: a compile-only selection is `blocked`
+(`compiled_only`) and cannot merge. Each concern job renders a per-feature table for its
+coverage group in the run summary beside the sanitized projection, and the run-level aggregate
+overview (selected versus full, executed versus compiled versus skipped) is assembled from the
+coordinator's ledger with `suite-overview.rb`: GitHub provides no artifact-free transport from
+matrix legs to a sibling job. The generator refuses anything that is not the validator's
+reviewed shape and reports honestly when no evidence was collected. Existing concern coverage stays authoritative: the evidence pipeline
+observes, it does not yet narrow what a concern executes.
 
 ### Keeping untrusted in sync with main (manual, by design)
 
@@ -390,8 +519,9 @@ Only Linux uses `base_sha`; the other platforms always run their whole list.
 Every source-bearing workflow gives each run its own concurrency group (it contains
 `github.run_id`) and `cancel-in-progress` is false. GitHub keeps only one *pending* run per
 group, so a shared per-SHA group let a later dispatch silently cancel an earlier queued run; that
-is why groups are per run. Nothing deduplicates runs: two dispatches for the same SHA both run.
-Lanes must therefore check for an existing run before dispatching:
+is why groups are per run. Nothing cancels a run: the duplicate-dispatch guard above stops a NEW
+dispatch in its pre-source job when the same identity is already queued or running; two
+completed runs of one identity are allowed and reconciled by the coordinator's ledger:
 
 ```bash
 gh run list -R Moh-Bakr/Taurine-CI --workflow linux-validation.yml --status queued
@@ -412,6 +542,7 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `visual` | Linux | Adds the Playwright `e2e-visual` tier; leave off until baselines for Linux exist |
 | `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
+| `selection-mode` | Internal result input | Each dispatcher supplies the reviewed full/partial decision; it is never inferred from the final job list |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
 | `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
@@ -419,15 +550,19 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 ## The Result verdict
 
 Each dispatcher ends with a `Result` job using the `run-result` composite. It lists every
-concern the workflow can run, reads each one's conclusion from the run's job list and writes:
+concern the workflow can run, reads each one's conclusion from the run's job list and writes.
+The dispatcher passes an explicit selection mode: Linux is full only for `profile=full` with no
+`base_sha`; macOS, Windows, Android and iOS are full only with `rust=true`; Orchestrate is full.
+The policy checks these call-site rules so a missing input cannot fall back to a guessed mode.
 
-- **PASS (full)**: every possible concern ran and succeeded. This is the only verdict that
-  admits a merge.
-- **PASS (partial)**: everything that ran succeeded, but some concerns were not selected
-  (quick profile, `base_sha`, or `rust=false`). They are shown as "not selected", never as
-  passed. A partial verdict does not admit a merge.
-- **FAIL**: a concern that ran did not succeed, no concern ran, or a required opt-in concern did
-  not run.
+- **PASS (full)**: the dispatcher explicitly requested full mode, every expected concern ran,
+  and each succeeded. This is the only concern-verdict mode that admits a merge.
+- **PASS (partial)**: the dispatcher explicitly requested partial mode and every concern that
+  ran succeeded. It stays partial even if every concern in its selected plan ran successfully;
+  quick profile, `base_sha`, and `rust=false` are always partial.
+- **FAIL**: an expected full-mode concern or a concern selected by a partial plan did not run,
+  a concern failed, the run contains duplicate or unexpected matching concern jobs, no concern
+  ran, or the selection/source contract is malformed.
 
 Always confirm the summary names the exact 40-character SHA you requested before attributing a
 result to a commit. A `Timings` job beside it tabulates durations against committed baselines and
