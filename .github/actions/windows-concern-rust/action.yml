@@ -130,11 +130,27 @@ runs:
             # the first hosted run fails there, and this one command still finds a Perl
             # with the Win32 modules (Strawberry Perl, not Git's msys perl) and NASM —
             # both installed on the image but not on the bash step's PATH.
+            # A source still on the pre-membership arrangement (dbx-core in the
+            # workspace `exclude` list) has nothing to check — the selection would
+            # fail with "package ID specification did not match any packages" — so
+            # the sub-step records the absence and moves on; a member that is
+            # present is checked exactly as above, and a real failure still fails
+            # the concern. The member list load is fail-closed: a manifest cargo
+            # cannot read fails the concern rather than reading as an absence.
             keyring_path="/c/Strawberry/perl/bin:/c/Program Files/NASM:${PATH}"
             echo "keyring-check perl: $(PATH="${keyring_path}" command -v perl 2>/dev/null | sanitize_stream || echo none)"
             echo "keyring-check nasm: $(PATH="${keyring_path}" command -v nasm 2>/dev/null | sanitize_stream || echo none)"
-            run_deferred rust-dbx-core-keyring-check \
-              env PATH="${keyring_path}" cargo check --locked --lib --package dbx-core --no-default-features --features sqlite-bundled,os-keyring
+            if ! dbx_members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort -u)" || [[ -z "${dbx_members}" ]]; then
+              echo 'error: failed to load the workspace member list' >&2
+              deferred_results+=('rust-dbx-core-keyring-check|failed: not run (the workspace member list could not be loaded)')
+              deferred_failed=1
+            elif grep -qx 'dbx-core' <<<"${dbx_members}"; then
+              run_deferred rust-dbx-core-keyring-check \
+                env PATH="${keyring_path}" cargo check --locked --lib --package dbx-core --no-default-features --features sqlite-bundled,os-keyring
+            else
+              echo 'rust-dbx-core-keyring-check: skipped: dbx-core is not a workspace member on this branch'
+              deferred_results+=('rust-dbx-core-keyring-check|skipped: dbx-core is not a workspace member on this branch')
+            fi
             # If the vendored OpenSSL build still fails, name the missing tool: the lines
             # published are fixed tool names (perl, nasm, nmake) with a fixed missing class;
             # no diagnostic text is republished.
