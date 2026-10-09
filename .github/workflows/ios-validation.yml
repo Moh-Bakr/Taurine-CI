@@ -1,4 +1,5 @@
 name: iOS source validation (protected)
+run-name: Taurine validation ${{ inputs.source_sha }} ${{ inputs.dispatch_key }}
 
 # Manual, protected, source-bearing validation. Pull requests and pushes never
 # enter the source-read environment or receive a private-source token.
@@ -7,6 +8,10 @@ on:
     inputs:
       source_sha:
         description: Exact 40-character commit SHA to validate from private Taurine
+        required: true
+        type: string
+      dispatch_key:
+        description: Full SHA-256 key for this exact control revision and normalized dispatch inputs
         required: true
         type: string
       rust:
@@ -62,6 +67,39 @@ jobs:
         uses: ./.github/actions/environment-preflight  # zizmor: ignore[self-repository]
         with:
           github-token: ${{ github.token }}
+
+      - name: Verify the coordinator dispatch identity
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_WORKFLOW_PATH: .github/workflows/ios-validation.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"rust":{0},"source_sha":{1}}}', toJSON(inputs.rust), toJSON(inputs.source_sha)) }}
+          CI_DISPATCH_CONTRACT_JSON: ''
+          CI_GENERATE_ONLY: 'false'
+          CI_CONTROL_REPOSITORY: ${{ github.repository }}
+          CI_CONTROL_SHA: ${{ github.sha }}
+          CI_CONTROL_REF: ${{ github.ref }}
+        run: ruby .github/policy/dispatch-identity.rb
+
+      # One dispatch identity, one run: a queued or in-progress run of this
+      # workflow carrying the same dispatch key means the same source SHA and
+      # inputs are already being validated, so this duplicate stops here,
+      # before any token is minted. Nothing shared with the existing run is
+      # changed; it can never be cancelled or evicted by this check. The
+      # coordinator's ledger remains the primary dispatch discipline.
+      - name: Refuse a duplicate dispatch
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW_PATH: .github/workflows/ios-validation.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_RUN_ID: ${{ github.run_id }}
+        run: ruby .github/policy/refuse-duplicate-dispatch.rb
+
 
       - name: Select the concerns and report the Rust cadence
         id: plan
@@ -402,7 +440,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate]
+    needs: [plan, validate]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -433,6 +471,8 @@ jobs:
         with:
           label: iOS
           expected-concerns: '["ios-native","ios-rust"]'
+          required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}
           name-pattern: '^iOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
+          selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
           github-token: ${{ github.token }}
