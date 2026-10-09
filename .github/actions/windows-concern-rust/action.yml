@@ -113,8 +113,38 @@ runs:
             run_deferred rust-coverage rust_coverage_check
             run_deferred rust-crypt-no-keychain-tests \
               cargo test --locked --no-fail-fast --package taurine-crypt --no-default-features
-            run_deferred rust-domain-tests \
-              cargo test --locked --no-fail-fast "${rust_domain_packages[@]/#/--package=}"
+            # The test selection guards on workspace membership, the same way
+            # the dbx-core keyring check below does: a crate registered above
+            # before the branch that carries it (taurine-ade-model and
+            # taurine-ade-log arrived that way) would otherwise fail the whole
+            # concern with "package ID specification did not match any
+            # packages". The packages that are members keep the single combined
+            # `cargo test` invocation exactly as before; each absent one
+            # records its own skip row. The member list load is fail-closed: a
+            # manifest cargo cannot read fails the concern rather than reading
+            # as an absence.
+            if ! domain_members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort -u)" || [[ -z "${domain_members}" ]]; then
+              echo 'error: failed to load the workspace member list' >&2
+              deferred_results+=('rust-domain-tests|failed: not run (the workspace member list could not be loaded)')
+              deferred_failed=1
+            else
+              domain_packages=()
+              for domain_registered in "${rust_domain_packages[@]}"; do
+                if grep -qx "${domain_registered}" <<<"${domain_members}"; then
+                  domain_packages+=("--package=${domain_registered}")
+                else
+                  echo "rust-domain: skipped: ${domain_registered} is not a workspace member on this branch"
+                  deferred_results+=("rust-domain-tests|skipped: ${domain_registered} is not a workspace member on this branch")
+                fi
+              done
+              if [[ "${#domain_packages[@]}" -gt 0 ]]; then
+                run_deferred rust-domain-tests \
+                  cargo test --locked --no-fail-fast "${domain_packages[@]}"
+              else
+                echo 'rust-domain: skipped: no registered domain package is a workspace member on this branch'
+                deferred_results+=('rust-domain-tests|skipped: no registered domain package is a workspace member on this branch')
+              fi
+            fi
             # dbx-core has `cfg(windows)` code (the reparse-point-safe key-file open and the
             # windows-native credential backend behind `os-keyring`) that no hosted job
             # compiles. This is a non-test library check of the minimal feature set that
