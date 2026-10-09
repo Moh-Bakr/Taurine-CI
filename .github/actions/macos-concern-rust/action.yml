@@ -84,7 +84,7 @@ runs:
           taurine-model taurine-atomic taurine-auth taurine-crypt taurine-store
           taurine-repo taurine-replicate taurine-sync taurine-notes taurine-core
           taurine-exec taurine-scripting taurine-mock taurine-git
-          # taurine-ade-model and taurine-ade-log return here when the ADE crates land on develop; they are unfinished work on feat/ade-first-run + feat/ade-models.
+          taurine-ade-model taurine-ade-log
           taurine-transport-fs taurine-transport-git taurine-transport-wifi
           taurine-cli
         )

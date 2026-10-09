@@ -43,6 +43,16 @@ explicit_key="$(generate "$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,p
   exit 1
 }
 
+# The dispatch event renders an omitted optional input as JSON null even when the
+# workflow declares a default (and an explicitly empty value renders null too), so
+# a null must normalise to the declared default: the same identity as the omitted
+# form, for every optional input type at once.
+null_key="$(generate "$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,profile:null,visual:null,gitleaks_history:null,base_sha:null}')")"
+[[ "${null_key}" == "${defaults_key}" ]] || {
+  echo 'dispatch identity did not normalize a rendered null input to its declared default' >&2
+  exit 1
+}
+
 valid_output="$(validate "$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha}')" "${defaults_key}")"
 [[ "${valid_output}" == CI_DISPATCH_IDENTITY=* ]] || {
   echo 'dispatch identity proof was not emitted for a valid key' >&2
@@ -171,6 +181,12 @@ expect_reject 'unreviewed workflow' workflow_invalid \
 sentinel='PUBLIC-SYNTHETIC-DO-NOT-ECHO'
 expect_reject 'unknown input' inputs_invalid \
   env "${base_env[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg leak "${sentinel}" '{source_sha:$sha,unexpected:$leak}')" \
+  CI_DISPATCH_KEY="${defaults_key}" ruby .github/policy/dispatch-identity.rb
+
+# A null required input is an omission with no default, never a value: it refuses
+# exactly as it did before the null normalisation.
+expect_reject 'null required input' inputs_invalid \
+  env "${base_env[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:null}')" \
   CI_DISPATCH_KEY="${defaults_key}" ruby .github/policy/dispatch-identity.rb
 
 engine_workflow=.github/workflows/live-proofs.yml

@@ -586,7 +586,7 @@ jobs:
   # run as "not selected" (never as passed), and the run fails if any concern that ran
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && needs.plan.result == 'success' }}
     needs: [plan, validate]
     name: Result
     runs-on: ubuntu-24.04
