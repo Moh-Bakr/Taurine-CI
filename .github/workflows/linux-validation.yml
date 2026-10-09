@@ -473,7 +473,7 @@ jobs:
         with:
           label: Linux
           expected-concerns: ${{ needs.plan.outputs.expected }}
-          required-concerns: ${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}
+          required-concerns: ${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix || '{"concern":[]}').concern) }}
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}

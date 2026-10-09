@@ -471,7 +471,7 @@ jobs:
         with:
           label: iOS
           expected-concerns: '["ios-native","ios-rust"]'
-          required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}
+          required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix || '{"concern":[]}').concern) }}
           name-pattern: '^iOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           selection-mode: ${{ inputs.rust && 'full' || 'partial' }}

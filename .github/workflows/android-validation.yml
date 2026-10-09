@@ -416,7 +416,7 @@ jobs:
         with:
           label: Android
           expected-concerns: '["android-native","android-rust"]'
-          required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}
+          required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix || '{"concern":[]}').concern) }}
           name-pattern: '^Android (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
