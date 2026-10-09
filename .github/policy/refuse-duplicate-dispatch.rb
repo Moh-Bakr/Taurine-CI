@@ -25,7 +25,9 @@ workflow_path = ENV.fetch('CI_WORKFLOW_PATH')
 source_sha = ENV.fetch('CI_SOURCE_SHA').downcase
 dispatch_key = ENV.fetch('CI_DISPATCH_KEY')
 run_id = ENV.fetch('CI_RUN_ID').to_i
-repository = ENV.fetch('GH_REPO')
+# The dispatching workflows set GH_TOKEN but not GH_REPO; GITHUB_REPOSITORY is
+# standard in every Actions run and names the same control repository.
+repository = ENV.fetch('GH_REPO') { ENV.fetch('GITHUB_REPOSITORY') }
 
 fail_closed('the guard inputs are malformed') unless workflow_path.match?(WORKFLOW) &&
                                                     source_sha.match?(/\A[0-9a-f]{40}\z/) &&

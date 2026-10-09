@@ -36,6 +36,15 @@ def canonical_inputs(declared_inputs, supplied)
   accepted = declared_inputs.keys - ['dispatch_key']
   reject_identity('inputs_invalid') unless (supplied.keys - accepted).empty?
 
+  # GitHub delivers an unset (or empty-string) optional workflow input to the
+  # dispatch template as JSON null — `toJSON(inputs.x)` renders null, and the
+  # dispatch API drops empty strings server-side, so an explicit empty can
+  # never reach this step as "". The documented key calculation normalizes
+  # those inputs to their declared defaults, so a null here means "not
+  # supplied" and must fall through to the default branch below; keeping it
+  # would reject every dispatch that omits an optional string input.
+  supplied = supplied.reject { |_name, value| value.nil? }
+
   normalized = {}
   digest_inputs.keys.sort.each do |name|
     spec = declared_inputs.fetch(name)
