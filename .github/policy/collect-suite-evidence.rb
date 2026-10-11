@@ -134,10 +134,13 @@ end
 
 # Reviewed runner adapters. A coverage group whose runner has no adapter here
 # cannot produce evidence: the collector refuses rather than guessing.
-# The Playwright reporter writes spec files relative to the app directory the
-# reviewed composite runs it from (linux-concern-e2e `cd taurine-desktop`), so
-# the adapter normalizes them to repo-relative paths, the same terms every
-# manifest pattern is written in.
+# The Playwright JSON reporter writes each spec's `file` relative to the
+# configured `testDir`, not to the working directory (verified against the
+# source-repo-pinned @playwright/test 1.62.0: a spec in `tests/e2e/deep/` is
+# reported as `deep/sample.spec.ts`). The reviewed composite runs
+# `taurine-desktop/playwright.config.ts`, whose `testDir` is `./tests/e2e`, so
+# the adapter restores both the app directory and the test directory, giving
+# repo-relative paths - the same terms every manifest pattern is written in.
 ADAPTERS = {
   'vitest-desktop' => method(:parse_vitest_report),
   'vitest-mobile' => method(:parse_vitest_report),
@@ -145,7 +148,7 @@ ADAPTERS = {
   'playwright-desktop' => method(:parse_playwright_report)
 }.freeze
 ADAPTER_PATH_PREFIXES = {
-  'playwright-desktop' => 'taurine-desktop/'
+  'playwright-desktop' => 'taurine-desktop/tests/e2e/'
 }.freeze
 
 # Reporter case status -> reviewed evidence count bucket. Executed counts both
