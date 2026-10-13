@@ -80,9 +80,19 @@ def parse_probe(stdout, mode, exit_code):
     if len(summaries) != 1:
         raise ValueError("missing or duplicate test summary")
     summary = summaries[0]
-    if not re.search(r"\b1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\b", summary):
+    if not re.fullmatch(r"ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [0-9]+(?:\.[0-9]+)?s", summary):
         raise ValueError("probe must execute exactly one passing test")
-    markers = re.findall(r"(?m)^TAURINE_DBX_PG8_RESULT ([^\r\n]+)$", stdout)
+    known_test_prefix = f"test {TEST} ... "
+    markers = []
+    for line in stdout.splitlines():
+        if MARKER not in line:
+            continue
+        if line.startswith(MARKER + " "):
+            markers.append(line[len(MARKER) + 1:])
+        elif line.startswith(known_test_prefix + MARKER + " "):
+            markers.append(line[len(known_test_prefix) + len(MARKER) + 1:])
+        else:
+            raise ValueError("result marker has an unexpected output prefix")
     if len(markers) != 1:
         raise ValueError("missing or duplicate result marker")
     fields = {}

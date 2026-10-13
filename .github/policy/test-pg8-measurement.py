@@ -66,11 +66,22 @@ class ContractTests(unittest.TestCase):
         return f"{pg8.MARKER} mode={mode} warmups=5 samples=30 result=complete{extra}"
 
     def stdout(self, marker=None, counts="1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"):
-        return f"running 1 test\ntest {pg8.TEST} ... ok\n{marker or self.marker()}\ntest result: ok. {counts}\n"
+        return f"running 1 test\ntest {pg8.TEST} ... ok\n{marker or self.marker()}\ntest result: ok. {counts}; finished in 0.01s\n"
 
     def test_probe_positive_each_mode(self):
         for mode in ("paired","legacy","dbx"):
             self.assertEqual(pg8.parse_probe(self.stdout(self.marker(mode)), mode, 0)["mode"], mode)
+
+    def test_probe_accepts_only_the_exact_harness_prefix_and_success_summary(self):
+        valid = self.stdout().replace(self.marker(), f"test {pg8.TEST} ... {self.marker()}")
+        self.assertEqual(pg8.parse_probe(valid, "paired", 0)["mode"], "paired")
+        invalid = [
+            self.stdout().replace(self.marker(), f"test other_test ... {self.marker()}"),
+            self.stdout().replace(self.marker(), f"unexpected output {self.marker()}"),
+            self.stdout().replace("test result: ok.", "test result: FAILED."),
+        ]
+        for output in invalid:
+            with self.subTest(output=output), self.assertRaises(ValueError): pg8.parse_probe(output, "paired", 0)
 
     def test_probe_skips_undercount_nonzero_and_marker_errors_rejected(self):
         cases=[(self.stdout().replace("running 1 test","SKIPPED"),"paired",0),
