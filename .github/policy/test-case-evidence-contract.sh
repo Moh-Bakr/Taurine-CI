@@ -53,7 +53,8 @@ write_playwright() {
     file="tests/e2e/api.spec.ts"
     discovery_report={"suites"=>[{"file"=>file,"specs"=>[{"title"=>"loads API","file"=>file,
       "tests"=>[{"projectName"=>project,"status"=>"discovered","results"=>[]}]}]}]}
-    execution_report={"suites"=>[{"file"=>file,"specs"=>[{"title"=>"loads API","file"=>file,
+    execution_report={"stats"=>{"expected"=>1,"skipped"=>0,"unexpected"=>0,"flaky"=>0},
+      "suites"=>[{"file"=>file,"specs"=>[{"title"=>"loads API","file"=>file,
       "tests"=>[{"projectName"=>project,"status"=>"expected","results"=>[{"status"=>"passed"}]}]}]}]}
     identity=[runner,config,tier,platform,project,"taurine-desktop/#{file}","","","loads API"]
     case_id=Digest::SHA256.hexdigest(JSON.generate(identity))
@@ -93,6 +94,21 @@ expect_error() {
   }
   ! grep -Eq 'api suite|lists requests|api\.test\.ts|"case_id"|[a-f0-9]{64}' <<<"${output}" || {
     echo "${expected_error}: raw identity or digest leaked" >&2; exit 1;
+  }
+}
+
+expect_blocked_outcome() {
+  local count_key="$1" output status
+  set +e
+  output="$(run_contract)"
+  status=$?
+  set -e
+  [[ "${status}" -ne 0 ]] || { echo "${count_key}: blocked outcome returned success" >&2; exit 1; }
+  jq -e --arg key "${count_key}" '.status == "shadow_blocked" and .counts[$key] == 1' <<<"${output}" >/dev/null || {
+    echo "${count_key}: blocked outcome or aggregate count was lost" >&2; exit 1;
+  }
+  ! grep -Eq 'loads API|api\.spec\.ts|"case_id"|[a-f0-9]{64}' <<<"${output}" || {
+    echo "${count_key}: blocked result leaked a raw identity" >&2; exit 1;
   }
 }
 
@@ -147,7 +163,11 @@ expect_error case_collection_empty
 # A correctly collected failed test is sanitized blocked evidence, never a pass.
 write_vitest
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["numPassedTests"]=1; r["numFailedTests"]=1; r["testResults"][0]["assertionResults"][1]["status"]="failed"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+set +e
 blocked="$(run_contract)"
+blocked_status=$?
+set -e
+[[ "${blocked_status}" -ne 0 ]] || { echo 'failed test outcome returned success' >&2; exit 1; }
 jq -e '.status == "shadow_blocked" and .counts.failed == 1 and .counts.passed == 1' <<<"${blocked}" >/dev/null
 ! grep -Eq 'api suite|lists requests|api\.test\.ts|"case_id"|[a-f0-9]{64}' <<<"${blocked}" || {
   echo 'blocked result leaked a raw identity' >&2; exit 1;
@@ -161,5 +181,38 @@ jq -e '.status == "shadow_valid_unverified_producer" and .counts.discovered == 1
   echo 'Playwright result leaked a raw identity' >&2; exit 1;
 }
 write_playwright; mutate "${work}/execution.json" command_id '"playwright.desktop.run.visual.v1"'; expect_error command_mismatch
+
+# Aggregate Playwright outcome is authoritative over the last retry result.
+# In particular, unexpected plus a last passed result remains blocked.
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r["suites"][0]["specs"][0]["tests"][0]; t["status"]="unexpected"; r["stats"]={"expected"=>0,"skipped"=>0,"unexpected"=>1,"flaky"=>0}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_blocked_outcome failed
+
+# Flaky keeps its aggregate classification and retry history; it cannot become a pass.
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r["suites"][0]["specs"][0]["tests"][0]; t["status"]="flaky"; t["results"]=[{"status"=>"failed"},{"status"=>"passed"}]; r["stats"]={"expected"=>0,"skipped"=>0,"unexpected"=>0,"flaky"=>1}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_blocked_outcome flaky
+
+# Skips remain blocked outcomes, while unknown/malformed attempt states fail closed.
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r["suites"][0]["specs"][0]["tests"][0]; t["status"]="skipped"; t["results"]=[{"status"=>"skipped"}]; r["stats"]={"expected"=>0,"skipped"=>1,"unexpected"=>0,"flaky"=>0}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_blocked_outcome skipped
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["suites"][0]["specs"][0]["tests"][0]["results"][0]["status"]="mystery"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error case_status_invalid
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["suites"][0]["specs"][0]["tests"][0]["status"]="mystery"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error case_status_invalid
+
+# Reporter errors and inconsistent summary counts are explicit blocked evidence.
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["errors"]=[{"message"=>"synthetic reporter failure"}]; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error reporter_errors_present
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["stats"]["expected"]=0; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error report_count_mismatch
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["errors"]="malformed"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error report_shape_invalid
 
 echo 'case evidence contract: schema, bindings, exact identity sets, status counts and sanitization fixtures passed'

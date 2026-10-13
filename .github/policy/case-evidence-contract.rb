@@ -155,7 +155,24 @@ end
 
 def playwright_cases(report, phase, runner, config, tier, platform, repo_root, expected_project)
   reject!('report_shape_invalid') unless report.is_a?(Hash) && report['suites'].is_a?(Array)
+  if report.key?('errors')
+    reject!('report_shape_invalid') unless report['errors'].is_a?(Array)
+    report['errors'].each do |error|
+      reject!('report_shape_invalid') unless error.is_a?(Hash) && error['message'].is_a?(String) && !error['message'].empty?
+      reject!('report_shape_invalid') if error.key?('stack') && !error['stack'].is_a?(String)
+    end
+    reject!('reporter_errors_present') unless report['errors'].empty?
+  end
+  if report.key?('stats')
+    stats = report['stats']
+    reject!('report_shape_invalid') unless stats.is_a?(Hash)
+    status_counts = %w[expected skipped unexpected flaky]
+    if status_counts.any? { |key| stats.key?(key) }
+      reject!('report_count_mismatch') unless status_counts.all? { |key| stats[key].is_a?(Integer) && stats[key] >= 0 }
+    end
+  end
   cases = []
+  outcomes = []
   walk = lambda do |suites, inherited_file, ancestors|
     suites.each do |suite|
       reject!('report_shape_invalid') unless suite.is_a?(Hash)
@@ -172,21 +189,38 @@ def playwright_cases(report, phase, runner, config, tier, platform, repo_root, e
           reject!('report_project_mismatch') unless test['projectName'] == expected_project
           results = test.fetch('results', [])
           reject!('report_shape_invalid') unless results.is_a?(Array)
-          status = if phase == 'discovery'
-                     'discovered'
-                   elsif results.length > 1 && results.any? { |result| result.is_a?(Hash) && result['status'] != 'passed' }
-                     'flaky'
-                   elsif results.length.positive?
-                     results.last.is_a?(Hash) ? results.last['status'] : nil
-                   else
-                     test['status']
-                   end
+          if phase == 'execution'
+            reject!('report_shape_invalid') unless test['status'].is_a?(String)
+            results.each do |result|
+              reject!('report_shape_invalid') unless result.is_a?(Hash) && result['status'].is_a?(String)
+              status_for(result['status'], 'playwright', phase)
+            end
+            status = status_for(test['status'], 'playwright', phase)
+            reject!('report_shape_invalid') if results.empty? && status != 'skipped'
+            if status == 'flaky'
+              attempt_statuses = results.map { |result| status_for(result['status'], 'playwright', phase) }
+              reject!('report_status_mismatch') unless attempt_statuses.length > 1 &&
+                attempt_statuses.include?('passed') && attempt_statuses.any? { |attempt| attempt != 'passed' }
+            end
+            if status == 'passed'
+              reject!('report_status_mismatch') unless results.all? do |result|
+                status_for(result['status'], 'playwright', phase) == 'passed'
+              end
+            elsif status == 'skipped'
+              reject!('report_status_mismatch') unless results.all? do |result|
+                status_for(result['status'], 'playwright', phase) == 'skipped'
+              end
+            end
+          else
+            status = 'discovered'
+          end
           title = (chain + [spec['title']]).join(' > ')
           case_file = spec['file'] || file
           app_root = runner == 'playwright-desktop' ? 'taurine-desktop/' : 'taurine-mobile/'
           case_file = "#{app_root}#{case_file}" unless Pathname.new(case_file).absolute? || case_file.start_with?(app_root)
           cases << case_record(runner, config, tier, platform, test['projectName'], case_file,
             title, status, 'playwright', phase, repo_root)
+          outcomes << status if phase == 'execution'
         end
       end
       children = suite.fetch('suites', [])
@@ -195,6 +229,14 @@ def playwright_cases(report, phase, runner, config, tier, platform, repo_root, e
     end
   end
   walk.call(report['suites'], nil, [])
+  if phase == 'execution' && report['stats'].is_a?(Hash) && %w[expected skipped unexpected flaky].all? { |key| report['stats'].key?(key) }
+    counts = outcomes.tally
+    expected = {
+      'expected' => counts.fetch('passed', 0), 'skipped' => counts.fetch('skipped', 0),
+      'unexpected' => counts.fetch('failed', 0), 'flaky' => counts.fetch('flaky', 0)
+    }
+    reject!('report_count_mismatch') unless expected.all? { |key, value| report['stats'][key] == value }
+  end
   cases
 end
 
@@ -305,7 +347,9 @@ begin
   discovery_ids = discovery.map { |item| item.fetch('case_id') }.sort
   execution_ids = execution.map { |item| item.fetch('case_id') }.sort
   reject!('discovery_execution_mismatch') unless discovery_ids == execution_ids
-  puts JSON.generate(sanitize_result(discovery, execution))
+  result = sanitize_result(discovery, execution)
+  puts JSON.generate(result)
+  exit 1 if result.fetch('status') == 'shadow_blocked'
 rescue ContractError => error
   puts JSON.generate({ 'schema_version' => 1, 'status' => 'shadow_blocked', 'error_class' => error.code })
   exit 1
