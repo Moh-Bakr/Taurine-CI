@@ -24,12 +24,26 @@ expect_policy_rejects() {
 reset_fixture
 ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
 
-# The complete live roster is required; a stale 12-arm identity contract must
-# fail because `engine=all` would otherwise select a different set of arms.
+# A stale 11-arm identity contract remains invalid: old12 and new13 are the
+# only explicit complete rollout states.
 reset_fixture
-ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
   "${work}/tree/.github/ci-matrix.json"
-expect_policy_rejects 'stale 12-arm live roster'
+expect_policy_rejects 'stale 11-arm live roster'
+
+# Both complete rollout states are explicit policy contracts: Stage 1 active old12,
+# Stage 2 exact new13. A proper subset of new13 missing any old arm is never allowed.
+new13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
+reset_fixture
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=JSON.parse(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json" "${new13}"
+ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+for missing in doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion; do
+  reset_fixture
+  ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); options=data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]; options << "tls-legacy"; options.delete(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
+    "${work}/tree/.github/ci-matrix.json" "${missing}"
+  expect_policy_rejects "new13 missing mandatory old arm ${missing}"
+done
 
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"] << "unreviewed"; File.write(path,JSON.pretty_generate(data))' \
