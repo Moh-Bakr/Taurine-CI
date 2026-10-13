@@ -50,16 +50,25 @@ end
 require_fixture(bindings.map { |binding| binding['runner_id'] }.sort == expected_runners.keys.sort, 'runner set')
 
 all_pass = EXPECTED.fetch('all_pass')
-require_fixture(all_pass.is_a?(Hash) && all_pass.keys.sort == %w[cases config expected_outcome file file_suite platform projects tier].sort &&
+require_fixture(all_pass.is_a?(Hash) && all_pass.keys.sort == %w[cases config expected_outcome file platform scopes].sort &&
   all_pass['config'] == 'all-pass.config.cjs' && all_pass['file'] == 'all-pass.spec.cjs' &&
-  all_pass['projects'] == %w[smoke critical] && all_pass['tier'] == 'feedback' &&
   all_pass['platform'] == 'linux' && all_pass['expected_outcome'] == 'passed', 'all-pass scope')
-file_suite = all_pass.fetch('file_suite')
-require_fixture(file_suite.is_a?(Hash) && file_suite.keys.sort == %w[file identity_uses title].sort &&
-  file_suite['title'] == 'all-pass.spec.cjs' && file_suite['file'].end_with?('/all-pass.spec.cjs') &&
-  file_suite['title'] != file_suite['file'] && file_suite['title'] == File.basename(file_suite['file']) &&
-  file_suite['identity_uses'] == 'file',
-  'distinct file suite title/path regression')
+expected_scopes = [
+  ['playwright-desktop', 'desktop-playwright-projects', 'smoke', 'feedback', 'taurine-desktop'],
+  ['playwright-desktop', 'desktop-playwright-projects', 'critical', 'feedback', 'taurine-desktop'],
+  ['playwright-mobile', 'mobile-playwright-projects', 'smoke', 'smoke', 'taurine-mobile'],
+  ['playwright-mobile', 'mobile-playwright-projects', 'critical', 'critical', 'taurine-mobile']
+]
+require_fixture(all_pass['scopes'].is_a?(Array) && all_pass['scopes'].length == expected_scopes.length, 'all-pass scope count')
+all_pass['scopes'].each do |scope|
+  require_fixture(scope.is_a?(Hash) && scope.keys.sort == %w[app_file config_id file_suite_title project runner_id tier].sort, 'all-pass scope shape')
+  expected = expected_scopes.find { |row| row == [scope['runner_id'], scope['config_id'], scope['project'], scope['tier'], scope['app_file'].to_s.split('/').first] }
+  require_fixture(expected && scope['app_file'] == "#{expected[4]}/.case-evidence-fixtures/all-pass.spec.cjs", 'adapter-specific all-pass scope')
+  require_fixture(scope['file_suite_title'] == File.basename(scope['app_file']) && scope['file_suite_title'] != scope['app_file'],
+    'file suite title/path distinction')
+end
+require_fixture(all_pass['scopes'].map { |scope| [scope['runner_id'], scope['project']] }.sort ==
+  expected_scopes.map { |row| row.first(1) + [row[2]] }.sort, 'all-pass project registry')
 require_fixture(all_pass['cases'].is_a?(Array) && all_pass['cases'].length == 3, 'all-pass case count')
 all_pass_source = File.binread(File.join(FIXTURE_DIR, all_pass['file']))
 all_pass_source = all_pass_source.force_encoding(Encoding::UTF_8)
@@ -90,44 +99,62 @@ end
 require_fixture(identity_rows.uniq.length == identity_rows.length, 'cross-project all-pass identity')
 
 duplicate = EXPECTED.fetch('duplicate_identity')
-require_fixture(duplicate.is_a?(Hash) && duplicate.keys.sort == %w[config copies describe expected_disposition file project title].sort &&
+require_fixture(duplicate.is_a?(Hash) && duplicate.keys.sort == %w[config expected_disposition expected_normalized_title expected_phase file paths project].sort &&
   duplicate['config'] == 'duplicate-identity.config.cjs' && duplicate['file'] == 'duplicate-identity.spec.cjs' &&
-  duplicate['project'] == 'smoke' && duplicate['copies'] == 2 &&
-  duplicate['expected_disposition'] == 'duplicate_case_identity', 'duplicate fixture scope')
+  duplicate['project'] == 'smoke' && duplicate['expected_disposition'] == 'duplicate_case_identity' &&
+  duplicate['expected_phase'] == 'control_identity_normalization' && duplicate['paths'].is_a?(Array) && duplicate['paths'].length == 2,
+  'duplicate fixture scope')
 duplicate_source = File.binread(File.join(FIXTURE_DIR, duplicate.fetch('file')))
-require_fixture(duplicate_source.scan("test('same case identity'").length == 2 && duplicate_source.include?(duplicate.fetch('describe').first),
-  'duplicate fixture source')
+normalized_titles = duplicate['paths'].map do |path|
+  require_fixture(path.is_a?(Hash) && path.keys.sort == %w[describe title].sort && path['describe'].is_a?(Array), 'duplicate path shape')
+  require_fixture(path['describe'].all? { |part| !part.empty? } && !path['title'].empty?, 'nonempty path parts')
+  (path['describe'] + [path['title']]).join(' > ')
+end
+require_fixture(normalized_titles.uniq.length == 1 && normalized_titles.first == duplicate['expected_normalized_title'],
+  'joined title collision')
+require_fixture(duplicate_source.include?("test('part > leaf'") && duplicate_source.include?("test('leaf'") &&
+  duplicate_source.include?("test.describe('duplicate group > part'"), 'duplicate fixture source')
 bindings.each do |binding|
   tier = binding.fetch('runner_id') == 'playwright-desktop' ? 'feedback' : 'smoke'
   app = binding.fetch('runner_id') == 'playwright-desktop' ? 'taurine-desktop' : 'taurine-mobile'
-  title = (duplicate.fetch('describe') + [duplicate.fetch('title')]).join(' > ')
+  title = normalized_titles.first
   identity = [binding.fetch('runner_id'), binding.fetch('config_id'), tier, 'linux', duplicate.fetch('project'),
     "#{app}/.case-evidence-fixtures/#{duplicate.fetch('file')}", '', '', title]
-  ids = Array.new(duplicate.fetch('copies')) { Digest::SHA256.hexdigest(JSON.generate(identity)) }
+  ids = normalized_titles.map { |normalized| Digest::SHA256.hexdigest(JSON.generate(identity[0, 8] + [normalized])) }
   require_fixture(ids.uniq.length == 1 && ids.length == 2, 'duplicate normalized identity collision')
 end
 
 outcomes = EXPECTED.fetch('outcomes')
-require_fixture(outcomes.is_a?(Hash) && outcomes.keys.sort == %w[cases config file project].sort &&
-  outcomes['config'] == 'outcomes.config.cjs' && outcomes['file'] == 'outcomes.spec.cjs' && outcomes['project'] == 'smoke',
-  'outcome fixture scope')
-outcome_source = File.binread(File.join(FIXTURE_DIR, outcomes.fetch('file')))
+require_fixture(outcomes.is_a?(Array) && outcomes.length == 2, 'outcome fixture scope count')
 expected_outcomes = {
-  'expected failure' => ['failed', ['failed'], 'expected', 'passed'],
-  'unexpected pass' => ['failed', ['passed'], 'unexpected', 'blocked'],
-  'flaky retry' => ['passed', %w[failed passed], 'flaky', 'blocked'],
-  'intentional skip' => ['skipped', [], 'skipped', 'blocked']
+  'expected failure' => ['failed', ['failed'], 'expected', 'passed', 0, 'outcomes.spec.cjs'],
+  'unexpected pass' => ['failed', ['passed'], 'unexpected', 'blocked', 0, 'outcomes.spec.cjs'],
+  'intentional skip' => ['skipped', [], 'skipped', 'blocked', 0, 'outcomes.spec.cjs'],
+  'flaky retry' => ['passed', %w[failed passed], 'flaky', 'blocked', 1, 'flaky.spec.cjs']
 }
-require_fixture(outcomes['cases'].is_a?(Array) && outcomes['cases'].length == expected_outcomes.length, 'outcome case count')
-outcomes['cases'].each do |entry|
-  require_fixture(entry.is_a?(Hash) && entry.keys.sort == %w[aggregate attempts describe disposition expected_status title].sort,
-    'outcome case shape')
-  require_fixture(expected_outcomes[entry['title']] == [entry['expected_status'], entry['attempts'], entry['aggregate'], entry['disposition']],
-    'outcome expectation')
-  require_fixture(outcome_source.include?(entry['title']), 'outcome source title')
+seen_outcome_titles = []
+outcomes.each do |outcome_group|
+  require_fixture(outcome_group.is_a?(Hash) && outcome_group.keys.sort == %w[cases config file project retries].sort &&
+    outcome_group['project'] == 'smoke' && outcome_group['config'] == (outcome_group['file'] == 'flaky.spec.cjs' ? 'flaky.config.cjs' : 'outcomes.config.cjs'),
+    'outcome group shape')
+  outcome_source = File.binread(File.join(FIXTURE_DIR, outcome_group.fetch('file')))
+  require_fixture(outcome_group['cases'].is_a?(Array), 'outcome cases')
+  outcome_group['cases'].each do |entry|
+    require_fixture(entry.is_a?(Hash) && entry.keys.sort == %w[aggregate attempts describe disposition expected_status title].sort,
+      'outcome case shape')
+    expected = expected_outcomes[entry['title']]
+    require_fixture(expected == [entry['expected_status'], entry['attempts'], entry['aggregate'], entry['disposition'], outcome_group['retries'], outcome_group['file']],
+      'outcome expectation/retry policy')
+    require_fixture(outcome_source.include?(entry['title']), 'outcome source title')
+    seen_outcome_titles << entry['title']
+  end
 end
-require_fixture(outcome_source.include?('test.fail();') && outcome_source.include?('testInfo.retry === 0') &&
-  outcome_source.include?("test.skip('intentional skip'"), 'outcome source behavior')
+outcome_source = File.binread(File.join(FIXTURE_DIR, 'outcomes.spec.cjs'))
+flaky_source = File.binread(File.join(FIXTURE_DIR, 'flaky.spec.cjs'))
+require_fixture(seen_outcome_titles.sort == expected_outcomes.keys.sort && outcome_source.include?('test.fail();') &&
+  outcome_source.include?("test.skip('intentional skip'") && flaky_source.include?('testInfo.retry === 0') &&
+  File.binread(File.join(FIXTURE_DIR, 'outcomes.config.cjs')).include?('retries: 0') &&
+  File.binread(File.join(FIXTURE_DIR, 'flaky.config.cjs')).include?('retries: 1'), 'outcome source retry behavior')
 
 callback = EXPECTED.fetch('callback_failure')
 callback_source = File.binread(File.join(FIXTURE_DIR, callback.fetch('reporter')))

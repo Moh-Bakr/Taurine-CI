@@ -5,7 +5,7 @@
 module.exports = {
   testDir: __dirname,
   testMatch: ['outcomes.spec.cjs'],
-  retries: 1,
+  retries: 0,
   reporter: 'json',
   projects: [{ name: 'smoke' }]
 };

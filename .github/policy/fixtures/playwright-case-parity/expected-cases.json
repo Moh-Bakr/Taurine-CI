@@ -25,14 +25,13 @@
   "all_pass": {
     "config": "all-pass.config.cjs",
     "file": "all-pass.spec.cjs",
-    "file_suite": {
-      "title": "all-pass.spec.cjs",
-      "file": "taurine-desktop/.case-evidence-fixtures/all-pass.spec.cjs",
-      "identity_uses": "file"
-    },
-    "tier": "feedback",
     "platform": "linux",
-    "projects": ["smoke", "critical"],
+    "scopes": [
+      {"runner_id": "playwright-desktop", "config_id": "desktop-playwright-projects", "project": "smoke", "tier": "feedback", "app_file": "taurine-desktop/.case-evidence-fixtures/all-pass.spec.cjs", "file_suite_title": "all-pass.spec.cjs"},
+      {"runner_id": "playwright-desktop", "config_id": "desktop-playwright-projects", "project": "critical", "tier": "feedback", "app_file": "taurine-desktop/.case-evidence-fixtures/all-pass.spec.cjs", "file_suite_title": "all-pass.spec.cjs"},
+      {"runner_id": "playwright-mobile", "config_id": "mobile-playwright-projects", "project": "smoke", "tier": "smoke", "app_file": "taurine-mobile/.case-evidence-fixtures/all-pass.spec.cjs", "file_suite_title": "all-pass.spec.cjs"},
+      {"runner_id": "playwright-mobile", "config_id": "mobile-playwright-projects", "project": "critical", "tier": "critical", "app_file": "taurine-mobile/.case-evidence-fixtures/all-pass.spec.cjs", "file_suite_title": "all-pass.spec.cjs"}
+    ],
     "cases": [
       {"describe": ["outer group", "inner group"], "title": "parameterized value alpha"},
       {"describe": ["outer group", "inner group"], "title": "parameterized value beta"},
@@ -44,22 +43,36 @@
     "config": "duplicate-identity.config.cjs",
     "file": "duplicate-identity.spec.cjs",
     "project": "smoke",
-    "describe": ["duplicate group"],
-    "title": "same case identity",
-    "copies": 2,
-    "expected_disposition": "duplicate_case_identity"
+    "paths": [
+      {"describe": ["duplicate group"], "title": "part > leaf"},
+      {"describe": ["duplicate group > part"], "title": "leaf"}
+    ],
+    "expected_normalized_title": "duplicate group > part > leaf",
+    "expected_disposition": "duplicate_case_identity",
+    "expected_phase": "control_identity_normalization"
   },
-  "outcomes": {
+  "outcomes": [
+    {
     "config": "outcomes.config.cjs",
     "file": "outcomes.spec.cjs",
     "project": "smoke",
+    "retries": 0,
     "cases": [
       {"describe": ["outcome group"], "title": "expected failure", "expected_status": "failed", "attempts": ["failed"], "aggregate": "expected", "disposition": "passed"},
       {"describe": ["outcome group"], "title": "unexpected pass", "expected_status": "failed", "attempts": ["passed"], "aggregate": "unexpected", "disposition": "blocked"},
-      {"describe": ["outcome group"], "title": "flaky retry", "expected_status": "passed", "attempts": ["failed", "passed"], "aggregate": "flaky", "disposition": "blocked"},
       {"describe": ["outcome group"], "title": "intentional skip", "expected_status": "skipped", "attempts": [], "aggregate": "skipped", "disposition": "blocked"}
     ]
-  },
+    },
+    {
+      "config": "flaky.config.cjs",
+      "file": "flaky.spec.cjs",
+      "project": "smoke",
+      "retries": 1,
+      "cases": [
+        {"describe": ["flaky group"], "title": "flaky retry", "expected_status": "passed", "attempts": ["failed", "passed"], "aggregate": "flaky", "disposition": "blocked"}
+      ]
+    }
+  ],
   "callback_failure": {
     "reporter": "callback-failure-reporter.cjs",
     "callback": "onBegin",
