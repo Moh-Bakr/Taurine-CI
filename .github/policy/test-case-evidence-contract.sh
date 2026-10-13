@@ -55,7 +55,7 @@ write_playwright() {
       "tests"=>[{"projectName"=>project,"status"=>"discovered","results"=>[]}]}]}]}
     execution_report={"stats"=>{"expected"=>1,"skipped"=>0,"unexpected"=>0,"flaky"=>0},
       "suites"=>[{"file"=>file,"specs"=>[{"title"=>"loads API","file"=>file,
-      "tests"=>[{"projectName"=>project,"status"=>"expected","results"=>[{"status"=>"passed"}]}]}]}]}
+      "tests"=>[{"projectName"=>project,"status"=>"expected","expectedStatus"=>"passed","results"=>[{"status"=>"passed"}]}]}]}]}
     identity=[runner,config,tier,platform,project,"taurine-desktop/#{file}","","","loads API"]
     case_id=Digest::SHA256.hexdigest(JSON.generate(identity))
     expected={"schema_version"=>1,"source_sha"=>source,"control_sha"=>control,"manifest_digest"=>manifest,
@@ -195,7 +195,7 @@ expect_blocked_outcome flaky
 
 # Skips remain blocked outcomes, while unknown/malformed attempt states fail closed.
 write_playwright
-ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r["suites"][0]["specs"][0]["tests"][0]; t["status"]="skipped"; t["results"]=[{"status"=>"skipped"}]; r["stats"]={"expected"=>0,"skipped"=>1,"unexpected"=>0,"flaky"=>0}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r["suites"][0]["specs"][0]["tests"][0]; t["status"]="skipped"; t["expectedStatus"]="skipped"; t["results"]=[{"status"=>"skipped"}]; r["stats"]={"expected"=>0,"skipped"=>1,"unexpected"=>0,"flaky"=>0}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
 expect_blocked_outcome skipped
 write_playwright
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["suites"][0]["specs"][0]["tests"][0]["results"][0]["status"]="mystery"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
@@ -212,7 +212,25 @@ write_playwright
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["stats"]["expected"]=0; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
 expect_error report_count_mismatch
 write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["stats"]={}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error report_count_mismatch
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["stats"]={"expected"=>1}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error report_count_mismatch
+write_playwright
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["errors"]="malformed"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
 expect_error report_shape_invalid
+
+# An expected failure is a passing aggregate only when its declared expectation matches every attempt.
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r["suites"][0]["specs"][0]["tests"][0]; t["expectedStatus"]="failed"; t["results"]=[{"status"=>"failed"}]; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expected_failure="$(run_contract)"
+jq -e '.status == "shadow_valid_unverified_producer" and .counts.passed == 1 and .counts.failed == 0' <<<"${expected_failure}" >/dev/null
+! grep -Eq 'loads API|api\.spec\.ts|"case_id"|[a-f0-9]{64}' <<<"${expected_failure}" || {
+  echo 'expected-failure result leaked a raw identity' >&2; exit 1;
+}
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["suites"][0]["specs"][0]["tests"][0]["expectedStatus"]="failed"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error report_status_mismatch
 
 echo 'case evidence contract: schema, bindings, exact identity sets, status counts and sanitization fixtures passed'

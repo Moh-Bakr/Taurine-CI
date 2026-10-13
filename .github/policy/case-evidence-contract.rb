@@ -114,6 +114,14 @@ def status_for(value, kind, phase)
   reject!('case_status_invalid')
 end
 
+def expected_playwright_attempt_status(value)
+  reject!('expected_status_invalid') unless %w[passed failed timedOut skipped interrupted].include?(value)
+  return 'passed' if value == 'passed'
+  return 'skipped' if value == 'skipped'
+
+  'failed'
+end
+
 def case_record(runner, config, tier, platform, project, file, title, status, kind, phase, repo_root)
   reject!('case_title_invalid') unless title.is_a?(String) && !title.empty? && title.bytesize <= 8192 && !title.include?("\0")
   reject!('case_project_invalid') unless project.nil? || (project.is_a?(String) && !project.empty? && project.bytesize <= 256)
@@ -166,8 +174,8 @@ def playwright_cases(report, phase, runner, config, tier, platform, repo_root, e
   if report.key?('stats')
     stats = report['stats']
     reject!('report_shape_invalid') unless stats.is_a?(Hash)
-    status_counts = %w[expected skipped unexpected flaky]
-    if status_counts.any? { |key| stats.key?(key) }
+    if phase == 'execution'
+      status_counts = %w[expected skipped unexpected flaky]
       reject!('report_count_mismatch') unless status_counts.all? { |key| stats[key].is_a?(Integer) && stats[key] >= 0 }
     end
   end
@@ -195,21 +203,21 @@ def playwright_cases(report, phase, runner, config, tier, platform, repo_root, e
               reject!('report_shape_invalid') unless result.is_a?(Hash) && result['status'].is_a?(String)
               status_for(result['status'], 'playwright', phase)
             end
+            expected_status = expected_playwright_attempt_status(test.fetch('expectedStatus', 'passed'))
             status = status_for(test['status'], 'playwright', phase)
             reject!('report_shape_invalid') if results.empty? && status != 'skipped'
+            attempt_statuses = results.map { |result| status_for(result['status'], 'playwright', phase) }
             if status == 'flaky'
-              attempt_statuses = results.map { |result| status_for(result['status'], 'playwright', phase) }
+              reject!('report_status_mismatch') if expected_status == 'skipped'
               reject!('report_status_mismatch') unless attempt_statuses.length > 1 &&
-                attempt_statuses.include?('passed') && attempt_statuses.any? { |attempt| attempt != 'passed' }
+                attempt_statuses.last == expected_status && attempt_statuses[0...-1].any? { |attempt| attempt != expected_status }
             end
             if status == 'passed'
-              reject!('report_status_mismatch') unless results.all? do |result|
-                status_for(result['status'], 'playwright', phase) == 'passed'
-              end
+              reject!('report_status_mismatch') if expected_status == 'skipped'
+              reject!('report_status_mismatch') unless attempt_statuses.all? { |attempt| attempt == expected_status }
             elsif status == 'skipped'
-              reject!('report_status_mismatch') unless results.all? do |result|
-                status_for(result['status'], 'playwright', phase) == 'skipped'
-              end
+              reject!('report_status_mismatch') unless expected_status == 'skipped'
+              reject!('report_status_mismatch') unless attempt_statuses.all? { |attempt| attempt == 'skipped' }
             end
           else
             status = 'discovered'
