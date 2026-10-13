@@ -86,6 +86,17 @@ git_row="$(grep '^| git |' <<<"${vitest_section}" | head -1)"
   exit 1
 }
 
+# Different coverage groups may have different selection digests, while still
+# belonging to the same source/control/catalog/manifest authority.
+different_group_selections="$(jq -c \
+  '.["evidence_e2e-regression-1"] |= (fromjson | .selection_digest = ("7" * 64) | tojson) |
+   .["evidence_e2e-regression-2"] |= (fromjson | .selection_digest = ("7" * 64) | tojson)' \
+  <<<"${evidence}")"
+if ! printf '%s' "${different_group_selections}" | ruby .github/policy/suite-overview.rb "${matrix}" - >/dev/null; then
+  echo 'overview: rejected distinct valid selection digests across coverage groups' >&2
+  exit 1
+fi
+
 # An unreviewed field anywhere in a projection is refused.
 tampered="$(jq -c '.["evidence_desktop-shard-1"] |= (fromjson | .raw_report_excerpt = "SYNTHETIC-PRIVATE" | tojson)' <<<"${evidence}")"
 if printf '%s' "${tampered}" | ruby .github/policy/suite-overview.rb "${matrix}" - >/dev/null 2>&1; then
@@ -93,12 +104,44 @@ if printf '%s' "${tampered}" | ruby .github/policy/suite-overview.rb "${matrix}"
   exit 1
 fi
 
-# Projections of one run that disagree on the source SHA are refused.
-conflicting="$(jq -c '.["evidence_desktop-shard-2"] |= (fromjson | .source_sha = "1111111111111111111111111111111111111112" | tojson)' <<<"${evidence}")"
-if printf '%s' "${conflicting}" | ruby .github/policy/suite-overview.rb "${matrix}" - >/dev/null 2>&1; then
-  echo 'overview: accepted conflicting source identities' >&2
-  exit 1
-fi
+# Projections from different groups in one export must share all run-wide
+# authority fields. Mutate both regression shards so the per-group check alone
+# cannot catch the disagreement.
+mutate_regression_identity() {
+  jq -c --arg field "$1" --arg value "$2" \
+    '.["evidence_e2e-regression-1"] |= (fromjson | .[$field] = $value | tojson) |
+     .["evidence_e2e-regression-2"] |= (fromjson | .[$field] = $value | tojson)' \
+    <<<"${evidence}"
+}
+for field in source_sha control_sha manifest_digest catalog_digest; do
+  case "${field}" in
+    source_sha) value=1111111111111111111111111111111111111112 ;;
+    control_sha) value=2222222222222222222222222222222222222223 ;;
+    manifest_digest) value=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+    catalog_digest) value=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
+  esac
+  conflicting="$(mutate_regression_identity "${field}" "${value}")"
+  if printf '%s' "${conflicting}" | ruby .github/policy/suite-overview.rb "${matrix}" - >/dev/null 2>&1; then
+    echo "overview: accepted cross-group ${field} mismatch" >&2
+    exit 1
+  fi
+done
+
+# Common authority fields must also be present and correctly shaped.
+for field in source_sha control_sha manifest_digest catalog_digest; do
+  missing="$(jq -c --arg field "${field}" \
+    '.["evidence_e2e-regression-1"] |= (fromjson | del(.[$field]) | tojson)' <<<"${evidence}")"
+  nullable="$(jq -c --arg field "${field}" \
+    '.["evidence_e2e-regression-1"] |= (fromjson | .[$field] = null | tojson)' <<<"${evidence}")"
+  malformed="$(jq -c --arg field "${field}" \
+    '.["evidence_e2e-regression-1"] |= (fromjson | .[$field] = "not-a-digest" | tojson)' <<<"${evidence}")"
+  for invalid in "${missing}" "${nullable}" "${malformed}"; do
+    if printf '%s' "${invalid}" | ruby .github/policy/suite-overview.rb "${matrix}" - >/dev/null 2>&1; then
+      echo "overview: accepted missing or malformed ${field}" >&2
+      exit 1
+    fi
+  done
+done
 
 # The collector writes a bare projection, while the overview consumes the run's
 # exported wrapper shape - the concern workflow wraps before rendering. Feeding

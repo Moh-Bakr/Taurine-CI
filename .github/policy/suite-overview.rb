@@ -33,6 +33,12 @@ ROW_KEYS = %w[
 ].sort.freeze
 STATUSES = %w[passed failed blocked not_selected absent].freeze
 COUNT_KEYS = %w[discovered_count owned_count executed_count compiled_count ignored_count quarantined_count env_skipped_count].freeze
+RUN_IDENTITY_PATTERNS = {
+  'source_sha' => /\A[0-9a-f]{40}\z/,
+  'control_sha' => /\A[0-9a-f]{40}\z/,
+  'manifest_digest' => /\A[0-9a-f]{64}\z/,
+  'catalog_digest' => /\A[0-9a-f]{64}\z/
+}.freeze
 
 def sort_json(value)
   case value
@@ -57,6 +63,24 @@ def parse_projection(text)
       COUNT_KEYS.all? { |key| row[key].is_a?(Integer) && row[key] >= 0 }
   end
   projection
+end
+
+# All projections in one export must describe the same source/control run and
+# the same reviewed source manifest/catalog. Selection and collection digests
+# are group/projection-specific, so merge_group validates those separately.
+def validate_run_identity!(projections)
+  expected = {}
+  projections.each do |projection|
+    RUN_IDENTITY_PATTERNS.each do |key, pattern|
+      value = projection[key]
+      reject_overview!('identity') unless value.is_a?(String) && pattern.match?(value)
+      if expected.key?(key)
+        reject_overview!('identity') unless expected[key] == value
+      else
+        expected[key] = value
+      end
+    end
+  end
 end
 
 # Merge the shard projections of one coverage group into one view. Counts sum;
@@ -122,6 +146,7 @@ begin
     exit 0
   end
 
+  validate_run_identity!(projections)
   by_group = projections.group_by { |projection| projection['coverage_requirement_id'] }
   first = projections.first
   puts "- Source SHA: `#{first['source_sha']}`"
