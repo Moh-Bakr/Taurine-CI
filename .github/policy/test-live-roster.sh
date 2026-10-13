@@ -30,16 +30,30 @@ arms="$(sed -n 's/^arms=//p' "${work}/output")"
   echo 'live roster fixture: planning step omitted roster or arms' >&2
   exit 1
 }
-jq -e '
-  type == "object" and
-  (keys | sort) == (["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "bastion"] | sort) and
-  (."pg-dbx".suites == ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
-  (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string"))
-' <<< "${roster}" >/dev/null
-jq -e --argjson selected "${arms}" '
-  $selected == ["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "bastion"]
-' <<< "${roster}" >/dev/null
 contract_arms="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options' .github/ci-matrix.json)"
+old12='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","bastion"]'
+new13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
+if [[ "${contract_arms}" != "${old12}" && "${contract_arms}" != "${new13}" ]]; then
+  echo 'live roster fixture: dispatch contract is neither the complete approved old12 nor new13' >&2
+  exit 1
+fi
+jq -e --argjson expected "${contract_arms}" --argjson selected "${arms}" '
+  type == "object" and
+  (keys | sort) == ($expected | sort) and
+  $selected == $expected and
+  (."pg-dbx".suites == ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
+  (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string")) and
+  (if has("tls-legacy") then
+     .pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"] and
+     .pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and
+     ."tls-legacy".report == false and
+     ."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"] and
+     ."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"]
+   else
+     .pgtls.suites == ["taurine-db-postgres live_tls"] and
+     ((.pgtls | has("cargo_features")) | not)
+   end)
+' <<< "${roster}" >/dev/null
 [[ "${contract_arms}" == "${arms}" ]] || {
   echo 'live roster fixture: dispatch identity contract differs from the executed arm roster' >&2
   exit 1
@@ -65,4 +79,42 @@ grep -q 'parse error' "${work}/invalid-stderr" || {
   exit 1
 }
 
-echo 'live roster: extracted plan script parses all 12 arms and rejects invalid JSON'
+# Stage 1 keeps the active plan at old12, while this synthetic planner fixture
+# proves the exact complete 13-arm roster and legacy contract before Stage 2 changes
+# the dispatcher. When run later over the Stage 2 tree, use its real 13-arm plan
+# directly so this fixture never injects a duplicate arm.
+expected13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
+plan13="${work}/plan.sh"
+if [[ "${contract_arms}" == "${old12}" ]]; then
+  ruby -e '
+    path = ARGV.fetch(0)
+    script = File.read(path)
+    pattern = /(\n[ \t]*)\{"engine": "bastion"/
+    row = %q|{"engine": "tls-legacy", "report": false, "suites": ["taurine-db-conformance dbx_pg_tls_live legacy"], "cargo_features": ["taurine-db-dbx/legacy-tls"], "blurb": "synthetic compatibility fixture"}|
+    abort "live roster fixture: bastion roster entry missing" unless script.scan(pattern).length == 1
+    pgtls_pattern = /\{"engine": "pgtls", "report": false,\n[ \t]*"suites": \["taurine-db-postgres live_tls"\],\n[ \t]*"blurb": "[^"]*"\}/
+    pgtls = %q|{"engine": "pgtls", "report": false, "suites": ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"], "cargo_features": ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"], "blurb": "synthetic Stage 2 proof contract"}|
+    abort "live roster fixture: old pgtls entry missing" unless script.scan(pgtls_pattern).length == 1
+    script = script.sub(pgtls_pattern, pgtls)
+    File.write(ARGV.fetch(1), script.sub(pattern) { "#{Regexp.last_match(1)}#{row},#{Regexp.last_match(1)}{\"engine\": \"bastion\"" })
+  ' "${work}/plan.sh" "${work}/plan-13.sh"
+  plan13="${work}/plan-13.sh"
+fi
+RUNNER_TEMP="${work}" GITHUB_OUTPUT="${work}/output-13" \
+  REQUESTED_ENGINE=all REQUESTED_SOURCE_SHA="${source_sha}" \
+  bash "${plan13}" > "${work}/stdout-13"
+roster13="$(sed -n 's/^roster=//p' "${work}/output-13")"
+arms13="$(sed -n 's/^arms=//p' "${work}/output-13")"
+[[ "${arms13}" == "${expected13}" ]] || { echo 'live roster fixture: full plan did not select exact new13' >&2; exit 1; }
+jq -e --argjson expected "${expected13}" '
+  .pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"] and
+  .pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and
+  ."tls-legacy".report == false and
+  ."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"] and
+  ."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"] and
+  (keys | sort) == ($expected | sort)
+' <<< "${roster13}" >/dev/null || {
+  echo 'live roster fixture: new13 roster changed its exact targets/features or complete membership' >&2; exit 1;
+}
+
+echo 'live roster: active plan is exact old12 or new13; exact new13 selection and legacy contract; invalid JSON rejected'
