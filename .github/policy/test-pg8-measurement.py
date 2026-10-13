@@ -2,6 +2,8 @@
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +34,18 @@ class ContractTests(unittest.TestCase):
         wrong=self.artifact(); wrong["target"]["kind"]=["bin"]
         with self.assertRaises(ValueError): pg8.select_artifact([json.dumps(wrong)], self.root)
 
+    def test_malformed_artifact_records_are_ignored_without_type_errors(self):
+        for record in ("[]", "null", json.dumps({"reason":"compiler-artifact", "target":{"name":pg8.TARGET,"kind":None}, "package_id":[], "executable":str(self.exe)})):
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                pg8.select_artifact([record], self.root)
+
+    def test_cli_errors_never_echo_source_supplied_paths(self):
+        sentinel = str(self.root / "PRIVATE_SENTINEL_ARTIFACT_PATH")
+        result = subprocess.run([sys.executable, str(Path(__file__).with_name("pg8-measurement.py")), "release", sentinel, str(self.root)], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn(sentinel, result.stderr)
+        self.assertEqual(result.stderr, "PG8 measurement validation failed (invalid fixed input)\n")
+
     def test_outside_and_symlink_artifacts_rejected(self):
         outside=Path(self.tmp.name).parent / (self.root.name + "-outside")
         outside.write_text("#!/bin/sh\n"); outside.chmod(0o755)
@@ -43,7 +57,7 @@ class ContractTests(unittest.TestCase):
 
     def marker(self, mode="paired", extra=""):
         if mode == "paired":
-            return f"{pg8.MARKER} mode=paired warmups=5 samples=30 order=alternating connect_legacy_p50_us=10 connect_dbx_p50_us=10 connect_ratio_p50=1.0000 first_row_legacy_p50_us=10 first_row_dbx_p50_us=10 first_row_ratio_p50=1.0000 max_ratio=1.0000 passed=true{extra}"
+            return f"{pg8.MARKER} mode=paired warmups=5 samples=30 order=alternating connect_legacy_p50_us=10 connect_dbx_p50_us=10 connect_ratio_p50=1.0000 first_row_legacy_p50_us=10 first_row_dbx_p50_us=10 first_row_ratio_p50=1.0000 max_ratio=1.1000 passed=true{extra}"
         return f"{pg8.MARKER} mode={mode} warmups=5 samples=30 result=complete{extra}"
 
     def stdout(self, marker=None, counts="1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"):
@@ -57,12 +71,16 @@ class ContractTests(unittest.TestCase):
         cases=[(self.stdout().replace("running 1 test","SKIPPED"),"paired",0),
                (self.stdout(counts="0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out"),"paired",0),
                (self.stdout()+self.marker()+"\n","paired",0),
-               (self.stdout(self.marker().replace("max_ratio=1.0000","max_ratio=NaN")),"paired",0),
+               (self.stdout(self.marker().replace("max_ratio=1.1000","max_ratio=NaN")),"paired",0),
+               (self.stdout(self.marker().replace("max_ratio=1.1000","max_ratio=1.0900")),"paired",0),
+               (self.stdout(self.marker().replace("max_ratio=1.1000","max_ratio=1.1100")),"paired",0),
                (self.stdout(self.marker()+"\n"+self.marker()),"paired",0),
                (self.stdout(self.marker()),"paired",2),
                (self.stdout(self.marker("legacy")),"paired",0)]
         for output,mode,code in cases:
             with self.subTest(output=output[-90:]), self.assertRaises(ValueError): pg8.parse_probe(output,mode,code)
+        with self.assertRaises(ValueError): pg8.parse_probe(self.stdout(self.marker("unknown")), "unknown", 0)
+        with self.assertRaises(ValueError): pg8.parse_probe("x" * (pg8.MAX_PROBE_OUTPUT_CHARS + 1), "paired", 0)
 
     def test_release_requires_x86_64_elf_and_owned_path(self):
         elf=self.root/"release"
@@ -78,5 +96,6 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(pg8.parse_rss("Maximum resident set size (kbytes): 123\n",0),123)
         for text,code in [("",0),("Maximum resident set size (kbytes): 1\nMaximum resident set size (kbytes): 2\n",0),("Maximum resident set size (kbytes): 0\n",0),("Maximum resident set size (kbytes): 2\n",1)]:
             with self.subTest(text=text,code=code), self.assertRaises(ValueError): pg8.parse_rss(text,code)
+        with self.assertRaises(ValueError): pg8.parse_rss("x" * (pg8.MAX_RSS_OUTPUT_CHARS + 1), 0)
 
 if __name__ == "__main__": unittest.main()

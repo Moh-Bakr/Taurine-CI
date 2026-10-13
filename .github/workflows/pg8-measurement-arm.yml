@@ -50,6 +50,10 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Start the concern timer
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: start
       - name: Check out the exact private source SHA
         id: verified-source
         uses: ./.github/actions/source-checkout  # zizmor: ignore[self-repository]
@@ -60,6 +64,11 @@ jobs:
           repository-id: ${{ env.SOURCE_REPOSITORY_ID }}
           repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
           repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
+      - name: Start the egress audit
+        continue-on-error: true
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: start
       - name: Start the fixed PostgreSQL 17 Dbx fixture
         uses: ./.github/actions/live-start-pg  # zizmor: ignore[self-repository]
         with:
@@ -75,7 +84,7 @@ jobs:
       - name: Install locked desktop dependencies
         uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
         with:
-          root: 'false'
+          root: 'true'
           desktop: 'true'
           mobile: 'false'
           vendor-fetch: 'true'
@@ -86,3 +95,14 @@ jobs:
           path: src
       - name: Measure the fixed PG8 probe and UAT release binaries
         uses: ./.github/actions/pg8-measurement  # zizmor: ignore[self-repository]
+      - name: Report egress audit
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: report
+      - name: Report concern duration
+        if: ${{ always() }}
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: report

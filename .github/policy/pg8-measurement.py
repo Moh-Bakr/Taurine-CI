@@ -12,6 +12,16 @@ TARGET = "dbx_pg8_performance_live"
 PACKAGE = "taurine-db-conformance"
 TEST = "dbx_pg8_performance_probe"
 MARKER = "TAURINE_DBX_PG8_RESULT"
+MAX_CARGO_JSON_CHARS = 64 * 1024 * 1024
+MAX_PROBE_OUTPUT_CHARS = 1024 * 1024
+MAX_RSS_OUTPUT_CHARS = 64 * 1024
+
+
+def read_bounded(stream, limit):
+    value = stream.read(limit + 1)
+    if len(value) > limit:
+        raise ValueError("input exceeds the fixed parser size limit")
+    return value
 
 
 def contained_executable(path, target_dir):
@@ -33,11 +43,16 @@ def select_artifact(lines, target_dir):
             obj = json.loads(line)
         except (TypeError, json.JSONDecodeError):
             continue
+        if not isinstance(obj, dict):
+            continue
         if obj.get("reason") != "compiler-artifact":
             continue
         target = obj.get("target")
         package_id = obj.get("package_id", "")
-        if not isinstance(target, dict) or target.get("name") != TARGET or "test" not in target.get("kind", []):
+        kinds = target.get("kind") if isinstance(target, dict) else None
+        if not isinstance(target, dict) or target.get("name") != TARGET or not isinstance(kinds, list) or "test" not in kinds:
+            continue
+        if not isinstance(package_id, str):
             continue
         if not re.search(r"(?:^|#)" + re.escape(PACKAGE) + r"(?:@|$)", package_id):
             continue
@@ -51,6 +66,10 @@ def select_artifact(lines, target_dir):
 
 
 def parse_probe(stdout, mode, exit_code):
+    if mode not in {"paired", "legacy", "dbx"}:
+        raise ValueError("unknown fixed probe mode")
+    if len(stdout) > MAX_PROBE_OUTPUT_CHARS:
+        raise ValueError("probe output exceeds the fixed parser size limit")
     if exit_code != 0:
         raise ValueError("probe process failed")
     if re.search(r"(?m)^test .+ \.\.\. (?:ignored|skipped)(?: .*)?$", stdout, re.I) or "SKIPPED" in stdout:
@@ -79,6 +98,8 @@ def parse_probe(stdout, mode, exit_code):
                     "first_row_legacy_p50_us", "first_row_dbx_p50_us", "first_row_ratio_p50", "max_ratio", "passed"}
         if set(fields) != expected | {"mode", "warmups", "samples"} or fields.get("order") != "alternating" or fields.get("passed") != "true":
             raise ValueError("paired result fields or verdict are invalid")
+        if fields.get("max_ratio") != "1.1000":
+            raise ValueError("paired result does not carry the fixed regression budget")
         for key in expected - {"order", "passed"}:
             value = fields[key]
             if not re.fullmatch(r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)", value):
@@ -94,6 +115,8 @@ def parse_probe(stdout, mode, exit_code):
 
 
 def parse_rss(stdout, exit_code):
+    if len(stdout) > MAX_RSS_OUTPUT_CHARS:
+        raise ValueError("RSS output exceeds the fixed parser size limit")
     if exit_code != 0:
         raise ValueError("timed probe process failed")
     values = re.findall(r"(?m)^\s*Maximum resident set size \(kbytes\):\s*([0-9]+)\s*$", stdout)
@@ -114,13 +137,13 @@ def validate_release_executable(path, target_dir):
 def main(argv):
     command = argv[1]
     if command == "artifact":
-        print(select_artifact(sys.stdin, argv[2]))
+        print(select_artifact(read_bounded(sys.stdin, MAX_CARGO_JSON_CHARS).splitlines(), argv[2]))
     elif command == "release":
         print(validate_release_executable(argv[2], argv[3]))
     elif command == "probe":
-        print(json.dumps(parse_probe(sys.stdin.read(), argv[2], int(argv[3])), sort_keys=True))
+        print(json.dumps(parse_probe(read_bounded(sys.stdin, MAX_PROBE_OUTPUT_CHARS), argv[2], int(argv[3])), sort_keys=True))
     elif command == "rss":
-        print(parse_rss(sys.stdin.read(), int(argv[2])))
+        print(parse_rss(read_bounded(sys.stdin, MAX_RSS_OUTPUT_CHARS), int(argv[2])))
     else:
         raise ValueError("unknown fixed parser command")
 
@@ -129,5 +152,7 @@ if __name__ == "__main__":
     try:
         main(sys.argv)
     except (ValueError, OSError, IndexError) as exc:
-        print("PG8 measurement validation failed: " + str(exc), file=sys.stderr)
+        # Never echo parser exceptions: filesystem and JSON errors may contain
+        # paths supplied by the private source checkout.
+        print("PG8 measurement validation failed (invalid fixed input)", file=sys.stderr)
         sys.exit(1)

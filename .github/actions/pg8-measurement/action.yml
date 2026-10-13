@@ -33,14 +33,14 @@ runs:
           output="${summary_dir}/${mode}.out"
           if [[ "${mode}" == paired ]]; then
             set +e
-            (cd "${source_dir}" && TAURINE_TEST_DBX_PG8_REQUIRED=1 TAURINE_TEST_DBX_PG8_MODE="${mode}" "${probe_bin}" --exact dbx_pg8_performance_probe --nocapture) >"${output}" 2>&1
+            (cd "${source_dir}" && TAURINE_TEST_DBX_PG8_REQUIRED=1 TAURINE_TEST_DBX_PG8_MODE="${mode}" "${probe_bin}" --exact dbx_pg8_performance_probe --nocapture --test-threads=1) >"${output}" 2>&1
             status=$?
             set -e
             python3 "${policy}" probe "${mode}" "${status}" <"${output}" >"${summary_dir}/${mode}.json"
           else
             time_file="${summary_dir}/${mode}.time"
             set +e
-            (cd "${source_dir}" && TAURINE_TEST_DBX_PG8_REQUIRED=1 TAURINE_TEST_DBX_PG8_MODE="${mode}" /usr/bin/time -v -o "${time_file}" "${probe_bin}" --exact dbx_pg8_performance_probe --nocapture) >"${output}" 2>&1
+            (cd "${source_dir}" && TAURINE_TEST_DBX_PG8_REQUIRED=1 TAURINE_TEST_DBX_PG8_MODE="${mode}" /usr/bin/time -v -o "${time_file}" "${probe_bin}" --exact dbx_pg8_performance_probe --nocapture --test-threads=1) >"${output}" 2>&1
             status=$?
             set -e
             python3 "${policy}" probe "${mode}" "${status}" <"${output}" >"${summary_dir}/${mode}.json"
@@ -80,3 +80,12 @@ runs:
             f.write(f'- Direct probe process peak RSS: legacy {legacy_rss} KiB; DBX {dbx_rss} KiB.\n')
             f.write(f'- UAT desktop release executable size: feature off {off} bytes; feature on {on} bytes; delta {on-off:+d} bytes.\n')
         PY
+    - name: Remove private measurement files and build outputs
+      if: ${{ always() }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        rm -rf /mnt/cargo-target/pg8-probe /mnt/cargo-target/pg8-product-off /mnt/cargo-target/pg8-product-on
+        rm -rf "${RUNNER_TEMP}/pg8-measurement"
+        rm -f "${RUNNER_TEMP}/pg8-probe-build.log"
