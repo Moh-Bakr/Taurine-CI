@@ -196,6 +196,7 @@ runs:
               db_packages+=("--package=${db_package}")
             done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
             rust_tests rust-db-tests "${db_packages[@]}"
+            dbx_registered_feature_tests "${db_packages[@]}"
             ;;
           rust-net)
             # The dialer, the egress verifier and the conformance suites. The latter
