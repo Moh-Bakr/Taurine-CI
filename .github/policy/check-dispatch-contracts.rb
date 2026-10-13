@@ -23,8 +23,6 @@ PREFLIGHT = {
   '.github/workflows/windows-validation.yml' => 'validate-input'
 }.freeze
 EXPECTED_RUN_NAME = 'Taurine validation ${{ inputs.source_sha }} ${{ inputs.dispatch_key }}'
-LIVE_ENGINES = %w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion].freeze
-LIVE_ENGINES_WITH_DBX = %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion].freeze
 SHA40 = { 'type' => 'string', 'required' => true, 'format' => 'sha40', 'digest_include' => true }.freeze
 DISPATCH_KEY = { 'type' => 'string', 'required' => true, 'format' => 'sha256', 'digest_include' => false }.freeze
 BOOLEAN_FALSE = { 'type' => 'boolean', 'required' => false, 'default' => false, 'digest_include' => true }.freeze
@@ -53,7 +51,7 @@ EXPECTED_INPUTS = {
   '.github/workflows/orchestrate-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY },
   '.github/workflows/live-proofs.yml' => {
     'engine' => { 'type' => 'string', 'required' => true, 'format' => 'engine-selection',
-                  'options' => LIVE_ENGINES, 'digest_include' => true },
+                  'options' => %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion], 'digest_include' => true },
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY
   }
 }.freeze
@@ -153,11 +151,7 @@ end
 workflows = contract['workflows'] || {}
 failures << '.github/ci-matrix.json: dispatch workflow set differs from the reviewed protected entrypoints' unless workflows.keys.sort == EXPECTED_WORKFLOWS.sort
 EXPECTED_INPUTS.each do |path, expected_inputs|
-  accepted_inputs = [expected_inputs]
-  if path == '.github/workflows/live-proofs.yml'
-    accepted_inputs << expected_inputs.merge('engine' => expected_inputs.fetch('engine').merge('options' => LIVE_ENGINES_WITH_DBX))
-  end
-  failures << ".github/ci-matrix.json: #{path} input contract differs from the reviewed schema" unless accepted_inputs.include?(workflows.dig(path, 'inputs'))
+  failures << ".github/ci-matrix.json: #{path} input contract differs from the reviewed schema" unless workflows.dig(path, 'inputs') == expected_inputs
 end
 
 workflows.each do |path, spec|
