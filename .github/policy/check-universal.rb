@@ -49,6 +49,13 @@ PREFLIGHT = {
   '.github/workflows/android-validation.yml' => 'plan',
   '.github/workflows/ios-validation.yml' => 'plan'
 }.freeze
+REQUIRED_PG8_PREFLIGHT = {
+  '.github/workflows/pg8-measurement.yml' => 'plan',
+  '.github/workflows/pg8-measurement-arm.yml' => 'preflight'
+}.freeze
+unless REQUIRED_PG8_PREFLIGHT.all? { |path, job| PREFLIGHT[path] == job }
+  failures << 'the reviewed PG8 dispatcher and reusable arm must keep their exact preflight mappings'
+end
 RUNS_PAST_FAILURE = /\b(always|failure|cancelled)\s*\(/
 
 # The top-level `&&` terms of an expression (the braces removed, parentheses respected).
