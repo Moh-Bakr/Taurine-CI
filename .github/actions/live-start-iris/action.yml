@@ -26,7 +26,7 @@ runs:
           case "${ENGINE}" in
             iris)
               # InterSystems IRIS Community from InterSystems' own registry
-              # (anonymous pull), pinned by the multi-arch index digest of
+              # (anonymous pull), pinned by the linux/amd64 child manifest of
               # tag 2025.3 (amd64 layers measured 1.15 GB compressed from the
               # registry manifest, inside the 2 GB per-engine cap). The driver
               # speaks Atelier REST (/api/atelier/v1) on the image's private
@@ -47,7 +47,7 @@ runs:
               docker run -d --name dbx-iris \
                 -p 127.0.0.1:52773:52773 \
                 -v "${RUNNER_TEMP}/iris-password.txt:/tmp/iris-password.txt" \
-                containers.intersystems.com/intersystems/iris-community@sha256:00a19ce756e96775c3f04514f8a6f0636122d25bdc22a53e01b57eef12dcaed9 \
+                containers.intersystems.com/intersystems/iris-community@sha256:984ebaaf24741aee73f03d72d3ffc534aed4bf29df0d0f24121b3f3762cae9a7 \
                 --password-file /tmp/iris-password.txt
               iris_code=000
               for _ in $(seq 1 60); do
