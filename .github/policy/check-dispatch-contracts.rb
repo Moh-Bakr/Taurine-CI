@@ -27,10 +27,7 @@ SHA40 = { 'type' => 'string', 'required' => true, 'format' => 'sha40', 'digest_i
 DISPATCH_KEY = { 'type' => 'string', 'required' => true, 'format' => 'sha256', 'digest_include' => false }.freeze
 BOOLEAN_FALSE = { 'type' => 'boolean', 'required' => false, 'default' => false, 'digest_include' => true }.freeze
 STRING_DEFAULT_EMPTY = { 'type' => 'string', 'required' => false, 'default' => '', 'digest_include' => true }.freeze
-LIVE_ENGINE_ROSTERS = [
-  %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion],
-  %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion]
-].freeze
+LIVE_ENGINE_ROSTER = %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion].freeze
 EXPECTED_INPUTS = {
   '.github/workflows/linux-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY,
@@ -55,7 +52,7 @@ EXPECTED_INPUTS = {
   '.github/workflows/orchestrate-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY },
   '.github/workflows/live-proofs.yml' => {
     'engine' => { 'type' => 'string', 'required' => true, 'format' => 'engine-selection',
-                  'options' => LIVE_ENGINE_ROSTERS.first, 'digest_include' => true },
+                  'options' => LIVE_ENGINE_ROSTER, 'digest_include' => true },
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY
   }
 }.freeze
@@ -156,14 +153,7 @@ workflows = contract['workflows'] || {}
 failures << '.github/ci-matrix.json: dispatch workflow set differs from the reviewed protected entrypoints' unless workflows.keys.sort == EXPECTED_WORKFLOWS.sort
 EXPECTED_INPUTS.each do |path, expected_inputs|
   actual_inputs = workflows.dig(path, 'inputs')
-  matches = if path == '.github/workflows/live-proofs.yml' && actual_inputs.is_a?(Hash)
-              engine_input = actual_inputs['engine']
-              declared_roster = engine_input.is_a?(Hash) ? engine_input['options'] : nil
-              LIVE_ENGINE_ROSTERS.include?(declared_roster) &&
-                actual_inputs == expected_inputs.merge('engine' => expected_inputs.fetch('engine').merge('options' => declared_roster))
-            else
-              actual_inputs == expected_inputs
-            end
+  matches = actual_inputs == expected_inputs
   failures << ".github/ci-matrix.json: #{path} input contract differs from the reviewed schema" unless matches
 end
 

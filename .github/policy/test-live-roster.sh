@@ -30,34 +30,168 @@ arms="$(sed -n 's/^arms=//p' "${work}/output")"
   echo 'live roster fixture: planning step omitted roster or arms' >&2
   exit 1
 }
-contract_arms="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options' .github/ci-matrix.json)"
-old12='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","bastion"]'
-new13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
-if [[ "${contract_arms}" != "${old12}" && "${contract_arms}" != "${new13}" ]]; then
-  echo 'live roster fixture: dispatch contract is neither the complete approved old12 nor new13' >&2
-  exit 1
-fi
-jq -e --argjson expected "${contract_arms}" --argjson selected "${arms}" '
+jq -e '
   type == "object" and
-  (keys | sort) == ($expected | sort) and
-  $selected == $expected and
+  (keys | sort) == (["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"] | sort) and
   (."pg-dbx".suites == ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
-  (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string")) and
-  (if has("tls-legacy") then
-     .pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"] and
-     .pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and
-     ."tls-legacy".report == false and
-     ."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"] and
-     ."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"]
-   else
-     .pgtls.suites == ["taurine-db-postgres live_tls"] and
-     ((.pgtls | has("cargo_features")) | not)
-   end)
+  (.pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]) and
+  (.pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"]) and
+  (."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]) and
+  (."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"]) and
+  (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string"))
 ' <<< "${roster}" >/dev/null
+jq -e --argjson selected "${arms}" '
+  $selected == ["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"]
+' <<< "${roster}" >/dev/null
+contract_arms="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options' .github/ci-matrix.json)"
 [[ "${contract_arms}" == "${arms}" ]] || {
   echo 'live roster fixture: dispatch identity contract differs from the executed arm roster' >&2
   exit 1
 }
+
+# Exercise the reusable arm's exact configuration gate. Only the legacy arm
+# may request the fixed OpenSSL feature and exact target/filter; pgtls must
+# carry the ordinary DBX TLS target. No arbitrary Cargo features or test names
+# are accepted from the arm config.
+arm_validation=.github/workflows/live-proof-arm.yml
+ruby .github/policy/extract-step.rb "${arm_validation}" \
+  'Validate protected call input' run > "${work}/arm-validation.sh"
+if (( BASH_VERSINFO[0] < 4 )); then
+  ruby -e 'path=ARGV.fetch(0); text=File.read(path); old=%q|${REQUESTED_SOURCE_SHA,,}|; abort unless text.scan(old).length == 1; File.write(path,text.sub(old,%q|${REQUESTED_SOURCE_SHA}|))' "${work}/arm-validation.sh"
+fi
+legacy_config="$(jq -c '."tls-legacy"' <<< "${roster}")"
+pgtls_config="$(jq -c '.pgtls' <<< "${roster}")"
+validate_arm() {
+  local engine="$1" config="$2" expected="$3" label="$4"
+  local status=0
+  RUNNER_TEMP="${work}" GITHUB_REPOSITORY=Moh-Bakr/Taurine-CI GITHUB_REF=refs/heads/main \
+    REQUESTED_ENGINE="${engine}" REQUESTED_SOURCE_SHA="${source_sha}" ARM_CONFIG="${config}" \
+    bash "${work}/arm-validation.sh" > "${work}/arm-validation.out" 2> "${work}/arm-validation.err" || status=$?
+  if [[ "${expected}" == pass && "${status}" -ne 0 ]]; then
+    echo "live roster fixture: valid ${label} arm was rejected" >&2
+    exit 1
+  fi
+  if [[ "${expected}" == reject && "${status}" -eq 0 ]]; then
+    echo "live roster fixture: malformed ${label} arm was accepted" >&2
+    exit 1
+  fi
+}
+while IFS= read -r engine; do
+  config="$(jq -c --arg engine "${engine}" '.[$engine]' <<< "${roster}")"
+  validate_arm "${engine}" "${config}" pass "${engine}"
+done < <(jq -r 'keys[]' <<< "${roster}")
+validate_arm tls-legacy "$(jq -c '. + {cargo_features:["unreviewed/feature"]}' <<< "${legacy_config}")" reject 'unreviewed feature'
+validate_arm tls-legacy "$(jq -c 'del(.cargo_features)' <<< "${legacy_config}")" reject 'missing legacy feature'
+validate_arm tls-legacy "$(jq -c '.suites=["taurine-db-conformance dbx_pg_tls_live dbx_tls_"]' <<< "${legacy_config}")" reject 'ordinary target in legacy arm'
+validate_arm pgtls "$(jq -c '.suites=["taurine-db-postgres live_tls"]' <<< "${pgtls_config}")" reject 'missing ordinary DBX TLS target'
+validate_arm pgtls "$(jq -c '. + {cargo_features:["unreviewed/feature"]}' <<< "${pgtls_config}")" reject 'unreviewed mTLS feature'
+validate_arm pgtls "$(jq -c '.suites |= .[0:2]' <<< "${pgtls_config}")" reject 'missing mTLS target'
+validate_arm tls-legacy "$(jq -c '. + {cargo_command:"echo untrusted"}' <<< "${legacy_config}")" reject 'unreviewed project command'
+
+# Run the actual live-build/live-run shell steps with a fake cargo executable
+# and a synthetic target file. This proves the fixed feature and exact test
+# filters reach Cargo while never invoking a source build or test binary.
+mkdir -p "${work}/runner" "${work}/fake-source/taurine-backend/taurine-db-conformance/tests" "${work}/fakebin"
+printf '// synthetic target marker\n' > "${work}/fake-source/taurine-backend/taurine-db-conformance/tests/dbx_pg_tls_live.rs"
+printf '// synthetic target marker\n' > "${work}/fake-source/taurine-backend/taurine-db-conformance/tests/dbx_pg_mtls_live.rs"
+cat > "${work}/fakebin/cargo" <<'FAKE_CARGO'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_CARGO_LOG}"
+if [[ "$*" == *--no-run* ]]; then
+  echo 'Finished synthetic proof binary build'
+  exit 0
+fi
+if [[ "$*" != *dbx_pg_tls_live* && "$*" != *dbx_pg_mtls_live* ]]; then
+  printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n'
+  exit 0
+fi
+if [[ "$*" == *dbx_pg_mtls_live* && "${FAKE_CARGO_MODE:-pass2}" == pass8 ]]; then
+  printf 'test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n'
+  exit 0
+fi
+case "${FAKE_CARGO_MODE:-pass2}" in
+  pass8) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
+  pass2) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
+  filtered2) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\n' ;;
+  pass1) printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
+  pass0) printf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
+  ignored) printf 'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n' ;;
+  filtered) printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out\n' ;;
+  skipped) printf 'SKIPPED: required fixture was not executed\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
+  failed) printf 'test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n'; exit 1 ;;
+  *) echo 'unknown fake cargo mode' >&2; exit 2 ;;
+esac
+FAKE_CARGO
+chmod +x "${work}/fakebin/cargo"
+ruby .github/policy/extract-step.rb .github/actions/live-build/action.yml \
+  "Build the engine's proof test binary" run > "${work}/build.sh"
+ruby .github/policy/extract-step.rb .github/actions/live-run/action.yml \
+  "Run the engine's live proof" run > "${work}/run.sh"
+ruby .github/policy/extract-step.rb .github/actions/live-start-pg/action.yml \
+  'Start the postgres, pgtls, tls-legacy, bastion server and wait for readiness' run > "${work}/start-pg.sh"
+bash -n "${work}/build.sh" "${work}/run.sh" "${work}/start-pg.sh"
+for required in TAURINE_TEST_DBX_MTLS_REQUIRED TAURINE_TEST_PG_MTLS_SERVER_CA TAURINE_TEST_PG_MTLS_CLIENT_CERT TAURINE_TEST_PG_MTLS_CLIENT_KEY TAURINE_TEST_PG_MTLS_UNTRUSTED_CERT TAURINE_TEST_PG_MTLS_UNTRUSTED_KEY; do
+  grep -Fq "${required}" "${work}/start-pg.sh" || { echo "live roster fixture: pgtls does not export ${required}" >&2; exit 1; }
+done
+grep -Fq 'ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1' "${work}/start-pg.sh" || {
+  echo 'live roster fixture: TLS10 endpoint is not pinned to TLS 1.0 only' >&2; exit 1;
+}
+grep -Fq '[[ "${got}" == "TLSv1" && -z "${refused}" ]] && tls10_ok=1' "${work}/start-pg.sh" || {
+  echo 'live roster fixture: TLS10 readiness does not require a TLSv1 handshake' >&2; exit 1;
+}
+run_fake_actions() {
+  local engine="$1" config="$2" label="$3" mode="$4" expected="$5"
+  local runner="${work}/runner-${label}" log="${work}/cargo-${label}.log" command_status=0
+  mkdir -p "${runner}"
+  printf '%s\n' "${config}" > "${runner}/live-arm.json"
+  jq -r '(.suites // [])[]' "${runner}/live-arm.json" > "${runner}/suites.txt"
+  : > "${log}"
+  (
+    set -e
+    cd "${work}/fake-source"
+    RUNNER_TEMP="${runner}" FAKE_CARGO_LOG="${log}" FAKE_CARGO_MODE="${mode}" PATH="${work}/fakebin:${PATH}" bash "${work}/build.sh"
+    RUNNER_TEMP="${runner}" FAKE_CARGO_LOG="${log}" FAKE_CARGO_MODE="${mode}" PATH="${work}/fakebin:${PATH}" bash "${work}/run.sh"
+  ) > "${work}/fake-${label}.out" 2> "${work}/fake-${label}.err" || command_status=$?
+  if [[ "${expected}" == pass && "${command_status}" -ne 0 ]]; then
+    echo "live roster fixture: fake live actions unexpectedly failed for ${engine}/${mode}" >&2
+    cat "${work}/fake-${label}.err" >&2
+    exit 1
+  elif [[ "${expected}" == reject && "${command_status}" -eq 0 ]]; then
+    echo "live roster fixture: fake live actions accepted incomplete ${engine}/${mode} evidence" >&2
+    exit 1
+  fi
+}
+run_fake_actions pgtls "${pgtls_config}" pgtls pass8 pass
+grep -Fq -- '-p taurine-db-conformance --test dbx_pg_tls_live dbx_tls_ -- --nocapture' "${work}/cargo-pgtls.log" || {
+  echo 'live roster fixture: pgtls did not pass the exact ordinary DBX filter to cargo' >&2; exit 1;
+}
+grep -Fq 'taurine-db-conformance [dbx_pg_tls_live] dbx_tls_ passed=2 skipped=0' "${work}/runner-pgtls/suite-results.txt" || {
+  echo 'live roster fixture: ordinary DBX TLS suite did not produce the required two executed tests' >&2; exit 1;
+}
+grep -Fq -- '-p taurine-db-conformance --features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live dbx_pg_mtls_ -- --nocapture' "${work}/cargo-pgtls.log" || {
+  echo 'live roster fixture: pgtls did not scope both fixed mTLS features and filter to the mTLS target' >&2; exit 1;
+}
+if grep -F -- '-p taurine-db-conformance --features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live' "${work}/cargo-pgtls.log" >/dev/null; then
+  echo 'live roster fixture: mTLS-only features leaked to the ordinary TLS suite' >&2; exit 1;
+fi
+grep -Fq 'taurine-db-conformance [dbx_pg_mtls_live] dbx_pg_mtls_ passed=8 skipped=0' "${work}/runner-pgtls/suite-results.txt" || {
+  echo 'live roster fixture: mTLS suite did not produce the required eight executed cases' >&2; exit 1;
+}
+run_fake_actions tls-legacy "${legacy_config}" tls-legacy pass2 pass
+grep -Fq -- '-p taurine-db-conformance --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live legacy -- --nocapture' "${work}/cargo-tls-legacy.log" || {
+  echo 'live roster fixture: tls-legacy did not pass the fixed feature and filter to cargo' >&2; exit 1;
+}
+grep -Fq 'taurine-db-conformance [dbx_pg_tls_live] legacy passed=2 skipped=0' "${work}/runner-tls-legacy/suite-results.txt" || {
+  echo 'live roster fixture: legacy DBX TLS suite did not produce the required two executed tests' >&2; exit 1;
+}
+run_fake_actions tls-legacy "${legacy_config}" filtered-legacy filtered2 pass
+for suite in pgtls tls-legacy; do
+  if [[ "${suite}" == pgtls ]]; then config="${pgtls_config}"; else config="${legacy_config}"; fi
+  for mode in pass0 pass1 ignored filtered skipped failed; do
+    run_fake_actions "${suite}" "${config}" "negative-${suite}-${mode}" "${mode}" reject
+  done
+done
 
 # Reproduce the regression in the extracted step: a shell comment inside the
 # heredoc is literal data, not a JSON comment, and must make planning fail.
@@ -79,42 +213,4 @@ grep -q 'parse error' "${work}/invalid-stderr" || {
   exit 1
 }
 
-# Stage 1 keeps the active plan at old12, while this synthetic planner fixture
-# proves the exact complete 13-arm roster and legacy contract before Stage 2 changes
-# the dispatcher. When run later over the Stage 2 tree, use its real 13-arm plan
-# directly so this fixture never injects a duplicate arm.
-expected13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
-plan13="${work}/plan.sh"
-if [[ "${contract_arms}" == "${old12}" ]]; then
-  ruby -e '
-    path = ARGV.fetch(0)
-    script = File.read(path)
-    pattern = /(\n[ \t]*)\{"engine": "bastion"/
-    row = %q|{"engine": "tls-legacy", "report": false, "suites": ["taurine-db-conformance dbx_pg_tls_live legacy"], "cargo_features": ["taurine-db-dbx/legacy-tls"], "blurb": "synthetic compatibility fixture"}|
-    abort "live roster fixture: bastion roster entry missing" unless script.scan(pattern).length == 1
-    pgtls_pattern = /\{"engine": "pgtls", "report": false,\n[ \t]*"suites": \["taurine-db-postgres live_tls"\],\n[ \t]*"blurb": "[^"]*"\}/
-    pgtls = %q|{"engine": "pgtls", "report": false, "suites": ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"], "cargo_features": ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"], "blurb": "synthetic Stage 2 proof contract"}|
-    abort "live roster fixture: old pgtls entry missing" unless script.scan(pgtls_pattern).length == 1
-    script = script.sub(pgtls_pattern, pgtls)
-    File.write(ARGV.fetch(1), script.sub(pattern) { "#{Regexp.last_match(1)}#{row},#{Regexp.last_match(1)}{\"engine\": \"bastion\"" })
-  ' "${work}/plan.sh" "${work}/plan-13.sh"
-  plan13="${work}/plan-13.sh"
-fi
-RUNNER_TEMP="${work}" GITHUB_OUTPUT="${work}/output-13" \
-  REQUESTED_ENGINE=all REQUESTED_SOURCE_SHA="${source_sha}" \
-  bash "${plan13}" > "${work}/stdout-13"
-roster13="$(sed -n 's/^roster=//p' "${work}/output-13")"
-arms13="$(sed -n 's/^arms=//p' "${work}/output-13")"
-[[ "${arms13}" == "${expected13}" ]] || { echo 'live roster fixture: full plan did not select exact new13' >&2; exit 1; }
-jq -e --argjson expected "${expected13}" '
-  .pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"] and
-  .pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and
-  ."tls-legacy".report == false and
-  ."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"] and
-  ."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"] and
-  (keys | sort) == ($expected | sort)
-' <<< "${roster13}" >/dev/null || {
-  echo 'live roster fixture: new13 roster changed its exact targets/features or complete membership' >&2; exit 1;
-}
-
-echo 'live roster: active plan is exact old12 or new13; exact new13 selection and legacy contract; invalid JSON rejected'
+echo 'live roster: extracted plan selects all 13 arms; arm schema binds exact DBX TLS tests and feature'

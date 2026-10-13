@@ -1,8 +1,9 @@
 name: Start the PostgreSQL live servers
 description: >
   Starts the PostgreSQL 17 servers behind the postgres, pg-dbx (the Dbx route),
-  pgtls (TLS plus plain) and bastion (SSH tunnel) arms, and the legacy-protocol
-  servers (PG 12/13 TLS 1.0/1.1, PG 17 RSA-kex) the tls-legacy arm will prove.
+  pgtls (Postgres TLS, DBX TLS, mTLS and plain) and bastion (SSH tunnel) arms, and
+  the legacy-protocol servers (PG 12/13 TLS 1.0/1.1, PG 17 RSA-kex) the
+  tls-legacy arm proves.
   Every server image is pinned by digest. Credentials are per-run throwaways for a
   loopback container that dies with the runner, masked before first use and handed
   to the suite only through GITHUB_ENV. Reads the private source only through the
@@ -10,13 +11,13 @@ description: >
 
 inputs:
   engine:
-    description: Arm to start (postgres, pg-dbx, pgtls, bastion; tls-legacy is ready but not yet rostered)
+    description: Arm to start (postgres, pg-dbx, pgtls, tls-legacy, bastion)
     required: true
 
 runs:
   using: composite
   steps:
-    - name: Start the postgres, pgtls, bastion server and wait for readiness
+    - name: Start the postgres, pgtls, tls-legacy, bastion server and wait for readiness
       shell: bash
       working-directory: ${{ github.workspace }}/src
       env:
@@ -110,23 +111,24 @@ runs:
               ;;
 
             pgtls)
-              # The two PostgreSQL servers `taurine-db-postgres/tests/live_tls.rs`
-              # needs at once (the lab's `postgres-tls` and `postgres-plain`):
-              # one presenting a certificate for pg.taurine.test, one with
-              # ssl=off. Both from the same pinned image (postgres 17-alpine,
-              # index digest, 0.12 GB compressed). The certificate material
-              # (CA, leaf, a rogue CA) is minted per run by the source's own
+              # Three PostgreSQL servers provide ordinary TLS, required client
+              # certificate auth and plaintext. The mTLS endpoint has its own
+              # pg_hba.conf so its clientcert=verify-full rule is isolated.
+              # All use the same pinned PostgreSQL 17 image. Certificate
+              # material (CA, server/client leaves and a rogue identity) is
+              # minted per run by the source's own
               # tools/db-lab/pgtls/generate.sh into the runner's checkout —
               # git-ignored there, never committed, gone with the runner — and
               # that script verifies the leaf chains to the CA, carries the
               # SAN and EKU, and does not chain to the rogue CA. The lab's
               # entrypoint copies the key into the container with the right
-              # ownership. Ready = a TLS session proven by pg_stat_ssl, and a
-              # plaintext session proven by `show ssl`.
+              # ownership. Readiness checks the ordinary TLS/plain services
+              # and the mTLS service's local socket; the eight DBX mTLS cases
+              # prove the real remote TLS and certificate behavior.
               lab="${GITHUB_WORKSPACE}/src/tools/db-lab/pgtls"
               [[ -s "${lab}/generate.sh" && -s "${lab}/entrypoint.sh" ]] || { echo 'pgtls: the lab scripts are missing from the source checkout' >&2; exit 1; }
               bash "${lab}/generate.sh" >/dev/null
-              for f in ca.crt rogue-ca.crt server.crt server.key; do
+              for f in ca.crt rogue-ca.crt server.crt server.key client.crt client.key untrusted-client.crt untrusted-client.key; do
                 [[ -s "${lab}/${f}" ]] || { echo "pgtls: generate.sh did not produce ${f}" >&2; exit 1; }
               done
               pg_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -145,8 +147,27 @@ runs:
                 -p 127.0.0.1:15434:5432 \
                 postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 \
                 -c ssl=off
+              mtls_lab="${RUNNER_TEMP}/taurine-pgtls-mtls"
+              mkdir -p "${mtls_lab}"
+              cat > "${mtls_lab}/pg_hba.conf" <<'PG_HBA'
+              local all all trust
+              hostssl payments taurine 172.16.0.0/12 scram-sha-256 clientcert=verify-full
+              host all all 0.0.0.0/0 reject
+              host all all ::/0 reject
+              PG_HBA
+              chmod 644 "${mtls_lab}/pg_hba.conf"
+              docker run -d --name dbx-pgmtls \
+                -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
+                -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
+                -p 127.0.0.1:15438:5432 \
+                -v "${lab}:/pgtls-src:ro" -v "${mtls_lab}:/pgtls-mtls:ro" \
+                --entrypoint /bin/sh \
+                postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 \
+                /pgtls-src/entrypoint.sh -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key \
+                  -c ssl_ca_file=/pgtls-src/ca.crt -c hba_file=/pgtls-mtls/pg_hba.conf
               tls_ok=0
               plain_ok=0
+              mtls_ready=0
               for _ in $(seq 1 60); do
                 if (( tls_ok == 0 )) && docker exec dbx-pgtls psql 'host=127.0.0.1 port=5432 user=taurine dbname=payments sslmode=require' -tAc 'select ssl from pg_stat_ssl where pid = pg_backend_pid()' 2>/dev/null | grep -qx t; then
                   tls_ok=1
@@ -154,26 +175,39 @@ runs:
                 if (( plain_ok == 0 )) && docker exec dbx-pgplain psql -h 127.0.0.1 -U taurine -d payments -tAc 'show ssl' 2>/dev/null | grep -qx off; then
                   plain_ok=1
                 fi
-                if (( tls_ok == 1 && plain_ok == 1 )); then
+                if (( mtls_ready == 0 )) && docker exec dbx-pgmtls pg_isready -h /var/run/postgresql -U taurine -d payments >/dev/null 2>&1; then
+                  mtls_ready=1
+                fi
+                if (( tls_ok == 1 && plain_ok == 1 && mtls_ready == 1 )); then
                   ready=1
                   break
                 fi
                 sleep 3
               done
               if (( ready == 0 )); then
-                echo "pgtls: not ready after 3 minutes (tls=${tls_ok} plain=${plain_ok}); log tails below" >&2
+                echo "pgtls: not ready after 3 minutes (tls=${tls_ok} plain=${plain_ok} mtls=${mtls_ready}); log tails below" >&2
                 docker logs dbx-pgtls 2>&1 | tail -20 >&2 || true
                 docker logs dbx-pgplain 2>&1 | tail -20 >&2 || true
+                docker logs dbx-pgmtls 2>&1 | tail -20 >&2 || true
                 exit 1
               fi
               version="$(docker exec dbx-pgtls psql -h 127.0.0.1 -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
+              mtls_version="$(docker exec dbx-pgmtls psql -h /var/run/postgresql -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
               {
                 echo "TAURINE_TEST_PG_TLS=127.0.0.1:15433"
                 echo "TAURINE_TEST_PG_PLAIN=127.0.0.1:15434"
                 echo "TAURINE_TEST_PG_TLS_CA=${lab}/ca.crt"
                 echo "TAURINE_TEST_PG_TLS_ROGUE_CA=${lab}/rogue-ca.crt"
+                echo "TAURINE_TEST_PG_MTLS=127.0.0.1:15438"
+                echo "TAURINE_TEST_PG_MTLS_SERVER_CA=${lab}/ca.crt"
+                echo "TAURINE_TEST_PG_MTLS_CLIENT_CERT=${lab}/client.crt"
+                echo "TAURINE_TEST_PG_MTLS_CLIENT_KEY=${lab}/client.key"
+                echo "TAURINE_TEST_PG_MTLS_UNTRUSTED_CERT=${lab}/untrusted-client.crt"
+                echo "TAURINE_TEST_PG_MTLS_UNTRUSTED_KEY=${lab}/untrusted-client.key"
                 echo "TAURINE_TEST_PG_PASSWORD=${pg_pass}"
-                echo "PROOF_SERVER_VERSION=PostgreSQL ${version} (tls + plain)"
+                echo 'TAURINE_TEST_DBX_TLS_REQUIRED=1'
+                echo 'TAURINE_TEST_DBX_MTLS_REQUIRED=1'
+                echo "PROOF_SERVER_VERSION=PostgreSQL ${version} (TLS + plain) / PostgreSQL ${mtls_version} (mTLS required)"
               } >> "${GITHUB_ENV}"
               ;;
 
@@ -252,7 +286,7 @@ runs:
 
             tls-legacy)
               # The legacy-protocol PostgreSQL servers the PG9 live proofs need
-              # (plan 25 task 2.5; plan 23 §3.3 and §5): TLS 1.0/1.1 only on
+              # (plan 25 task 2.5; plan 23 §3.3 and §5): TLS 1.0-only and TLS 1.1-only peers on
               # the last two legacy-capable majors, and an RSA-key-exchange-only
               # TLS 1.2 peer on PostgreSQL 17 — the two real-server shapes the
               # stack-incompatibility classifier must end honestly (today the
@@ -265,12 +299,10 @@ runs:
               # own tools/db-lab/pgtls/generate.sh — the same script, and the
               # same entrypoint's key-ownership fix, the pgtls arm uses.
               #
-              # NO ROSTER ENTRY SELECTS THIS SERVER SET YET: the private
-              # repository's PG9 live suite — the real-server shape of that
-              # wall — has not landed, and the SKIPPED=fail law forbids adding
-              # an arm whose suites do not exist. The env block at the end is
-              # the gate contract that suite is expected to read; wiring the
-              # roster line is the follow-up once it lands.
+              # The DBX PG9 integration target is selected by the roster's
+              # exact `legacy` filter and this arm enables only its required
+              # selector. If the target, feature, or fixtures are absent, the
+              # build or the SKIPPED=fail run contract refuses the proof.
               lab="${GITHUB_WORKSPACE}/src/tools/db-lab/pgtls"
               [[ -s "${lab}/generate.sh" && -s "${lab}/entrypoint.sh" ]] || { echo 'tls-legacy: the lab scripts are missing from the source checkout' >&2; exit 1; }
               bash "${lab}/generate.sh" >/dev/null
@@ -279,8 +311,8 @@ runs:
               done
               pg_pass="$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
               echo "::add-mask::${pg_pass}"
-              # PG 12: floor TLSv1, ceiling TLSv1.1 — speaks 1.0–1.1 and
-              # nothing else. PG 13: pinned to TLS 1.1 on both sides. The
+              # PG 12: pinned to TLSv1 on both sides. PG 13: pinned to TLS 1.1
+              # on both sides. The
               # SECLEVEL=0 cipher floor is what lets the image's OpenSSL 3
               # still offer the deprecated protocol's suites. All three
               # servers take the minted certificate, so a future verification
@@ -293,7 +325,7 @@ runs:
                 --entrypoint /bin/sh \
                 postgres@sha256:7c8f4870583184ebadf7f17a6513620aac5f365a7938dc6a6911c1d5df2f481a \
                 /pgtls-src/entrypoint.sh -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key \
-                  -c ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1.1 -c 'ssl_ciphers=DEFAULT@SECLEVEL=0'
+                  -c ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1 -c 'ssl_ciphers=DEFAULT@SECLEVEL=0'
               docker run -d --name dbx-pg13-legacy \
                 -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
                 -e POSTGRES_PASSWORD="${pg_pass}" -e PGPASSWORD="${pg_pass}" \
@@ -338,9 +370,9 @@ runs:
               auth_ok=0
               for _ in $(seq 1 60); do
                 if (( tls10_ok == 0 )); then
-                  got="$(wire 15435 -min_protocol TLSv1 -max_protocol TLSv1.1 -cipher 'ALL@SECLEVEL=0')"
-                  refused="$(wire 15435 -min_protocol TLSv1.2)"
-                  [[ "${got}" == "TLSv1.1" && -z "${refused}" ]] && tls10_ok=1
+                  got="$(wire 15435 -min_protocol TLSv1 -max_protocol TLSv1 -cipher 'ALL@SECLEVEL=0')"
+                  refused="$(wire 15435 -min_protocol TLSv1.1 -max_protocol TLSv1.1 -cipher 'ALL@SECLEVEL=0')"
+                  [[ "${got}" == "TLSv1" && -z "${refused}" ]] && tls10_ok=1
                 fi
                 if (( tls11_ok == 0 )); then
                   got="$(wire 15436 -min_protocol TLSv1.1 -max_protocol TLSv1.1 -cipher 'ALL@SECLEVEL=0')"
@@ -364,7 +396,7 @@ runs:
                 sleep 3
               done
               if (( ready == 0 )); then
-                echo "tls-legacy: not ready after 3 minutes (tls1.0/1.1=${tls10_ok} tls1.1=${tls11_ok} rsakex=${rsakex_ok} auth=${auth_ok}); log tails below" >&2
+                echo "tls-legacy: not ready after 3 minutes (tls1.0-only=${tls10_ok} tls1.1-only=${tls11_ok} rsakex=${rsakex_ok} auth=${auth_ok}); log tails below" >&2
                 docker logs dbx-pg12-legacy 2>&1 | tail -20 >&2 || true
                 docker logs dbx-pg13-legacy 2>&1 | tail -20 >&2 || true
                 docker logs dbx-pg17-rsakex 2>&1 | tail -20 >&2 || true
@@ -380,7 +412,8 @@ runs:
                 echo "TAURINE_TEST_PG_TLS_CA=${lab}/ca.crt"
                 echo "TAURINE_TEST_PG_TLS_ROGUE_CA=${lab}/rogue-ca.crt"
                 echo "TAURINE_TEST_PG_PASSWORD=${pg_pass}"
-                echo "PROOF_SERVER_VERSION=PostgreSQL ${v12} (TLS 1.0-1.1 only) / PostgreSQL ${v13} (TLS 1.1 only) / PostgreSQL ${v17} (RSA-kex TLS 1.2 only)"
+                echo 'TAURINE_TEST_DBX_TLS_LEGACY_REQUIRED=1'
+                echo "PROOF_SERVER_VERSION=PostgreSQL ${v12} (TLS 1.0 only) / PostgreSQL ${v13} (TLS 1.1 only) / PostgreSQL ${v17} (RSA-kex TLS 1.2 only)"
               } >> "${GITHUB_ENV}"
               ;;
 

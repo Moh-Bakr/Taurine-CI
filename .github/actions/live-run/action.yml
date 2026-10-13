@@ -21,6 +21,15 @@ runs:
       run: |
         set -euo pipefail
         arm="${RUNNER_TEMP}/live-arm.json"
+        engine="$(jq -er '.engine' "${arm}")"
+        jq -e '
+          if .engine == "tls-legacy" then
+            .cargo_features == ["taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]
+          elif .engine == "pgtls" then
+            .cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]
+          else (.cargo_features // []) == []
+          end
+        ' "${arm}" >/dev/null || { echo 'proof-run: unreviewed features or DBX suite definition' >&2; exit 1; }
         target="$(jq -r '.target // empty' "${arm}")"
         filter="$(jq -r '.filter // empty' "${arm}")"
         log="${RUNNER_TEMP}/live-proof.log"
@@ -36,6 +45,11 @@ runs:
           overall=0
           while read -r pkg targets name; do
             args=()
+            if [[ "${engine}" == 'tls-legacy' ]]; then
+              args+=(--features taurine-db-dbx/legacy-tls)
+            elif [[ "${engine}" == 'pgtls' && "${targets}" == dbx_pg_mtls_live ]]; then
+              args+=(--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls)
+            fi
             IFS=, read -ra tl <<< "${targets}"
             for t in "${tl[@]}"; do args+=(--test "${t}"); done
             [[ -n "${name:-}" ]] && args+=("${name}")
@@ -50,10 +64,18 @@ runs:
             } >> "${log}"
             skips="$(grep -c 'SKIPPED' "${suite_log}" || true)"
             passed="$(grep -E '^test result: ok\. [0-9]+ passed' "${suite_log}" | awk '{s+=$4} END{print s+0}')"
+            ignored="$(grep -E '^test result: (ok|FAILED)\. ' "${suite_log}" | awk '{s+=$8} END{print s+0}')"
+            filtered="$(grep -E '^test result: (ok|FAILED)\. ' "${suite_log}" | awk '{s+=$12} END{print s+0}')"
+            required_count=0
+            if [[ "${pkg}" == taurine-db-conformance && "${targets}" == dbx_pg_tls_live && ("${name:-}" == dbx_tls_ || "${name:-}" == legacy) ]]; then required_count=2; fi
+            if [[ "${pkg}" == taurine-db-conformance && "${targets}" == dbx_pg_mtls_live && "${name:-}" == dbx_pg_mtls_ ]]; then required_count=8; fi
             verdict=pass
             if (( code != 0 )); then verdict="FAIL(exit ${code})"; overall=1; fi
             if (( skips > 0 )); then verdict="FAIL(${skips} SKIPPED)"; overall=1; fi
             if (( code == 0 && passed == 0 )); then verdict='FAIL(no test passed)'; overall=1; fi
+            if (( required_count > 0 && (passed != required_count || ignored > 0) )); then
+              verdict="FAIL(required ${required_count} tests, passed=${passed}, ignored=${ignored}, filtered=${filtered})"; overall=1
+            fi
             echo "${verdict}: ${pkg} [${targets}] ${name:-} passed=${passed} skipped=${skips}" | tee -a "${RUNNER_TEMP}/suite-results.txt"
             if (( code != 0 )); then
               # Name the failure in the log right here, not only in the summary: the failed

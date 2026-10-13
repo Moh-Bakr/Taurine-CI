@@ -24,15 +24,21 @@ expect_policy_rejects() {
 reset_fixture
 ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
 
-# The complete live roster is required; a stale 11-arm identity contract must
-# fail because `engine=all` would otherwise select a different set of arms.
+# Final Stage 2 accepts only new13. The Stage 1 predecessor policy separately
+# allows complete old12 during rollout; candidate policy must reject that old
+# schema as well as every incomplete subset.
+reset_fixture
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+expect_policy_rejects 'old12 rollback after Stage 2 activation'
+
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
   "${work}/tree/.github/ci-matrix.json"
 expect_policy_rejects 'stale 11-arm live roster'
 
-# Both complete rollout states are explicit policy contracts: Stage 1 active old12,
-# Stage 2 exact new13. A proper subset of new13 missing any old arm is never allowed.
+# The exact complete new13 candidate schema is valid. Every proper subset
+# missing any previously mandatory arm is refused below.
 new13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=JSON.parse(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
