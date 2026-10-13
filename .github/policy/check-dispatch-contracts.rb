@@ -4,7 +4,7 @@ require 'json'
 require 'yaml'
 
 ROOT = ARGV[0] || '.'
-EXPECTED_WORKFLOWS = %w[
+DEPLOYED_WORKFLOWS = %w[
   .github/workflows/android-validation.yml
   .github/workflows/ios-validation.yml
   .github/workflows/linux-validation.yml
@@ -13,6 +13,12 @@ EXPECTED_WORKFLOWS = %w[
   .github/workflows/orchestrate-validation.yml
   .github/workflows/windows-validation.yml
 ].freeze
+PG8_WORKFLOW = '.github/workflows/pg8-measurement.yml'.freeze
+# Stage 1 accepts the deployed contract unchanged, or that exact contract plus
+# the single reviewed PG8 entrypoint planned for Stage 2. It does not accept a
+# partial replacement, a changed input schema, or any other new dispatcher.
+COMPATIBLE_WORKFLOW_SETS = [DEPLOYED_WORKFLOWS.sort, (DEPLOYED_WORKFLOWS + [PG8_WORKFLOW]).sort].freeze
+EXPECTED_WORKFLOWS = (DEPLOYED_WORKFLOWS + [PG8_WORKFLOW]).freeze
 PREFLIGHT = {
   '.github/workflows/android-validation.yml' => 'plan',
   '.github/workflows/ios-validation.yml' => 'plan',
@@ -20,7 +26,8 @@ PREFLIGHT = {
   '.github/workflows/live-proofs.yml' => 'plan',
   '.github/workflows/macos-validation.yml' => 'plan',
   '.github/workflows/orchestrate-validation.yml' => 'validate-input',
-  '.github/workflows/windows-validation.yml' => 'validate-input'
+  '.github/workflows/windows-validation.yml' => 'validate-input',
+  PG8_WORKFLOW => 'plan'
 }.freeze
 EXPECTED_RUN_NAME = 'Taurine validation ${{ inputs.source_sha }} ${{ inputs.dispatch_key }}'
 SHA40 = { 'type' => 'string', 'required' => true, 'format' => 'sha40', 'digest_include' => true }.freeze
@@ -54,7 +61,8 @@ EXPECTED_INPUTS = {
     'engine' => { 'type' => 'string', 'required' => true, 'format' => 'engine-selection',
                   'options' => LIVE_ENGINE_ROSTER, 'digest_include' => true },
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY
-  }
+  },
+  PG8_WORKFLOW => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY }
 }.freeze
 SOURCE_SHA_RUN = <<~'SH'.freeze
   set -euo pipefail
@@ -150,8 +158,11 @@ unless contract.is_a?(Hash) && contract['version'] == 1 &&
   contract = {}
 end
 workflows = contract['workflows'] || {}
-failures << '.github/ci-matrix.json: dispatch workflow set differs from the reviewed protected entrypoints' unless workflows.keys.sort == EXPECTED_WORKFLOWS.sort
+unless COMPATIBLE_WORKFLOW_SETS.include?(workflows.keys.sort)
+  failures << '.github/ci-matrix.json: dispatch workflow set must match the deployed set or the exact PG8-compatible extension'
+end
 EXPECTED_INPUTS.each do |path, expected_inputs|
+  next if path == PG8_WORKFLOW && !workflows.key?(PG8_WORKFLOW)
   actual_inputs = workflows.dig(path, 'inputs')
   matches = actual_inputs == expected_inputs
   failures << ".github/ci-matrix.json: #{path} input contract differs from the reviewed schema" unless matches

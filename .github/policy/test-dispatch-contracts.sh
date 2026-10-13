@@ -24,6 +24,104 @@ expect_policy_rejects() {
 reset_fixture
 ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
 
+# Stage 1 remains valid against the deployed seven-workflow tree, and also
+# accepts exactly one future standalone PG8 dispatcher with its fixed identity
+# schema. The measurement implementation itself is introduced only in Stage 2.
+reset_fixture
+cat > "${work}/tree/.github/workflows/pg8-measurement.yml" <<'YAML'
+name: PostgreSQL DBX PG8 measurement
+run-name: Taurine validation ${{ inputs.source_sha }} ${{ inputs.dispatch_key }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to validate from private Taurine
+        required: true
+        type: string
+      dispatch_key:
+        description: Full SHA-256 key for this exact control revision and normalized inputs
+        required: true
+        type: string
+permissions: {}
+jobs:
+  plan:
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the source-read deployment branches
+        uses: ./.github/actions/environment-preflight
+        with:
+          github-token: ${{ github.token }}
+      - name: Verify the coordinator dispatch identity
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_WORKFLOW_PATH: .github/workflows/pg8-measurement.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"source_sha":{0}}}', toJSON(inputs.source_sha)) }}
+          CI_DISPATCH_CONTRACT_JSON: ''
+          CI_GENERATE_ONLY: 'false'
+          CI_CONTROL_REPOSITORY: ${{ github.repository }}
+          CI_CONTROL_SHA: ${{ github.sha }}
+          CI_CONTROL_REF: ${{ github.ref }}
+        run: ruby .github/policy/dispatch-identity.rb
+      - name: Refuse a duplicate dispatch
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW_PATH: .github/workflows/pg8-measurement.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_RUN_ID: ${{ github.run_id }}
+        run: ruby .github/policy/refuse-duplicate-dispatch.rb
+  measure:
+    needs: [plan]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/pg8-measurement-arm.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+YAML
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); workflows=data.fetch("dispatch_contracts").fetch("workflows"); workflows[".github/workflows/pg8-measurement.yml"]={"inputs"=>{"source_sha"=>{"type"=>"string","required"=>true,"format"=>"sha40","digest_include"=>true},"dispatch_key"=>{"type"=>"string","required"=>true,"format"=>"sha256","digest_include"=>false}}}; File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+cp "${work}/tree/.github/workflows/pg8-measurement.yml" "${work}/pg8-measurement.yml"
+cp "${work}/tree/.github/ci-matrix.json" "${work}/ci-matrix-pg8.json"
+
+# A schema extension, a matching matrix declaration, or a new entrypoint name
+# cannot broaden the exact future contract.
+reset_fixture
+cp "${work}/pg8-measurement.yml" "${work}/tree/.github/workflows/pg8-measurement.yml"
+cp "${work}/ci-matrix-pg8.json" "${work}/tree/.github/ci-matrix.json"
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/pg8-measurement.yml").fetch("inputs").fetch("source_sha")["format"]="short-sha"; File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+expect_policy_rejects 'future PG8 workflow schema drift'
+
+reset_fixture
+cp "${work}/pg8-measurement.yml" "${work}/tree/.github/workflows/pg8-measurement.yml"
+cp "${work}/ci-matrix-pg8.json" "${work}/tree/.github/ci-matrix.json"
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows")[".github/workflows/unreviewed.yml"]={"inputs"=>{}}; File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+expect_policy_rejects 'unreviewed ninth workflow'
+
+reset_fixture
+cp "${work}/pg8-measurement.yml" "${work}/tree/.github/workflows/pg8-measurement.yml"
+cp "${work}/ci-matrix-pg8.json" "${work}/tree/.github/ci-matrix.json"
+ruby -ryaml -e 'path=ARGV.fetch(0); doc=YAML.safe_load(File.read(path),aliases:false); job=doc.fetch("jobs").fetch("plan"); identity=job.fetch("steps").find { |step| step["name"]=="Verify the coordinator dispatch identity" }; identity.fetch("env")["CI_NORMALIZED_INPUTS"]="${{ format(\x27{{\"source_sha\":{0},\"mode\":{1}}}\x27, toJSON(inputs.source_sha), toJSON(inputs.mode)) }}"; File.write(path,YAML.dump(doc))' \
+  "${work}/tree/.github/workflows/pg8-measurement.yml"
+expect_policy_rejects 'future PG8 dispatch identity input drift'
+
 # Final Stage 2 accepts only new13. The Stage 1 predecessor policy separately
 # allows complete old12 during rollout; candidate policy must reject that old
 # schema as well as every incomplete subset.
