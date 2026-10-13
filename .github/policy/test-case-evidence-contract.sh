@@ -232,5 +232,11 @@ jq -e '.status == "shadow_valid_unverified_producer" and .counts.passed == 1 and
 write_playwright
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r["suites"][0]["specs"][0]["tests"][0]["expectedStatus"]="failed"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
 expect_error report_status_mismatch
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r["suites"][0]["specs"][0]["tests"][0]; t["expectedStatus"]="failed"; t["results"]=[{"status"=>"timedOut"}]; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error report_status_mismatch
+write_playwright
+ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r["suites"][0]["specs"][0]["tests"][0]; t["expectedStatus"]="timedOut"; t["results"]=[{"status"=>"failed"}]; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
+expect_error report_status_mismatch
 
 echo 'case evidence contract: schema, bindings, exact identity sets, status counts and sanitization fixtures passed'

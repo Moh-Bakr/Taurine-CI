@@ -114,12 +114,9 @@ def status_for(value, kind, phase)
   reject!('case_status_invalid')
 end
 
-def expected_playwright_attempt_status(value)
+def validate_expected_playwright_status(value)
   reject!('expected_status_invalid') unless %w[passed failed timedOut skipped interrupted].include?(value)
-  return 'passed' if value == 'passed'
-  return 'skipped' if value == 'skipped'
-
-  'failed'
+  value
 end
 
 def case_record(runner, config, tier, platform, project, file, title, status, kind, phase, repo_root)
@@ -203,10 +200,10 @@ def playwright_cases(report, phase, runner, config, tier, platform, repo_root, e
               reject!('report_shape_invalid') unless result.is_a?(Hash) && result['status'].is_a?(String)
               status_for(result['status'], 'playwright', phase)
             end
-            expected_status = expected_playwright_attempt_status(test.fetch('expectedStatus', 'passed'))
+            expected_status = validate_expected_playwright_status(test.fetch('expectedStatus', 'passed'))
             status = status_for(test['status'], 'playwright', phase)
             reject!('report_shape_invalid') if results.empty? && status != 'skipped'
-            attempt_statuses = results.map { |result| status_for(result['status'], 'playwright', phase) }
+            attempt_statuses = results.map { |result| result['status'] }
             if status == 'flaky'
               reject!('report_status_mismatch') if expected_status == 'skipped'
               reject!('report_status_mismatch') unless attempt_statuses.length > 1 &&
