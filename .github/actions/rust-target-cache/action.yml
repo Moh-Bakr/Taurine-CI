@@ -146,37 +146,79 @@ runs:
           printf '%s[/\\]+src[/\\]' "${ws}"
         }
 
+        # Traversal and size errors can include attacker-chosen cached path names.
+        # Keep those errors out of public logs, but never treat a partial scan
+        # or measurement as proof that the cache is safe.
+        cache_find() {
+          if ! find "$@" 2>/dev/null; then
+            echo 'target-cache: cache traversal failed' >&2
+            return 1
+          fi
+        }
+
+        cache_du() {
+          if ! du -sk "$1" 2>/dev/null; then
+            echo 'target-cache: cache size measurement failed' >&2
+            return 1
+          fi
+        }
+
+        # Return every unsafe cache entry without printing it to the job log. A
+        # path name can carry a checkout reference even when its file is empty;
+        # a symlink can expose an absolute target in the cache archive even when
+        # grep never follows it. All links are discarded, including relative
+        # ones, because a restored link can escape the intended cache tree.
+        unsafe_cache_entries() {
+          local pattern="$1" d paths links content status
+          for d in ${cached_dirs}; do
+            [[ -e "${d}" || -L "${d}" ]] || continue
+            if [[ -L "${d}" ]]; then printf '%s\n' "${d}"; continue; fi
+            if content="$(LC_ALL=C grep -rlaE -- "${pattern}" "${d}" 2>/dev/null)"; then
+              [[ -z "${content}" ]] || printf '%s\n' "${content}"
+            else
+              status=$?
+              if (( status != 1 )); then
+                echo 'target-cache: cache content scan failed' >&2
+                return 1
+              fi
+            fi
+            paths="$(cache_find "${d}" -print)" || return 1
+            printf '%s\n' "${paths}" | LC_ALL=C grep -E -- "${pattern}" || true
+            links="$(cache_find "${d}" -type l -print)" || return 1
+            [[ -z "${links}" ]] || printf '%s\n' "${links}"
+          done
+        }
+
         # Removes, from the debug profile under $1, every entry that is not a third-party
         # crate of keep.txt, every test or bin executable (with the files sharing its stem),
         # and every entry whose metadata names a path in the private checkout. Prints the
         # number of entries removed.
         strip_profile() {
           local profile="$1" sets="$2" listing="${2}/entries.txt" pattern
-          : > "${listing}"
+          : > "${listing}" || return 1
+          [[ ! -L "${profile}" ]] || { echo 'target-cache: linked profile refused' >&2; return 1; }
           [[ -d "${profile}" ]] || { echo 0; return 0; }
           pattern="$(private_path_pattern)"
           (
-            cd "${profile}"
+            cd "${profile}" 2>/dev/null || { echo 'target-cache: profile unavailable' >&2; exit 1; }
             for d in ${cached_dirs}; do
               [[ -d "${d}" ]] || continue
-              find "${d}" -mindepth 1 -maxdepth 1 -print
+              cache_find "${d}" -mindepth 1 -maxdepth 1 -print || exit 1
             done
-          ) > "${listing}"
+          ) > "${listing}" || return 1
           # Executables in deps/ are test or bin targets: no dependency produces one there.
           (
-            cd "${profile}"
+            cd "${profile}" 2>/dev/null || { echo 'target-cache: profile unavailable' >&2; exit 1; }
             if [[ -d deps ]]; then
-              find deps -maxdepth 1 -type f \( -name '*.exe' -o \( ! -name '*.*' -perm -u+x \) \) -print
+              cache_find deps -maxdepth 1 -type f \( -name '*.exe' -o \( ! -name '*.*' -perm -u+x \) \) -print || exit 1
             fi
-          ) | sed -E 's#^deps/##; s#\.exe$##' > "${sets}/exe-stems.txt"
-          # Metadata (dep-info, build-script output, fingerprints) naming the private checkout.
+          ) | sed -E 's#^deps/##; s#\.exe$##' > "${sets}/exe-stems.txt" || return 1
+          # Scan contents and paths, and discard symlinks. This is the same
+          # unsafe-entry scan the save proof runs.
           (
-            cd "${profile}"
-            for d in ${cached_dirs}; do
-              [[ -d "${d}" ]] || continue
-              LC_ALL=C grep -rlaE --include='*.d' --include='output' --include='root-output' --include='*.json' --include='dep-*' -- "${pattern}" "${d}" 2>/dev/null || true
-            done
-          ) | awk -F/ '{ print $1 "/" $2 }' | sort -u > "${sets}/private-refs.txt"
+            cd "${profile}" 2>/dev/null || { echo 'target-cache: profile unavailable' >&2; exit 1; }
+            unsafe_cache_entries "${pattern}" || exit 1
+          ) | awk -F/ 'NF >= 2 { print $1 "/" $2 }' | sort -u > "${sets}/private-refs.txt" || return 1
           awk -v sets="${sets}" '
             BEGIN {
               while ((getline n < (sets "/keep.txt")) > 0) keep[n] = 1
@@ -199,32 +241,70 @@ runs:
               if ((n in keep) || (alt != "" && (alt in keep))) next
               print entry
             }
-          ' "${listing}" > "${sets}/remove.txt"
-          # A deps/ dep-info file that names the private checkout takes its whole stem.
+          ' "${listing}" > "${sets}/remove.txt" || return 1
+          # A cache root that is itself a link is absent from the top-level
+          # listing. Unlink it without traversing its target.
+          for d in ${cached_dirs}; do
+            if [[ -L "${profile}/${d}" ]]; then
+              printf '%s\n' "${d}" >> "${sets}/remove.txt" || return 1
+            fi
+          done
+          # A reference into the private checkout poisons the crate's whole cached
+          # family: a fingerprint kept without its build directory (or the reverse)
+          # is a stale-cache link failure, not a cache win. So the stem's deps
+          # files, build directory and fingerprint all go, in both the package-name
+          # and the lib-prefixed file-name form.
           if [[ -s "${sets}/private-refs.txt" ]]; then
-            grep '^deps/' "${sets}/private-refs.txt" | sed -E 's#^deps/##; s#\..*$##' | while IFS= read -r stem; do
-              grep -E "^deps/${stem}(\.|$)" "${listing}" || true
-            done >> "${sets}/remove.txt"
+            awk -F/ '{
+              stem = $2; sub(/\..*$/, "", stem)
+              print stem
+              if (stem ~ /^lib./) print substr(stem, 4)
+              else print "lib" stem
+            }' \
+              "${sets}/private-refs.txt" | sort -u \
+            | while IFS= read -r stem; do
+                [[ -n "${stem}" ]] || continue
+                (
+                  cd "${profile}" 2>/dev/null || { echo 'target-cache: profile unavailable' >&2; exit 1; }
+                  for d in ${cached_dirs}; do
+                    [[ -d "${d}" ]] || continue
+                    case "${d}" in
+                      deps) cache_find "${d}" -mindepth 1 -maxdepth 1 \( -name "${stem}.*" -o -name "${stem}" \) -print || exit 1 ;;
+                      *) if [[ -d "${d}/${stem}" ]]; then echo "${d}/${stem}"; fi ;;
+                    esac
+                  done
+                ) || exit 1
+              done >> "${sets}/remove.txt" || return 1
           fi
-          sort -u -o "${sets}/remove.txt" "${sets}/remove.txt"
+          sort -u -o "${sets}/remove.txt" "${sets}/remove.txt" || return 1
           (
-            cd "${profile}"
+            cd "${profile}" 2>/dev/null || { echo 'target-cache: profile unavailable' >&2; exit 1; }
             while IFS= read -r entry; do
-              if [[ -n "${entry}" ]]; then rm -rf -- "${entry}"; fi
+              if [[ -n "${entry}" ]]; then
+                rm -rf -- "${entry}" 2>/dev/null || { echo 'target-cache: unsafe entry removal failed' >&2; exit 1; }
+              fi
             done < "${sets}/remove.txt"
-          )
-          wc -l < "${sets}/remove.txt" | tr -d ' '
+          ) || return 1
+          wc -l < "${sets}/remove.txt" | tr -d ' ' || return 1
         }
 
         size_mib() {
           local total=0 d kib
           for d in ${cached_dirs}; do
             if [[ -d "$1/${d}" ]]; then
-              kib="$(du -sk "$1/${d}" | awk '{ print $1 }')"
+              kib="$(cache_du "$1/${d}" | awk '{ print $1 }')" || return 1
               total=$((total + kib))
             fi
           done
           echo $((total / 1024))
+        }
+
+        deps_file_inventory() {
+          if [[ -d deps ]]; then
+            local files
+            files="$(cache_find deps -maxdepth 1 -type f | wc -l | tr -d ' ')" || return 1
+            echo "  deps files: ${files}"
+          fi
         }
 
         to_unix_path() {
@@ -335,40 +415,54 @@ runs:
         classify_lock "${sets}"
         failed=0
         [[ -d "${profile}" ]] || { echo 'target-cache: nothing to save' >&2; exit 1; }
-        cd "${profile}"
+        [[ ! -L "${profile}" ]] || { echo 'target-cache: linked profile refused' >&2; exit 1; }
+        cd "${profile}" 2>/dev/null || { echo 'target-cache: profile unavailable' >&2; exit 1; }
         # What is saved: entries and size per cached directory, and file kinds in deps/.
         echo 'target-cache: saved inventory (counts only; crate names are not published)'
         for d in ${cached_dirs}; do
           entries=0; kib=0
           if [[ -d "${d}" ]]; then
-            entries="$(find "${d}" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
-            kib="$(du -sk "${d}" | awk '{ print $1 }')"
+            entries="$(cache_find "${d}" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+            kib="$(cache_du "${d}" | awk '{ print $1 }')"
           fi
           echo "  ${d}: ${entries} entries, $((kib / 1024)) MiB"
         done
-        if [[ -d deps ]]; then
-          find deps -maxdepth 1 -type f | sed -E 's#^.*/##; s#^[^.]*##; s#^$#(none)#' | sort | uniq -c | sed 's/^/  deps kind /'
-        fi
+        deps_file_inventory
         # 1. No entry carries the name of a crate built from the private checkout. The names
         #    come from the lockfile (packages without a source), matched as a whole crate
         #    name in either the package (dash) or file (underscore) form.
         names="$(sed 's/_/[-_]/g' "${sets}/local.txt" | paste -sd'|' -)"
         if [[ -n "${names}" ]]; then
-          hits="$(for d in ${cached_dirs}; do [[ -d "${d}" ]] && find "${d}" -mindepth 1 -maxdepth 1 -print; done | sed -E 's#^[^/]*/##' | grep -cE "^(lib)?(${names})-[0-9a-f]+(\.|$)" || true)"
+          entries="$(for d in ${cached_dirs}; do
+            if [[ -d "${d}" ]]; then cache_find "${d}" -mindepth 1 -maxdepth 1 -print || exit 1; fi
+          done)"
+          hits="$(printf '%s\n' "${entries}" | sed -E 's#^[^/]*/##' | grep -cE "^(lib)?(${names})-[0-9a-f]+(\.|$)" || true)"
           if [[ "${hits}" != 0 ]]; then
             echo "target-cache: ${hits} saved entries carry a workspace crate name" >&2
             failed=1
           fi
         fi
-        # 2. No saved file, binary or text, names a path in the private checkout.
+        # 2. No saved content or path names reference the private checkout, and
+        #    no symlink survives into an archive that another run can read.
+        #    On failure only the fixed cache directory classes are published; a
+        #    filename or extension may itself contain private information.
         pattern="$(private_path_pattern)"
-        refs="$(for d in ${cached_dirs}; do [[ -d "${d}" ]] && LC_ALL=C grep -rlaE -- "${pattern}" "${d}"; done 2>/dev/null | wc -l | tr -d ' ' || true)"
+        refs_list="$(unsafe_cache_entries "${pattern}" | sort -u)"
+        refs="$(printf '%s\n' "${refs_list}" | grep -c . || true)"
         if [[ "${refs}" != 0 ]]; then
           echo "target-cache: ${refs} saved files name a path in the private checkout" >&2
+          printf '%s\n' "${refs_list}" | awk -F/ '
+            $1 == "deps" || $1 == "build" || $1 == ".fingerprint" { count[$1]++; next }
+            { count["other"]++ }
+            END { for (k in count) print "  private-path cache directory " k ": " count[k] }
+          ' >&2 || true
           failed=1
         fi
         # 3. No test or bin executable remains in deps/.
-        exes="$( { [[ -d deps ]] && find deps -maxdepth 1 -type f \( -name '*.exe' -o \( ! -name '*.*' -perm -u+x \) \) -print; } | wc -l | tr -d ' ' || true)"
+        exes=0
+        if [[ -d deps ]]; then
+          exes="$(cache_find deps -maxdepth 1 -type f \( -name '*.exe' -o \( ! -name '*.*' -perm -u+x \) \) -print | wc -l | tr -d ' ')"
+        fi
         if [[ "${exes}" != 0 ]]; then
           echo "target-cache: ${exes} executables remain in deps/" >&2
           failed=1
