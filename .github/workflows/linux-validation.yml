@@ -269,7 +269,7 @@ jobs:
           only_list='[]'
           if [[ -n "${ONLY}" ]]; then
             only_list="$(printf '%s' "${ONLY}" | jq -cR 'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | unique')"
-            unknown="$(jq -n -c --argjson only "${only_list}" --argjson candidates "${candidates}" '$only - $candidates | join(",")')"
+            unknown="$(jq -n -r --argjson only "${only_list}" --argjson candidates "${candidates}" '$only - $candidates | join(",")')"
             if [[ -n "${unknown}" ]]; then
               echo "only: not a concern of this dispatch (unknown name, or its opt-in input is off): ${unknown}" >&2
               exit 1
@@ -477,5 +477,5 @@ jobs:
           name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}
-          selection-mode: ${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}
+          selection-mode: ${{ inputs.profile == 'full' && inputs.base_sha == '' && inputs.only == '' && 'full' || 'partial' }}
           github-token: ${{ github.token }}

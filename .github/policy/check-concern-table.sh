@@ -51,10 +51,7 @@ unless problems.empty?
 end
 puts "concern table: #{table.length} Linux concerns (#{opt_in.length} opt-in) match the plan and the result check"
 mode_by_workflow = {
-  '.github/workflows/linux-validation.yml' => [
-    "${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}",
-    "${{ inputs.profile == 'full' && inputs.base_sha == '' && inputs.only == '' && 'full' || 'partial' }}"
-  ],
+  '.github/workflows/linux-validation.yml' => ["${{ inputs.profile == 'full' && inputs.base_sha == '' && inputs.only == '' && 'full' || 'partial' }}"],
   '.github/workflows/macos-validation.yml' => ["${{ inputs.rust && 'full' || 'partial' }}"],
   '.github/workflows/windows-validation.yml' => ["${{ inputs.rust && 'full' || 'partial' }}"],
   '.github/workflows/android-validation.yml' => ["${{ inputs.rust && 'full' || 'partial' }}"],
