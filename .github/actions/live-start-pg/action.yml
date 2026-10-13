@@ -154,7 +154,7 @@ runs:
               hostssl payments taurine 172.16.0.0/12 scram-sha-256 clientcert=verify-full
               host all all 0.0.0.0/0 reject
               host all all ::/0 reject
-              PG_HBA
+          PG_HBA
               chmod 644 "${mtls_lab}/pg_hba.conf"
               docker run -d --name dbx-pgmtls \
                 -e POSTGRES_USER=taurine -e POSTGRES_DB=payments \
