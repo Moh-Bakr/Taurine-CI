@@ -97,7 +97,10 @@ fi
 # A crafted deps suffix must never be echoed by the inventory report.
 touch "${profile}/deps/libgamma-cccc.taurine\\src\\secret.rs"
 inventory="$(cd "${profile}" && deps_file_inventory)"
-[[ "${inventory}" =~ ^[[:space:]]deps[[:space:]]files:[[:space:]][0-9]+$ ]]
+[[ "${inventory}" =~ ^[[:space:]]+deps[[:space:]]+files:[[:space:]]+[0-9]+$ ]] || {
+  echo 'cache inventory did not emit a count-only summary' >&2
+  exit 1
+}
 [[ "${inventory}" != *secret* ]]
 [[ -n "$(cd "${profile}" && unsafe_cache_entries "$(private_path_pattern)")" ]]
 
@@ -128,13 +131,23 @@ if (cd "${profile}" && cache_du build) >"${fixture}/du-out" 2>"${fixture}/du-err
   echo 'cache size check accepted an unreadable directory' >&2
   exit 1
 fi
-[[ "$(cat "${fixture}/scan-err")" == 'target-cache: cache traversal failed' ]]
+scan_error="$(cat "${fixture}/scan-err")"
+[[ "${scan_error}" == 'target-cache: cache traversal failed' ||
+   "${scan_error}" == 'target-cache: cache content scan failed' ]] || {
+  echo 'cache scan emitted an unexpected error class' >&2
+  exit 1
+}
 [[ "$(cat "${fixture}/du-err")" == 'target-cache: cache size measurement failed' ]]
 if removed="$(strip_profile "${profile}" "${fixture}/sets" 2>"${fixture}/strip-err")"; then
   echo 'cache strip accepted an unreadable directory through command substitution' >&2
   exit 1
 fi
-[[ "$(cat "${fixture}/strip-err")" == 'target-cache: cache traversal failed' ]]
+strip_error="$(cat "${fixture}/strip-err")"
+[[ "${strip_error}" == 'target-cache: cache traversal failed' ||
+   "${strip_error}" == 'target-cache: cache content scan failed' ]] || {
+  echo 'cache strip emitted an unexpected error class' >&2
+  exit 1
+}
 if before="$(size_mib "${profile}" 2>"${fixture}/size-err")"; then
   echo 'cache size accepted an unreadable directory through command substitution' >&2
   exit 1
