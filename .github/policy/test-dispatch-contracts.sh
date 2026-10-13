@@ -24,6 +24,23 @@ expect_policy_rejects() {
 reset_fixture
 ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
 
+# Roll out the pg-dbx arm in two public-policy steps: only the reviewed legacy
+# and expanded enumerations may pass while the base policy catches up.
+reset_fixture
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+
+reset_fixture
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+
+reset_fixture
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"] << "unreviewed"; File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+expect_policy_rejects 'unreviewed live engine'
+
 reset_fixture
 ruby -e 'path=ARGV.fetch(0); text=File.read(path); marker="      - name: Verify the coordinator dispatch identity\n"; abort unless text.include?(marker); File.write(path,text.sub(marker, marker + "        if: false\n"))' \
   "${work}/tree/.github/workflows/linux-validation.yml"
