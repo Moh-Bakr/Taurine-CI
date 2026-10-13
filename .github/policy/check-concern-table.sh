@@ -51,12 +51,15 @@ unless problems.empty?
 end
 puts "concern table: #{table.length} Linux concerns (#{opt_in.length} opt-in) match the plan and the result check"
 mode_by_workflow = {
-  '.github/workflows/linux-validation.yml' => "${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}",
-  '.github/workflows/macos-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
-  '.github/workflows/windows-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
-  '.github/workflows/android-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
-  '.github/workflows/ios-validation.yml' => "${{ inputs.rust && 'full' || 'partial' }}",
-  '.github/workflows/orchestrate-validation.yml' => 'full'
+  '.github/workflows/linux-validation.yml' => [
+    "${{ inputs.profile == 'full' && inputs.base_sha == '' && 'full' || 'partial' }}",
+    "${{ inputs.profile == 'full' && inputs.base_sha == '' && inputs.only == '' && 'full' || 'partial' }}"
+  ],
+  '.github/workflows/macos-validation.yml' => ["${{ inputs.rust && 'full' || 'partial' }}"],
+  '.github/workflows/windows-validation.yml' => ["${{ inputs.rust && 'full' || 'partial' }}"],
+  '.github/workflows/android-validation.yml' => ["${{ inputs.rust && 'full' || 'partial' }}"],
+  '.github/workflows/ios-validation.yml' => ["${{ inputs.rust && 'full' || 'partial' }}"],
+  '.github/workflows/orchestrate-validation.yml' => ['full']
 }
 required_by_workflow = {
   '.github/workflows/linux-validation.yml' => "${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}",
@@ -71,10 +74,10 @@ needs_by_workflow = {
   '.github/workflows/android-validation.yml' => %w[plan],
   '.github/workflows/ios-validation.yml' => %w[plan]
 }
-mode_by_workflow.each do |path, expected_mode|
+mode_by_workflow.each do |path, allowed_modes|
   parsed = YAML.safe_load(File.read(path), aliases: false)
   callers = parsed.fetch('jobs').values.flat_map { |job| job['steps'] || [] }.select { |step| step['uses'].to_s == './.github/actions/run-result' }
-  unless callers.length == 1 && callers.first.fetch('with', {})['selection-mode'] == expected_mode
+  unless callers.length == 1 && allowed_modes.include?(callers.first.fetch('with', {})['selection-mode'])
     warn "#{path}: run-result must use its reviewed explicit selection mode"
     exit 1
   end
