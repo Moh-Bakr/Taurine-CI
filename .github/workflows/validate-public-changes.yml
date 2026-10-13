@@ -96,6 +96,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-sanitizers.sh
 
+      - name: Test the compiled dependency cache strip against hostile outputs
+        shell: bash
+        run: bash .github/policy/test-rust-target-cache.sh
+
       - name: Test the failure-detail extractors against fixtures
         shell: bash
         run: bash .github/policy/test-extractors.sh

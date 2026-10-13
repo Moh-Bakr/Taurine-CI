@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Exercise the cache strip on synthetic third-party output, including binary,
+# build-script and fingerprint files that name the private checkout.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+fixture="$(mktemp -d)"
+trap 'rm -rf "${fixture}"' EXIT
+awk '
+  /cat > .*target-cache\.sh.*HELPERS/ { inside = 1; next }
+  inside && /^        HELPERS$/ { exit }
+  inside { sub(/^        /, ""); print }
+' "${root}/.github/actions/rust-target-cache/action.yml" > "${fixture}/helpers.sh"
+grep -q '^strip_profile() {' "${fixture}/helpers.sh"
+# shellcheck source=/dev/null
+source "${fixture}/helpers.sh"
+
+export GITHUB_WORKSPACE="${fixture}/taurine"
+mkdir -p "${GITHUB_WORKSPACE}/src" "${fixture}/target/debug" "${fixture}/sets"
+cat > "${GITHUB_WORKSPACE}/src/Cargo.lock" <<'LOCK'
+[[package]]
+name = "private-crate"
+version = "0.1.0"
+
+[[package]]
+name = "alpha"
+version = "1.0.0"
+source = "registry+https://example.invalid"
+
+[[package]]
+name = "beta"
+version = "1.0.0"
+source = "registry+https://example.invalid"
+
+[[package]]
+name = "gamma"
+version = "1.0.0"
+source = "registry+https://example.invalid"
+
+[[package]]
+name = "delta"
+version = "1.0.0"
+source = "registry+https://example.invalid"
+
+[[package]]
+name = "epsilon"
+version = "1.0.0"
+source = "registry+https://example.invalid"
+LOCK
+cd "${GITHUB_WORKSPACE}/src"
+printf 'synthetic private source' > "${GITHUB_WORKSPACE}/src/secret.rs"
+classify_lock "${fixture}/sets"
+profile="${fixture}/target/debug"
+mkdir -p "${profile}/deps" "${profile}/build/alpha-aaaa/out" \
+  "${profile}/build/beta-bbbb/out" "${profile}/build/gamma-cccc/out" \
+  "${profile}/build/delta-dddd/out/taurine/src" "${profile}/build/epsilon-eeee/out" \
+  "${profile}/.fingerprint/alpha-aaaa" "${profile}/.fingerprint/beta-bbbb" \
+  "${profile}/.fingerprint/gamma-cccc" "${profile}/.fingerprint/delta-dddd" \
+  "${profile}/.fingerprint/epsilon-eeee"
+printf 'binary\000%s/src/secret.rs\000' "${GITHUB_WORKSPACE}" > "${profile}/deps/libalpha-aaaa.rlib"
+printf 'safe' > "${profile}/deps/libalpha-aaaa.rmeta"
+printf 'safe' > "${profile}/build/alpha-aaaa/out/generated"
+printf 'safe' > "${profile}/.fingerprint/alpha-aaaa/metadata"
+printf 'safe' > "${profile}/deps/libbeta-bbbb.rlib"
+printf 'private: %s\\src\\secret.rs\n' "${GITHUB_WORKSPACE}" > "${profile}/build/beta-bbbb/out/generated"
+printf 'safe' > "${profile}/.fingerprint/beta-bbbb/metadata"
+printf 'safe' > "${profile}/deps/libgamma-cccc.rlib"
+printf 'safe' > "${profile}/build/gamma-cccc/out/generated"
+printf 'safe' > "${profile}/.fingerprint/gamma-cccc/metadata"
+printf 'safe' > "${profile}/deps/libdelta-dddd.rlib"
+printf 'safe' > "${profile}/build/delta-dddd/out/taurine/src/secret.rs"
+printf 'safe' > "${profile}/.fingerprint/delta-dddd/metadata"
+printf 'safe' > "${profile}/deps/libepsilon-eeee.rlib"
+ln -s "${GITHUB_WORKSPACE}/src/secret.rs" "${profile}/build/epsilon-eeee/out/source-link"
+printf 'safe' > "${profile}/.fingerprint/epsilon-eeee/metadata"
+printf 'safe' > "${profile}/deps/libprivate_crate-dddd.rlib"
+printf 'safe' > "${profile}/deps/tool-eeee"
+chmod u+x "${profile}/deps/tool-eeee"
+
+removed="$(strip_profile "${profile}" "${fixture}/sets")"
+[[ "${removed}" -ge 12 ]]
+for path in deps/libalpha-aaaa.rlib deps/libalpha-aaaa.rmeta build/alpha-aaaa \
+  .fingerprint/alpha-aaaa deps/libbeta-bbbb.rlib build/beta-bbbb \
+  .fingerprint/beta-bbbb deps/libdelta-dddd.rlib build/delta-dddd \
+  .fingerprint/delta-dddd deps/libepsilon-eeee.rlib build/epsilon-eeee \
+  .fingerprint/epsilon-eeee deps/libprivate_crate-dddd.rlib deps/tool-eeee; do
+  [[ ! -e "${profile}/${path}" ]] || { echo "cache strip retained ${path}" >&2; exit 1; }
+done
+for path in deps/libgamma-cccc.rlib build/gamma-cccc/out/generated .fingerprint/gamma-cccc/metadata; do
+  [[ -e "${profile}/${path}" ]] || { echo "cache strip removed clean ${path}" >&2; exit 1; }
+done
+if LC_ALL=C grep -rlaqE -- "$(private_path_pattern)" "${profile}/deps" "${profile}/build" "${profile}/.fingerprint"; then
+  echo 'cache strip retained a private checkout reference' >&2
+  exit 1
+fi
+[[ -z "$(find "${profile}" -type l -print)" ]] || { echo 'cache strip retained a symlink' >&2; exit 1; }
+# A crafted deps suffix must never be echoed by the inventory report.
+touch "${profile}/deps/libgamma-cccc.taurine\\src\\secret.rs"
+inventory="$(cd "${profile}" && deps_file_inventory)"
+[[ "${inventory}" =~ ^[[:space:]]deps[[:space:]]files:[[:space:]][0-9]+$ ]]
+[[ "${inventory}" != *secret* ]]
+[[ -n "$(cd "${profile}" && unsafe_cache_entries "$(private_path_pattern)")" ]]
+
+# A linked cache root must be unlinked without reading or deleting its target.
+mkdir -p "${fixture}/root-link-profile" "${fixture}/root-link-sets"
+classify_lock "${fixture}/root-link-sets"
+ln -s "${GITHUB_WORKSPACE}/src" "${fixture}/root-link-profile/deps"
+strip_profile "${fixture}/root-link-profile" "${fixture}/root-link-sets" >/dev/null
+[[ ! -L "${fixture}/root-link-profile/deps" && -f "${GITHUB_WORKSPACE}/src/secret.rs" ]]
+
+# A linked profile is never traversed by the destructive strip.
+ln -s "${profile}" "${fixture}/linked-profile"
+if strip_profile "${fixture}/linked-profile" "${fixture}/root-link-sets" >/dev/null 2>&1; then
+  echo 'cache strip accepted a linked profile' >&2
+  exit 1
+fi
+
+# Traversal failures must block saving and never print an inaccessible private
+# path into the public job log.
+blocked="${profile}/build/gamma-cccc/out/taurine/src/private"
+mkdir -p "${blocked}"
+chmod 000 "${blocked}"
+if (cd "${profile}" && unsafe_cache_entries "$(private_path_pattern)") >"${fixture}/scan-out" 2>"${fixture}/scan-err"; then
+  echo 'cache scan accepted an unreadable directory' >&2
+  exit 1
+fi
+if (cd "${profile}" && cache_du build) >"${fixture}/du-out" 2>"${fixture}/du-err"; then
+  echo 'cache size check accepted an unreadable directory' >&2
+  exit 1
+fi
+[[ "$(cat "${fixture}/scan-err")" == 'target-cache: cache traversal failed' ]]
+[[ "$(cat "${fixture}/du-err")" == 'target-cache: cache size measurement failed' ]]
+if removed="$(strip_profile "${profile}" "${fixture}/sets" 2>"${fixture}/strip-err")"; then
+  echo 'cache strip accepted an unreadable directory through command substitution' >&2
+  exit 1
+fi
+[[ "$(cat "${fixture}/strip-err")" == 'target-cache: cache traversal failed' ]]
+if before="$(size_mib "${profile}" 2>"${fixture}/size-err")"; then
+  echo 'cache size accepted an unreadable directory through command substitution' >&2
+  exit 1
+fi
+[[ "$(cat "${fixture}/size-err")" == 'target-cache: cache size measurement failed' ]]
+chmod 700 "${blocked}"
+unreadable="${profile}/deps/libgamma-cccc.unreadable"
+printf 'synthetic contents' > "${unreadable}"
+chmod 000 "${unreadable}"
+if (cd "${profile}" && unsafe_cache_entries "$(private_path_pattern)") >"${fixture}/scan-out" 2>"${fixture}/scan-err"; then
+  echo 'cache scan accepted an unreadable file' >&2
+  exit 1
+fi
+[[ "$(cat "${fixture}/scan-err")" == 'target-cache: cache content scan failed' ]]
+if removed="$(strip_profile "${profile}" "${fixture}/sets" 2>"${fixture}/strip-err")"; then
+  echo 'cache strip accepted an unreadable file through command substitution' >&2
+  exit 1
+fi
+[[ "$(cat "${fixture}/strip-err")" == 'target-cache: cache content scan failed' ]]
+chmod 600 "${unreadable}"
+echo 'rust target cache strip fixtures passed'
