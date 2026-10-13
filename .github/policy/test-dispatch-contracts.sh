@@ -59,6 +59,16 @@ jobs:
         uses: ./.github/actions/environment-preflight
         with:
           github-token: ${{ github.token }}
+      - name: Validate exact source SHA
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
       - name: Verify the coordinator dispatch identity
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -242,6 +252,52 @@ if (cd "${work}/strict-mode" && bash .github/policy/check-concern-table.sh) >"${
 fi
 grep -qF 'run-result must use its reviewed explicit selection mode' "${work}/strict-mode.stderr"
 
+# PG8 must use the exact source SHA validation step before dispatch identity.
+mutate_pg8_source_validator() {
+  local mutation="$1"
+  reset_fixture
+  cp "${work}/pg8-measurement.yml" "${work}/tree/.github/workflows/pg8-measurement.yml"
+  cp "${work}/ci-matrix-pg8.json" "${work}/tree/.github/ci-matrix.json"
+  ruby -ryaml -e '
+    path, mutation = ARGV
+    doc = YAML.safe_load_file(path, aliases: false)
+    steps = doc.fetch("jobs").fetch("plan").fetch("steps")
+    source = steps.find { |step| step["name"] == "Validate exact source SHA" }
+    identity = steps.find { |step| step["name"] == "Verify the coordinator dispatch identity" }
+    case mutation
+    when "missing" then steps.delete(source)
+    when "reordered" then steps.delete(source); steps.insert(steps.index(identity) + 1, source)
+    when "body" then source["run"] = source.fetch("run").sub("40-character hexadecimal", "short hexadecimal")
+    when "binding" then source.fetch("env")["REQUESTED_SOURCE_SHA"] = "${{ inputs.dispatch_key }}"
+    end
+    File.write(path, YAML.dump(doc))
+  ' "${work}/tree/.github/workflows/pg8-measurement.yml" "${mutation}"
+  expect_policy_rejects "PG8 source SHA validator ${mutation} mutation"
+}
+for mutation in missing reordered body binding; do
+  mutate_pg8_source_validator "${mutation}"
+done
+
+# The two exact PG8 local references are reviewed; adding a third reference stays blocked.
+source .github/policy/check-actions.sh
+printf '%s\n' 'jobs:' '  measure:' '    uses: ./.github/workflows/pg8-measurement-arm.yml' \
+  '  action:' '    steps:' '      - name: approved action' '        uses: ./.github/actions/pg8-measurement' >"${work}/pg8-references.yml"
+check_action_references "${work}/pg8-references.yml"
+printf '%s\n' '      - name: unreviewed action' '        uses: ./.github/actions/pg8-unreviewed' >>"${work}/pg8-references.yml"
+if (check_action_references "${work}/pg8-references.yml") >"${work}/action.stdout" 2>"${work}/action.stderr"; then
+  echo 'unreviewed PG8 third local reference unexpectedly passed' >&2; exit 1
+fi
+grep -qF 'Unreviewed or mutable Action reference' "${work}/action.stderr"
+
+# Removing the reusable-arm preflight map entry must not disable universal checking.
+cp .github/policy/check-universal.rb "${work}/check-universal-mutated.rb"
+ruby -e 'path=ARGV.fetch(0); text=File.read(path); entry="  '\''.github/workflows/pg8-measurement-arm.yml'\'' => '\''preflight'\'',\n"; abort "required PG8 arm mapping missing from fixture" unless text.include?(entry); File.write(path,text.sub(entry,""))' \
+  "${work}/check-universal-mutated.rb"
+if ruby "${work}/check-universal-mutated.rb" . >"${work}/universal.stdout" 2>"${work}/universal.stderr"; then
+  echo 'missing PG8 arm preflight mapping unexpectedly passed universal policy' >&2; exit 1
+fi
+grep -qF 'the reviewed PG8 dispatcher and reusable arm must keep their exact preflight mappings' "${work}/universal.stderr"
+
 echo 'dispatch contracts: Plan selection accepts valid visual opt-in, preserves partial only identity, and rejects disabled/unknown concerns'
 echo 'dispatch contracts: strict stage-2 policy rejects the old Linux selection-mode expression'
-echo 'dispatch contracts: mutations for conditional, bypassed and mismapped proofs were rejected'
+echo 'dispatch contracts: source-SHA, local-reference, and PG8 preflight-mapping mutations were rejected'

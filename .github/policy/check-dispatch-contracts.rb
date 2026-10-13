@@ -123,6 +123,11 @@ SOURCE_SHA_STEPS = {
     'name' => 'Validate exact source SHA', 'shell' => 'bash',
     'env' => { 'REQUESTED_SOURCE_SHA' => '${{ inputs.source_sha }}' },
     'run' => SOURCE_SHA_RUN
+  },
+  PG8_WORKFLOW => {
+    'name' => 'Validate exact source SHA', 'shell' => 'bash',
+    'env' => { 'REQUESTED_SOURCE_SHA' => '${{ inputs.source_sha }}' },
+    'run' => SOURCE_SHA_RUN
   }
 }.freeze
 failures = []
