@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "runner_bindings": [
+    {
+      "runner_id": "playwright-desktop",
+      "config_id": "desktop-playwright-projects",
+      "version": "1.62.0",
+      "packages": {
+        "node_modules/@playwright/test": "sha512-9zOJ6ZQRAena31MpOH9VSzIz8Ou3YJ/wtY/eQm5T2uhfhG7/U3COrMS8xOtUrZrp9OgdmzEnIYODye3nY1VqzA==",
+        "node_modules/playwright": "sha512-Z14dG305dgaLu6foB1TXQagFiW8JfSUIUaUuPaKQ6NtBPKF1P/qXcqfh6c6K/icPqdy37JmjbiBXf6JNg6Sylw==",
+        "node_modules/playwright-core": "sha512-nsNRyq0r2zsG8AcRHWknc9QRA5XCueC7gWMrs+Gx2tlZn9hcl8zudfh00lhJPY1DE7NmZ6bDsT9g2yey8mXljA=="
+      }
+    },
+    {
+      "runner_id": "playwright-mobile",
+      "config_id": "mobile-playwright-projects",
+      "version": "1.62.1",
+      "packages": {
+        "node_modules/@playwright/test": "sha512-DTcUc8qii+cpHvtOwggMtBRMjKZHXYWdw8syRYu2vtzuq4Wxphqq4NfCs5Zt44L6mA8rfDfj+PHnxFc/FeK6mQ==",
+        "node_modules/playwright": "sha512-0M+L3LAD8/nm554LOla9Ayx0j0tmFZ0FBcoQ7F1VuVHpM/XpiC8RcDzBQB8W5+hA8L22THxELzeF+2WcUzvcLg==",
+        "node_modules/playwright-core": "sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw=="
+      }
+    }
+  ],
+  "all_pass": {
+    "config": "all-pass.config.cjs",
+    "file": "all-pass.spec.cjs",
+    "file_suite": {
+      "title": "all-pass.spec.cjs",
+      "file": "taurine-desktop/.case-evidence-fixtures/all-pass.spec.cjs",
+      "identity_uses": "file"
+    },
+    "tier": "feedback",
+    "platform": "linux",
+    "projects": ["smoke", "critical"],
+    "cases": [
+      {"describe": ["outer group", "inner group"], "title": "parameterized value alpha"},
+      {"describe": ["outer group", "inner group"], "title": "parameterized value beta"},
+      {"describe": ["outer group", "inner group"], "title": "shared title across projects"}
+    ],
+    "expected_outcome": "passed"
+  },
+  "duplicate_identity": {
+    "config": "duplicate-identity.config.cjs",
+    "file": "duplicate-identity.spec.cjs",
+    "project": "smoke",
+    "describe": ["duplicate group"],
+    "title": "same case identity",
+    "copies": 2,
+    "expected_disposition": "duplicate_case_identity"
+  },
+  "outcomes": {
+    "config": "outcomes.config.cjs",
+    "file": "outcomes.spec.cjs",
+    "project": "smoke",
+    "cases": [
+      {"describe": ["outcome group"], "title": "expected failure", "expected_status": "failed", "attempts": ["failed"], "aggregate": "expected", "disposition": "passed"},
+      {"describe": ["outcome group"], "title": "unexpected pass", "expected_status": "failed", "attempts": ["passed"], "aggregate": "unexpected", "disposition": "blocked"},
+      {"describe": ["outcome group"], "title": "flaky retry", "expected_status": "passed", "attempts": ["failed", "passed"], "aggregate": "flaky", "disposition": "blocked"},
+      {"describe": ["outcome group"], "title": "intentional skip", "expected_status": "skipped", "attempts": [], "aggregate": "skipped", "disposition": "blocked"}
+    ]
+  },
+  "callback_failure": {
+    "reporter": "callback-failure-reporter.cjs",
+    "callback": "onBegin",
+    "expected_completion_marker": "absent",
+    "expected_disposition": "blocked"
+  }
+}
