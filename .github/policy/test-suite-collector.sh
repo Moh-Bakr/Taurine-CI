@@ -242,6 +242,9 @@ ruby -rjson -e '
 expect_reject 'executed case outside the selection' desktop-shard-1
 
 # The Playwright adapter: projects, files and statuses from the browser report.
+# The JSON reporter writes each spec's file relative to the configured testDir
+# (`./tests/e2e` in the reviewed config), so the fixture paths carry no
+# `tests/e2e/` segment - that segment is the adapter's own restoration.
 expected_mode=full
 expected_selected_ids="$(group_ids desktop-playwright-feedback-linux)"
 ruby -rjson -e '
@@ -250,18 +253,28 @@ ruby -rjson -e '
   }
   report = { "config" => {}, "suites" => [
     { "title" => "SYNTHETIC-PRIVATE", "suites" => [
-      spec.call("tests/e2e/rest/login.spec.ts", "smoke", "expected"),
-      spec.call("tests/e2e/database/query.spec.ts", "critical", "expected") ] } ] }
+      spec.call("rest/login.spec.ts", "smoke", "expected"),
+      spec.call("database/query.spec.ts", "critical", "expected") ] } ] }
   File.write(ARGV.fetch(0), JSON.generate(report))
 ' "${report}" "${repo_root}"
 run_collector e2e-critical >/dev/null
 jq -e '.status == "passed" and .coverage_requirement_id == "desktop-playwright-feedback-linux" and
   ([.suites[] | select(.status == "passed") | .executed_count] | all(. == 1))' "${projection}" >/dev/null
 
+# A report path that already carries the testDir segment does not match the
+# manifest terms twice: the adapter restores exactly one `tests/e2e/` prefix.
+ruby -rjson -e '
+  d=JSON.parse(File.read(ARGV.fetch(0)))
+  d["suites"][0]["suites"][0]["file"]="tests/e2e/rest/login.spec.ts"
+  File.write(ARGV.fetch(0),JSON.generate(d))
+' "${report}" "${repo_root}"
+expect_reject 'doubled testDir segment' e2e-critical
+
 # A case from a project outside the reviewed group scope is a filter mismatch.
 ruby -rjson -e '
   d=JSON.parse(File.read(ARGV.fetch(0)))
-  d["suites"][0]["suites"] << { "file" => "tests/e2e/rest/other.spec.ts", "specs" => [ { "title" => "x", "tests" => [ { "projectName" => "bench", "status" => "expected" } ] } ] }
+  d["suites"][0]["suites"][0]["file"]="rest/login.spec.ts"
+  d["suites"][0]["suites"] << { "file" => "rest/other.spec.ts", "specs" => [ { "title" => "x", "tests" => [ { "projectName" => "bench", "status" => "expected" } ] } ] }
   File.write(ARGV.fetch(0),JSON.generate(d))
 ' "${report}" "${repo_root}"
 expect_reject 'project outside the group scope' e2e-critical
