@@ -24,9 +24,12 @@ expect_policy_rejects() {
 reset_fixture
 ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
 
-# Stage 1 remains valid against the deployed seven-workflow tree, and also
-# accepts exactly one future standalone PG8 dispatcher with its fixed identity
-# schema. The measurement implementation itself is introduced only in Stage 2.
+# The candidate Stage 2 policy rejects the old seven-workflow set and accepts
+# only the exact complete eight-workflow contract with PG8 present.
+reset_fixture
+ruby -rjson -e 'path=ARGV.fetch(0); d=JSON.parse(File.read(path)); d.fetch("dispatch_contracts").fetch("workflows").delete(".github/workflows/pg8-measurement.yml"); File.write(path,JSON.generate(d)); File.delete(File.join(File.dirname(path),"workflows","pg8-measurement.yml"))' "${work}/tree/.github/ci-matrix.json"
+expect_policy_rejects 'old seven-workflow rollback after Stage 2 activation'
+
 reset_fixture
 cat > "${work}/tree/.github/workflows/pg8-measurement.yml" <<'YAML'
 name: PostgreSQL DBX PG8 measurement
@@ -59,6 +62,16 @@ jobs:
         uses: ./.github/actions/environment-preflight
         with:
           github-token: ${{ github.token }}
+      - name: Validate exact source SHA
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
       - name: Verify the coordinator dispatch identity
         shell: bash
         working-directory: ${{ github.workspace }}

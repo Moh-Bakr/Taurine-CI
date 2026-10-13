@@ -44,6 +44,7 @@ PREFLIGHT = {
   '.github/workflows/source-read.yml' => 'validate-input',
   '.github/workflows/live-proofs.yml' => 'plan',
   '.github/workflows/pg8-measurement.yml' => 'plan',
+  '.github/workflows/pg8-measurement-arm.yml' => 'preflight',
   '.github/workflows/macos-validation.yml' => 'plan',
   '.github/workflows/android-validation.yml' => 'plan',
   '.github/workflows/ios-validation.yml' => 'plan'

@@ -1,0 +1,88 @@
+name: PostgreSQL DBX PG8 measurement arm (protected)
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact 40-character private source SHA
+        required: true
+        type: string
+    secrets:
+      SOURCE_READER_PRIVATE_KEY:
+        required: true
+permissions: {}
+env:
+  SOURCE_REPOSITORY_ID: '1330267721'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: Taurine
+jobs:
+  preflight:
+    permissions:
+      actions: read
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the source-read deployment branches
+        uses: ./.github/actions/environment-preflight  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+  measure:
+    permissions:
+      contents: read
+    needs: [preflight]
+    if: needs.preflight.result == 'success' && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
+    name: Measure PG8 at exact private SHA
+    environment: source-read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out the exact private source SHA
+        id: verified-source
+        uses: ./.github/actions/source-checkout  # zizmor: ignore[self-repository]
+        with:
+          source-sha: ${{ inputs.source_sha }}
+          app-client-id: ${{ vars.SOURCE_READER_APP_ID }}
+          app-private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          repository-id: ${{ env.SOURCE_REPOSITORY_ID }}
+          repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
+      - name: Start the fixed PostgreSQL 17 Dbx fixture
+        uses: ./.github/actions/live-start-pg  # zizmor: ignore[self-repository]
+        with:
+          engine: pg-dbx
+      - name: Install shared sanitizers
+        uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
+      - name: Prepare fixed packaging dependencies
+        uses: ./.github/actions/root-setup  # zizmor: ignore[self-repository]
+        with:
+          concern: rust-packaging
+      - name: Remove root before source commands
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+      - name: Install locked desktop dependencies
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
+        with:
+          root: 'false'
+          desktop: 'true'
+          mobile: 'false'
+          vendor-fetch: 'true'
+      - name: Install Rust toolchain and packaging libraries
+        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
+        with:
+          concern: rust-packaging
+          path: src
+      - name: Measure the fixed PG8 probe and UAT release binaries
+        uses: ./.github/actions/pg8-measurement  # zizmor: ignore[self-repository]
