@@ -206,6 +206,17 @@ engine_roster_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --ar
   echo 'all engines and the explicit complete roster produced different dispatch identities' >&2
   exit 1
 }
+engine_eleven="${engine_roster/,pg-dbx/}"
+engine_eleven_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg engines "${engine_eleven}" '{source_sha:$sha,engine:$engines}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
+[[ "${engine_all_key}" != "${engine_eleven_key}" ]] || {
+  echo 'all engines collided with the old 11-arm roster dispatch identity' >&2
+  exit 1
+}
+pg_dbx_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"pg-dbx"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
+[[ "${pg_dbx_key}" =~ ^[0-9a-f]{64}$ ]] || {
+  echo 'direct pg-dbx dispatch was not accepted' >&2
+  exit 1
+}
 engine_output="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"postgres, doris"}')" "CI_DISPATCH_KEY=${engine_key}" ruby .github/policy/dispatch-identity.rb)"
 [[ "${engine_output}" == *'"engine":"doris,postgres"'* ]] || {
   echo 'engine selection was not canonicalized to the reviewed roster order' >&2

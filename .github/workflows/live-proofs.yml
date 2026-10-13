@@ -128,6 +128,19 @@ jobs:
           # `filter` (none for rocketmq: both tests in its file are the proof).
           # `report` says the arm's suite prints the conformance report whose
           # header the verdict reads. `blurb` is the image line the summary shows.
+          # The pg-dbx arm uses the same pinned PostgreSQL 17 server, dialled
+          # through the Dbx route — plan 25 task 2.5, PG2's live evidence for
+          # the Stage-2 pilot. The private Dbx-route suites select the adapter
+          # family over legacy registration; the conformance crate compiles the
+          # engine's `dbx-pg` feature and both routes use `connect_routed`.
+          # No environment switch exists or is needed: the dev-only
+          # `database.engine.override` stays a compiled-in developer setting.
+          # Every compiled route row still defaults to Legacy. This arm proves
+          # Dbx before the flip decision (PG2), but does not flip anything.
+          # The legacy-TLS proof (tls-legacy: PG 12/13 and the PG 17 RSA-kex
+          # peer) follows once the private PG9 live suite lands; SKIPPED=fail
+          # forbids adding an arm whose suites do not exist yet.
+          # Keep this commentary outside the JSON heredoc.
           cat > "${RUNNER_TEMP}/roster.json" <<'TCI_LIVE_ROSTER'
           [
             {"engine": "doris", "target": "live_servers", "filter": "doris_passes_every_check", "report": true,
@@ -147,22 +160,6 @@ jobs:
                         "taurine-db-postgres live_catalog,live_blob,live_ddl,live_depth,live_explain,live_notices,cancel",
                         "taurine-db-engine live_postgres"],
              "blurb": "Image: postgres 17-alpine (pinned by digest); suites: conformance + taurine-db-postgres live + engine live_postgres"},
-            # The same pinned PostgreSQL 17 server, dialled through the Dbx
-            # route — plan 25 task 2.5, PG2's live evidence for the Stage-2
-            # pilot. The route is selected by the private repository's own
-            # Dbx-route suites the way every conformance run selects it: the
-            # suite hands the engine's connect walk the adapter family built
-            # over the legacy registration (the conformance crate compiles the
-            # engine's `dbx-pg` feature), and the walk carries both routes
-            # through the same `connect_routed` seam. No environment switch
-            # exists or is needed — the dev-only `database.engine.override`
-            # stays a compiled-in developer setting, not a dispatch input.
-            # Every compiled route row still defaults to Legacy; this arm
-            # proves the Dbx route BEFORE the flip decision (PG2), it does not
-            # flip anything. The legacy-TLS proof (tls-legacy: PG 12/13 and
-            # the PG 17 RSA-kex peer) follows once the private repository
-            # lands its PG9 live suite — the SKIPPED=fail law forbids adding
-            # an arm whose suites do not exist yet.
             {"engine": "pg-dbx", "report": true,
              "suites": ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"],
              "blurb": "Image: postgres 17-alpine (pinned by digest, the postgres arm's image); suites: the conformance suite and the shadow diff through the Dbx route"},

@@ -149,6 +149,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh
 
+      - name: Test live-proof roster selection and JSON validity
+        shell: bash
+        run: bash .github/policy/test-live-roster.sh
+
       - name: Test the dispatch contract policy against weakened fixtures
         shell: bash
         run: bash .github/policy/test-dispatch-contracts.sh
