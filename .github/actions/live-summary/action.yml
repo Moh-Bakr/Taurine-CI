@@ -123,7 +123,7 @@ runs:
         # like a report of nothing but skips. The arm definition says what the
         # verdict needs: a clean conformance report (every arm but pgtls and
         # bastion), and/or every cargo suite passed with nothing skipped
-        # (the multi-suite arms: postgres, mysql, mssql, pgtls, bastion).
+        # (the multi-suite arms: postgres, mysql, mssql, pgtls, tls-legacy, bastion).
         ok=1
         if [[ "${has_report}" == "true" ]]; then
           [[ -n "${header}" && "${header}" == *", 0 failed, "* && "${header}" == *", 0 invalid"* ]] || ok=0

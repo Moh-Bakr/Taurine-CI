@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris | postgres | pg-dbx | mysql | mssql | pgtls | bastion), a comma-separated list of them, or all
+        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris | postgres | pg-dbx | mysql | mssql | pgtls | tls-legacy | bastion), a comma-separated list of them, or all
         required: true
         type: string
       source_sha:
@@ -137,9 +137,11 @@ jobs:
           # `database.engine.override` stays a compiled-in developer setting.
           # Every compiled route row still defaults to Legacy. This arm proves
           # Dbx before the flip decision (PG2), but does not flip anything.
-          # The legacy-TLS proof (tls-legacy: PG 12/13 and the PG 17 RSA-kex
-          # peer) follows once the private PG9 live suite lands; SKIPPED=fail
-          # forbids adding an arm whose suites do not exist yet.
+          # The `pgtls` arm also runs the DBX provider's ordinary TLS cases
+          # against those same generated certificate fixtures. The dedicated
+          # `tls-legacy` arm selects only the two DBX legacy-peer tests and
+          # enables the one reviewed OpenSSL feature; SKIPPED=fail makes any
+          # missing selector, target or fixture a failed proof.
           # Keep this commentary outside the JSON heredoc.
           cat > "${RUNNER_TEMP}/roster.json" <<'TCI_LIVE_ROSTER'
           [
@@ -173,8 +175,15 @@ jobs:
                         "taurine-db-mssql live_blob,live_ddl,live_depth,live_explain,live_notices,live_reset,cancel,udt"],
              "blurb": "Image: mssql/server 2022-latest (pinned by digest); suites: conformance + taurine-db-mssql live"},
             {"engine": "pgtls", "report": false,
-             "suites": ["taurine-db-postgres live_tls"],
-             "blurb": "Images: postgres 17-alpine x2 (pinned by digest): ssl=on with a per-run certificate, and ssl=off"},
+             "suites": ["taurine-db-postgres live_tls",
+                        "taurine-db-conformance dbx_pg_tls_live dbx_tls_",
+                        "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"],
+             "cargo_features": ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"],
+             "blurb": "Images: postgres 17-alpine x3 (pinned by digest): ordinary TLS, verified DBX mTLS and plain"},
+            {"engine": "tls-legacy", "report": false,
+             "suites": ["taurine-db-conformance dbx_pg_tls_live legacy"],
+             "cargo_features": ["taurine-db-dbx/legacy-tls"],
+             "blurb": "Images: PostgreSQL 12/13 TLS 1.0/1.1 and PostgreSQL 17 RSA-kex (pinned by digest): DBX Rustls refusal and acknowledged OpenSSL compatibility proofs"},
             {"engine": "bastion", "report": false,
              "suites": ["taurine-app dbx_connect_live"],
              "blurb": "Images: postgres 17-alpine and the lab bastion (alpine 3.20 base pinned by digest; apk openssh-server unpinned); suite: taurine-app dbx_connect_live"}

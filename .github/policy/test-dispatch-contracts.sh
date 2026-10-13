@@ -24,12 +24,12 @@ expect_policy_rejects() {
 reset_fixture
 ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
 
-# The complete live roster is required; a stale 11-arm identity contract must
+# The complete live roster is required; a stale 12-arm identity contract must
 # fail because `engine=all` would otherwise select a different set of arms.
 reset_fixture
-ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
   "${work}/tree/.github/ci-matrix.json"
-expect_policy_rejects 'stale 11-arm live roster'
+expect_policy_rejects 'stale 12-arm live roster'
 
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"] << "unreviewed"; File.write(path,JSON.pretty_generate(data))' \

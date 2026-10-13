@@ -51,7 +51,7 @@ EXPECTED_INPUTS = {
   '.github/workflows/orchestrate-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY },
   '.github/workflows/live-proofs.yml' => {
     'engine' => { 'type' => 'string', 'required' => true, 'format' => 'engine-selection',
-                  'options' => %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion], 'digest_include' => true },
+                  'options' => %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion], 'digest_include' => true },
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY
   }
 }.freeze

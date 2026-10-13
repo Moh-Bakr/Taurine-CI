@@ -32,10 +32,36 @@ runs:
         # A single-target arm has no suites and one conformance test target.
         arm="${RUNNER_TEMP}/live-arm.json"
         suites="${RUNNER_TEMP}/suites.txt"
+        engine="$(jq -er '.engine' "${arm}")"
+        jq -e '
+          if .engine == "tls-legacy" then
+            .cargo_features == ["taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]
+          elif .engine == "pgtls" then
+            .cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]
+          else (.cargo_features // []) == []
+          end
+        ' "${arm}" >/dev/null || { echo 'proof-build: unreviewed features or DBX suite definition' >&2; exit 1; }
         jq -r '(.suites // [])[]' "${arm}" > "${suites}"
+        if jq -e 'any(.suites[]?; . == "taurine-db-conformance dbx_pg_tls_live dbx_tls_" or . == "taurine-db-conformance dbx_pg_tls_live legacy")' "${arm}" >/dev/null; then
+          [[ -s taurine-backend/taurine-db-conformance/tests/dbx_pg_tls_live.rs ]] || {
+            echo 'proof-build: required DBX TLS integration target is absent at the requested source SHA' >&2
+            exit 1
+          }
+        fi
+        if jq -e 'any(.suites[]?; . == "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_")' "${arm}" >/dev/null; then
+          [[ -s taurine-backend/taurine-db-conformance/tests/dbx_pg_mtls_live.rs ]] || {
+            echo 'proof-build: required DBX mTLS integration target is absent at the requested source SHA' >&2
+            exit 1
+          }
+        fi
         if [[ -s "${suites}" ]]; then
           while read -r pkg targets _; do
             build_args=()
+            if [[ "${engine}" == 'tls-legacy' ]]; then
+              build_args+=(--features taurine-db-dbx/legacy-tls)
+            elif [[ "${engine}" == 'pgtls' && "${targets}" == dbx_pg_mtls_live ]]; then
+              build_args+=(--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls)
+            fi
             IFS=, read -ra tl <<< "${targets}"
             for t in "${tl[@]}"; do build_args+=(--test "${t}"); done
             if ! cargo test -p "${pkg}" "${build_args[@]}" --no-run \

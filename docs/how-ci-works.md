@@ -615,8 +615,17 @@ behind the newest 300.5.x release.
 
 `live-proofs.yml` runs each selected database engine's env-gated conformance suite against its real
 single-node Docker server at an exact private SHA (Postgres, MySQL, SQL Server, Db2, Informix, Doris,
-StarRocks, RocketMQ, IRIS, plus the Postgres TLS and bastion proofs). These runs find driver defects
-that the offline suites cannot.
+StarRocks, RocketMQ, IRIS, the Postgres and DBX TLS proofs, the legacy-peer DBX TLS proof, and the
+bastion proof). These runs find driver defects that the offline suites cannot.
+
+The `pgtls` arm runs the DBX provider's ordinary TLS cases and eight mTLS cases against separate
+PostgreSQL services. The mTLS service requires a trusted client certificate and rejects absent,
+untrusted, and mismatched client identities. Its `dbx-pg` and `legacy-tls` features apply only to
+that exact target. The separate `tls-legacy` arm runs two DBX tests against TLS 1.0-only, TLS
+1.1-only, and RSA-key-exchange peers; its two cases must both execute. Fixed target/filter/feature
+tuples are validated before project code. Missing targets, selectors, features, incomplete case
+counts, or `SKIPPED` output fail the proof. `engine=all` includes all 13 required arms; the existing
+12 arms remain required.
 
 It is split three ways:
 

@@ -206,10 +206,15 @@ engine_roster_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --ar
   echo 'all engines and the explicit complete roster produced different dispatch identities' >&2
   exit 1
 }
-engine_eleven="${engine_roster/,pg-dbx/}"
-engine_eleven_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg engines "${engine_eleven}" '{source_sha:$sha,engine:$engines}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
-[[ "${engine_all_key}" != "${engine_eleven_key}" ]] || {
-  echo 'all engines collided with the old 11-arm roster dispatch identity' >&2
+engine_twelve="${engine_roster/,tls-legacy/}"
+engine_twelve_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg engines "${engine_twelve}" '{source_sha:$sha,engine:$engines}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
+[[ "${engine_all_key}" != "${engine_twelve_key}" ]] || {
+  echo 'all engines collided with the old 12-arm roster dispatch identity' >&2
+  exit 1
+}
+tls_legacy_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"tls-legacy"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
+[[ "${tls_legacy_key}" =~ ^[0-9a-f]{64}$ ]] || {
+  echo 'direct tls-legacy dispatch was not accepted' >&2
   exit 1
 }
 pg_dbx_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"pg-dbx"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"

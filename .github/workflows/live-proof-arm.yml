@@ -106,6 +106,14 @@ jobs:
             and ((.target // "") | test("^[a-z0-9_]*$"))
             and ((.filter // "") | test("^[a-z0-9_]*$"))
             and ((.suites // []) | all(type == "string" and test("^[a-z0-9-]+ [a-z0-9_,]+( [a-z0-9_]+)?$")))
+            and ((keys - ["engine", "report", "blurb", "target", "filter", "suites", "cargo_features"]) | length == 0)
+            and (((.cargo_features // []) | (type == "array" and all(. == "taurine-db-dbx/legacy-tls" or . == "taurine-db-dbx/dbx-pg"))))
+            and (if $engine == "tls-legacy"
+                 then .cargo_features == ["taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]
+                 elif $engine == "pgtls"
+                 then .cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]
+                 else ((.cargo_features // []) == [])
+                 end)
             and ((.target // "") != "" or ((.suites // []) | length) > 0)
           ' "${RUNNER_TEMP}/live-arm.json" >/dev/null || { echo 'the arm definition is malformed' >&2; exit 1; }
           printf 'Requested engine: %s\nRequested source SHA: %s\n' "${REQUESTED_ENGINE}" "${REQUESTED_SOURCE_SHA,,}"
@@ -187,7 +195,7 @@ jobs:
           engine: ${{ inputs.engine }}
 
       - name: Start the PostgreSQL, TLS or bastion servers
-        if: ${{ inputs.engine == 'postgres' || inputs.engine == 'pg-dbx' || inputs.engine == 'pgtls' || inputs.engine == 'bastion' }}
+        if: ${{ inputs.engine == 'postgres' || inputs.engine == 'pg-dbx' || inputs.engine == 'pgtls' || inputs.engine == 'tls-legacy' || inputs.engine == 'bastion' }}
         uses: ./.github/actions/live-start-pg  # zizmor: ignore[self-repository]
         with:
           engine: ${{ inputs.engine }}
