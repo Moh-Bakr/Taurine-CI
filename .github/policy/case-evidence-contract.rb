@@ -182,7 +182,9 @@ def playwright_cases(report, phase, runner, config, tier, platform, repo_root, e
     suites.each do |suite|
       reject!('report_shape_invalid') unless suite.is_a?(Hash)
       file = suite['file'].is_a?(String) ? suite['file'] : inherited_file
-      chain = suite['file'] ? ancestors : ancestors + (suite['title'].is_a?(String) && !suite['title'].empty? ? [suite['title']] : [])
+      suite_title = suite['title']
+      has_describe_title = inherited_file && suite_title.is_a?(String) && !suite_title.empty?
+      chain = has_describe_title ? ancestors + [suite_title] : ancestors
       specs = suite.fetch('specs', [])
       reject!('report_shape_invalid') unless specs.is_a?(Array)
       specs.each do |spec|

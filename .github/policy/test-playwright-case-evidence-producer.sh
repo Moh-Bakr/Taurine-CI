@@ -6,6 +6,61 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
   control = ARGV.fetch(0)
   producer = File.join(control, ".github/policy/playwright-case-evidence-producer.rb")
+  producer_source = File.read(producer)
+  Object.const_set(:OUTPUT_LIMIT, 8 * 1024 * 1024)
+  Object.const_set(:TIMEOUT_SECONDS, 2 * 60 * 60)
+  Object.const_set(:MAX_CASES, 250_000)
+  Object.const_set(:CONTRACT_RESULT_COUNTS, %w[discovered executed passed failed flaky skipped ignored quarantined env_skipped].sort.freeze)
+  Object.const_set(:CONTRACT_ERROR_CLASSES, %w[
+    adapter_unsupported arguments_invalid case_collection_empty case_count_limit case_file_invalid invalid_input
+    case_file_outside_root case_project_invalid case_status_invalid case_title_invalid collection_incomplete
+    command_mismatch discovery_binding_invalid discovery_execution_mismatch duplicate_case_identity
+    expected_shape_invalid expected_status_invalid identity_invalid identity_mismatch input_size_limit
+    producer_failed producer_version_mismatch project_scope_mismatch report_count_mismatch report_digest_invalid
+    report_project_mismatch report_shape_invalid report_status_mismatch reporter_errors_present
+    schema_version_unsupported selection_invalid selection_mismatch tier_mismatch tool_version_mismatch
+  ].sort.freeze)
+  class ProducerError < StandardError; end
+  Object.define_method(:reject!) { |code| raise ProducerError, code }
+  bounded_methods = producer_source[/def run_bounded.*(?=\ndef checked_file)/m]
+  raise "bounded runner method missing" unless bounded_methods
+  TOPLEVEL_BINDING.eval(bounded_methods, producer, producer_source.lines.index { |line| line.start_with?("def run_bounded") } + 1)
+  clock = Process.method(:clock_gettime)
+  started = clock.call(Process::CLOCK_MONOTONIC)
+  begin
+    run_bounded([RbConfig.ruby, "-e", "Process.spawn(RbConfig.ruby, \"-e\", \"sleep 15\"); exit 0"],
+      chdir: Dir.pwd, env: {"PATH" => ENV.fetch("PATH", "/usr/bin:/bin")}, timeout: 0.75)
+    raise "bounded runner ignored inherited-pipe deadline"
+  rescue ProducerError => error
+    raise "wrong bounded runner error" unless error.message == "process_timeout"
+  end
+  raise "bounded runner exceeded pipe-drain deadline" if clock.call(Process::CLOCK_MONOTONIC) - started > 3
+
+  valid_counts = {"discovered" => 1, "executed" => 1, "passed" => 1, "failed" => 0,
+    "flaky" => 0, "skipped" => 0, "ignored" => 0, "quarantined" => 0, "env_skipped" => 0}
+  valid_result = {"schema_version" => 1, "status" => "shadow_valid_unverified_producer", "counts" => valid_counts}
+  safe_result = validate_contract_result!(0, valid_result)
+  raise "validator result was not reconstructed safely" unless safe_result == valid_result && !safe_result.equal?(valid_result)
+  blocked_counts = valid_counts.merge("passed" => 0, "failed" => 1)
+  blocked_result = {"schema_version" => 1, "status" => "shadow_blocked", "counts" => blocked_counts}
+  raise "blocked validator result was rejected" unless validate_contract_result!(1, blocked_result) == blocked_result
+  [valid_result.merge("private_title" => "RAW_VALIDATOR_SENTINEL"),
+    {"schema_version" => 1, "status" => "shadow_blocked", "error_class" => "reporter_failed", "raw" => "RAW_VALIDATOR_SENTINEL"},
+    {"schema_version" => 1, "status" => "shadow_blocked", "error_class" => "UNKNOWN_RAW_SENTINEL"}].each do |bad_result|
+    begin
+      validate_contract_result!(bad_result["status"] == "shadow_valid_unverified_producer" ? 0 : 1, bad_result)
+      raise "validator result with unknown fields or error class was accepted"
+    rescue ProducerError => error
+      raise "wrong validator result rejection" unless error.message == "validator_failed"
+    end
+  end
+  begin
+    validate_contract_result!(0, valid_result.merge("counts" => valid_counts.merge("passed" => -1)))
+    raise "invalid validator count was accepted"
+  rescue ProducerError => error
+    raise "wrong validator count rejection" unless error.message == "validator_failed"
+  end
+
   temp = File.realpath(Dir.mktmpdir("playwright-producer-fixtures-"))
   begin
     source = File.join(temp, "source")

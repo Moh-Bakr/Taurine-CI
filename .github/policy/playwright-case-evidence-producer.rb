@@ -30,6 +30,18 @@ MAX_REPORT_BYTES = 64 * 1024 * 1024
 MAX_CASES = 250_000
 TIMEOUT_SECONDS = 2 * 60 * 60
 OUTPUT_LIMIT = 8 * 1024 * 1024
+CONTRACT_RESULT_COUNTS = %w[
+  discovered executed passed failed flaky skipped ignored quarantined env_skipped
+].sort.freeze
+CONTRACT_ERROR_CLASSES = %w[
+  adapter_unsupported arguments_invalid case_collection_empty case_count_limit case_file_invalid invalid_input
+  case_file_outside_root case_project_invalid case_status_invalid case_title_invalid collection_incomplete
+  command_mismatch discovery_binding_invalid discovery_execution_mismatch duplicate_case_identity
+  expected_shape_invalid expected_status_invalid identity_invalid identity_mismatch input_size_limit
+  producer_failed producer_version_mismatch project_scope_mismatch report_count_mismatch report_digest_invalid
+  report_project_mismatch report_shape_invalid report_status_mismatch reporter_errors_present
+  schema_version_unsupported selection_invalid selection_mismatch tier_mismatch tool_version_mismatch
+].sort.freeze
 EXPECTED_KEYS = %w[
   schema_version source_sha control_sha manifest_digest catalog_digest selection_digest selection_mode
   selected_suite_ids runner_id config_id tier platform project tool_version repo_root
@@ -119,22 +131,34 @@ def run_bounded(argv, chdir:, env:, timeout: TIMEOUT_SECONDS, capture_stdout: fa
         end
       end
     end
+    deadline = started + timeout
+    stop_owned_group = lambda do
+      Process.kill('TERM', -waiter.pid) rescue nil
+      Process.kill('KILL', -waiter.pid) rescue nil
+      readers.each(&:kill)
+    end
     loop do
       break if waiter.join(0.05)
       if overflow
-        Process.kill('TERM', -waiter.pid) rescue nil
-        sleep 0.2
-        Process.kill('KILL', -waiter.pid) rescue nil
+        stop_owned_group.call
         reject!('process_output_limit')
       end
-      next if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started < timeout
+      next if Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
 
-      Process.kill('TERM', -waiter.pid) rescue nil
-      sleep 0.2
-      Process.kill('KILL', -waiter.pid) rescue nil
+      stop_owned_group.call
       reject!('process_timeout')
     end
-    readers.each(&:join)
+    until readers.none?(&:alive?)
+      if overflow
+        stop_owned_group.call
+        reject!('process_output_limit')
+      end
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        stop_owned_group.call
+        reject!('process_timeout')
+      end
+      readers.each { |reader| reader.join(0.05) }
+    end
     reject!('process_output_limit') if overflow || bytes.any? { |count| count > OUTPUT_LIMIT }
     status = waiter.value.exitstatus
     completed = true
@@ -148,6 +172,43 @@ ensure
     sleep 0.2
     Process.kill('KILL', -child_pid) rescue nil
   end
+end
+
+def validate_contract_result!(exit_status, result)
+  reject!('validator_failed') unless result.is_a?(Hash) && result['schema_version'] == 1
+  case result['status']
+  when 'shadow_valid_unverified_producer'
+    reject!('validator_failed') unless exit_status == 0 && result.keys.sort == %w[counts schema_version status]
+    counts = validate_contract_counts!(result['counts'])
+    reject!('validator_failed') unless counts['failed'].zero? && counts['flaky'].zero? &&
+      counts['skipped'].zero? && counts['ignored'].zero? && counts['quarantined'].zero? &&
+      counts['env_skipped'].zero? && counts['passed'] == counts['executed']
+    { 'schema_version' => 1, 'status' => 'shadow_valid_unverified_producer', 'counts' => counts }
+  when 'shadow_blocked'
+    if result.keys.sort == %w[counts schema_version status]
+      reject!('validator_failed') unless exit_status == 1
+      counts = validate_contract_counts!(result['counts'])
+      reject!('validator_failed') if counts['failed'].zero? && counts['flaky'].zero? &&
+        counts['skipped'].zero? && counts['ignored'].zero? && counts['quarantined'].zero? &&
+        counts['env_skipped'].zero?
+      { 'schema_version' => 1, 'status' => 'shadow_blocked', 'counts' => counts }
+    elsif result.keys.sort == %w[error_class schema_version status]
+      reject!('validator_failed') unless exit_status == 1 && CONTRACT_ERROR_CLASSES.include?(result['error_class'])
+      { 'schema_version' => 1, 'status' => 'shadow_blocked', 'error_class' => result['error_class'] }
+    else
+      reject!('validator_failed')
+    end
+  else
+    reject!('validator_failed')
+  end
+end
+
+def validate_contract_counts!(counts)
+  reject!('validator_failed') unless counts.is_a?(Hash) && counts.keys.sort == CONTRACT_RESULT_COUNTS &&
+    counts.values.all? { |count| count.is_a?(Integer) && count.between?(0, MAX_CASES) } &&
+    counts['discovered'] == counts['executed'] && counts['executed'].positive? &&
+    %w[passed failed flaky skipped ignored quarantined env_skipped].sum { |key| counts.fetch(key) } == counts['executed']
+  CONTRACT_RESULT_COUNTS.to_h { |key| [key, counts.fetch(key)] }
 end
 
 def checked_file(path, root, max_bytes)
@@ -449,9 +510,8 @@ begin
       validator_status, result_json = run_bounded([validator, CONTRACT, expected_copy, discovery_copy, execution_copy],
         chdir: ROOT, env: validator_env, timeout: 60, capture_stdout: true)
       result = JSON.parse(result_json)
-      reject!('validator_failed') unless [0, 1].include?(validator_status) && result.is_a?(Hash) &&
-        result['schema_version'] == 1 && %w[shadow_valid_unverified_producer shadow_blocked].include?(result['status'])
-      puts JSON.generate(result)
+      safe_result = validate_contract_result!(validator_status, result)
+      puts JSON.generate(safe_result)
       exit(validator_status)
   end
 rescue ProducerError => error
