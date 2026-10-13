@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +39,10 @@ class ContractTests(unittest.TestCase):
         for record in ("[]", "null", json.dumps({"reason":"compiler-artifact", "target":{"name":pg8.TARGET,"kind":None}, "package_id":[], "executable":str(self.exe)})):
             with self.subTest(record=record), self.assertRaises(ValueError):
                 pg8.select_artifact([record], self.root)
+
+    def test_cli_input_bound_counts_bytes(self):
+        self.assertEqual(pg8.read_bounded(io.BytesIO("é".encode()), 2), "é")
+        with self.assertRaises(ValueError): pg8.read_bounded(io.BytesIO("é".encode()), 1)
 
     def test_cli_errors_never_echo_source_supplied_paths(self):
         sentinel = str(self.root / "PRIVATE_SENTINEL_ARTIFACT_PATH")

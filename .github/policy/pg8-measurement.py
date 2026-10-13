@@ -21,6 +21,8 @@ def read_bounded(stream, limit):
     value = stream.read(limit + 1)
     if len(value) > limit:
         raise ValueError("input exceeds the fixed parser size limit")
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
     return value
 
 
@@ -137,13 +139,13 @@ def validate_release_executable(path, target_dir):
 def main(argv):
     command = argv[1]
     if command == "artifact":
-        print(select_artifact(read_bounded(sys.stdin, MAX_CARGO_JSON_CHARS).splitlines(), argv[2]))
+        print(select_artifact(read_bounded(sys.stdin.buffer, MAX_CARGO_JSON_CHARS).splitlines(), argv[2]))
     elif command == "release":
         print(validate_release_executable(argv[2], argv[3]))
     elif command == "probe":
-        print(json.dumps(parse_probe(read_bounded(sys.stdin, MAX_PROBE_OUTPUT_CHARS), argv[2], int(argv[3])), sort_keys=True))
+        print(json.dumps(parse_probe(read_bounded(sys.stdin.buffer, MAX_PROBE_OUTPUT_CHARS), argv[2], int(argv[3])), sort_keys=True))
     elif command == "rss":
-        print(parse_rss(read_bounded(sys.stdin, MAX_RSS_OUTPUT_CHARS), int(argv[2])))
+        print(parse_rss(read_bounded(sys.stdin.buffer, MAX_RSS_OUTPUT_CHARS), int(argv[2])))
     else:
         raise ValueError("unknown fixed parser command")
 
