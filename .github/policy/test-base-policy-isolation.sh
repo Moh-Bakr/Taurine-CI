@@ -207,7 +207,8 @@ exit 0
 SH
 commit_base "${survivor}"
 rm -f "${child_pid}"
-expect_pass survivor "${survivor}"
+# Leaving a process behind fails the step, by name, and the process is gone.
+expect_reject survivor "${survivor}" 'left a process running in its session when it returned'
 [[ -s "${child_pid}" ]] || { echo 'base-policy isolation: the survivor fixture started no child' >&2; exit 1; }
 # Give the teardown a moment to land, then the child must be gone.
 sleep 1
@@ -233,7 +234,7 @@ exit 0
 SH
 commit_base "${steerer}"
 rm -f "${steered_pid}"
-expect_pass steerer "${steerer}"
+expect_reject steerer "${steerer}" 'left a process running in its session when it returned'
 [[ -s "${steered_pid}" ]] || { echo 'base-policy isolation: the steerer fixture started no child' >&2; exit 1; }
 sleep 1
 if kill -0 "$(cat "${steered_pid}")" 2>/dev/null; then
@@ -241,6 +242,64 @@ if kill -0 "$(cat "${steered_pid}")" 2>/dev/null; then
   echo 'base-policy isolation: a base script steered the teardown and kept its child alive' >&2
   exit 1
 fi
+
+# A process that leaves the session altogether: Process.daemon double-forks and calls setsid, so
+# it is in no group the teardown kills and is re-parented away from the step. It must still be
+# found, fail the step by name, and be killed.
+#
+# The step finds it by the marker in its environment, which it reads from /proc. Where there is
+# no /proc -- macOS, where ps also hides the environment of Apple's own binaries such as
+# /usr/bin/ruby -- the marker cannot be read, so this fixture says plainly that it did not run
+# rather than passing. The policy job runs on Linux, where it does.
+if [[ ! -d /proc/self ]]; then
+  echo 'base-policy isolation: NOT EXERCISED HERE -- the daemon-escape fixture needs /proc; it runs in the Linux policy job' >&2
+  daemon_skipped=yes
+else
+  daemon_skipped=no
+fi
+if [[ "${daemon_skipped}" == no ]]; then
+daemon="$(fixture "${work}/daemon")"
+passing_scripts "${daemon}"
+daemon_pid="${work}/daemon-child.pid"
+cat > "${daemon}/base-policy/.github/policy/check-pass.rb" <<RB
+Process.daemon(true, true)
+File.write('${daemon_pid}', Process.pid.to_s)
+sleep 120
+RB
+commit_base "${daemon}"
+rm -f "${daemon_pid}"
+expect_reject daemon "${daemon}" 'left a process that escaped its session'
+[[ -s "${daemon_pid}" ]] || { echo 'base-policy isolation: the daemon fixture started no process' >&2; exit 1; }
+if kill -0 "$(cat "${daemon_pid}")" 2>/dev/null; then
+  kill -KILL "$(cat "${daemon_pid}")" 2>/dev/null || true
+  echo 'base-policy isolation: a daemonised process outlived the step' >&2
+  exit 1
+fi
+fi
+
+# The last base script rewrites one that already ran. No script runs after it, so only the
+# final verification can notice.
+last="$(fixture "${work}/last")"
+passing_scripts "${last}"
+printf '%s\n' 'File.write(".github/policy/check-pass.sh", "exit 0\n# rewritten after it ran\n")' \
+  > "${last}/base-policy/.github/policy/test-pass.rb"
+commit_base "${last}"
+expect_reject last "${last}" 'no longer matches the base commit it was pinned to'
+
+# A base checkout whose file on disk no longer matches its git object. The pin must come from the
+# object, so the disk copy is caught; a pin built from the disk would agree with the tampered file.
+tampered="$(fixture "${work}/tampered")"
+passing_scripts "${tampered}"
+commit_base "${tampered}"
+printf 'exit 0\n# changed on disk after the commit\n' > "${tampered}/base-policy/.github/policy/check-pass.sh"
+expect_reject tampered "${tampered}" 'no longer matches the base commit it was pinned to'
+
+# A hidden file added after the pin is an unexpected file like any other.
+hidden="$(fixture "${work}/hidden")"
+passing_scripts "${hidden}"
+printf '%s\n' 'printf "exit 0\n" > .github/policy/.hidden' > "${hidden}/base-policy/.github/policy/check-pass.sh"
+commit_base "${hidden}"
+expect_reject hidden "${hidden}" 'does not match the files the base commit pinned'
 
 # The loader variables must not reach a base script, however they were planted. The witness is a
 # base script that fails when it can see one.
@@ -260,4 +319,5 @@ expect_pass loader "${loader}" \
   LD_PRELOAD=/tmp/planted.so LD_LIBRARY_PATH=/tmp/planted LD_AUDIT=/tmp/planted-audit.so \
   DYLD_INSERT_LIBRARIES=/tmp/planted.dylib DYLD_LIBRARY_PATH=/tmp/planted
 
-echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind does not outlive its check, even when the script plants a bogus group id; and planted loader variables never reach a base script'
+echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind, in its session or escaped from it by Process.daemon, fails the step and is killed, even when the script plants a bogus group id; a rewrite by the last script, a tampered base checkout and a hidden file are caught; and planted loader variables never reach a base script'
+[[ "${daemon_skipped}" == no ]] || echo 'base-policy isolation: the daemon-escape case above was NOT exercised on this host'

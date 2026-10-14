@@ -246,8 +246,14 @@ jobs:
   # Its own job because the checks in `policy` run this pull request's scripts, and any of them can
   # append to GITHUB_ENV or GITHUB_PATH, write into RUNNER_TEMP, or leave a process running. In one
   # job the base pass had to defend against all of that from inside the same environment. In a
-  # separate job it never shares that environment: a fresh runner, a fresh RUNNER_TEMP, and nothing
-  # of this pull request's has executed before the base scripts do.
+  # separate job it starts on a fresh runner with a fresh RUNNER_TEMP, so nothing those checks
+  # exported or left behind reaches it.
+  #
+  # That is not the same as no pull-request code running here: some base tests extract and run
+  # steps from this pull request's own copy of this workflow, inside this job. The steps below
+  # limit what that code can do. And because the pull request's copy of this file defines this job
+  # too, none of this defends against a pull request that edits it -- review is the control for
+  # that (docs/how-ci-works.md).
   #
   # `policy` requires this job's result, so splitting it out does not take it off the required
   # status check.
@@ -272,6 +278,14 @@ jobs:
           path: base-policy
           fetch-depth: 1
           persist-credentials: false
+
+      # Base tests extract and execute steps from this pull request's copy of the workflow, so
+      # pull-request code runs inside this job. Take away the runner's passwordless sudo and
+      # Docker before any of it does, with the same composite the source-validation jobs use
+      # before project code; the step below asserts sudo is gone.
+      - name: Remove root before the base policy runs
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
 
       # The shell is named by absolute path and started in privileged mode with the startup files
       # skipped, so nothing can steer it through BASH_ENV, ENV, SHELLOPTS, an exported function
@@ -318,6 +332,16 @@ jobs:
           for name in CI GITHUB_ACTIONS GITHUB_API_URL GITHUB_EVENT_NAME GITHUB_REF GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_SHA GITHUB_WORKSPACE RUNNER_ARCH RUNNER_OS RUNNER_TEMP; do
             [[ -z "${!name+x}" ]] || scrub+=("${name}=${!name}")
           done
+          # Root was removed by the drop-root step before this one. Hosted runners give the job
+          # user passwordless sudo, and PR code that a base test executes could otherwise use it to
+          # write /etc/ld.so.preload or replace ruby. Fail closed if it is still there.
+          if /usr/bin/sudo -n true 2>/dev/null; then
+            echo "::error::passwordless sudo is still available, so a base script could act as root"
+            exit 1
+          fi
+          # Defence in depth: `env -i` above already starts every base script with nothing but the
+          # allow-listed names, so no loader variable can reach one. This asserts it rather than
+          # relying on it.
           loaders="$("${scrub[@]}" /usr/bin/env | grep -E '^(LD_|DYLD_)' || true)"
           [[ -z "${loaders}" ]] || { echo "::error::loader variables reached the base policy environment: ${loaders%%=*}"; exit 1; }
 
@@ -361,7 +385,8 @@ jobs:
             printf '%s\n' "${pins}" | "${scrub[@]}" "${ruby_bin}" -e '
               require "digest"
               pinned = STDIN.read.lines.map { |line| line.chomp.split("  ", 2) }.reject { |pair| pair.length != 2 }.to_h { |d, p| [p, d] }
-              present = Dir.glob(".github/policy/**/*").select { |path| File.file?(path) }.sort
+              # FNM_DOTMATCH, so an added hidden file is reported like any other.
+              present = Dir.glob(".github/policy/**/*", File::FNM_DOTMATCH).select { |path| File.file?(path) }.sort
               missing = pinned.keys.sort - present
               extra = present - pinned.keys.sort
               unless missing.empty? && extra.empty?
@@ -388,19 +413,69 @@ jobs:
           # calls Process.setsid and then becomes the base script: it names the session and its
           # group. It is taken from `$!`, never from a file, because a base script could rewrite a
           # file to point the teardown at some other group and keep its own child alive.
+          #
+          # Leaving a process behind is a failure, not a warning: a base script has no reason to,
+          # and a process that outlives its check can act on the next one. Two ways out are
+          # watched.
+          #
+          # A process still in the script's session when it returns is found through the group.
+          #
+          # A process that left the session -- a double fork and setsid, as Process.daemon does --
+          # is in no group the teardown can kill. It is found by a marker instead: each script
+          # runs with a fresh random TAURINE_BASE_GUARD value in its environment, which every
+          # process it starts inherits through fork, exec and daemon alike. Anything still alive
+          # with that value once the script has returned has outlived it. An earlier version
+          # diffed the runner user's process list instead; that cannot tell an escapee from an
+          # unrelated process the same user started meanwhile, and it failed closed on exactly
+          # that in testing. The marker is per script, so it does not have that problem.
+          marked_pids() {
+            local marker="TAURINE_BASE_GUARD=$1" found=''
+            if [[ -d /proc/self ]]; then
+              local environ
+              for environ in /proc/[0-9]*/environ; do
+                if tr '\0' '\n' < "${environ}" 2>/dev/null | grep -Fxq -- "${marker}"; then
+                  found+="${environ//[^0-9]/} "
+                fi
+              done
+            else
+              # No /proc: read each process's environment through ps. Exclude this shell's own
+              # descendants, which carry the marker only as an argument to the search itself.
+              found="$(ps -E -A -o pid=,ppid=,command= | awk -v me="$$" -v needle="${marker}" '
+                { parent[$1] = $2; line[$1] = $0 }
+                END {
+                  for (p in line) {
+                    if (index(line[p], needle) == 0) continue
+                    q = p
+                    while (q != me && q > 1 && (q in parent)) q = parent[q]
+                    if (q != me) printf "%s ", p
+                  }
+                }')"
+            fi
+            printf '%s' "${found}"
+          }
+          process_failure=0
           run_guarded() {
-            local status=0 leader
-            "${scrub[@]}" ${token[@]+"${token[@]}"} "${ruby_bin}" -e '
+            local status=0 leader guard survivors
+            guard="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+            "${scrub[@]}" ${token[@]+"${token[@]}"} "TAURINE_BASE_GUARD=${guard}" "${ruby_bin}" -e '
               Process.setsid
               exec(*ARGV)
             ' "$@" &
             leader=$!
             wait "${leader}" || status=$?
-            kill -TERM -- "-${leader}" 2>/dev/null || true
-            sleep 1
             if kill -0 -- "-${leader}" 2>/dev/null; then
+              kill -TERM -- "-${leader}" 2>/dev/null || true
+              sleep 1
               kill -KILL -- "-${leader}" 2>/dev/null || true
-              echo "::warning::a base policy script left a process group behind; it was killed"
+              echo "::error::base policy: ${check##*/} left a process running in its session when it returned; it was killed"
+              process_failure=1
+            fi
+            survivors="$(marked_pids "${guard}")"
+            if [[ -n "${survivors// /}" ]]; then
+              # shellcheck disable=SC2086
+              kill -KILL ${survivors} 2>/dev/null || true
+              echo "::error::base policy: ${check##*/} left a process that escaped its session (pid ${survivors% }); it was killed"
+              process_failure=1
             fi
             return "${status}"
           }
@@ -421,6 +496,7 @@ jobs:
             echo '::endgroup::'
           done
           [[ "${executed}" -eq "${expected}" ]] || { echo "::error::ran ${executed} of ${expected} base policy scripts"; exit 1; }
+          [[ "${process_failure}" -eq 0 ]] || status=1
           verify_manifest || status=1
           echo "base policy: ${executed} scripts run against ${pinned} pinned files"
           exit "${status}"

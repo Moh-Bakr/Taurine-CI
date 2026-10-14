@@ -740,44 +740,66 @@ nothing ran. `test-base-policy-env.sh` runs the step as declared, over rejecting
 of those planted, and fails on a step that does not hold.
 
 What the environment scrub alone could not stop is code the pull request contributes that the
-base pass itself executes. Several base tests extract a step from the pull request's workflows or
-actions and run it, as the same user, with write access to `.github/policy/`, so that code could
-rewrite a later base script on disk; and a background process left by an earlier pull-request step
-could do the same. The base pass is therefore isolated further:
+base pass itself executes. Several base tests -- `test-base-policy-env.sh` and
+`test-base-policy-isolation.sh` among them -- extract steps from the pull request's own copy of
+`validate-public-changes.yml` and run them, as the same user, inside the base pass. So
+pull-request code does run there, and it could rewrite a later base script on disk or leave a
+process behind to act later. The base pass is therefore isolated further:
 
-- **Its own job.** It runs as `base-policy`, separate from the checks in `policy`, on a fresh runner
-  where no pull-request step has executed. `policy` declares `needs: [base-policy]` and fails unless
-  that job succeeded, so the base pass stays on the required status check.
+- **Its own job.** It runs as `base-policy`, separate from the checks in `policy`, so nothing the
+  pull request's own policy scripts export there reaches it. `policy` declares
+  `needs: [base-policy]` and fails unless that job succeeded.
+- **No root.** Hosted runners give the job user passwordless sudo. The job runs the same
+  `drop-root` composite the source-validation jobs run before project code, then the step
+  asserts `sudo -n true` is refused. Without that, pull-request code run by a base test could
+  write `/etc/ld.so.preload` or replace ruby.
 - **Pinned to the base commit.** The base checkout's `HEAD` must equal the pull request's base SHA.
-  A SHA-256 manifest is built from that commit's git objects, held only in the step's memory and
-  handed to the verifier on standard input, and re-verified before every base script and once at
-  the end. A rewritten, added or removed base file fails the step. The manifest is never written
-  to disk, because a base script could rewrite a file there to match its own edit.
-- **One session per script.** Each base script runs in its own session, created by the pinned ruby
-  with `Process.setsid`, and its process group is torn down when it returns. The group is taken from
-  the step's own `$!`, never from a file a script could overwrite.
-- **No loader variables.** The step shell unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`, the
-  allow-list never forwards them, and the step asserts no `LD_*` or `DYLD_*` name reaches a base
-  script.
+  A SHA-256 manifest is built from that commit's git objects -- not from the files on disk -- held
+  only in the step's memory, and re-verified before every base script and once after the last.
+  A rewritten, added, removed or hidden base file fails the step. The manifest is never written to
+  disk, where a base script could rewrite it to match its own edit.
+- **Nothing outlives a script.** Each base script runs in its own session, created by the pinned
+  ruby with `Process.setsid`, and the step fails if any process is still in it when the script
+  returns. Each script also runs with a fresh random marker in its environment; any process still
+  alive carrying that marker afterwards -- one that left the session, as `Process.daemon` does --
+  fails the step too. Survivors are killed either way. The group is taken from the step's own `$!`,
+  never from a file a script could overwrite.
+- **No loader variables.** The step shell unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`,
+  the allow-list never forwards them, and the step asserts none reaches a base script.
 
-`test-base-policy-isolation.sh` runs the step over fixtures for each: a mismatched checkout, a
-rewritten, added and removed base file, the same rewrite under poisoned ruby, a forged manifest on
-disk, a forged digest function, a base script that leaves a child running, the same while planting
-a bogus group id, and planted loader variables.
+`test-base-policy-isolation.sh` runs the step over fixtures for each: a mismatched checkout; a
+rewritten, added, removed and hidden base file; a rewrite by the last script, which only the
+final check can see; a base checkout tampered on disk; the same rewrite under poisoned ruby; a
+forged manifest on disk; a forged digest function; a base script that leaves a child in its
+session, the same while planting a bogus group id, and one that daemonises out of it; and planted
+loader variables.
 
-What remains, and is accepted for now:
+What this does **not** do, plainly:
 
-- A base script can call `setsid` itself and so leave the session the teardown kills. GitHub-hosted
-  runners reap a job's remaining processes when it ends, and with the base pass in its own job
-  nothing of the pull request's runs after it; but within the job such a process can outlive its
-  own check.
-- `DYLD_*` forwarding cannot be observed on macOS, which strips those names under System Integrity
-  Protection, so the loader fixture's behaviour for them is expected on the Linux runner rather than
-  measured locally. On Linux the dynamic loader ignores `DYLD_*` anyway.
-- The base job's result reaches the required check only through `policy`'s `needs` and its guard
-  step. A pull request edits its own copy of this workflow, and no base policy check yet asserts
-  that the guard and the `needs` are present, so removing them relies on review. A policy check for
-  that structure is the follow-up.
+- **It hardens the base pass as an honest workflow runs it. It does not defend against a pull
+  request that edits the workflow.** Under `pull_request`, the pull request's own copy of this
+  file defines both jobs. It can delete the pin, change `BASE_SHA` or the checkout `ref:`, add
+  `if: false`, drop `needs`, or replace the step outright, and no check that this workflow runs
+  can stop that, because the pull request also controls which checks run. Until the owner
+  decides on a ruleset-required workflow run from the default branch, review of every change to
+  this workflow and to `.github/policy/` is the only control for it.
+- **Pull-request code runs inside the base pass.** The two test scripts named above execute steps
+  taken from the pull request's workflow. Everything listed here limits what that code can do; it
+  does not stop it running.
+- **The pull request's tree is not pinned.** The base scripts judge the files in the workspace,
+  and pull-request code running inside the pass could change those between one script and the
+  next. Only the base policy is pinned.
+- **An escapee that clears its environment is not seen.** The marker is inherited, so a process
+  that deliberately starts with a clean environment after leaving the session carries none. The
+  marker is read from `/proc`, which exists on the Linux runner; on macOS the fixture that tests
+  it reports that it did not run.
+- **A window between scripts.** An escaped process is found when the script that started it
+  returns. Until then it runs alongside that script and can act -- including on the base files the
+  next verification will check, though any change it makes there is caught by that verification.
+- **`DYLD_*` forwarding cannot be observed on macOS**, which strips those names under System
+  Integrity Protection; on Linux the dynamic loader ignores them.
+- **The sudo assertion cannot be exercised off a runner.** It needs passwordless sudo to be present
+  to prove it is gone, which a developer machine does not have.
 
 ## Accepted residual risks
 
