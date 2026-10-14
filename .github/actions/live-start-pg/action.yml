@@ -121,8 +121,8 @@ runs:
               # validates the fixed SAN/EKU, trusted and rogue chains, and key
               # pairs without logging key material. The protected container
               # entrypoint installs server files with PostgreSQL ownership,
-              # and fixes ssl_min_protocol_version=TLSv1 -c
-              # ssl_max_protocol_version=TLSv1 for the TLS 1.0-only endpoint.
+              # and fixes ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1
+              # for the TLS 1.0-only endpoint.
               # Readiness checks the ordinary TLS/plain services
               # and the mTLS service's local socket; the eight DBX mTLS cases
               # prove the real remote TLS and certificate behavior.
