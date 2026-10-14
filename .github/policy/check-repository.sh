@@ -24,6 +24,16 @@ while IFS= read -r -d '' path; do
         "$path" == .github/policy/test-pg8-measurement.py ]]; then
     continue
   fi
+  # The reviewed case-evidence assets, and nothing else: the control-owned
+  # Playwright list reporter the producers hand to the pinned runner, and the
+  # recorded runner reports their tests replay. They are JavaScript and JSON
+  # because that is what the pinned runner loads and emits; a Ruby or shell
+  # file cannot be either. One flat directory, lower-case names, those two
+  # extensions: no nesting, no other extension, and no other path in the
+  # repository gains an exception from this rule.
+  if [[ "$path" =~ ^\.github/policy/case-evidence-assets/[a-z0-9-]+\.(cjs|json)$ ]]; then
+    continue
+  fi
   if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt ]]; then
     continue
   fi
@@ -38,7 +48,9 @@ while IFS= read -r -d '' path; do
   exit 1
 done < <(git ls-files -z)
 
-if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' | grep -E "$forbidden_path_re|$forbidden_name_re"; then
+if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' \
+  | grep -vE '^\.github/policy/case-evidence-assets/[a-z0-9-]+\.json$' \
+  | grep -E "$forbidden_path_re|$forbidden_name_re"; then
   echo "The public repository contains a forbidden source, credential, or starter-document path." >&2
   exit 1
 fi
