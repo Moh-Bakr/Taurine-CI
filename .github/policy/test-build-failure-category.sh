@@ -320,14 +320,19 @@ printf 'private log\n' >"${tmp}/pg8-temp/pg8-probe-build-24680-1.log"
 printf 'sentinel\n' >"${tmp}/pg8-temp/keep-me"
 sed "s#/mnt/cargo-target#${prepared}#g" "${tmp}/pg8-cleanup.sh" >"${tmp}/pg8-cleanup-prepared.sh"
 RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=1 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-1" target_root)" PG8_SUMMARY_DIR="$(pg8_output_value "${tmp}/pg8-output-1" summary_dir)" PG8_BUILD_LOG="${pg8_build_log_1}" bash "${tmp}/pg8-cleanup.sh"
-[[ ! -e "${pg8_temp_real}/pg8-measurement-24680-1" && ! -e "${pg8_temp_real}/pg8-probe-build-24680-1.log" && -f "${tmp}/pg8-temp/keep-me" ]]
+if [[ -e "${pg8_temp_real}/pg8-measurement-24680-1" || -e "${pg8_build_log_1}" || ! -f "${tmp}/pg8-temp/keep-me" ]]; then
+  echo 'PG8 fallback cleanup did not remove only its emitted root/log' >&2; exit 1
+fi
+if [[ ! -e "${tmp}/pg8-temp/pg8-measurement-24680-6" || ! -f "${tmp}/pg8-temp/pg8-probe-build-24680-1.log" ]]; then
+  echo 'PG8 fallback cleanup removed an unallocated sibling path' >&2; exit 1
+fi
 printf 'summary data\n' >"${tmp}/pg8-temp/pg8-measurement-24680-6-summary/keep"
 pg8_build_log_6="$(pg8_output_value "${tmp}/pg8-output-6" build_log)"
 printf 'build log\n' >"${pg8_build_log_6}"
-RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=6 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-6" target_root)" PG8_SUMMARY_DIR="${tmp}/pg8-temp/pg8-measurement-24680-6-summary" PG8_BUILD_LOG="${pg8_build_log_6}" bash "${tmp}/pg8-cleanup-prepared.sh"
-[[ ! -e "${prepared}/pg8-measurement-24680-6" && ! -e "${tmp}/pg8-temp/pg8-measurement-24680-6" ]]
-[[ ! -e "${tmp}/pg8-temp/pg8-measurement-24680-6-summary" && -f "${tmp}/pg8-temp/keep-me" ]]
-[[ ! -e "${pg8_build_log_6}" ]]
+RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=6 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-6" target_root)" PG8_SUMMARY_DIR="${pg8_temp_real}/pg8-measurement-24680-6-summary" PG8_BUILD_LOG="${pg8_build_log_6}" bash "${tmp}/pg8-cleanup-prepared.sh"
+if [[ -e "${prepared}/pg8-measurement-24680-6" || ! -e "${tmp}/pg8-temp/pg8-measurement-24680-6" || -e "${tmp}/pg8-temp/pg8-measurement-24680-6-summary" || -e "${pg8_build_log_6}" || ! -f "${tmp}/pg8-temp/keep-me" ]]; then
+  echo 'PG8 prepared cleanup did not preserve the unallocated fallback sibling' >&2; exit 1
+fi
 
 # Rejected setup paths publish only directories actually allocated. A pre-existing target
 # is never emitted for cleanup; a newly created root is emitted if summary allocation refuses.
@@ -338,7 +343,9 @@ if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/p
 fi
 [[ -z "$(pg8_output_value "${tmp}/pg8-output-9" target_root)" && -z "$(pg8_output_value "${tmp}/pg8-output-9" summary_dir)" ]]
 RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=9 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-9" target_root)" PG8_SUMMARY_DIR="$(pg8_output_value "${tmp}/pg8-output-9" summary_dir)" PG8_BUILD_LOG="$(pg8_output_value "${tmp}/pg8-output-9" build_log)" bash "${tmp}/pg8-cleanup.sh"
-[[ -f "${pg8_temp_real}/pg8-measurement-24680-9/keep" ]]
+if [[ ! -f "${pg8_temp_real}/pg8-measurement-24680-9/keep" ]]; then
+  echo 'PG8 cleanup removed a pre-existing target sentinel' >&2; exit 1
+fi
 
 mkdir -p "${pg8_temp_real}/pg8-measurement-24680-10-summary"
 printf 'summary sentinel\n' >"${pg8_temp_real}/pg8-measurement-24680-10-summary/keep"
@@ -348,7 +355,9 @@ fi
 [[ "$(pg8_output_value "${tmp}/pg8-output-10" target_root)" == "${pg8_temp_real}/pg8-measurement-24680-10" ]]
 [[ -z "$(pg8_output_value "${tmp}/pg8-output-10" summary_dir)" ]]
 RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=10 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-10" target_root)" PG8_SUMMARY_DIR="$(pg8_output_value "${tmp}/pg8-output-10" summary_dir)" PG8_BUILD_LOG="$(pg8_output_value "${tmp}/pg8-output-10" build_log)" bash "${tmp}/pg8-cleanup.sh"
-[[ ! -e "${pg8_temp_real}/pg8-measurement-24680-10" && -f "${pg8_temp_real}/pg8-measurement-24680-10-summary/keep" ]]
+if [[ -e "${pg8_temp_real}/pg8-measurement-24680-10" || ! -f "${pg8_temp_real}/pg8-measurement-24680-10-summary/keep" ]]; then
+  echo 'PG8 cleanup did not preserve the pre-existing summary sentinel' >&2; exit 1
+fi
 
 # Invalid source/temp setup has no allocated-path outputs, so always cleanup preserves any
 # same-run-name sentinels already present under RUNNER_TEMP.
@@ -360,5 +369,7 @@ if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/s
 fi
 [[ -z "$(pg8_output_value "${tmp}/pg8-output-11" target_root)" && -z "$(pg8_output_value "${tmp}/pg8-output-11" summary_dir)" ]]
 RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=11 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-11" target_root)" PG8_SUMMARY_DIR="$(pg8_output_value "${tmp}/pg8-output-11" summary_dir)" PG8_BUILD_LOG="$(pg8_output_value "${tmp}/pg8-output-11" build_log)" bash "${tmp}/pg8-cleanup.sh"
-[[ -f "${pg8_temp_real}/pg8-measurement-24680-11/keep" && -f "${pg8_temp_real}/pg8-measurement-24680-11-summary/keep" ]]
+if [[ ! -f "${pg8_temp_real}/pg8-measurement-24680-11/keep" || ! -f "${pg8_temp_real}/pg8-measurement-24680-11-summary/keep" ]]; then
+  echo 'PG8 cleanup removed invalid-path sentinels' >&2; exit 1
+fi
 echo 'build-failure category fixtures: classifications, privacy, failure preservation, live-build and PG8 callsites pass'
