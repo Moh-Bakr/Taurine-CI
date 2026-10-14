@@ -8,7 +8,6 @@ require 'open3'
 require 'pathname'
 require 'rbconfig'
 require 'tmpdir'
-require_relative 'case-evidence-assets'
 
 class ProducerError < StandardError
   attr_reader :code
@@ -24,7 +23,7 @@ def reject!(code)
 end
 
 ROOT = File.expand_path('../..', __dir__).freeze
-REPORTER_NAME = 'playwright-case-list-reporter.cjs'.freeze
+REPORTER = File.join(__dir__, 'case-evidence-assets', 'playwright-case-list-reporter.cjs').freeze
 CONTRACT = File.join(__dir__, 'case-evidence-contract.rb').freeze
 MAX_INPUT_BYTES = 1 * 1024 * 1024
 MAX_REPORT_BYTES = 64 * 1024 * 1024
@@ -32,7 +31,7 @@ MAX_CASES = 250_000
 TIMEOUT_SECONDS = 2 * 60 * 60
 OUTPUT_LIMIT = 8 * 1024 * 1024
 CONTRACT_RESULT_COUNTS = %w[
-  discovered executed passed failed flaky skipped ignored quarantined env_skipped
+  discovered executed passed failed retried_pass skipped ignored quarantined env_skipped
 ].sort.freeze
 CONTRACT_ERROR_CLASSES = %w[
   adapter_unsupported arguments_invalid case_collection_empty case_count_limit case_file_invalid invalid_input
@@ -181,17 +180,19 @@ def validate_contract_result!(exit_status, result)
   when 'shadow_valid_unverified_producer'
     reject!('validator_failed') unless exit_status == 0 && result.keys.sort == %w[counts schema_version status]
     counts = validate_contract_counts!(result['counts'])
-    reject!('validator_failed') unless counts['failed'].zero? && counts['flaky'].zero? &&
-      counts['skipped'].zero? && counts['ignored'].zero? && counts['quarantined'].zero? &&
-      counts['env_skipped'].zero? && counts['passed'] == counts['executed']
+    # retried_pass and skipped are reported outcomes, not parity failures; see
+    # ACCEPTED_STATUSES in case-evidence-contract.rb. They are never folded into
+    # passed, so the three must still account for every executed case.
+    reject!('validator_failed') unless counts['failed'].zero? && counts['ignored'].zero? &&
+      counts['quarantined'].zero? && counts['env_skipped'].zero? &&
+      counts['passed'] + counts['retried_pass'] + counts['skipped'] == counts['executed']
     { 'schema_version' => 1, 'status' => 'shadow_valid_unverified_producer', 'counts' => counts }
   when 'shadow_blocked'
     if result.keys.sort == %w[counts schema_version status]
       reject!('validator_failed') unless exit_status == 1
       counts = validate_contract_counts!(result['counts'])
-      reject!('validator_failed') if counts['failed'].zero? && counts['flaky'].zero? &&
-        counts['skipped'].zero? && counts['ignored'].zero? && counts['quarantined'].zero? &&
-        counts['env_skipped'].zero?
+      reject!('validator_failed') if counts['failed'].zero? && counts['ignored'].zero? &&
+        counts['quarantined'].zero? && counts['env_skipped'].zero?
       { 'schema_version' => 1, 'status' => 'shadow_blocked', 'counts' => counts }
     elsif result.keys.sort == %w[error_class schema_version status]
       reject!('validator_failed') unless exit_status == 1 && CONTRACT_ERROR_CLASSES.include?(result['error_class'])
@@ -208,7 +209,7 @@ def validate_contract_counts!(counts)
   reject!('validator_failed') unless counts.is_a?(Hash) && counts.keys.sort == CONTRACT_RESULT_COUNTS &&
     counts.values.all? { |count| count.is_a?(Integer) && count.between?(0, MAX_CASES) } &&
     counts['discovered'] == counts['executed'] && counts['executed'].positive? &&
-    %w[passed failed flaky skipped ignored quarantined env_skipped].sum { |key| counts.fetch(key) } == counts['executed']
+    %w[passed failed retried_pass skipped ignored quarantined env_skipped].sum { |key| counts.fetch(key) } == counts['executed']
   CONTRACT_RESULT_COUNTS.to_h { |key| [key, counts.fetch(key)] }
 end
 
@@ -466,10 +467,6 @@ begin
         [adapter['version'], "Version #{adapter['version']}"].include?(version_output.strip)
 
       project = expected.fetch('project')
-      # The control reporter is written into this job's own mode-0700 directory
-      # from the control-owned asset module, so the runner loads it from a
-      # private path rather than from the control checkout.
-      reporter_path = CaseEvidenceAssets.materialize(work, [REPORTER_NAME]).fetch(0)
       list_report_path = File.join(work, 'discovery.json')
       marker_path = File.join(work, 'completion.json')
       File.open(list_report_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |file| file.close }
@@ -477,7 +474,7 @@ begin
       list_env = child_environment(node, work, browser_cache: browser_cache,
         report_path: list_report_path, marker_path: marker_path)
       list_argv = [node, cli, 'test', '--config', 'playwright.config.ts', '--list', '--project', project,
-        '--reporter', reporter_path]
+        '--reporter', REPORTER]
       list_status, = run_bounded(list_argv, chdir: app_root, env: list_env)
       reject!('runner_failed') unless list_status == 0
       marker = checked_file(marker_path, work, 4096)

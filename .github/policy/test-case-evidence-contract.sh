@@ -5,8 +5,8 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/case-evidence-contract.XXXXXX")"
 trap 'rm -rf "${work}"' EXIT
-mkdir -p "${work}/source/taurine-desktop/tests/unit"
-touch "${work}/source/taurine-desktop/tests/unit/api.test.ts"
+mkdir -p "${work}/source/taurine-desktop/tests/unit" "${work}/source/taurine-desktop/tests/e2e/deep"
+touch "${work}/source/taurine-desktop/tests/unit/api.test.ts" "${work}/source/taurine-desktop/tests/e2e/deep/api.spec.ts"
 
 write_vitest() {
   ruby -rjson -rdigest -e '
@@ -50,8 +50,13 @@ write_playwright() {
     runner="playwright-desktop"; config="desktop-playwright-projects"; tier="feedback"; platform="linux"; project="smoke"
     ids=["desktop.playwright.feedback.api"]
     selection=Digest::SHA256.hexdigest(JSON.generate(ids))
-    file="tests/e2e/api.spec.ts"
-    discovery_report={"suites"=>[{"file"=>file,"specs"=>[{"title"=>"outer > inner > loads API","file"=>file,
+    # The real 1.62.0 JSON reporter writes `file` relative to testDir, and the
+    # list reporter resolves an absolute path; the two halves must still land on
+    # one identity. Recorded shape:
+    # .github/policy/case-evidence-assets/real-execution-feedback.json
+    file="deep/api.spec.ts"
+    discovery_file=File.join(root,"taurine-desktop/tests/e2e",file)
+    discovery_report={"suites"=>[{"file"=>discovery_file,"specs"=>[{"title"=>"outer > inner > loads API","file"=>discovery_file,
       "tests"=>[{"projectName"=>project,"status"=>"discovered","results"=>[]}]}]}]}
     execution_report={"stats"=>{"expected"=>1,"skipped"=>0,"unexpected"=>0,"flaky"=>0},
       "suites"=>[{"title"=>"api.spec.ts","file"=>file,"specs"=>[],"suites"=>[
@@ -60,7 +65,7 @@ write_playwright() {
             "tests"=>[{"projectName"=>project,"status"=>"expected","expectedStatus"=>"passed","results"=>[{"status"=>"passed"}]}]}],"suites"=>[]}
         ]}
       ]}]}
-    identity=[runner,config,tier,platform,project,"taurine-desktop/#{file}","","","outer > inner > loads API"]
+    identity=[runner,config,tier,platform,project,"taurine-desktop/tests/e2e/#{file}","","","outer > inner > loads API"]
     case_id=Digest::SHA256.hexdigest(JSON.generate(identity))
     expected={"schema_version"=>1,"source_sha"=>source,"control_sha"=>control,"manifest_digest"=>manifest,
       "catalog_digest"=>catalog,"selection_digest"=>selection,"selection_mode"=>"full","selected_suite_ids"=>ids,
@@ -101,6 +106,21 @@ expect_error() {
   }
 }
 
+# A permitted retry pass and a deliberate skip are reported, not blocked: the
+# runner reported them and exited zero. They must be counted under their own
+# key and must never be counted as a pass.
+expect_counted_outcome() {
+  local count_key="$1" output status
+  set +e
+  output="$(run_contract)"
+  status=$?
+  set -e
+  [[ "${status}" -eq 0 ]] || { echo "${count_key}: a reported outcome was treated as a parity failure" >&2; exit 1; }
+  jq -e --arg key "${count_key}" '.status == "shadow_valid_unverified_producer" and .counts[$key] == 1 and .counts.passed == 0 and .counts.failed == 0' <<<"${output}" >/dev/null || {
+    echo "${count_key}: outcome was folded into another count or lost" >&2; exit 1;
+  }
+}
+
 expect_blocked_outcome() {
   local count_key="$1" output status
   set +e
@@ -118,7 +138,7 @@ expect_blocked_outcome() {
 
 write_vitest
 positive="$(run_contract)"
-jq -e '.status == "shadow_valid_unverified_producer" and .counts == {"discovered":2,"executed":2,"passed":2,"failed":0,"flaky":0,"skipped":0,"ignored":0,"quarantined":0,"env_skipped":0}' <<<"${positive}" >/dev/null
+jq -e '.status == "shadow_valid_unverified_producer" and .counts == {"discovered":2,"executed":2,"passed":2,"failed":0,"retried_pass":0,"skipped":0,"ignored":0,"quarantined":0,"env_skipped":0}' <<<"${positive}" >/dev/null
 ! grep -Eq 'api suite|lists requests|api\.test\.ts|"case_id"|[a-f0-9]{64}' <<<"${positive}" || {
   echo 'valid result leaked a title, path, case ID or digest' >&2; exit 1;
 }
@@ -192,15 +212,17 @@ write_playwright
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r.dig("suites",0,"suites",0,"suites",0,"specs",0,"tests",0); t["status"]="unexpected"; r["stats"]={"expected"=>0,"skipped"=>0,"unexpected"=>1,"flaky"=>0}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
 expect_blocked_outcome failed
 
-# Flaky keeps its aggregate classification and retry history; it cannot become a pass.
+# A pass on the retry the project's own config permits keeps its retry history,
+# is reported as retried_pass, and is never counted as a pass.
 write_playwright
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r.dig("suites",0,"suites",0,"suites",0,"specs",0,"tests",0); t["status"]="flaky"; t["results"]=[{"status"=>"failed"},{"status"=>"passed"}]; r["stats"]={"expected"=>0,"skipped"=>0,"unexpected"=>0,"flaky"=>1}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
-expect_blocked_outcome flaky
+expect_counted_outcome retried_pass
 
-# Skips remain blocked outcomes, while unknown/malformed attempt states fail closed.
+# A deliberate skip is reported under its own key; unknown or malformed attempt
+# states still fail closed.
 write_playwright
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; t=r.dig("suites",0,"suites",0,"suites",0,"specs",0,"tests",0); t["status"]="skipped"; t["expectedStatus"]="skipped"; t["results"]=[{"status"=>"skipped"}]; r["stats"]={"expected"=>0,"skipped"=>1,"unexpected"=>0,"flaky"=>0}; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
-expect_blocked_outcome skipped
+expect_counted_outcome skipped
 write_playwright
 ruby -rjson -rdigest -e 'p=ARGV.fetch(0); d=JSON.parse(File.read(p)); r=d["report"]; r.dig("suites",0,"suites",0,"suites",0,"specs",0,"tests",0,"results",0)["status"]="mystery"; d["collection_digest"]=Digest::SHA256.hexdigest(JSON.generate(r)); File.write(p,JSON.generate(d))' "${work}/execution.json"
 expect_error case_status_invalid

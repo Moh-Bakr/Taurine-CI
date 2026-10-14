@@ -597,17 +597,21 @@ jobs:
       # second execution of the suite, enables no selection, and the full
       # concern matrix stays mandatory.
       #
-      # Only e2e-critical, e2e-a11y and e2e-visual are reconciled. The four
-      # e2e-regression-* concerns each run --shard=N/4, so an execution report
-      # holds a quarter of its project while a --list enumerates all of it, and
-      # whether the pinned runner applies --shard to --list is unproven; they
-      # are refused rather than given a weaker rule.
+      # Only e2e-critical, e2e-a11y and e2e-visual are reconciled. 1.62.0 does
+      # apply --shard to --list, so a shard job could compare its own quarter
+      # against its own listing -- but no shard job can see the other three, so
+      # that would be a weaker claim wearing the same green badge. The four
+      # e2e-regression-* concerns are refused rather than given that rule.
+      #
+      # The ownership manifest is source-owned, so its absence must not be a way
+      # to switch this gate off: a reconciled concern without one fails with
+      # manifest_absent rather than skipping quietly.
       #
       # Written out here rather than as a composite action because a new local
       # action is only reviewable in two merges: the base commit's
       # check-actions.sh allow-list runs against this pull request's tree.
       - name: Reconcile case evidence for the browser concern
-        if: ${{ steps.verified-source.outcome == 'success' && steps.suite-contract.outcome == 'success' && steps.suite-contract.outputs.manifest_present == 'true' && steps.concern-e2e.outcome == 'success' }}
+        if: ${{ steps.verified-source.outcome == 'success' && steps.suite-contract.outcome == 'success' && steps.concern-e2e.outcome == 'success' }}
         shell: bash
         working-directory: ${{ github.workspace }}
         env:

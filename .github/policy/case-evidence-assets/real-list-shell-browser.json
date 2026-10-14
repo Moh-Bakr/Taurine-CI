@@ -1,0 +1,21 @@
+{
+  "suites": [
+    {
+      "file": "__APP_ROOT__/tests/e2e/deep/inner.spec.ts",
+      "specs": [
+        {
+          "title": "nested directory group > shell case in a nested directory @browser-shell",
+          "file": "__APP_ROOT__/tests/e2e/deep/inner.spec.ts",
+          "tests": [
+            {
+              "projectName": "shell-browser",
+              "status": "discovered",
+              "results": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

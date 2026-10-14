@@ -6,18 +6,14 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/playwright-pinned-parity-test.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 
-mkdir -p "$tmp/control/.github/policy" "$tmp/source" "$tmp/fake-bin"
+mkdir -p "$tmp/control/.github/policy/case-evidence-assets" "$tmp/source" "$tmp/fake-bin"
 cp "$root/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/control/.github/policy/"
-cp "$root/.github/policy/case-evidence-assets.rb" "$tmp/control/.github/policy/"
-# The expected-case manifest is an asset, not a tracked file; write the copy
-# this harness reads out of the same module the producer stages from.
-ruby -r"$root/.github/policy/case-evidence-assets" \
-  -e 'File.binwrite(ARGV.fetch(0), CaseEvidenceAssets::ASSETS.fetch("expected-cases.json"))' \
-  "$tmp/expected-cases.json"
+cp "$root/.github/policy/case-evidence-assets/"* "$tmp/control/.github/policy/case-evidence-assets/"
 
 ruby -rjson -rfileutils -rrbconfig -e '
   control, source, fakebin = ARGV
-  expected = JSON.parse(File.read(File.join(File.dirname(control), "expected-cases.json")))
+  expected_path = File.join(control, ".github/policy/case-evidence-assets/expected-cases.json")
+  expected = JSON.parse(File.read(expected_path))
   expected.fetch("runner_bindings").each do |binding|
     app = binding.fetch("runner_id") == "playwright-desktop" ? "taurine-desktop" : "taurine-mobile"
     app_root = File.join(source, app)
@@ -99,18 +95,22 @@ ruby -rjson -rfileutils -rrbconfig -e '
         records.pop
       end
     end
-    root_suite = {"title" => fixture, "file" => fixture_path, "specs" => [], "suites" => []}
+    # Real 1.62.0 writes the JSON reporter file field relative to testDir,
+    # which for these fixtures is the stage directory, so it is the bare file
+    # name, not the absolute path the list reporter resolves. Recorded shape:
+    # .github/policy/case-evidence-assets/real-execution-feedback.json
+    root_suite = {"title" => fixture, "file" => fixture, "specs" => [], "suites" => []}
     records.each do |record|
       current = root_suite
       record.fetch("parts")[0...-1].each do |part|
         child = current["suites"].find { |entry| entry["title"] == part }
         unless child
-          child = {"title" => part, "file" => fixture_path, "specs" => [], "suites" => []}
+          child = {"title" => part, "file" => fixture, "specs" => [], "suites" => []}
           current["suites"] << child
         end
         current = child
       end
-      current["specs"] << {"title" => record.fetch("parts").last, "file" => fixture_path,
+      current["specs"] << {"title" => record.fetch("parts").last, "file" => fixture,
         "tests" => [{"projectName" => project, "status" => record.fetch("status"),
           "expectedStatus" => record.fetch("expectedStatus"),
           "results" => record.fetch("attempts").map { |status| {"status" => status} }}]}
@@ -252,11 +252,6 @@ for mutation in extra duplicate missing; do
   cp "$tmp/fake-bin/node.baseline" "$tmp/fake-bin/node"
 done
 
-# The synthetic callback reporter is an asset too; write the copy this direct
-# check loads beside the harness's other scratch files.
-ruby -r"$root/.github/policy/case-evidence-assets" \
-  -e 'File.binwrite(ARGV.fetch(0), CaseEvidenceAssets::ASSETS.fetch("callback-failure-reporter.cjs"))' \
-  "$tmp/callback-failure-reporter.cjs"
 direct_sentinel="$tmp/direct-callback.sentinel"
 direct_status=0
 TAURINE_PARITY_CALLBACK_SENTINEL="$direct_sentinel" node -e '
@@ -264,7 +259,7 @@ TAURINE_PARITY_CALLBACK_SENTINEL="$direct_sentinel" node -e '
   try { new Reporter().onBegin(); } catch (error) {
     if (error.message !== "SYNTHETIC_REPORTER_CALLBACK_FAILURE") throw error;
   }
-' "$tmp/callback-failure-reporter.cjs" || direct_status=$?
+' "$tmp/control/.github/policy/case-evidence-assets/callback-failure-reporter.cjs" || direct_status=$?
 [[ "$direct_status" -eq 0 && "$(cat "$direct_sentinel")" == 'synthetic-onBegin-failure-v1' ]] || {
   echo 'direct fake reporter callback did not throw-and-swallow with its sentinel' >&2
   exit 1

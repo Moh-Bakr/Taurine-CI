@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "why": "The reports beside this file are real @playwright/test 1.62.0 output, not hand-written shapes. The earlier harnesses invented a report shape the real runner never writes, and encoded an identity bug in the fixture that was supposed to catch it.",
+  "runner": {
+    "packages": ["@playwright/test", "playwright", "playwright-core"],
+    "version": "1.62.0",
+    "source": "copied from the private desktop app's installed node_modules into a scratch directory; no private source, spec or test name was used or recorded"
+  },
+  "synthetic_app": {
+    "config": "testDir ./tests/e2e, fullyParallel false, workers 1, retries 1 under CI, projects smoke (grep @smoke), critical (grep @critical, grepInvert @smoke), shell-browser (grep @browser-shell, grepInvert @smoke) - the tier shape of the real desktop config",
+    "specs": [
+      "tests/e2e/flows.spec.ts: nested describes and parameterized titles",
+      "tests/e2e/deep/inner.spec.ts: a spec in a nested directory, which is what exposes the path normalisation",
+      "tests/e2e/outcomes.spec.ts (separate app): a flaky retry, an intentional skip and a plain pass"
+    ]
+  },
+  "commands": {
+    "discovery": "node node_modules/playwright/cli.js test --config playwright.config.ts --list --project <project> --reporter <playwright-case-list-reporter.cjs>",
+    "execution_feedback": "node node_modules/playwright/cli.js test --config playwright.config.ts --project smoke --project critical --project shell-browser --reporter=json",
+    "execution_outcomes": "CI=1 node node_modules/playwright/cli.js test --config playwright.config.ts --project smoke --reporter=json"
+  },
+  "observed": {
+    "execution_file_paths": "relative to testDir: flows.spec.ts and deep/inner.spec.ts",
+    "discovery_file_paths": "absolute, resolved from test.location.file",
+    "feedback_totals": {"expected": 5, "skipped": 0, "unexpected": 0, "flaky": 0},
+    "feedback_discovery_counts": {"smoke": 3, "critical": 1, "shell-browser": 1},
+    "outcomes_totals": {"expected": 1, "skipped": 1, "unexpected": 0, "flaky": 1},
+    "outcomes_exit_code": 0
+  },
+  "placeholders": {
+    "__APP_ROOT__": "the absolute app root the reports were produced under; each test substitutes its own temporary directory",
+    "__SCRATCH__": "the scratch directory above that app root"
+  }
+}

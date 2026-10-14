@@ -8,7 +8,6 @@ require 'open3'
 require 'pathname'
 require 'rbconfig'
 require 'tmpdir'
-require_relative 'case-evidence-assets'
 
 class ParityError < StandardError
   attr_reader :code
@@ -24,8 +23,9 @@ def reject!(code)
 end
 
 ROOT = File.expand_path('../..', __dir__).freeze
-ASSETS_PATH = File.join(ROOT, CaseEvidenceAssets::RELATIVE_PATH).freeze
-REPORTER_NAME = 'playwright-case-list-reporter.cjs'.freeze
+EXPECTED_PATH = File.join(ROOT, '.github/policy/case-evidence-assets/expected-cases.json').freeze
+REPORTER_PATH = File.join(ROOT, '.github/policy/case-evidence-assets/playwright-case-list-reporter.cjs').freeze
+FIXTURE_DIR = File.dirname(EXPECTED_PATH).freeze
 MAX_INPUT_BYTES = 1 * 1024 * 1024
 MAX_REPORT_BYTES = 4 * 1024 * 1024
 MAX_CASES = 64
@@ -61,13 +61,6 @@ FIXTURE_FILES = %w[
   outcomes.config.cjs outcomes.spec.cjs flaky.config.cjs flaky.spec.cjs
   callback-failure-reporter.cjs
 ].freeze
-
-# The control reporter is staged beside the fixtures it reads, so Playwright
-# loads it from the same private mode-0700 directory rather than from the
-# control checkout.
-def control_reporter(stage)
-  File.join(stage, REPORTER_NAME)
-end
 ERROR_CLASSES = %w[
   arguments_invalid control_checkout_dirty control_identity_invalid fixture_binding_invalid
   fixture_duplicate_missing fixture_outcome_mismatch fixture_scope_mismatch lock_binding_invalid
@@ -197,14 +190,10 @@ def require_clean!(tool, root, error_code)
 end
 
 def validate_manifest!(tool, expected)
-  # Every staged asset, the expected-case manifest included, comes out of this
-  # one control file; binding its bytes to the verified control commit binds
-  # all of them, exactly as comparing each tracked fixture used to.
-  reject!('fixture_binding_invalid') unless File.file?(ASSETS_PATH) && File.size(ASSETS_PATH) <= MAX_INPUT_BYTES
-  reject!('fixture_binding_invalid') unless File.binread(ASSETS_PATH) ==
-    git_file(tool, ROOT, expected, CaseEvidenceAssets::RELATIVE_PATH, 'fixture_binding_invalid')
-  bytes = CaseEvidenceAssets::ASSETS.fetch('expected-cases.json')
-  reject!('fixture_binding_invalid') unless bytes.bytesize <= MAX_INPUT_BYTES
+  reject!('fixture_binding_invalid') unless File.file?(EXPECTED_PATH) && File.size(EXPECTED_PATH) <= MAX_INPUT_BYTES
+  relative = '.github/policy/case-evidence-assets/expected-cases.json'
+  bytes = File.binread(EXPECTED_PATH)
+  reject!('fixture_binding_invalid') unless bytes == git_file(tool, ROOT, expected, relative, 'fixture_binding_invalid')
   data = JSON.parse(bytes)
   reject!('fixture_binding_invalid') unless data.is_a?(Hash) && data['schema_version'] == 1
   bindings = data.fetch('runner_bindings')
@@ -320,14 +309,19 @@ rescue SystemCallError
   reject!('private_output_invalid')
 end
 
-# The asset module's bytes were bound to the verified control commit in
-# validate_manifest!, so staging is a copy out of it; no file in the control
-# checkout is read again here.
-def stage_files!(stage, files)
-  reject!('fixture_binding_invalid') unless files.all? { |name| FIXTURE_FILES.include?(name) } && files.uniq == files
-  CaseEvidenceAssets.materialize(stage, files + [REPORTER_NAME])
-rescue KeyError, SystemCallError
-  reject!('fixture_binding_invalid')
+def stage_files!(stage, files, tool, control_sha)
+  files.each do |name|
+    reject!('fixture_binding_invalid') unless FIXTURE_FILES.include?(name)
+    relative = ".github/policy/case-evidence-assets/#{name}"
+    source = File.join(FIXTURE_DIR, name)
+    expected_bytes = git_file(tool, ROOT, control_sha, relative, 'fixture_binding_invalid')
+    reject!('fixture_binding_invalid') unless File.file?(source) && File.binread(source) == expected_bytes
+    File.open(File.join(stage, name), File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+      file.write(expected_bytes)
+      file.flush
+      file.fsync
+    end
+  end
 end
 
 def list_rows(report, marker, runner_id, config, tier, platform, project, app_file, stage)
@@ -410,7 +404,15 @@ def execution_cases(report, stage, expected_file, project)
   raw = []
   walk_execution(report.fetch('suites'), nil, [], raw)
   raw.each do |test|
-    reject!('report_shape_invalid') unless test['project'] == project && File.realpath(test['file']) == File.realpath(expected_file)
+    # The JSON reporter writes `file` relative to the config's testDir, which
+    # for these fixtures is the stage directory -- not relative to this
+    # process's working directory. Resolving it anywhere else raises, or worse
+    # resolves to a different file that happens to exist. Verified against the
+    # pinned 1.62.0 output recorded in
+    # .github/policy/case-evidence-assets/real-execution-feedback.json.
+    resolved = Pathname.new(test['file']).absolute? ? test['file'] : File.join(stage, test['file'])
+    reject!('report_shape_invalid') unless test['project'] == project &&
+      File.realpath(resolved) == File.realpath(expected_file)
   end
   counts = raw.map do |test|
     case test['status']
@@ -427,10 +429,9 @@ rescue SystemCallError
   reject!('report_shape_invalid')
 end
 
-def list_phase(node, cli, app_root, stage, project, report, completion, config_name: 'all-pass.config.cjs', reporter: nil)
-  reporter ||= control_reporter(stage)
-  create_private_output(report) if reporter == control_reporter(stage)
-  create_private_output(completion) if reporter == control_reporter(stage)
+def list_phase(node, cli, app_root, stage, project, report, completion, config_name: 'all-pass.config.cjs', reporter: REPORTER_PATH)
+  create_private_output(report) if reporter == REPORTER_PATH
+  create_private_output(completion) if reporter == REPORTER_PATH
   env = child_env(node, File.dirname(report), report: report, completion: completion)
   if File.basename(reporter) == 'callback-failure-reporter.cjs'
     sentinel = File.join(File.dirname(report), 'callback-failure.sentinel')
@@ -484,7 +485,7 @@ def run_negative_outcomes!(node, cli, app_root, stage, work)
   create_private_output(list)
   create_private_output(marker)
   env = child_env(node, work, report: list, completion: marker)
-  status, = run_bounded([node, cli, 'test', '--config', config, '--list', '--project', 'smoke', '--reporter', control_reporter(stage)],
+  status, = run_bounded([node, cli, 'test', '--config', config, '--list', '--project', 'smoke', '--reporter', REPORTER_PATH],
     chdir: app_root, env: env)
   reject!('runner_failed') unless status == 0
   listed = private_path!(list, work, MAX_REPORT_BYTES)
@@ -604,7 +605,7 @@ begin
       [binding['version'], "Version #{binding['version']}"].include?(version_output.strip)
     Dir.mktmpdir('taurine-parity-', app_root) do |stage|
       File.chmod(0o700, stage)
-      stage_files!(stage, %w[all-pass.config.cjs all-pass.spec.cjs])
+      stage_files!(stage, %w[all-pass.config.cjs all-pass.spec.cjs], git, control_sha)
       Dir.mktmpdir('taurine-parity-reports-', ENV.fetch('RUNNER_TEMP', Dir.tmpdir)) do |work|
         File.chmod(0o700, work)
         Dir.mkdir(File.join(work, 'home'), 0o700)
@@ -619,7 +620,7 @@ begin
   Dir.mktmpdir('taurine-parity-negative-', app_root) do |stage|
     File.chmod(0o700, stage)
     stage_files!(stage, %w[duplicate-identity.config.cjs duplicate-identity.spec.cjs outcomes.config.cjs outcomes.spec.cjs
-      flaky.config.cjs flaky.spec.cjs callback-failure-reporter.cjs])
+      flaky.config.cjs flaky.spec.cjs callback-failure-reporter.cjs], git, control_sha)
     Dir.mktmpdir('taurine-parity-negative-reports-', ENV.fetch('RUNNER_TEMP', Dir.tmpdir)) do |work|
       File.chmod(0o700, work)
       Dir.mkdir(File.join(work, 'home'), 0o700)

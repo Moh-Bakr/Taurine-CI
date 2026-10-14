@@ -4,7 +4,7 @@ Status: **activated in the Linux browser concerns; producer honesty and runner c
 
 ## Activation (owner decision, 2026-10-14)
 
-`.github/policy/case-evidence-admission.rb` is the trusted producer for the admission path, invoked by `.github/actions/linux-concern-case-evidence/action.yml` from `linux-validation-concern.yml` after the source token is revoked and root is dropped.
+`.github/policy/case-evidence-admission.rb` is the trusted producer for the admission path, invoked by the "Reconcile case evidence for the browser concern" step of `linux-validation-concern.yml` after the source token is revoked and root is dropped. The step is written out in that workflow rather than in a composite action: a new local action is only reviewable across two merges, because the base commit's `check-actions.sh` allow-list runs against a pull request's tree.
 
 It adds only the discovery half. The reviewed browser concern already writes a Playwright JSON execution report to `RUNNER_TEMP/test-ids/<concern>.json`; the producer runs one `playwright test --list --project <project>` per project with the control-owned reporter — no browser, no web server, no second execution of the suite — and hands both halves to the unchanged validator, once per project.
 
@@ -18,9 +18,11 @@ Reconciled concerns and their scopes:
 
 Because `e2e-critical` runs three projects in one command while the validator binds one project per envelope, the producer partitions the execution report by `projectName` in control code and validates each partition separately. Before partitioning it asserts that every executed case belongs to one of that concern's reviewed projects, so a case no project owns blocks instead of being silently dropped; afterwards it asserts the partitions account for every executed case and, where the runner supplied `stats`, that those totals equal the reconciled total.
 
-The four `e2e-regression-*` concerns are **not** reconciled. Each runs `--shard=N/4`, so its execution report holds a quarter of the project while a `--list` for that project enumerates all of it, and whether the pinned runner applies `--shard` to `--list` has not been proven on 1.62.0. The producer refuses those concerns rather than carrying a weaker subset rule for four of seven.
+The four `e2e-regression-*` concerns are **not** reconciled. 1.62.0 does apply `--shard` to `--list`, so a shard job could compare its own quarter against its own listing — but that is a weaker claim than this gate makes elsewhere: a single shard job cannot show that the four shards together ran the whole project, and nothing in a shard job can see the other three. Reconciling them would mean the same green badge standing for two different claims, so the producer refuses those concerns instead.
 
 Nothing is relaxed by this activation: no coverage floor, suite floor or required concern changed, no selector was enabled, and the result is an additional fail-closed step on an already-mandatory concern.
+
+The producer verifies the identities it runs under rather than trusting the step that passed them in: the source and control checkouts must be at the expected commits, the source checkout must be clean, `.github/ci-matrix.json` and the source's ownership manifest, lockfile and `playwright.config.ts` must match their commits byte for byte, the recomputed catalog and manifest digests must match, the selected suite IDs must be exactly one reviewed coverage group's candidate set, and the installed runner must be the reviewed 1.62.0 pin with its integrity hashes. A lockfile bump therefore blocks as `runner_version_unpinned` rather than running this gate against a report shape nothing has proven. The ownership manifest is source-owned, so its absence blocks as `manifest_absent` instead of skipping the step.
 
 ## What the validator checks
 
@@ -61,6 +63,18 @@ For every adapter, the producer must capture the exact locked runner version fro
 It establishes, on every reconciled concern: that the pinned runner's discovery and its execution agree case for case, that no executed case lacks a discovered identity and no discovered case went unexecuted, that no two cases share an identity, that no suite came back unexpectedly empty, and that every executed case belongs to a reviewed project of that concern.
 
 It does not establish that the producer is honest about having invoked the command it names; that the four sharded regression concerns are case-complete; that the mobile Playwright adapter works at all (no mobile concern is reconciled); or anything whatsoever about Vitest, whose list/run parity is still unproven and whose adapters below remain proposals.
+
+It is also not *discovery completeness* in the broad sense, and the phrase is avoided deliberately. Reconciliation is per-project self-consistency under the source project's own `playwright.config.ts`: its `testDir`, its `grep` and its `grepInvert` decide which cases exist for a project, and both halves of the comparison inherit those decisions. Three consequences, each reproduced against the pinned runner and none of them new in this change:
+
+- a case tagged for two tiers runs twice, once per project, and both runs reconcile, so duplicate execution across projects is not detected here;
+- a case retagged out of every gated tier (for example to `@slow`, which only the ungated `bench` project greps) disappears from both halves and reconciles;
+- there is no floor on the number of cases, so a config change that empties a project fails only if it empties it entirely, which blocks as `case_collection_empty`.
+
+What the gate does catch is a disagreement between what the pinned runner says it will run and what it reports having run, for the projects a concern is bound to.
+
+## Outcomes that are reported rather than blocked
+
+A case that passed on a retry its project's config permits, and a case the suite deliberately skips, are not parity failures: the runner reported both and exited zero. Blocking on them would silently override the source project's one-retry policy and its deliberate skips, which is a product decision and not this gate's to take. They are counted as `retried_pass` and `skipped` in the sanitized summary, never folded into `passed`, so a reader can see them. The blocking scope is exactly: a discovered case that was not executed, an executed case that was not discovered, a duplicate case identity, an empty suite, a case belonging to no reviewed project of that concern, a missing ownership manifest, a runner version that is not the reviewed pin, and any identity that does not match git. Each blocks under its own error class.
 
 ## Gaps and admission boundary
 

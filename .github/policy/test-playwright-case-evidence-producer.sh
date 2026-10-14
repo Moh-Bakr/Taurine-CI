@@ -10,7 +10,7 @@ ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
   Object.const_set(:OUTPUT_LIMIT, 8 * 1024 * 1024)
   Object.const_set(:TIMEOUT_SECONDS, 2 * 60 * 60)
   Object.const_set(:MAX_CASES, 250_000)
-  Object.const_set(:CONTRACT_RESULT_COUNTS, %w[discovered executed passed failed flaky skipped ignored quarantined env_skipped].sort.freeze)
+  Object.const_set(:CONTRACT_RESULT_COUNTS, %w[discovered executed passed failed retried_pass skipped ignored quarantined env_skipped].sort.freeze)
   Object.const_set(:CONTRACT_ERROR_CLASSES, %w[
     adapter_unsupported arguments_invalid case_collection_empty case_count_limit case_file_invalid invalid_input
     case_file_outside_root case_project_invalid case_status_invalid case_title_invalid collection_incomplete
@@ -37,10 +37,17 @@ ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
   raise "bounded runner exceeded pipe-drain deadline" if clock.call(Process::CLOCK_MONOTONIC) - started > 3
 
   valid_counts = {"discovered" => 1, "executed" => 1, "passed" => 1, "failed" => 0,
-    "flaky" => 0, "skipped" => 0, "ignored" => 0, "quarantined" => 0, "env_skipped" => 0}
+    "retried_pass" => 0, "skipped" => 0, "ignored" => 0, "quarantined" => 0, "env_skipped" => 0}
   valid_result = {"schema_version" => 1, "status" => "shadow_valid_unverified_producer", "counts" => valid_counts}
   safe_result = validate_contract_result!(0, valid_result)
   raise "validator result was not reconstructed safely" unless safe_result == valid_result && !safe_result.equal?(valid_result)
+  # A permitted retry pass and a deliberate skip are reported outcomes, so the
+  # producer must accept them beside passes rather than call them failures.
+  %w[retried_pass skipped].each do |reported|
+    counts = valid_counts.merge("discovered" => 2, "executed" => 2, reported => 1)
+    result = {"schema_version" => 1, "status" => "shadow_valid_unverified_producer", "counts" => counts}
+    raise "a reported #{reported} outcome was treated as a failure" unless validate_contract_result!(0, result) == result
+  end
   blocked_counts = valid_counts.merge("passed" => 0, "failed" => 1)
   blocked_result = {"schema_version" => 1, "status" => "shadow_blocked", "counts" => blocked_counts}
   raise "blocked validator result was rejected" unless validate_contract_result!(1, blocked_result) == blocked_result
@@ -146,7 +153,11 @@ ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
         exit 0
       end
       app_root = File.expand_path("../..", File.dirname(cli))
+      # The list reporter resolves an absolute path; the JSON reporter writes
+      # the path relative to testDir (./tests/e2e). Real 1.62.0 shape, recorded
+      # in .github/policy/case-evidence-assets/real-execution-feedback.json.
       test_file = File.join(app_root, "tests/e2e/smoke.spec.ts")
+      execution_file = "smoke.spec.ts"
       project = args[args.index("--project") + 1]
       if args.include?("--list")
         report_path = ENV.fetch("TAURINE_CASE_EVIDENCE_REPORT_PATH")
@@ -163,13 +174,13 @@ ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
       end
       output = ENV.fetch("PLAYWRIGHT_JSON_OUTPUT_NAME")
       tests = [{"projectName" => project, "status" => "expected", "expectedStatus" => "passed", "results" => [{"status" => "passed"}]}]
-      specs = [{"title" => "suite > forged private title", "file" => test_file, "tests" => tests}]
+      specs = [{"title" => "suite > forged private title", "file" => execution_file, "tests" => tests}]
       if mode == "extra-case"
-        specs << {"title" => "suite > extra forged case", "file" => test_file,
+        specs << {"title" => "suite > extra forged case", "file" => execution_file,
           "tests" => [{"projectName" => project, "status" => "expected", "expectedStatus" => "passed", "results" => [{"status" => "passed"}]}]}
       end
       report = {"stats" => {"expected" => specs.length, "skipped" => 0, "unexpected" => 0, "flaky" => 0},
-        "suites" => [{"file" => test_file, "specs" => specs}]}
+        "suites" => [{"file" => execution_file, "specs" => specs}]}
       File.write(output, JSON.generate(report))
       File.open(log, "a", 0o600) { |f| f.puts(JSON.generate({"private_modes_ok" => (File.stat(output).mode & 0o077).zero?})) }
       exit 0
@@ -202,17 +213,7 @@ ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
     commands = logs.select { |entry| entry.key?("args") }
     raise "runner inherited a secret" unless commands.none? { |entry| entry["secret_inherited"] }
     raise "private output permissions were too broad" unless logs.select { |entry| entry.key?("private_modes_ok") }.all? { |entry| entry["private_modes_ok"] }
-    # The reporter is materialised into the RUNNER_TEMP directory owned by this
-    # job, so assert the stronger property: an absolute path with the fixed
-    # basename, inside the private runtime temp and outside both checkouts.
-    private_reporter = lambda do |argv|
-      path = argv.last
-      path.is_a?(String) && path.start_with?(File.join(temp, "runtime-tmp") + "/") &&
-        File.basename(path) == "playwright-case-list-reporter.cjs" &&
-        !path.start_with?(control + "/") && !path.start_with?(source + "/")
-    end
-    raise "list command was not fixed" unless commands[0]["args"].first(7) == ["test", "--config", "playwright.config.ts", "--list", "--project", "smoke", "--reporter"] &&
-      commands[0]["args"].length == 8 && private_reporter.call(commands[0]["args"])
+    raise "list command was not fixed" unless commands[0]["args"] == ["test", "--config", "playwright.config.ts", "--list", "--project", "smoke", "--reporter", File.join(control, ".github/policy/case-evidence-assets/playwright-case-list-reporter.cjs")]
     raise "execution command was not fixed" unless commands[1]["args"] == ["test", "--config", "playwright.config.ts", "--project", "smoke", "--reporter", "json"]
     raise "producer temp data survived" unless Dir.children(File.join(temp, "runtime-tmp")).empty?
 
@@ -232,8 +233,7 @@ ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
     mobile_positive, mobile_status = invoke.call(mobile_expected_path)
     raise "mobile adapter pin failed" unless mobile_status == 0 && JSON.parse(mobile_positive)["status"] == "shadow_valid_unverified_producer"
     mobile_commands = File.readlines(log_file).map { |line| JSON.parse(line) }.select { |entry| entry.key?("args") }.drop(2)
-    raise "mobile argv was not fixed" unless mobile_commands[0]["args"].first(7) == ["test", "--config", "playwright.config.ts", "--list", "--project", "smoke", "--reporter"] &&
-      mobile_commands[0]["args"].length == 8 && private_reporter.call(mobile_commands[0]["args"]) &&
+    raise "mobile argv was not fixed" unless mobile_commands[0]["args"] == ["test", "--config", "playwright.config.ts", "--list", "--project", "smoke", "--reporter", File.join(control, ".github/policy/case-evidence-assets/playwright-case-list-reporter.cjs")] &&
       mobile_commands[1]["args"] == ["test", "--config", "playwright.config.ts", "--project", "smoke", "--reporter", "json"]
 
     bad_args, bad_args_status = invoke.call(expected_path, "--reporter=source-controlled")

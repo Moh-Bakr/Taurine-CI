@@ -41,7 +41,6 @@ require 'json'
 require 'open3'
 require 'rbconfig'
 require 'tmpdir'
-require_relative 'case-evidence-assets'
 require_relative 'case-evidence-contract'
 
 class AdmissionError < StandardError
@@ -59,7 +58,10 @@ end
 
 CONTROL_ROOT = File.expand_path('../..', __dir__).freeze
 CONTRACT = File.join(__dir__, 'case-evidence-contract.rb').freeze
-REPORTER_NAME = 'playwright-case-list-reporter.cjs'.freeze
+REPORTER = File.join(__dir__, 'case-evidence-assets', 'playwright-case-list-reporter.cjs').freeze
+MATRIX_RELATIVE = '.github/ci-matrix.json'.freeze
+MANIFEST_RELATIVE = 'scripts/ci/suite-ownership.json'.freeze
+MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_REPORT_BYTES = 64 * 1024 * 1024
 MAX_LOCK_BYTES = 8 * 1024 * 1024
 OUTPUT_LIMIT = 1 * 1024 * 1024
@@ -68,13 +70,12 @@ LIST_TIMEOUT = 300
 # The fixed concern-to-scope table. A concern that is not named here is not
 # reconciled, and the caller is expected not to invoke this producer for it.
 #
-# The four `e2e-regression-*` concerns are deliberately absent. Each runs
-# `--shard=N/4`, so its execution report holds one quarter of the project's
-# cases while a `--list` for that project enumerates all of them; exact
-# discovery/execution equality cannot hold inside a single shard job, and
-# whether the pinned runner applies `--shard` to `--list` is unverified. Giving
-# them a weaker subset rule would make this gate mean something different for
-# four of seven concerns, so they stay unreconciled and honestly reported.
+# The four `e2e-regression-*` concerns are deliberately absent. 1.62.0 does
+# apply `--shard` to `--list`, so a shard job could reconcile its own quarter
+# against its own listing. That is a weaker claim than this gate makes
+# elsewhere: nothing inside one shard job can show that the four shards
+# together ran the whole project. Rather than have one result stand for two
+# different claims, those concerns are refused and reported as unreconciled.
 SCOPES = {
   'e2e-critical' => { 'app' => 'taurine-desktop', 'runner_id' => 'playwright-desktop',
     'config_id' => 'desktop-playwright-projects', 'tier' => 'feedback',
@@ -85,13 +86,44 @@ SCOPES = {
     'config_id' => 'desktop-playwright-projects', 'tier' => 'visual', 'projects' => %w[visual] }
 }.freeze
 
-ERROR_CLASSES = %w[
+# The exact runner this gate was proven against. A lockfile bump is not a
+# silent upgrade: the recorded parity evidence, and the report shape every
+# identity derivation depends on, are specific to this version, so a different
+# one blocks until it has been proven and reviewed. Integrity values are the
+# reviewed pins carried by the shadow producer and the parity manifest.
+PINNED_RUNNER = {
+  'version' => '1.62.0',
+  'packages' => {
+    'node_modules/@playwright/test' => 'sha512-9zOJ6ZQRAena31MpOH9VSzIz8Ou3YJ/wtY/eQm5T2uhfhG7/U3COrMS8xOtUrZrp9OgdmzEnIYODye3nY1VqzA==',
+    'node_modules/playwright' => 'sha512-Z14dG305dgaLu6foB1TXQagFiW8JfSUIUaUuPaKQ6NtBPKF1P/qXcqfh6c6K/icPqdy37JmjbiBXf6JNg6Sylw==',
+    'node_modules/playwright-core' => 'sha512-nsNRyq0r2zsG8AcRHWknc9QRA5XCueC7gWMrs+Gx2tlZn9hcl8zudfh00lhJPY1DE7NmZ6bDsT9g2yey8mXljA=='
+  }
+}.freeze
+
+# Validator classes this producer may repeat verbatim. Anything else is
+# reported as contract_rejected rather than echoed.
+# The sanitized counts this producer republishes. retried_pass and skipped are
+# shown in their own right: a reader of the public summary can see that a case
+# needed the retry its project permits, or that the suite skipped it, without
+# either being counted as a pass.
+REPORTED_COUNTS = %w[discovered executed passed retried_pass skipped].freeze
+
+CONTRACT_ERROR_CLASSES = %w[
+  case_collection_empty discovery_execution_mismatch duplicate_case_identity
+  report_count_mismatch report_project_mismatch report_shape_invalid report_status_mismatch
+  reporter_errors_present selection_mismatch
+].freeze
+
+ERROR_CLASSES = (CONTRACT_ERROR_CLASSES + %w[
+  catalog_binding_invalid config_binding_invalid control_checkout_invalid control_sha_mismatch
+  git_untrusted manifest_absent manifest_binding_invalid runner_version_unpinned
+  source_checkout_dirty source_sha_mismatch suite_scope_mismatch
   arguments_invalid concern_unsupported contract_rejected discovery_failed
   execution_report_invalid identity_env_invalid lock_binding_invalid node_runtime_invalid
   partition_incomplete process_output_limit process_timeout project_unexpected
   reporter_failed report_path_invalid source_path_invalid stats_mismatch tool_binding_invalid
   work_dir_invalid
-].sort.freeze
+]).sort.freeze
 
 def within?(path, root)
   root_real = File.realpath(root)
@@ -180,6 +212,50 @@ ensure
   end
 end
 
+# Git is resolved outside both checkouts, so neither the source nor the control
+# tree can supply the binary that verifies it. Same rule as the reviewed shadow
+# producer in playwright-case-evidence-producer.rb.
+def git_tool
+  tool = resolve_executable('git', ENV.fetch('PATH', ''))
+  block!('git_untrusted') if within?(tool, CONTROL_ROOT)
+  tool
+end
+
+def git_env(tool)
+  { 'PATH' => [File.dirname(tool), '/usr/bin', '/bin'].uniq.join(File::PATH_SEPARATOR), 'HOME' => Dir.tmpdir,
+    'GIT_CONFIG_NOSYSTEM' => '1', 'GIT_CONFIG_GLOBAL' => File::NULL, 'GIT_TERMINAL_PROMPT' => '0' }
+end
+
+def git_capture(tool, root, arguments, code, timeout: 30)
+  stdout, _stderr, status = Open3.capture3(git_env(tool), tool, '-C', root, *arguments, unsetenv_others: true)
+  block!(code) unless status.exitstatus.zero?
+  stdout
+rescue SystemCallError
+  block!(code)
+end
+
+def git_head!(tool, root, code)
+  head = git_capture(tool, root, ['rev-parse', '--verify', 'HEAD'], code).strip
+  block!(code) unless head.match?(/\A[0-9a-f]{40}\z/)
+  head
+end
+
+def git_file!(tool, root, revision, relative, code)
+  git_capture(tool, root, ['show', "#{revision}:#{relative}"], code)
+end
+
+def require_clean!(tool, root, code)
+  block!(code) unless git_capture(tool, root, ['status', '--porcelain=v1', '--untracked-files=all'], code).empty?
+end
+
+def tracked_bytes!(tool, root, revision, relative, code)
+  path = File.join(root, relative)
+  block!(code) unless File.file?(path) && File.size(path) <= MAX_INPUT_BYTES && within?(path, root)
+  bytes = File.binread(path)
+  block!(code) unless bytes == git_file!(tool, root, revision, relative, code)
+  bytes
+end
+
 def sha40!(name)
   value = ENV[name]
   block!('identity_env_invalid') unless value.is_a?(String) && value.match?(/\A[0-9a-f]{40}\z/)
@@ -201,24 +277,41 @@ rescue JSON::ParserError
   block!('identity_env_invalid')
 end
 
-# The locked runner version, read from the app lockfile and cross-checked
-# against the package actually installed in that app. The version is a fact
-# about the exact source SHA under test, not a command the source supplies.
-def tool_version!(app_root)
-  lock_path = File.join(app_root, 'package-lock.json')
-  block!('lock_binding_invalid') unless File.file?(lock_path) && File.size(lock_path) <= MAX_LOCK_BYTES
-  lock = JSON.parse(File.binread(lock_path))
-  version = lock.fetch('packages').fetch('node_modules/playwright').fetch('version')
-  block!('lock_binding_invalid') unless version.is_a?(String) && version.match?(/\A\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\z/)
-  %w[node_modules/@playwright/test node_modules/playwright node_modules/playwright-core].each do |package|
-    block!('lock_binding_invalid') unless lock.fetch('packages').fetch(package).fetch('version') == version
-    installed = File.join(app_root, package, 'package.json')
+# The runner is pinned, not merely read. The lockfile is compared byte for byte
+# against the source commit under test, each of the three packages must carry
+# the reviewed version and integrity, and the package actually installed in the
+# app must be that same version. A lockfile bump therefore blocks with
+# runner_version_unpinned instead of quietly running this gate against a report
+# shape nothing has proven.
+def pinned_tool_version!(tool, app_root, source_root, source_sha, app)
+  lock_bytes = tracked_bytes!(tool, source_root, source_sha, "#{app}/package-lock.json", 'lock_binding_invalid')
+  lock = JSON.parse(lock_bytes)
+  packages = lock.fetch('packages')
+  PINNED_RUNNER.fetch('packages').each do |name, integrity|
+    entry = packages.fetch(name)
+    block!('runner_version_unpinned') unless entry['version'] == PINNED_RUNNER.fetch('version') &&
+      entry['integrity'] == integrity
+    installed = File.join(app_root, name, 'package.json')
     block!('tool_binding_invalid') unless File.file?(installed) && within?(installed, File.join(app_root, 'node_modules'))
-    block!('tool_binding_invalid') unless JSON.parse(File.binread(installed))['version'] == version
+    block!('tool_binding_invalid') unless JSON.parse(File.binread(installed))['version'] == PINNED_RUNNER.fetch('version')
   end
-  version
+  PINNED_RUNNER.fetch('version')
 rescue JSON::ParserError, KeyError, SystemCallError
   block!('lock_binding_invalid')
+end
+
+def sort_json(value)
+  case value
+  when Hash then value.keys.sort.each_with_object({}) { |key, result| result[key] = sort_json(value.fetch(key)) }
+  when Array then value.map { |item| sort_json(item) }
+  else value
+  end
+end
+
+# The same canonical digest suite-contract.rb computes, so recomputing here
+# either reproduces the value that step published or blocks.
+def canonical_digest(value)
+  Digest::SHA256.hexdigest(JSON.generate(sort_json(value), ascii_only: true))
 end
 
 def private_json!(path, root, limit)
@@ -340,16 +433,22 @@ def reconcile!(expected_path, discovery_path, execution_path)
   stdout, _stderr, status = Open3.capture3(ruby, CONTRACT, expected_path, discovery_path, execution_path,
     unsetenv_others: true)
   result = JSON.parse(stdout)
-  block!('contract_rejected') unless status.exitstatus.zero? && result['status'] == 'shadow_valid_unverified_producer'
-  result
+  return result if status.exitstatus.zero? && result['status'] == 'shadow_valid_unverified_producer'
+
+  # Surface the validator's own class. A case discovered but never executed, a
+  # duplicate identity and an empty suite are different findings, and folding
+  # them into one `contract_rejected` left a public reader unable to tell a
+  # parity failure from anything else.
+  reported = result['error_class']
+  block!(CONTRACT_ERROR_CLASSES.include?(reported) ? reported : 'contract_rejected')
 rescue JSON::ParserError, SystemCallError
   block!('contract_rejected')
 end
 
-def emit(status:, concern:, projects: [], discovered: 0, executed: 0, error_class: nil)
+def emit(status:, concern:, projects: [], counts: {}, error_class: nil)
   if status == 'ok'
     { 'schema_version' => 1, 'status' => 'case_evidence_reconciled', 'concern' => concern,
-      'projects' => projects, 'counts' => { 'discovered' => discovered, 'executed' => executed } }
+      'projects' => projects, 'counts' => counts }
   else
     fixed = ERROR_CLASSES.include?(error_class) ? error_class : 'contract_rejected'
     { 'schema_version' => 1, 'status' => 'case_evidence_blocked', 'concern' => concern, 'error_class' => fixed }
@@ -382,15 +481,59 @@ begin
   block!('node_runtime_invalid') if within?(node, CONTROL_ROOT) || within?(node, source_root)
 
   selected_ids = selected_suite_ids!
+  source_sha = sha40!('CI_EXPECTED_SOURCE_SHA')
+  control_sha = sha40!('CI_EXPECTED_CONTROL_SHA')
+
+  # The identities this gate runs under are checked against git, not taken on
+  # the word of the step that passed them in. Without this the expected file
+  # and the envelopes are built from one set of environment values and compared
+  # against each other, which proves nothing.
+  git = git_tool
+  block!('source_sha_mismatch') unless git_head!(git, source_root, 'source_sha_mismatch') == source_sha
+  block!('control_sha_mismatch') unless git_head!(git, CONTROL_ROOT, 'control_checkout_invalid') == control_sha
+  require_clean!(git, source_root, 'source_checkout_dirty')
+
+  # F4: a missing ownership manifest must not quietly disable this gate. The
+  # manifest is source-owned, so deleting it would otherwise skip the step.
+  manifest_digest = ENV['CI_EXPECTED_MANIFEST_DIGEST'].to_s
+  block!('manifest_absent') if manifest_digest.empty?
+  block!('identity_env_invalid') unless manifest_digest.match?(/\A[0-9a-f]{64}\z/)
+
+  matrix_bytes = tracked_bytes!(git, CONTROL_ROOT, control_sha, MATRIX_RELATIVE, 'catalog_binding_invalid')
+  catalog = JSON.parse(matrix_bytes).fetch('suite_catalog')
+  catalog_digest = sha256!('CI_EXPECTED_CATALOG_DIGEST')
+  block!('catalog_binding_invalid') unless canonical_digest(catalog) == catalog_digest
+
+  manifest_bytes = tracked_bytes!(git, source_root, source_sha, MANIFEST_RELATIVE, 'manifest_binding_invalid')
+  block!('manifest_binding_invalid') unless canonical_digest(JSON.parse(manifest_bytes)) == manifest_digest
+
+  tracked_bytes!(git, source_root, source_sha, "#{scope.fetch('app')}/playwright.config.ts", 'config_binding_invalid')
+  tool_version = pinned_tool_version!(git, app_root, source_root, source_sha, scope.fetch('app'))
+
+  # The selected suites must be the reviewed candidate set of exactly one
+  # coverage group for this runner, config, tier, platform and project set.
+  suite_prefix = "#{scope.fetch('app').delete_prefix('taurine-')}.playwright.#{scope.fetch('tier')}."
+  block!('suite_scope_mismatch') unless selected_ids.all? { |id| id.start_with?(suite_prefix) }
+  groups = catalog.fetch('coverage_requirements')
+  block!('catalog_binding_invalid') unless groups.is_a?(Array)
+  matching = groups.select do |group|
+    group.is_a?(Hash) && group['runner'] == scope.fetch('runner_id') && group['config'] == scope.fetch('config_id') &&
+      group['tier'] == scope.fetch('tier') && group['platforms'].is_a?(Array) && group['platforms'].include?('linux') &&
+      group['projects'].is_a?(Array) && group['projects'].sort == scope.fetch('projects').sort
+  end
+  block!('suite_scope_mismatch') unless matching.length == 1 &&
+    matching.first['candidate_suite_ids'].is_a?(Array) &&
+    matching.first['candidate_suite_ids'].sort == selected_ids.sort
+
   expected_base = {
     'schema_version' => 1,
-    'source_sha' => sha40!('CI_EXPECTED_SOURCE_SHA'), 'control_sha' => sha40!('CI_EXPECTED_CONTROL_SHA'),
-    'manifest_digest' => sha256!('CI_EXPECTED_MANIFEST_DIGEST'), 'catalog_digest' => sha256!('CI_EXPECTED_CATALOG_DIGEST'),
+    'source_sha' => source_sha, 'control_sha' => control_sha,
+    'manifest_digest' => manifest_digest, 'catalog_digest' => catalog_digest,
     'selection_digest' => canonical_selected_digest(selected_ids),
     'selection_mode' => ENV['CI_EXPECTED_SELECTION_MODE'], 'selected_suite_ids' => selected_ids,
     'runner_id' => scope.fetch('runner_id'), 'config_id' => scope.fetch('config_id'),
     'tier' => scope.fetch('tier'), 'platform' => ENV['CI_PLATFORM'],
-    'tool_version' => tool_version!(app_root), 'repo_root' => source_root
+    'tool_version' => tool_version, 'repo_root' => source_root
   }.freeze
   block!('identity_env_invalid') unless %w[full shadow].include?(expected_base['selection_mode']) &&
     expected_base['platform'] == 'linux'
@@ -409,9 +552,9 @@ begin
   unexpected = observed.uniq - scope.fetch('projects')
   block!('project_unexpected') unless unexpected.empty?
 
-  reporter = CaseEvidenceAssets.materialize(work, [REPORTER_NAME]).fetch(0)
-  total_discovered = 0
-  total_executed = 0
+  block!('control_checkout_invalid') unless File.file?(REPORTER)
+  reporter = REPORTER
+  totals = Hash.new(0)
   per_project = []
 
   scope.fetch('projects').each do |project|
@@ -438,22 +581,24 @@ begin
 
     result = reconcile!(expected_path, discovery_path, execution_envelope_path)
     counts = result.fetch('counts')
-    total_discovered += counts.fetch('discovered')
-    total_executed += counts.fetch('executed')
-    per_project << { 'project' => project, 'discovered' => counts.fetch('discovered'),
-      'executed' => counts.fetch('executed') }
+    REPORTED_COUNTS.each { |key| totals[key] += counts.fetch(key) }
+    per_project << REPORTED_COUNTS.each_with_object({ 'project' => project }) do |key, row|
+      row[key] = counts.fetch(key)
+    end
   end
 
   # The partitions must account for the whole report: the concern's own stats,
   # where the runner supplied them, equal the union of what was reconciled.
   stats = execution_report['stats']
   if stats.is_a?(Hash) && %w[expected skipped unexpected flaky].all? { |key| stats[key].is_a?(Integer) }
-    block!('stats_mismatch') unless stats.values_at('expected', 'skipped', 'unexpected', 'flaky').sum == total_executed
+    block!('stats_mismatch') unless stats.values_at('expected', 'skipped', 'unexpected', 'flaky').sum == totals['executed']
   end
-  block!('partition_incomplete') unless total_executed == total_discovered
+  block!('partition_incomplete') unless totals['executed'] == totals['discovered']
+  # A retried pass and a deliberate skip are reported, never folded into passed.
+  block!('partition_incomplete') unless totals['passed'] + totals['retried_pass'] + totals['skipped'] == totals['executed']
 
   puts JSON.generate(emit(status: 'ok', concern: concern, projects: per_project,
-    discovered: total_discovered, executed: total_executed))
+    counts: REPORTED_COUNTS.to_h { |key| [key, totals[key]] }))
 rescue AdmissionError => error
   puts JSON.generate(emit(status: 'blocked', concern: concern_name, error_class: error.code))
   exit 1

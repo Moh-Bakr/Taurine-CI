@@ -50,7 +50,7 @@ run_contract() {
 
 assert_unverified() {
   local output="$1"
-  jq -e '.status == "shadow_valid_unverified_producer" and .counts == {"discovered":1,"executed":1,"passed":1,"failed":0,"flaky":0,"skipped":0,"ignored":0,"quarantined":0,"env_skipped":0}' <<<"${output}" >/dev/null
+  jq -e '.status == "shadow_valid_unverified_producer" and .counts == {"discovered":1,"executed":1,"passed":1,"failed":0,"retried_pass":0,"skipped":0,"ignored":0,"quarantined":0,"env_skipped":0}' <<<"${output}" >/dev/null
   ! grep -Eq 'FORGED PRIVATE TITLE SENTINEL|synthetic\.spec\.ts|[a-f0-9]{64}' <<<"${output}" || {
     echo 'trust boundary emitted private title, path, or digest' >&2; exit 1;
   }

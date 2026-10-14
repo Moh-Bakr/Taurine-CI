@@ -158,6 +158,24 @@ def vitest_cases(report, phase, runner, config, tier, platform, repo_root)
   end
 end
 
+# Where a Playwright report's `file` is relative to. The JSON reporter writes
+# each spec's file relative to the configured `testDir`, not to the app root or
+# the working directory: a spec in `tests/e2e/deep/` comes back as
+# `deep/inner.spec.ts`. Verified against the pinned @playwright/test 1.62.0 and
+# recorded in .github/policy/case-evidence-assets/real-execution-feedback.json;
+# .github/policy/collect-suite-evidence.rb documents the same shape for the
+# deployed collector. The control list reporter resolves absolute paths, which
+# safe_relative_file reduces against the repository root, so restoring the app
+# and test directory here is what makes the two halves agree.
+#
+# Desktop is the verified entry. Mobile mirrors it and is unverified: no mobile
+# concern is reconciled anywhere, and proving its testDir is part of the mobile
+# adapter's own work.
+PLAYWRIGHT_PATH_PREFIXES = {
+  'playwright-desktop' => 'taurine-desktop/tests/e2e/',
+  'playwright-mobile' => 'taurine-mobile/tests/e2e/'
+}.freeze
+
 def playwright_cases(report, phase, runner, config, tier, platform, repo_root, expected_project)
   reject!('report_shape_invalid') unless report.is_a?(Hash) && report['suites'].is_a?(Array)
   if report.key?('errors')
@@ -223,8 +241,8 @@ def playwright_cases(report, phase, runner, config, tier, platform, repo_root, e
           end
           title = (chain + [spec['title']]).join(' > ')
           case_file = spec['file'] || file
-          app_root = runner == 'playwright-desktop' ? 'taurine-desktop/' : 'taurine-mobile/'
-          case_file = "#{app_root}#{case_file}" unless Pathname.new(case_file).absolute? || case_file.start_with?(app_root)
+          prefix = PLAYWRIGHT_PATH_PREFIXES.fetch(runner) { reject!('adapter_unsupported') }
+          case_file = "#{prefix}#{case_file}" unless Pathname.new(case_file).absolute? || case_file.start_with?(prefix)
           cases << case_record(runner, config, tier, platform, test['projectName'], case_file,
             title, status, 'playwright', phase, repo_root)
           outcomes << status if phase == 'execution'
@@ -321,9 +339,18 @@ def validate_envelope(envelope, expected, phase)
   cases
 end
 
+# A case that passed on a retry the project's own config permits, and a case
+# the suite deliberately skips, are not parity failures: the runner reported
+# both and exited zero, and treating them as failures would silently override
+# the source project's retry policy and its deliberate skips. They are counted
+# under their own names instead, never folded into `passed`, so a reader can
+# see them. Anything else -- a failure, an ignored, quarantined or
+# environment-skipped case -- still blocks.
+ACCEPTED_STATUSES = %w[passed flaky skipped].freeze
+
 def sanitize_result(discovery, execution)
   statuses = execution.map { |item| item.fetch('status') }.tally
-  clean = statuses.fetch('passed', 0) == execution.length
+  clean = statuses.keys.all? { |status| ACCEPTED_STATUSES.include?(status) }
   {
     'schema_version' => 1,
     # A structurally reconciled report is still shadow evidence: this program
@@ -332,7 +359,7 @@ def sanitize_result(discovery, execution)
     'counts' => {
       'discovered' => discovery.length, 'executed' => execution.length,
       'passed' => statuses.fetch('passed', 0), 'failed' => statuses.fetch('failed', 0),
-      'flaky' => statuses.fetch('flaky', 0), 'skipped' => statuses.fetch('skipped', 0),
+      'retried_pass' => statuses.fetch('flaky', 0), 'skipped' => statuses.fetch('skipped', 0),
       'ignored' => statuses.fetch('ignored', 0), 'quarantined' => statuses.fetch('quarantined', 0),
       'env_skipped' => statuses.fetch('env_skipped', 0)
     }
