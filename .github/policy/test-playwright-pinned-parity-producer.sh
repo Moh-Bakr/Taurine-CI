@@ -254,7 +254,7 @@ TAURINE_PARITY_CALLBACK_SENTINEL="$direct_sentinel" node -e '
   echo 'direct fake reporter callback did not throw-and-swallow with its sentinel' >&2
   exit 1
 }
-[[ "$(stat -f '%Lp' "$direct_sentinel")" == '600' ]] || { echo 'direct callback sentinel permissions are too broad' >&2; exit 1; }
+ruby -e 'path = ARGV.fetch(0); abort "direct callback sentinel permissions are too broad" unless File.file?(path) && (File.stat(path).mode & 0o777) == 0o600' "$direct_sentinel"
 
 run_callback_variant() {
   name="$1"
