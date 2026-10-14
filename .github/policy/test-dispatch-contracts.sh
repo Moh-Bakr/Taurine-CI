@@ -13,16 +13,53 @@ reset_fixture() {
 }
 
 expect_policy_rejects() {
-  local label="$1" output status
+  local label="$1" expected="${2:-}" output status
   set +e
   output="$(ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" 2>&1)"
   status=$?
   set -e
   [[ "${status}" -ne 0 ]] || { echo "${label}: weakened fixture passed dispatch contract policy" >&2; exit 1; }
+  if [[ -n "${expected}" && "${output}" != *"${expected}"* ]]; then
+    echo "${label}: rejected for the wrong reason: ${output}" >&2
+    exit 1
+  fi
 }
 
 reset_fixture
 ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+
+# The PG8 reusable caller must propagate only the nested pre-flight permissions;
+# its source-bearing leaf must remain least-privilege.
+mutate_pg8_permission_scope() {
+  local mutation="$1"
+  reset_fixture
+  ruby -ryaml -e '
+    root = ARGV.fetch(0)
+    workflow_path = File.join(root, ".github/workflows/pg8-measurement.yml")
+    arm_path = File.join(root, ".github/workflows/pg8-measurement-arm.yml")
+    workflow = YAML.safe_load_file(workflow_path, aliases: false)
+    arm = YAML.safe_load_file(arm_path, aliases: false)
+    case ARGV.fetch(1)
+    when "caller-missing-actions" then workflow.fetch("jobs").fetch("measure").fetch("permissions").delete("actions")
+    when "caller-actions-write" then workflow.fetch("jobs").fetch("measure").fetch("permissions")["actions"] = "write"
+    when "preflight-missing-actions" then arm.fetch("jobs").fetch("preflight").fetch("permissions").delete("actions")
+    when "measure-actions-read" then arm.fetch("jobs").fetch("measure").fetch("permissions")["actions"] = "read"
+    end
+    File.write(workflow_path, YAML.dump(workflow))
+    File.write(arm_path, YAML.dump(arm))
+  ' "${work}/tree" "${mutation}"
+  case "${mutation}" in
+    caller-missing-actions|caller-actions-write)
+      expect_policy_rejects "PG8 nested permission ${mutation} mutation" 'reusable caller must grant exactly actions: read and contents: read' ;;
+    preflight-missing-actions)
+      expect_policy_rejects "PG8 nested permission ${mutation} mutation" 'nested pre-flight must request exactly actions: read and contents: read' ;;
+    measure-actions-read)
+      expect_policy_rejects "PG8 nested permission ${mutation} mutation" 'source-bearing measurement job must remain limited to contents: read' ;;
+  esac
+}
+for mutation in caller-missing-actions caller-actions-write preflight-missing-actions measure-actions-read; do
+  mutate_pg8_permission_scope "${mutation}"
+done
 
 # The candidate Stage 2 policy rejects the old seven-workflow set and accepts
 # only the exact complete eight-workflow contract with PG8 present.
@@ -99,6 +136,7 @@ jobs:
   measure:
     needs: [plan]
     permissions:
+      actions: read
       contents: read
     uses: ./.github/workflows/pg8-measurement-arm.yml
     with:

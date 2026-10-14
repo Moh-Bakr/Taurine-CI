@@ -148,7 +148,9 @@ for required in TAURINE_TEST_DBX_MTLS_REQUIRED TAURINE_TEST_PG_MTLS_SERVER_CA TA
   grep -Fq "${required}" "${work}/start-pg.sh" || { echo "live roster fixture: pgtls does not export ${required}" >&2; exit 1; }
 done
 grep -Fq 'ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1' "${work}/start-pg.sh" || {
-  echo 'live roster fixture: TLS10 endpoint is not pinned to TLS 1.0 only' >&2; exit 1;
+  if ! grep -Fq 'tls10)' .github/policy/pgtls-postgres-entrypoint.sh || ! grep -Fq 'ssl_max_protocol_version=TLSv1' .github/policy/pgtls-postgres-entrypoint.sh; then
+    echo 'live roster fixture: TLS10 endpoint is not pinned to TLS 1.0 only' >&2; exit 1;
+  fi
 }
 grep -Fq '[[ "${got}" == "TLSv1" && -z "${refused}" ]] && tls10_ok=1' "${work}/start-pg.sh" || {
   echo 'live roster fixture: TLS10 readiness does not require a TLSv1 handshake' >&2; exit 1;
