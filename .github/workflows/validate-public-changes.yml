@@ -157,6 +157,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-live-start-pg-shell.sh
 
+      - name: Test control-owned PostgreSQL TLS fixtures without certificates or containers
+        shell: bash
+        run: bash .github/policy/test-pgtls-control-fixtures.sh
+
       - name: Test registered DBX feature coverage and old-source compatibility
         shell: bash
         run: bash .github/policy/test-dbx-feature-coverage.sh
