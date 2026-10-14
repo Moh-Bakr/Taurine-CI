@@ -159,6 +159,16 @@ jobs:
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh
 
+      # The roster the plan step selects is exactly what runs: no matrix filter, literal output
+      # or skipped arm step between them.
+      - name: Pin the live-proof fan-out from roster to arm runs
+        shell: bash
+        run: ruby .github/policy/check-live-proof-fanout.rb
+
+      - name: Test the live-proof fan-out pin on arm-dropping fixtures
+        shell: bash
+        run: bash .github/policy/test-live-proof-fanout.sh
+
       - name: Test live-proof roster selection and JSON validity
         shell: bash
         run: bash .github/policy/test-live-roster.sh

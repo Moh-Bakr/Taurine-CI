@@ -638,6 +638,33 @@ It is split three ways:
 - **The `live-*` composites** hold the per-engine server start-up (image digest pins, ports, readiness),
   the cargo build, the run and the summary.
 
+The policy pins both halves of the fan-out. `test-live-roster.sh` runs the real plan step and checks
+which arms it selects; `check-live-proof-fanout.rb` checks that selection is what runs. The plan job's
+`arms` and `roster` outputs must come from that step, whose name, inputs and shell are fixed, and its
+`if` is exactly the protected-ref condition, because `prove` needs `plan` and a skipped plan skips
+every arm. The `prove` job must be exactly one arm-workflow call per selected arm, with no `include`,
+`exclude`, extra axis or condition. In the arm workflow, the job and its workflow-level environment
+are pinned, and the input validation, build and run steps are pinned in full and in that order: the
+action or script, `if`, `continue-on-error`, `env`, `with`, shell and directory of each, so replacing
+a body, swapping an action or overriding `RUNNER_TEMP` fails the check. The validation script is
+pinned by SHA-256 (the recompute command is in the check). Workflow files are read as text and YAML
+and refused, with the cause named, when they are missing, symlinks, too large, not UTF-8, not YAML,
+ambiguous (a repeated key, an anchor or an alias) or not a mapping. Changing any of these is a
+reviewed policy change that lands in two steps (see "Changing the policy").
+
+Two residuals are known and not closed by this check. Neither makes a bypass possible that a pull
+request could not already make, since a pull request controls the workflow YAML itself; each makes it
+quieter, and the likely fix is the environment isolation described under "Changing the policy".
+
+- **The select step's environment is not closed.** A plan step before `select` that writes
+  `GITHUB_PATH`, or a workflow-level `BASH_ENV`, can change what `select` executes; `test-live-roster.sh`
+  runs the extracted select script alone and cannot see either. The steps before `select` are
+  composites whose contents this check does not read.
+- **An arm can be narrowed between validation and run.** A new step between the pinned validation and
+  run steps can rewrite `${RUNNER_TEMP}/live-arm.json`, for example to one suite of a multi-suite arm,
+  and the arm still passes with less proved. The pinned order does not forbid a step in between, and
+  the contents of the `live-build` and `live-run` composites are not read here either.
+
 Each selection has its own concurrency group, runs are never cancelled, and only check titles and counts
 are published.
 
@@ -712,15 +739,45 @@ checkout and it ran exactly as many base scripts as that checkout holds, so a pa
 nothing ran. `test-base-policy-env.sh` runs the step as declared, over rejecting fixtures, with each
 of those planted, and fails on a step that does not hold.
 
-What none of this stops is code the pull request contributes that the base pass itself executes.
-Several base tests extract a step from the pull request's workflows or actions and run it, as the
-same user, with write access to `.github/policy/`, so that code can rewrite a later base script on
-disk, and a background process left by an earlier pull-request step can do the same. An environment
-scrub cannot close this, and no `sudo` is needed. It is known and not fixed here. The follow-up is
-to run the base pass in its own job, with no pull-request step before it, record a SHA-256 manifest
-of every base policy file in memory and re-verify it before each script, and run each script in its
-own session and kill its process group afterwards. Until then review of workflow and policy changes
-is the control for it.
+What the environment scrub alone could not stop is code the pull request contributes that the
+base pass itself executes. Several base tests extract a step from the pull request's workflows or
+actions and run it, as the same user, with write access to `.github/policy/`, so that code could
+rewrite a later base script on disk; and a background process left by an earlier pull-request step
+could do the same. The base pass is therefore isolated further:
+
+- **Its own job.** It runs as `base-policy`, separate from the checks in `policy`, on a fresh runner
+  where no pull-request step has executed. `policy` declares `needs: [base-policy]` and fails unless
+  that job succeeded, so the base pass stays on the required status check.
+- **Pinned to the base commit.** The base checkout's `HEAD` must equal the pull request's base SHA.
+  A SHA-256 manifest is built from that commit's git objects, held only in the step's memory and
+  handed to the verifier on standard input, and re-verified before every base script and once at
+  the end. A rewritten, added or removed base file fails the step. The manifest is never written
+  to disk, because a base script could rewrite a file there to match its own edit.
+- **One session per script.** Each base script runs in its own session, created by the pinned ruby
+  with `Process.setsid`, and its process group is torn down when it returns. The group is taken from
+  the step's own `$!`, never from a file a script could overwrite.
+- **No loader variables.** The step shell unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`, the
+  allow-list never forwards them, and the step asserts no `LD_*` or `DYLD_*` name reaches a base
+  script.
+
+`test-base-policy-isolation.sh` runs the step over fixtures for each: a mismatched checkout, a
+rewritten, added and removed base file, the same rewrite under poisoned ruby, a forged manifest on
+disk, a forged digest function, a base script that leaves a child running, the same while planting
+a bogus group id, and planted loader variables.
+
+What remains, and is accepted for now:
+
+- A base script can call `setsid` itself and so leave the session the teardown kills. GitHub-hosted
+  runners reap a job's remaining processes when it ends, and with the base pass in its own job
+  nothing of the pull request's runs after it; but within the job such a process can outlive its
+  own check.
+- `DYLD_*` forwarding cannot be observed on macOS, which strips those names under System Integrity
+  Protection, so the loader fixture's behaviour for them is expected on the Linux runner rather than
+  measured locally. On Linux the dynamic loader ignores `DYLD_*` anyway.
+- The base job's result reaches the required check only through `policy`'s `needs` and its guard
+  step. A pull request edits its own copy of this workflow, and no base policy check yet asserts
+  that the guard and the `needs` are present, so removing them relies on review. A policy check for
+  that structure is the follow-up.
 
 ## Accepted residual risks
 
