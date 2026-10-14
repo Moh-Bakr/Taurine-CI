@@ -214,9 +214,12 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # The shell is named by absolute path with the startup hooks removed, so a BASH_ENV or ENV
+      # that an earlier step wrote to GITHUB_ENV, or a bash on a GITHUB_PATH directory, cannot run
+      # before this script does. The script then guards each base script (see below).
       - name: Run the base commit's policy against this pull request
         if: github.event_name == 'pull_request'
-        shell: bash
+        shell: /usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -eo pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

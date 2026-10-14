@@ -700,10 +700,13 @@ to `GITHUB_ENV` or `GITHUB_PATH`. The base pass therefore runs each base script,
 alike, with an allow-listed environment (`env -i`, a fixed `PATH`, a clean `HOME`, only the
 `GITHUB_*`/`RUNNER_*` and token variables it needs) and names `ruby` and `bash` by absolute path, so
 a planted `RUBYOPT`, `RUBYLIB`, `BASH_ENV` or `PATH` shim cannot turn a rejection into a pass.
-`test-base-policy-env.sh` runs the step's own script over rejecting fixtures with those planted.
-What a script inside the step cannot defend is the step's own shell, which reads `BASH_ENV` and
-resolves `bash` before the script starts; closing that needs a `shell:` override or running the base
-pass in a separate job, and until then review of workflow and policy changes is the control for it.
+The step's own shell is closed the same way: it declares `shell: /usr/bin/env -u BASH_ENV -u ENV
+/bin/bash --noprofile --norc -eo pipefail {0}`, so the absolute paths cannot be intercepted by a
+`PATH` shim and no startup hook is read before the script runs. `test-base-policy-env.sh` runs the
+step as declared, over rejecting fixtures, with those planted, and fails on a step that does not
+protect both layers. What none of this stops is a prior step that changes files on the runner
+itself (the job user can use `sudo`); review of workflow and policy changes remains the control for
+that.
 
 ## Accepted residual risks
 

@@ -2,12 +2,14 @@
 # The base-policy step must not be steerable by environment that an earlier step of the job wrote to
 # GITHUB_ENV or GITHUB_PATH. This extracts the reviewed step itself, runs it over fixture base
 # scripts that all reject, and shows the step still rejects when RUBYOPT/RUBYLIB/BASH_ENV and a PATH
-# shim have been planted to make every child exit 0. A second run over scripts that inspect their own
-# environment shows the scrub removes the planted variables and keeps what the base policy needs.
+# shim have been planted to make every process exit 0. A second run over scripts that inspect their
+# own environment shows the scrub removes the planted variables and keeps what the base policy needs.
 # Run from the repository root. Usage: test-base-policy-env.sh [workflow-file]
 #
-# The planted BASH_ENV is written to leave the step's own shell alone: a step cannot defend its own
-# shell from inside its script (see docs/how-ci-works.md), so this models the child-targeted case.
+# Emulating the runner: the step's `shell:` is read from the workflow and run the way the runner runs
+# it, the string split on spaces into one command with `{0}` replaced by the script file, started
+# with the planted PATH so a bare `bash` resolves through it. The runner's own process setup is not
+# reproduced (it is not available here); only the command it executes is.
 set -euo pipefail
 
 workflow="${1:-.github/workflows/validate-public-changes.yml}"
@@ -17,13 +19,22 @@ trap 'rm -rf "${work}"' EXIT
 root="${PWD}"
 
 ruby "${root}/.github/policy/extract-step.rb" "${workflow}" "${step}" run > "${work}/step.sh"
+step_shell="$(ruby -ryaml -e '
+  doc = YAML.safe_load(File.read(ARGV[0]), aliases: false)
+  found = doc.fetch("jobs").values.flat_map { |job| job.fetch("steps").select { |s| s["name"] == ARGV[1] } }
+  abort "expected one step" unless found.length == 1
+  print found.first.fetch("shell")
+' "${workflow}" "${step}")"
+[[ -n "${step_shell}" ]] || { echo "base-policy environment: the step declares no shell" >&2; exit 1; }
+# The runner turns the named shell `bash` into this command; any other value is used as written.
+[[ "${step_shell}" != bash ]] || step_shell='bash --noprofile --norc -eo pipefail {0}'
 
-# What a hostile earlier step could have planted: every child process it affects exits 0.
+# What a hostile earlier step could have planted: every process it affects exits 0, the step's own
+# shell included.
 poison="${work}/poison"
 mkdir -p "${poison}/shim"
 printf 'at_exit { exit!(0) }\n' > "${poison}/poison.rb"
-# $0 is not yet the script name while BASH_ENV is read, so the shell is recognised by its command line.
-printf 'case "$(ps -o command= -p "$$" 2>/dev/null)" in *step.sh*) ;; *) exit 0 ;; esac\n' > "${poison}/poison.sh"
+printf 'exit 0\n' > "${poison}/poison.sh"
 printf '#!/bin/sh\nexit 0\n' > "${poison}/shim/ruby"
 cp "${poison}/shim/ruby" "${poison}/shim/bash"
 chmod +x "${poison}/shim/ruby" "${poison}/shim/bash"
@@ -80,7 +91,14 @@ run_step() {
       "PATH=${poison}/shim:${PATH}" GITHUB_ENV=/dev/null GITHUB_PATH=/dev/null PLANTED=1
     )
   fi
-  (cd "${tree}" && env "${environment[@]}" /bin/bash --noprofile --norc -eo pipefail "${work}/step.sh")
+  local -a shell_argv=()
+  read -r -a shell_argv <<< "${step_shell}"
+  local i
+  for i in "${!shell_argv[@]}"; do
+    [[ "${shell_argv[i]}" != '{0}' ]] || shell_argv[i]="${work}/step.sh"
+  done
+  # The command is looked up through the planted PATH, as the runner does for a bare name.
+  (cd "${tree}" && env "${environment[@]}" "${shell_argv[@]}")
 }
 
 expect_rejects() {
