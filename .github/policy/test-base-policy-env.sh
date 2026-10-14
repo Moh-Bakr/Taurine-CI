@@ -36,8 +36,10 @@ mkdir -p "${poison}/shim"
 printf 'at_exit { exit!(0) }\n' > "${poison}/poison.rb"
 printf 'exit 0\n' > "${poison}/poison.sh"
 printf '#!/bin/sh\nexit 0\n' > "${poison}/shim/ruby"
-cp "${poison}/shim/ruby" "${poison}/shim/bash"
-chmod +x "${poison}/shim/ruby" "${poison}/shim/bash"
+for name in bash cp rm mv mkdir diff; do cp "${poison}/shim/ruby" "${poison}/shim/${name}"; done
+chmod +x "${poison}/shim/"*
+# Run if the shell evaluates PS4 under an imported SHELLOPTS=xtrace: proof that planted code ran.
+xtrace_marker="${work}/xtrace-code-ran"
 
 # A fresh tree per run: the base policy checked out beside a pull request tree.
 fixture() {
@@ -58,23 +60,27 @@ witness_scripts() {
   cat > "${policy}/check-env.sh" <<'SH'
 set -u
 [[ "${PATH}" == /usr/bin:/bin:/usr/sbin:/sbin ]] || { echo "PATH is ${PATH}" >&2; exit 1; }
-for name in RUBYOPT RUBYLIB BASH_ENV ENV GITHUB_ENV GITHUB_PATH LD_PRELOAD DYLD_INSERT_LIBRARIES PLANTED; do
+for name in RUBYOPT RUBYLIB BASH_ENV ENV GITHUB_ENV GITHUB_PATH LD_PRELOAD DYLD_INSERT_LIBRARIES PLANTED GH_TOKEN; do
   [[ -z "${!name+x}" ]] || { echo "${name} leaked into the base policy" >&2; exit 1; }
 done
 [[ "${HOME}" == "${RUNNER_TEMP}/base-policy-home" ]] || { echo "HOME is not the clean home" >&2; exit 1; }
-for name in GH_TOKEN RUNNER_TEMP GITHUB_WORKSPACE GITHUB_REPOSITORY; do
+for name in RUNNER_TEMP GITHUB_WORKSPACE GITHUB_REPOSITORY; do
   [[ -n "${!name:-}" ]] || { echo "${name} was not passed through" >&2; exit 1; }
 done
+# bash always sets SHELLOPTS itself, so what matters is what was exported into this process.
+if env | grep -qE '^(SHELLOPTS|PS4|BASH_FUNC_[^=]*)='; then echo "an exported shell setting leaked into the base policy" >&2; exit 1; fi
 [[ "$(command -v ruby)" == /usr/bin/ruby ]] || { echo "ruby resolves to $(command -v ruby)" >&2; exit 1; }
 SH
   cat > "${policy}/check-env.rb" <<'RB'
-%w[RUBYOPT RUBYLIB BASH_ENV GITHUB_ENV GITHUB_PATH PLANTED].each do |name|
+%w[RUBYOPT RUBYLIB BASH_ENV GITHUB_ENV GITHUB_PATH PLANTED SHELLOPTS PS4 GH_TOKEN].each do |name|
   abort "#{name} leaked into the base policy" if ENV.key?(name)
 end
 abort 'PATH is not fixed' unless ENV['PATH'] == '/usr/bin:/bin:/usr/sbin:/sbin'
-abort 'GH_TOKEN was not passed through' if ENV.fetch('GH_TOKEN', '').empty?
 RB
   cp "${policy}/check-env.rb" "${policy}/test-env.rb"
+  # lint.sh is the one script that is given the token; it must see exactly that and nothing planted.
+  sed -e 's/ PLANTED GH_TOKEN; do/ PLANTED; do/' "${policy}/check-env.sh" > "${policy}/lint.sh"
+  printf '%s\n' '[[ "${GH_TOKEN:-}" == fixture-token ]] || { echo "lint.sh did not receive the token" >&2; exit 1; }' >> "${policy}/lint.sh"
 }
 
 # Run the step the way the job does: the environment the earlier steps left, then the script.
@@ -89,6 +95,10 @@ run_step() {
     environment+=(
       "RUBYOPT=-rpoison" "RUBYLIB=${poison}" "BASH_ENV=${poison}/poison.sh"
       "PATH=${poison}/shim:${PATH}" GITHUB_ENV=/dev/null GITHUB_PATH=/dev/null PLANTED=1
+      # Exported functions that make the step's own commands no-ops, and a traced shell whose PS4 runs code.
+      'BASH_FUNC_cp%%=() {  :; }' 'BASH_FUNC_rm%%=() {  :; }' 'BASH_FUNC_mv%%=() {  :; }'
+      'BASH_FUNC_mkdir%%=() {  :; }' 'BASH_FUNC_diff%%=() {  :; }'
+      SHELLOPTS=xtrace "PS4=\$(: > '${xtrace_marker}')"
     )
   fi
   local -a shell_argv=()
@@ -105,7 +115,12 @@ expect_rejects() {
   local label="$1" poisoned="$2" dir="${work}/$1" tree rc=0
   tree="$(fixture "${dir}")"
   reject_scripts "${tree}"
+  rm -f "${xtrace_marker}"
   run_step "${tree}" "${poisoned}" > "${dir}.out" 2>&1 || rc=$?
+  if [[ -e "${xtrace_marker}" ]]; then
+    echo "base-policy environment: ${label}: code planted in PS4 ran in the step's shell" >&2
+    exit 1
+  fi
   if [[ "${rc}" -eq 0 ]]; then
     echo "base-policy environment: ${label}: the step passed although every base script rejects" >&2
     sed 's/^/  /' "${dir}.out" >&2
@@ -123,7 +138,12 @@ expect_clean_environment() {
   local label="$1" poisoned="$2" dir="${work}/$1" tree rc=0
   tree="$(fixture "${dir}")"
   witness_scripts "${tree}"
+  rm -f "${xtrace_marker}"
   run_step "${tree}" "${poisoned}" > "${dir}.out" 2>&1 || rc=$?
+  if [[ -e "${xtrace_marker}" ]]; then
+    echo "base-policy environment: ${label}: code planted in PS4 ran in the step's shell" >&2
+    exit 1
+  fi
   if [[ "${rc}" -ne 0 ]]; then
     echo "base-policy environment: ${label}: a base script saw a polluted or incomplete environment" >&2
     sed 's/^/  /' "${dir}.out" >&2
@@ -131,9 +151,23 @@ expect_clean_environment() {
   fi
 }
 
+# A step that runs nothing must fail, whatever the reason nothing ran.
+expect_fails_when_nothing_runs() {
+  local label="$1" poisoned="$2" dir="${work}/$1" tree rc=0
+  tree="$(fixture "${dir}")"
+  run_step "${tree}" "${poisoned}" > "${dir}.out" 2>&1 || rc=$?
+  [[ "${rc}" -ne 0 ]] || { echo "base-policy environment: ${label}: the step passed with no base script to run" >&2; exit 1; }
+  grep -qF 'the base commit has no policy scripts to run' "${dir}.out" || {
+    echo "base-policy environment: ${label}: no reason reported" >&2
+    exit 1
+  }
+}
+
 expect_rejects 'rejecting scripts, clean environment' no
 expect_rejects 'rejecting scripts, RUBYOPT/RUBYLIB/BASH_ENV and a PATH shim planted' yes
 expect_clean_environment 'environment witness, clean environment' no
 expect_clean_environment 'environment witness, planted variables' yes
+expect_fails_when_nothing_runs 'no base scripts, clean environment' no
+expect_fails_when_nothing_runs 'no base scripts, planted variables' yes
 
-echo 'base-policy environment: planted RUBYOPT, RUBYLIB, BASH_ENV and PATH shims cannot make the base policy pass; only the allow-listed environment reaches it'
+echo 'base-policy environment: planted RUBYOPT, RUBYLIB, BASH_ENV, SHELLOPTS/PS4, exported functions and PATH shims cannot make the base policy pass or skip; only the allow-listed environment reaches it, and the token only reaches lint.sh'

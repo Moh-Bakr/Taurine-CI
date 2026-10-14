@@ -698,15 +698,29 @@ base pass is caught only by review: treat any change to `validate-public-changes
 Earlier steps of that job run the pull request's own policy scripts, and any of them can append
 to `GITHUB_ENV` or `GITHUB_PATH`. The base pass therefore runs each base script, Ruby and shell
 alike, with an allow-listed environment (`env -i`, a fixed `PATH`, a clean `HOME`, only the
-`GITHUB_*`/`RUNNER_*` and token variables it needs) and names `ruby` and `bash` by absolute path, so
-a planted `RUBYOPT`, `RUBYLIB`, `BASH_ENV` or `PATH` shim cannot turn a rejection into a pass.
-The step's own shell is closed the same way: it declares `shell: /usr/bin/env -u BASH_ENV -u ENV
-/bin/bash --noprofile --norc -eo pipefail {0}`, so the absolute paths cannot be intercepted by a
-`PATH` shim and no startup hook is read before the script runs. `test-base-policy-env.sh` runs the
-step as declared, over rejecting fixtures, with those planted, and fails on a step that does not
-protect both layers. What none of this stops is a prior step that changes files on the runner
-itself (the job user can use `sudo`); review of workflow and policy changes remains the control for
-that.
+`GITHUB_*`/`RUNNER_*` variables it needs, and the token for `lint.sh` alone) and names `ruby` and
+`bash` by absolute path, so a planted `RUBYOPT`, `RUBYLIB`, `BASH_ENV` or `PATH` shim cannot turn a
+rejection into a pass.
+
+The step's own shell is closed the same way. It declares `shell: /usr/bin/env -u BASH_ENV -u ENV
+/bin/bash --noprofile --norc -p -eo pipefail {0}`: the absolute paths cannot be intercepted by a
+`PATH` shim, no startup file is read, and privileged mode (`-p`) stops bash importing exported
+functions (`BASH_FUNC_*`) and `SHELLOPTS`/`PS4`, which would otherwise run planted code in the step
+shell. The script then fixes its own `PATH` before it does anything, so `rm`, `mv`, `cp`, `mkdir` and
+`diff` cannot be shimmed, and it fails unless the copied base policy is identical to the base
+checkout and it ran exactly as many base scripts as that checkout holds, so a pass cannot mean that
+nothing ran. `test-base-policy-env.sh` runs the step as declared, over rejecting fixtures, with each
+of those planted, and fails on a step that does not hold.
+
+What none of this stops is code the pull request contributes that the base pass itself executes.
+Several base tests extract a step from the pull request's workflows or actions and run it, as the
+same user, with write access to `.github/policy/`, so that code can rewrite a later base script on
+disk, and a background process left by an earlier pull-request step can do the same. An environment
+scrub cannot close this, and no `sudo` is needed. It is known and not fixed here. The follow-up is
+to run the base pass in its own job, with no pull-request step before it, record a SHA-256 manifest
+of every base policy file in memory and re-verify it before each script, and run each script in its
+own session and kill its process group afterwards. Until then review of workflow and policy changes
+is the control for it.
 
 ## Accepted residual risks
 

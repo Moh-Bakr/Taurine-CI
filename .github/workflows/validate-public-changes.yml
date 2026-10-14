@@ -214,26 +214,40 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # The shell is named by absolute path with the startup hooks removed, so a BASH_ENV or ENV
-      # that an earlier step wrote to GITHUB_ENV, or a bash on a GITHUB_PATH directory, cannot run
-      # before this script does. The script then guards each base script (see below).
+      # The shell is named by absolute path and started in privileged mode with the startup files
+      # skipped, so an earlier step cannot steer it through BASH_ENV, ENV, SHELLOPTS, an exported
+      # function (BASH_FUNC_*) or a bash on a GITHUB_PATH directory before this script runs. The
+      # script then pins its own command lookup and guards each base script (see below).
       - name: Run the base commit's policy against this pull request
         if: github.event_name == 'pull_request'
-        shell: /usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -eo pipefail {0}
+        shell: /usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin
           set -euo pipefail
           base="${RUNNER_TEMP}/base-policy"
           rm -rf "${base}"
           mv base-policy "${base}"
+          # The base scripts the loop below selects, counted in the base checkout before the copy, so a
+          # copy or a loop that quietly does nothing is a failure and not a pass.
+          count_scripts() {
+            local n=0 f
+            for f in "$1"/check-*.rb "$1"/check-*.sh "$1"/lint.sh "$1"/test-*.sh "$1"/test-*.rb; do
+              if [[ -f "${f}" ]]; then n=$((n + 1)); fi
+            done
+            echo "${n}"
+          }
+          expected="$(count_scripts "${base}/.github/policy")"
+          [[ "${expected}" -gt 0 ]] || { echo "::error::the base commit has no policy scripts to run"; exit 1; }
           rm -rf .github/policy
           cp -R "${base}/.github/policy" .github/policy
+          diff -rq "${base}/.github/policy" .github/policy > /dev/null || { echo "::error::the base policy was not copied faithfully"; exit 1; }
           # Earlier steps of this job run this pull request's own policy scripts, and any of them can
           # append to GITHUB_ENV or GITHUB_PATH. Each base script therefore runs with an allow-listed
           # environment, a fixed PATH, a clean HOME, and ruby and bash named by absolute path, so
           # nothing a pull request exports (RUBYOPT, RUBYLIB, BASH_ENV, a PATH shim) can change what
-          # the base policy decides.
+          # the base policy decides. Only lint.sh, whose zizmor audits read the API, gets the token.
           ruby_bin=/usr/bin/ruby
           bash_bin=/bin/bash
           for tool in "${ruby_bin}" "${bash_bin}" /usr/bin/env; do
@@ -242,17 +256,22 @@ jobs:
           clean_home="${RUNNER_TEMP}/base-policy-home"
           mkdir -p "${clean_home}"
           scrub=(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "HOME=${clean_home}" LANG=C.UTF-8 LC_ALL=C.UTF-8)
-          for name in CI GH_TOKEN GITHUB_ACTIONS GITHUB_API_URL GITHUB_EVENT_NAME GITHUB_REF GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_SHA GITHUB_WORKSPACE RUNNER_ARCH RUNNER_OS RUNNER_TEMP; do
+          for name in CI GITHUB_ACTIONS GITHUB_API_URL GITHUB_EVENT_NAME GITHUB_REF GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_SHA GITHUB_WORKSPACE RUNNER_ARCH RUNNER_OS RUNNER_TEMP; do
             [[ -z "${!name+x}" ]] || scrub+=("${name}=${!name}")
           done
           status=0
+          executed=0
           for check in .github/policy/check-*.rb .github/policy/check-*.sh .github/policy/lint.sh .github/policy/test-*.sh .github/policy/test-*.rb; do
             [[ -f "${check}" ]] || continue
+            executed=$((executed + 1))
+            token=()
+            if [[ "${check##*/}" == lint.sh && -n "${GH_TOKEN+x}" ]]; then token=("GH_TOKEN=${GH_TOKEN}"); fi
             echo "::group::base policy: ${check##*/}"
             case "${check}" in
-              *.rb) "${scrub[@]}" "${ruby_bin}" "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
-              *) "${scrub[@]}" "${bash_bin}" --noprofile --norc "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
+              *.rb) "${scrub[@]}" ${token[@]+"${token[@]}"} "${ruby_bin}" "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
+              *) "${scrub[@]}" ${token[@]+"${token[@]}"} "${bash_bin}" --noprofile --norc "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
             esac
             echo '::endgroup::'
           done
+          [[ "${executed}" -eq "${expected}" ]] || { echo "::error::ran ${executed} of ${expected} base policy scripts"; exit 1; }
           exit "${status}"
