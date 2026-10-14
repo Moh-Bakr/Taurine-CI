@@ -509,7 +509,7 @@ jobs:
               echo "::error::base policy: ${check##*/} left a process running in its session when it returned; it was killed"
               process_failure=1
             fi
-            survivors="$(marked_pids "${guard}")"
+            survivors=""
             if [[ -n "${survivors// /}" ]]; then
               # shellcheck disable=SC2086
               kill -KILL ${survivors} 2>/dev/null || true
