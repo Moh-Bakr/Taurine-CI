@@ -66,6 +66,14 @@ while IFS= read -r -d '' record; do
     echo "Case-evidence assets must be plain regular files: $asset has git mode $mode" >&2
     exit 1
   fi
+  # Valid JSON and JavaScript never contain a raw NUL, and a NUL is what makes
+  # git call a file binary. Refusing it here keeps these files inside the text
+  # world every other check assumes, rather than leaving the credential scan to
+  # decide how to treat them.
+  if [[ "$(LC_ALL=C tr -d '\000' < "$asset" | wc -c | tr -d ' ')" != "$(wc -c < "$asset" | tr -d ' ')" ]]; then
+    echo "Case-evidence assets must not contain NUL bytes: $asset" >&2
+    exit 1
+  fi
 done < <(git ls-files -s -z -- .github/policy/case-evidence-assets)
 
 if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' \
@@ -82,11 +90,18 @@ fi
 # a pasted key or private path would land. Exclude the scripts by extension
 # instead, so the asset directory is scanned like anything else.
 #
+# -a, not -I: -I skips whatever git judges binary, and a single NUL byte is
+# enough to earn that judgement, so one NUL in front of a key header hid it
+# from this scan entirely. Every path this repository admits is a text type,
+# so there is nothing here that needs skipping.
+#
 # The PEM alternation was also wrong: it read BEGIN (RSA|OPENSSH|EC|PRIVATE)
 # KEY, which matches "BEGIN PRIVATE KEY" but not "BEGIN RSA PRIVATE KEY" --
-# the commonest header of all, and every other qualified one. The qualifier is
-# now optional in front of PRIVATE KEY, which only widens what is caught.
-if git grep -nI -E 'GH_APP_PRIVATE_KEY|TAURINE_(PAT|TOKEN|PRIVATE_KEY)|GITHUB_TOKEN[[:space:]]*[:=]|TAURI_SIGNING_PRIVATE_KEY|DEPLOY_KEY|BEGIN ((RSA|DSA|EC|OPENSSH|ENCRYPTED) )?PRIVATE KEY|secrets\.(TAURINE|GH_APP|PAT|DEPLOY|SIGNING)' -- . ':!*.lock' ':!.github/workflows/validate-public-changes.yml' ':!.github/policy/*.sh' ':!.github/policy/*.rb' ':!.github/policy/*.py'; then
+# the commonest header of all, and every other qualified one. Any sequence of
+# qualifiers is now allowed in front of PRIVATE KEY, which also covers
+# "BEGIN PGP PRIVATE KEY BLOCK" and anything added later. It only widens what
+# is caught, and it matches nothing already in this repository.
+if git grep -na -E 'GH_APP_PRIVATE_KEY|TAURINE_(PAT|TOKEN|PRIVATE_KEY)|GITHUB_TOKEN[[:space:]]*[:=]|TAURI_SIGNING_PRIVATE_KEY|DEPLOY_KEY|BEGIN ([A-Z0-9]+ )*PRIVATE KEY|secrets\.(TAURINE|GH_APP|PAT|DEPLOY|SIGNING)' -- . ':!*.lock' ':!.github/workflows/validate-public-changes.yml' ':!.github/policy/*.sh' ':!.github/policy/*.rb' ':!.github/policy/*.py'; then
   echo "A reusable source, signing, or deployment credential pattern was found." >&2
   exit 1
 fi
