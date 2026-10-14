@@ -178,7 +178,7 @@ jobs:
              "suites": ["taurine-db-postgres live_tls",
                         "taurine-db-conformance dbx_pg_tls_live dbx_tls_",
                         "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"],
-             "cargo_features": ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"],
+             "cargo_features": ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"],
              "blurb": "Images: postgres 17-alpine x3 (pinned by digest): ordinary TLS, verified DBX mTLS and plain"},
             {"engine": "tls-legacy", "report": false,
              "suites": ["taurine-db-conformance dbx_pg_tls_live legacy"],

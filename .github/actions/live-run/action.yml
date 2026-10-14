@@ -26,7 +26,7 @@ runs:
           if .engine == "tls-legacy" then
             .cargo_features == ["taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]
           elif .engine == "pgtls" then
-            .cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]
+            .cargo_features == ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]
           else (.cargo_features // []) == []
           end
         ' "${arm}" >/dev/null || { echo 'proof-run: unreviewed features or DBX suite definition' >&2; exit 1; }
@@ -48,7 +48,7 @@ runs:
             if [[ "${engine}" == 'tls-legacy' ]]; then
               args+=(--features taurine-db-dbx/legacy-tls)
             elif [[ "${engine}" == 'pgtls' && "${targets}" == dbx_pg_mtls_live ]]; then
-              args+=(--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls)
+              args+=(--features taurine-db-engine/dbx-pg --features taurine-db-dbx/legacy-tls)
             fi
             IFS=, read -ra tl <<< "${targets}"
             for t in "${tl[@]}"; do args+=(--test "${t}"); done

@@ -87,6 +87,7 @@ validate_arm tls-legacy "$(jq -c 'del(.cargo_features)' <<< "${legacy_config}")"
 validate_arm tls-legacy "$(jq -c '.suites=["taurine-db-conformance dbx_pg_tls_live dbx_tls_"]' <<< "${legacy_config}")" reject 'ordinary target in legacy arm'
 validate_arm pgtls "$(jq -c '.suites=["taurine-db-postgres live_tls"]' <<< "${pgtls_config}")" reject 'missing ordinary DBX TLS target'
 validate_arm pgtls "$(jq -c '. + {cargo_features:["unreviewed/feature"]}' <<< "${pgtls_config}")" reject 'unreviewed mTLS feature'
+validate_arm pgtls "$(jq -c '. + {cargo_features:["taurine-db-dbx/dbx-pg","taurine-db-dbx/legacy-tls"]}' <<< "${pgtls_config}")" reject 'old package feature reference'
 validate_arm pgtls "$(jq -c '.suites |= .[0:2]' <<< "${pgtls_config}")" reject 'missing mTLS target'
 validate_arm tls-legacy "$(jq -c '. + {cargo_command:"echo untrusted"}' <<< "${legacy_config}")" reject 'unreviewed project command'
 
