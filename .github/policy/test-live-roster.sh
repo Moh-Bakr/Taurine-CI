@@ -92,6 +92,8 @@ validate_arm tls-legacy "$(jq -c '. + {cargo_command:"echo untrusted"}' <<< "${l
 # and a synthetic target file. This proves the fixed feature and exact test
 # filters reach Cargo while never invoking a source build or test binary.
 mkdir -p "${work}/runner" "${work}/fake-source/taurine-backend/taurine-db-conformance/tests" "${work}/fakebin"
+mkdir -p "${work}/fake-source/.github/policy"
+cp .github/policy/build-failure-category.rb "${work}/fake-source/.github/policy/build-failure-category.rb"
 printf '// synthetic target marker\n' > "${work}/fake-source/taurine-backend/taurine-db-conformance/tests/dbx_pg_tls_live.rs"
 printf '// synthetic target marker\n' > "${work}/fake-source/taurine-backend/taurine-db-conformance/tests/dbx_pg_mtls_live.rs"
 cat > "${work}/fakebin/cargo" <<'FAKE_CARGO'
@@ -198,6 +200,12 @@ run_fake_actions tls-legacy "${legacy_config}" compiler-heavy compiler-heavy rej
 grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live codes=E0046=1' "${work}/fake-compiler-heavy.err" || {
   echo 'live roster fixture: an early Rust compiler code was hidden by warning-heavy output' >&2; exit 1;
 }
+grep -Fq 'build-failure: category=other count=1 target=dbx_pg_tls_live' "${work}/fake-compiler-heavy.err" || {
+  echo 'live roster fixture: compiler-heavy failure omitted its protected category summary' >&2; exit 1;
+}
+if grep -E 'LoadError|cannot load such file' "${work}/fake-compiler-heavy.err" >/dev/null; then
+  echo 'live roster fixture: protected classifier helper was unavailable in the fake workspace' >&2; exit 1;
+fi
 if grep -E 'SECRET_|PRIVATE_WARNING_|/private/var|/home/runner/work' "${work}/fake-compiler-heavy.err" >/dev/null; then
   echo 'live roster fixture: compiler diagnostic summary leaked a private message, path, or warning' >&2; exit 1;
 fi
@@ -205,6 +213,12 @@ run_fake_actions tls-legacy "${legacy_config}" compiler-nocode compiler-nocode r
 grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live code=unclassified count=1' "${work}/fake-compiler-nocode.err" || {
   echo 'live roster fixture: code-less compiler error was not classified as unclassified' >&2; exit 1;
 }
+grep -Fq 'build-failure: category=other count=1 target=dbx_pg_tls_live' "${work}/fake-compiler-nocode.err" || {
+  echo 'live roster fixture: code-less compiler failure omitted its protected category summary' >&2; exit 1;
+}
+if grep -E 'LoadError|cannot load such file' "${work}/fake-compiler-nocode.err" >/dev/null; then
+  echo 'live roster fixture: protected classifier helper was unavailable for the code-less case' >&2; exit 1;
+fi
 if grep -E 'SECRET_|/home/runner/work' "${work}/fake-compiler-nocode.err" >/dev/null; then
   echo 'live roster fixture: code-less diagnostic leaked private content' >&2; exit 1;
 fi
@@ -212,6 +226,12 @@ run_fake_actions tls-legacy "${legacy_config}" compiler-empty compiler-empty rej
 grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live code=unclassified count=0' "${work}/fake-compiler-empty.err" || {
   echo 'live roster fixture: failure without compiler diagnostics was not visibly unclassified' >&2; exit 1;
 }
+grep -Fq 'build-failure: category=other count=1 target=dbx_pg_tls_live' "${work}/fake-compiler-empty.err" || {
+  echo 'live roster fixture: empty compiler failure omitted its protected category summary' >&2; exit 1;
+}
+if grep -E 'LoadError|cannot load such file' "${work}/fake-compiler-empty.err" >/dev/null; then
+  echo 'live roster fixture: protected classifier helper was unavailable for the empty case' >&2; exit 1;
+fi
 if grep -E 'SECRET_|/home/runner/work' "${work}/fake-compiler-empty.err" >/dev/null; then
   echo 'live roster fixture: noncompiler failure leaked private content' >&2; exit 1;
 fi
@@ -250,3 +270,12 @@ grep -q 'parse error' "${work}/invalid-stderr" || {
 }
 
 echo 'live roster: extracted plan selects all 13 arms; arm schema binds exact DBX TLS tests and feature'
+if [[ "${LIVE_ROSTER_HOST_PREFIX_CHILD:-}" != 1 ]]; then
+  hosted_temp="${work}/hosted-prefix/home/runner/work/_temp"
+  mkdir -p "${hosted_temp}"
+  if ! RUNNER_TEMP="${hosted_temp}" LIVE_ROSTER_HOST_PREFIX_CHILD=1 bash "${BASH_SOURCE[0]}" >"${work}/hosted-prefix.out" 2>"${work}/hosted-prefix.err"; then
+    echo 'live roster fixture: hosted-style /home/runner/work/_temp prefix failed' >&2
+    exit 1
+  fi
+  echo 'live roster fixture: hosted-style /home/runner/work/_temp prefix passed'
+fi
