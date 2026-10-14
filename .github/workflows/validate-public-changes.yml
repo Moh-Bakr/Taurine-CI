@@ -34,7 +34,7 @@ jobs:
     permissions:
       contents: read
     name: Validate workflow policy
-    needs: [base-policy]
+    needs: [base-policy, base-policy-fixtures]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -201,19 +201,6 @@ jobs:
         shell: bash
         run: bash .github/policy/test-dispatch-contracts.sh
 
-      # The base-policy step below runs every base script in an allow-listed environment; this runs
-      # that step's own script over rejecting fixtures with RUBYOPT, RUBYLIB, BASH_ENV and a PATH
-      # shim planted, and requires it to still reject.
-      - name: Test that planted environment cannot make the base policy pass
-        shell: bash
-        run: bash .github/policy/test-base-policy-env.sh
-
-      # The base-policy job pins the base policy to the base commit's objects, tears down whatever
-      # a base script leaves running, and keeps the loader variables out. This runs that job's step
-      # over fixtures that break each of those, and requires it to notice.
-      - name: Test the base-policy job's pin, process containment and loader scrub
-        shell: bash
-        run: bash .github/policy/test-base-policy-isolation.sh
 
       # Release-installed tools are listed with their pins; Dependabot covers the Actions.
       - name: Check the tool pin list and Dependabot coverage
@@ -227,6 +214,19 @@ jobs:
       # The base-policy pass is a separate job (below), so the result it reached cannot be
       # influenced by anything the checks above exported. This step keeps the required status
       # check honest: it fails when that job did not pass.
+      - name: Require the base-policy fixtures job to have passed
+        if: ${{ always() }}
+        shell: bash
+        env:
+          FIXTURES_RESULT: ${{ needs.base-policy-fixtures.result }}
+        run: |
+          set -euo pipefail
+          if [[ "${FIXTURES_RESULT}" != 'success' ]]; then
+            echo "::error::the base-policy fixtures job did not pass (result: ${FIXTURES_RESULT})"
+            exit 1
+          fi
+          echo 'base policy: the base-policy fixtures job passed'
+
       - name: Require the base-policy job to have passed
         if: ${{ always() && github.event_name == 'pull_request' }}
         shell: bash
@@ -257,6 +257,45 @@ jobs:
   #
   # `policy` requires this job's result, so splitting it out does not take it off the required
   # status check.
+  # The fixtures that execute the base-policy step. They have a job of their own because that step
+  # refuses to run while passwordless sudo is available, and the `policy` job keeps it. Here the
+  # sudo rule is shown first, while root is still present, and then root is removed and every other
+  # fixture runs, as the step itself would run in the base-policy job.
+  base-policy-fixtures:
+    permissions:
+      contents: read
+    name: Test the base-policy step
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Before drop-root, while passwordless sudo is still there: the step must refuse to run.
+      # --require makes this fail rather than skip if it cannot exercise that.
+      - name: Test that the base-policy step refuses to run with passwordless sudo
+        shell: bash
+        run: bash .github/policy/test-base-policy-sudo.sh --require
+
+      - name: Remove root before the remaining fixtures
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+
+      # Rejecting fixtures with RUBYOPT, RUBYLIB, BASH_ENV and a PATH shim planted: the step must
+      # still reject.
+      - name: Test that planted environment cannot make the base policy pass
+        shell: bash
+        run: bash .github/policy/test-base-policy-env.sh
+
+      # The pin, process containment and loader scrub, each broken by its own fixture. /proc exists
+      # here, so the daemon-escape fixture runs rather than reporting that it could not.
+      - name: Test the base-policy job's pin, process containment and loader scrub
+        shell: bash
+        run: bash .github/policy/test-base-policy-isolation.sh
+
   base-policy:
     permissions:
       contents: read

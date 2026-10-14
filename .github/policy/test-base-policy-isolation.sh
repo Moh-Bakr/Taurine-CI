@@ -9,6 +9,14 @@
 # Run from the repository root. Usage: test-base-policy-isolation.sh [workflow-file]
 set -euo pipefail
 
+# The step refuses to run while passwordless sudo is available, so these fixtures can only run where
+# it is not: a developer machine, or after drop-root in the policy workflow. Say so rather than
+# report every fixture as failing for a reason that has nothing to do with it.
+if /usr/bin/sudo -n true 2>/dev/null; then
+  echo "${0##*/}: passwordless sudo is available, and the step refuses to run with it; run this after drop-root" >&2
+  exit 1
+fi
+
 workflow="${1:-.github/workflows/validate-public-changes.yml}"
 step="Run the base commit's policy against this pull request"
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/base-policy-isolation-test.XXXXXX")"
