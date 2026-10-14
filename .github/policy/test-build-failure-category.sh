@@ -216,27 +216,33 @@ set -e
 ! grep -qE 'PRIVATE-WINDOWS-COMPILER-SENTINEL|PRIVATE-RUBY-ERROR|Users\\Private|Users/Private' "${tmp}/windows-success.out"
 echo 'Windows rust-db compile-category fixtures: passed failure-only guard, fixed fallback, actual rc, and privacy checks'
 
-# Exercise the actual PG8 failure branch; fake mkdir avoids touching its fixed /mnt target path.
+# Exercise the actual PG8 failure branch with a real owned RUNNER_TEMP fallback.
 mkdir -p "${tmp}/src" "${tmp}/pg8-temp" "${tmp}/pg8-bin" "${tmp}/.github/policy"
 cp "${classifier}" "${tmp}/.github/policy/build-failure-category.rb"
 ruby "${root}/.github/policy/extract-step.rb" "${pg8_action}" 'Run fixed PG8 probe and UAT release comparisons' run >"${tmp}/pg8.sh"
 bash -n "${tmp}/pg8.sh"
-cat >"${tmp}/pg8-bin/mkdir" <<'STUB'
-#!/usr/bin/env bash
-exit 0
-STUB
 cat >"${tmp}/pg8-bin/cargo" <<'STUB'
 #!/usr/bin/env bash
+[[ -z "${GITHUB_OUTPUT:-}" ]] || exit 97
+printf '%s\n' "${CARGO_TARGET_DIR}" >"${FAKE_TARGET_CAPTURE}"
 printf '%s\n' '{"reason":"compiler-message","message":{"message":"error: failed to select a version for PRIVATE-CRATE","rendered":"PRIVATE raw message"}}' >&2
 exit 101
 STUB
-chmod +x "${tmp}/pg8-bin/mkdir" "${tmp}/pg8-bin/cargo"
-if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src bash "${tmp}/pg8.sh" >"${tmp}/pg8.out" 2>&1; then
+chmod +x "${tmp}/pg8-bin/cargo"
+if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=1 GITHUB_OUTPUT="${tmp}/pg8-output-1" FAKE_TARGET_CAPTURE="${tmp}/target.capture" bash "${tmp}/pg8.sh" >"${tmp}/pg8.out" 2>&1; then
   echo 'PG8 action fixture unexpectedly passed' >&2
   exit 1
 fi
 grep -qF 'build-failure: category=dependency-resolution count=1 target=dbx_pg8_performance_live' "${tmp}/pg8.out"
 ! grep -Eq 'PRIVATE-CRATE|PRIVATE raw message' "${tmp}/pg8.out"
+pg8_temp_real="$(cd "${tmp}/pg8-temp" && pwd -P)"
+pg8_output_value() { sed -n "s/^$2=//p" "$1"; }
+[[ "$(cat "${tmp}/target.capture")" == "${pg8_temp_real}/pg8-measurement-24680-1/probe" ]]
+[[ -d "${tmp}/pg8-temp/pg8-measurement-24680-1/product-off" && -d "${tmp}/pg8-temp/pg8-measurement-24680-1/product-on" ]]
+grep -qF "target_root=${pg8_temp_real}/pg8-measurement-24680-1" "${tmp}/pg8-output-1"
+grep -qF 'summary_dir=' "${tmp}/pg8-output-1"
+pg8_build_log_1="$(pg8_output_value "${tmp}/pg8-output-1" build_log)"
+[[ "${pg8_build_log_1}" == "${pg8_temp_real}/pg8-probe-build-24680-1-"*.log ]]
 for helper_case in missing broken; do
   pg8_workspace="${tmp}/pg8-nohelper-workspace"
   test_path="${tmp}/pg8-bin:${PATH}"
@@ -245,11 +251,125 @@ for helper_case in missing broken; do
     pg8_workspace="${tmp}"
     test_path="${tmp}/broken-ruby-bin:${tmp}/pg8-bin:${PATH}"
   fi
-  if PATH="${test_path}" GITHUB_WORKSPACE="${pg8_workspace}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src bash "${tmp}/pg8.sh" >"${tmp}/pg8-${helper_case}-helper.out" 2>&1; then
+  helper_attempt=3
+  [[ "${helper_case}" != broken ]] || helper_attempt=4
+  if PATH="${test_path}" GITHUB_WORKSPACE="${pg8_workspace}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT="${helper_attempt}" GITHUB_OUTPUT="${tmp}/pg8-output-${helper_attempt}" FAKE_TARGET_CAPTURE="${tmp}/target.capture" bash "${tmp}/pg8.sh" >"${tmp}/pg8-${helper_case}-helper.out" 2>&1; then
     echo "PG8 ${helper_case}-helper fixture unexpectedly passed" >&2
     exit 1
   fi
   grep -qF 'build-failure: category=other count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-${helper_case}-helper.out"
   ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/pg8-${helper_case}-helper.out"
 done
+
+# The source path and temp path are validated before Cargo can run. A source symlink,
+# a temp directory inside the checkout, and an attacker-controlled source path all fail.
+mkdir -p "${tmp}/pg8-outside-source" "${tmp}/pg8-symlink-workspace" "${tmp}/pg8-symlink-workspace/.github/policy"
+cp "${classifier}" "${tmp}/pg8-symlink-workspace/.github/policy/build-failure-category.rb"
+ln -s "${tmp}/pg8-outside-source" "${tmp}/pg8-symlink-workspace/src"
+for invalid_case in symlink-source inside-source-temp source-path; do
+  workspace="${tmp}"
+  runner_temp="${tmp}/pg8-temp"
+  source_path=src
+  if [[ "${invalid_case}" == symlink-source ]]; then workspace="${tmp}/pg8-symlink-workspace"; fi
+  if [[ "${invalid_case}" == inside-source-temp ]]; then runner_temp="${tmp}/src/runner-temp"; mkdir -p "${runner_temp}"; fi
+  if [[ "${invalid_case}" == source-path ]]; then source_path=../outside; fi
+  if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${workspace}" RUNNER_TEMP="${runner_temp}" SOURCE_PATH="${source_path}" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=5 GITHUB_OUTPUT="${tmp}/pg8-output-invalid-${invalid_case}" FAKE_TARGET_CAPTURE="${tmp}/should-not-run" bash "${tmp}/pg8.sh" >"${tmp}/pg8-${invalid_case}.out" 2>&1; then
+    echo "PG8 ${invalid_case} path fixture unexpectedly passed" >&2; exit 1
+  fi
+  [[ ! -e "${tmp}/should-not-run" ]]
+  ! grep -Eq '/Users/|/home/|PRIVATE|SECRET' "${tmp}/pg8-${invalid_case}.out"
+done
+
+# Exercise the prepared-target branch using an extracted-script copy with the fixed mount
+# path redirected to a synthetic owned temp directory; never touch the real /mnt mount.
+prepared_dir="${tmp}/prepared-mount"
+mkdir -m 0700 "${prepared_dir}"
+prepared="$(cd "${prepared_dir}" && pwd -P)"
+sed "s#/mnt/cargo-target#${prepared}#g" "${tmp}/pg8.sh" >"${tmp}/pg8-prepared.sh"
+bash -n "${tmp}/pg8-prepared.sh"
+if PATH="${tmp}/pg8-bin:${PATH}" CARGO_TARGET_DIR="${prepared}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=6 GITHUB_OUTPUT="${tmp}/pg8-output-6" FAKE_TARGET_CAPTURE="${tmp}/prepared.capture" bash "${tmp}/pg8-prepared.sh" >"${tmp}/pg8-prepared.out" 2>&1; then
+  echo 'PG8 prepared-target failure fixture unexpectedly passed' >&2; exit 1
+fi
+[[ "$(cat "${tmp}/prepared.capture")" == "${prepared}/pg8-measurement-24680-6/probe" ]]
+[[ -d "${prepared}/pg8-measurement-24680-6/product-off" && -d "${prepared}/pg8-measurement-24680-6/product-on" ]]
+
+# An unwritable prepared candidate and a symlink candidate both fall back to the owned
+# runner temp root; neither causes Cargo to write through the rejected candidate.
+chmod 0500 "${prepared}"
+if PATH="${tmp}/pg8-bin:${PATH}" CARGO_TARGET_DIR="${prepared}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=7 GITHUB_OUTPUT="${tmp}/pg8-output-7" FAKE_TARGET_CAPTURE="${tmp}/unwritable.capture" bash "${tmp}/pg8-prepared.sh" >"${tmp}/pg8-unwritable.out" 2>&1; then
+  echo 'PG8 unwritable-target failure fixture unexpectedly passed' >&2; exit 1
+fi
+chmod 0700 "${prepared}"
+[[ "$(cat "${tmp}/unwritable.capture")" == "${pg8_temp_real}/pg8-measurement-24680-7/probe" ]]
+[[ ! -e "${prepared}/pg8-measurement-24680-7" ]]
+ln -s "${prepared}" "${tmp}/prepared-link"
+sed "s#${prepared}#${tmp}/prepared-link#g" "${tmp}/pg8-prepared.sh" >"${tmp}/pg8-symlink-candidate.sh"
+bash -n "${tmp}/pg8-symlink-candidate.sh"
+if PATH="${tmp}/pg8-bin:${PATH}" CARGO_TARGET_DIR="${tmp}/prepared-link" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=8 GITHUB_OUTPUT="${tmp}/pg8-output-8" FAKE_TARGET_CAPTURE="${tmp}/symlink-candidate.capture" bash "${tmp}/pg8-symlink-candidate.sh" >"${tmp}/pg8-symlink-candidate.out" 2>&1; then
+  echo 'PG8 symlink-target failure fixture unexpectedly passed' >&2; exit 1
+fi
+[[ "$(cat "${tmp}/symlink-candidate.capture")" == "${pg8_temp_real}/pg8-measurement-24680-8/probe" ]]
+[[ ! -e "${prepared}/pg8-measurement-24680-8" ]]
+
+# The cleanup step only removes successful allocations from control-step outputs. It leaves
+# sibling sentinels untouched; all paths are synthetic directories under this fixture.
+ruby "${root}/.github/policy/extract-step.rb" "${pg8_action}" 'Remove private measurement files and build outputs' run >"${tmp}/pg8-cleanup.sh"
+bash -n "${tmp}/pg8-cleanup.sh"
+mkdir -p "${tmp}/pg8-temp/pg8-measurement-24680-6-summary" "${prepared}/pg8-measurement-24680-6" "${tmp}/pg8-temp/pg8-measurement-24680-6"
+printf 'private log\n' >"${tmp}/pg8-temp/pg8-probe-build-24680-1.log"
+printf 'sentinel\n' >"${tmp}/pg8-temp/keep-me"
+sed "s#/mnt/cargo-target#${prepared}#g" "${tmp}/pg8-cleanup.sh" >"${tmp}/pg8-cleanup-prepared.sh"
+RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=1 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-1" target_root)" PG8_SUMMARY_DIR="$(pg8_output_value "${tmp}/pg8-output-1" summary_dir)" PG8_BUILD_LOG="${pg8_build_log_1}" bash "${tmp}/pg8-cleanup.sh"
+if [[ -e "${pg8_temp_real}/pg8-measurement-24680-1" || -e "${pg8_build_log_1}" || ! -f "${tmp}/pg8-temp/keep-me" ]]; then
+  echo 'PG8 fallback cleanup did not remove only its emitted root/log' >&2; exit 1
+fi
+if [[ ! -e "${tmp}/pg8-temp/pg8-measurement-24680-6" || ! -f "${tmp}/pg8-temp/pg8-probe-build-24680-1.log" ]]; then
+  echo 'PG8 fallback cleanup removed an unallocated sibling path' >&2; exit 1
+fi
+printf 'summary data\n' >"${tmp}/pg8-temp/pg8-measurement-24680-6-summary/keep"
+pg8_build_log_6="$(pg8_output_value "${tmp}/pg8-output-6" build_log)"
+printf 'build log\n' >"${pg8_build_log_6}"
+RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=6 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-6" target_root)" PG8_SUMMARY_DIR="${pg8_temp_real}/pg8-measurement-24680-6-summary" PG8_BUILD_LOG="${pg8_build_log_6}" bash "${tmp}/pg8-cleanup-prepared.sh"
+if [[ -e "${prepared}/pg8-measurement-24680-6" || ! -e "${tmp}/pg8-temp/pg8-measurement-24680-6" || -e "${tmp}/pg8-temp/pg8-measurement-24680-6-summary" || -e "${pg8_build_log_6}" || ! -f "${tmp}/pg8-temp/keep-me" ]]; then
+  echo 'PG8 prepared cleanup did not preserve the unallocated fallback sibling' >&2; exit 1
+fi
+
+# Rejected setup paths publish only directories actually allocated. A pre-existing target
+# is never emitted for cleanup; a newly created root is emitted if summary allocation refuses.
+mkdir -p "${pg8_temp_real}/pg8-measurement-24680-9"
+printf 'target sentinel\n' >"${pg8_temp_real}/pg8-measurement-24680-9/keep"
+if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=9 GITHUB_OUTPUT="${tmp}/pg8-output-9" FAKE_TARGET_CAPTURE="${tmp}/should-not-run-9" bash "${tmp}/pg8.sh" >"${tmp}/pg8-preexisting-target.out" 2>&1; then
+  echo 'PG8 pre-existing target fixture unexpectedly passed' >&2; exit 1
+fi
+[[ -z "$(pg8_output_value "${tmp}/pg8-output-9" target_root)" && -z "$(pg8_output_value "${tmp}/pg8-output-9" summary_dir)" ]]
+RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=9 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-9" target_root)" PG8_SUMMARY_DIR="$(pg8_output_value "${tmp}/pg8-output-9" summary_dir)" PG8_BUILD_LOG="$(pg8_output_value "${tmp}/pg8-output-9" build_log)" bash "${tmp}/pg8-cleanup.sh"
+if [[ ! -f "${pg8_temp_real}/pg8-measurement-24680-9/keep" ]]; then
+  echo 'PG8 cleanup removed a pre-existing target sentinel' >&2; exit 1
+fi
+
+mkdir -p "${pg8_temp_real}/pg8-measurement-24680-10-summary"
+printf 'summary sentinel\n' >"${pg8_temp_real}/pg8-measurement-24680-10-summary/keep"
+if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=10 GITHUB_OUTPUT="${tmp}/pg8-output-10" FAKE_TARGET_CAPTURE="${tmp}/should-not-run-10" bash "${tmp}/pg8.sh" >"${tmp}/pg8-preexisting-summary.out" 2>&1; then
+  echo 'PG8 pre-existing summary fixture unexpectedly passed' >&2; exit 1
+fi
+[[ "$(pg8_output_value "${tmp}/pg8-output-10" target_root)" == "${pg8_temp_real}/pg8-measurement-24680-10" ]]
+[[ -z "$(pg8_output_value "${tmp}/pg8-output-10" summary_dir)" ]]
+RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=10 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-10" target_root)" PG8_SUMMARY_DIR="$(pg8_output_value "${tmp}/pg8-output-10" summary_dir)" PG8_BUILD_LOG="$(pg8_output_value "${tmp}/pg8-output-10" build_log)" bash "${tmp}/pg8-cleanup.sh"
+if [[ -e "${pg8_temp_real}/pg8-measurement-24680-10" || ! -f "${pg8_temp_real}/pg8-measurement-24680-10-summary/keep" ]]; then
+  echo 'PG8 cleanup did not preserve the pre-existing summary sentinel' >&2; exit 1
+fi
+
+# Invalid source/temp setup has no allocated-path outputs, so always cleanup preserves any
+# same-run-name sentinels already present under RUNNER_TEMP.
+mkdir -p "${pg8_temp_real}/pg8-measurement-24680-11" "${pg8_temp_real}/pg8-measurement-24680-11-summary"
+printf 'invalid-path sentinel\n' >"${pg8_temp_real}/pg8-measurement-24680-11/keep"
+printf 'invalid-summary sentinel\n' >"${pg8_temp_real}/pg8-measurement-24680-11-summary/keep"
+if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/src/runner-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=11 GITHUB_OUTPUT="${tmp}/pg8-output-11" FAKE_TARGET_CAPTURE="${tmp}/should-not-run-11" bash "${tmp}/pg8.sh" >"${tmp}/pg8-invalid-temp.out" 2>&1; then
+  echo 'PG8 invalid temp fixture unexpectedly passed' >&2; exit 1
+fi
+[[ -z "$(pg8_output_value "${tmp}/pg8-output-11" target_root)" && -z "$(pg8_output_value "${tmp}/pg8-output-11" summary_dir)" ]]
+RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=11 PG8_TARGET_ROOT="$(pg8_output_value "${tmp}/pg8-output-11" target_root)" PG8_SUMMARY_DIR="$(pg8_output_value "${tmp}/pg8-output-11" summary_dir)" PG8_BUILD_LOG="$(pg8_output_value "${tmp}/pg8-output-11" build_log)" bash "${tmp}/pg8-cleanup.sh"
+if [[ ! -f "${pg8_temp_real}/pg8-measurement-24680-11/keep" || ! -f "${pg8_temp_real}/pg8-measurement-24680-11-summary/keep" ]]; then
+  echo 'PG8 cleanup removed invalid-path sentinels' >&2; exit 1
+fi
 echo 'build-failure category fixtures: classifications, privacy, failure preservation, live-build and PG8 callsites pass'

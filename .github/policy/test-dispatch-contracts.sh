@@ -283,6 +283,31 @@ fi
 grep -qF 'only must be a comma-separated list of concern names' "${work}/validate.stderr"
 grep -Fq "inputs.only == ''" .github/workflows/linux-validation.yml || { echo 'only filter can be mislabeled full' >&2; exit 1; }
 
+# Reproduce the actual Windows Plan step with the valid optional Rust concern.
+# jq -r is required because jq -c represents an empty set-difference as `""`.
+ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("plan").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
+  .github/workflows/windows-validation.yml "${work}/windows-plan.sh"
+run_windows_plan() {
+  local label="$1" rust="$2" only="$3" expected_status="$4" status=0
+  : >"${work}/windows-plan.out"
+  : >"${work}/windows-plan.summary"
+  (RUST_REQUESTED="${rust}" ONLY="${only}" GITHUB_OUTPUT="${work}/windows-plan.out" GITHUB_STEP_SUMMARY="${work}/windows-plan.summary" bash "${work}/windows-plan.sh") \
+    >"${work}/windows-plan.stdout" 2>"${work}/windows-plan.stderr" || status=$?
+  if [[ "${expected_status}" == success && "${status}" -ne 0 ]]; then
+    echo "${label}: valid Windows Plan selection failed" >&2; exit 1
+  elif [[ "${expected_status}" == reject && "${status}" -eq 0 ]]; then
+    echo "${label}: invalid Windows Plan selection unexpectedly passed" >&2; exit 1
+  fi
+}
+run_windows_plan 'full Windows Rust matrix' true '' success
+ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "wrong full Windows Rust matrix" unless JSON.parse(out.fetch("rust_matrix")) == {"concern"=>%w[rust-domain rust-db rust-net rust-ovpn rust-app-1 rust-app-2 rust-packaging rust-tls-openssl]}' "${work}/windows-plan.out"
+run_windows_plan 'filtered Windows Rust concern' true rust-db success
+ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "valid rust-db concern was not selected" unless JSON.parse(out.fetch("rust_matrix")) == {"concern"=>["rust-db"]}' "${work}/windows-plan.out"
+run_windows_plan 'unknown Windows concern' true rust-not-reviewed reject
+grep -qF 'only: not a Windows concern of this dispatch' "${work}/windows-plan.stderr"
+run_windows_plan 'Rust concern while Rust disabled' false rust-db reject
+grep -qF 'only: not a Windows concern of this dispatch' "${work}/windows-plan.stderr"
+
 # The strict stage-2 concern-table contract must reject the old expression again.
 mkdir -p "${work}/strict-mode"
 cp -R .github "${work}/strict-mode/"
