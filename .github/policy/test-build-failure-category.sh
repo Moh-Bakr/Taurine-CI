@@ -144,6 +144,27 @@ cat >"${tmp}/malformed-ruby-bin/ruby" <<'STUB'
 printf '%s\n' 'build-failure: category=linkerfailed count=1 target=selected-live-proof-target' 'PRIVATE-EXTRA /Users/PRIVATE/path'
 STUB
 chmod +x "${tmp}/malformed-ruby-bin/ruby"
+mkdir -p "${tmp}/legacy-ruby-bin"
+cat >"${tmp}/legacy-ruby-bin/ruby" <<'STUB'
+#!/usr/bin/env bash
+target="$3"
+case "${FAKE_HELPER_MODE:-legacy}" in
+  legacy) printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}" ;;
+  extra)
+    printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}"
+    printf '%s\n' 'PRIVATE-EXTRA-PROTOCOL /Users/PRIVATE/path'
+    ;;
+  unknown) printf 'build-failure: category=PRIVATE-UNKNOWN count=1 target=%s\n' "${target}" ;;
+  wrong-target) printf '%s\n' 'build-failure: category=missingtarget count=1 target=dbx_pg_tls_live' ;;
+  bad-count) printf 'build-failure: category=missingtarget count=1000 target=%s\n' "${target}" ;;
+  trailing-blank)
+    printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}"
+    printf '\n'
+    ;;
+  *) exit 9 ;;
+esac
+STUB
+chmod +x "${tmp}/legacy-ruby-bin/ruby"
 for helper_case in missing broken malformed; do
   test_path="${tmp}/bin:${PATH}"
   workspace="${tmp}/live-nohelper-workspace"
@@ -161,6 +182,18 @@ for helper_case in missing broken malformed; do
   grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${tmp}/live-${helper_case}-helper.out"
   grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-${helper_case}-helper.out"
   ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/live-${helper_case}-helper.out"
+done
+for legacy_mode in legacy extra unknown wrong-target bad-count trailing-blank; do
+  if PATH="${tmp}/legacy-ruby-bin:${tmp}/bin:${PATH}" FAKE_HELPER_MODE="${legacy_mode}" GITHUB_WORKSPACE="${root}" RUNNER_TEMP="${tmp}/live-temp" bash "${tmp}/live.sh" >"${tmp}/live-legacy-${legacy_mode}.out" 2>&1; then
+    echo "live-build ${legacy_mode} helper fixture unexpectedly passed" >&2; exit 1
+  fi
+  if [[ "${legacy_mode}" == legacy ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${tmp}/live-legacy-${legacy_mode}.out"
+  else
+    grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${tmp}/live-legacy-${legacy_mode}.out"
+  fi
+  grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-legacy-${legacy_mode}.out"
+  ! grep -Eq 'PRIVATE-UNKNOWN|PRIVATE-EXTRA-PROTOCOL|Users/PRIVATE' "${tmp}/live-legacy-${legacy_mode}.out"
 done
 
 # Exercise the actual PGTLS multi-suite path with stub target files. Cargo succeeds twice, then
@@ -214,8 +247,9 @@ run_windows_report() {
   local output="${tmp}/windows-${os}-${concern}-${label}-${runtime}.out"
   if [[ "${runtime}" == broken ]]; then test_path="${tmp}/windows-rubyfail-bin:${tmp}/windows-bin"; fi
   if [[ "${runtime}" == malformed ]]; then test_path="${tmp}/malformed-ruby-bin:${tmp}/windows-bin"; fi
+  if [[ "${runtime}" == legacy || "${runtime}" == extra || "${runtime}" == unknown || "${runtime}" == wrong-target || "${runtime}" == bad-count || "${runtime}" == trailing-blank ]]; then test_path="${tmp}/legacy-ruby-bin:${tmp}/windows-bin"; fi
   set +e
-  PATH="${test_path}:${PATH}" RUNNER_TEMP="${tmp}/windows-runner" GITHUB_WORKSPACE="${tmp}/windows-workspace" OS_LABEL="${os}" CONCERN="${concern}" FAKE_CARGO_STATUS="${status}" bash -c '
+  PATH="${test_path}:${PATH}" RUNNER_TEMP="${tmp}/windows-runner" GITHUB_WORKSPACE="${tmp}/windows-workspace" OS_LABEL="${os}" CONCERN="${concern}" FAKE_CARGO_STATUS="${status}" FAKE_HELPER_MODE="${runtime}" bash -c '
     set -euo pipefail
     source "$1/sanitize.sh"
     source "$1/report.sh"
@@ -235,6 +269,9 @@ run_windows_report() {
       grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
       grep -qF 'build-failure-disposition: value=no-match' "${output}"
     fi
+  elif [[ "${runtime}" == legacy && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${output}"
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${output}"
   elif [[ "${runtime}" != available && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
     grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
     grep -qF 'build-failure-disposition: value=helper-unavailable' "${output}"
@@ -254,6 +291,12 @@ STUB
 chmod +x "${tmp}/windows-rubyfail-bin/ruby"
 run_windows_report Windows rust-db rust-db-build 101 broken
 run_windows_report Windows rust-db rust-db-build 101 malformed
+run_windows_report Windows rust-db rust-db-build 101 legacy
+run_windows_report Windows rust-db rust-db-build 101 extra
+run_windows_report Windows rust-db rust-db-build 101 unknown
+run_windows_report Windows rust-db rust-db-build 101 wrong-target
+run_windows_report Windows rust-db rust-db-build 101 bad-count
+run_windows_report Windows rust-db rust-db-build 101 trailing-blank
 run_windows_report Linux rust-db rust-db-build 101 available
 run_windows_report Windows rust-domain rust-domain-build 101 available
 run_windows_report Windows rust-db rust-db-tests 101 available
@@ -321,6 +364,20 @@ for helper_case in missing broken malformed; do
   grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/pg8-${helper_case}-helper.out"
   ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/pg8-${helper_case}-helper.out"
   ! grep -qF 'PRIVATE-EXTRA' "${tmp}/pg8-${helper_case}-helper.out"
+done
+legacy_attempt=20
+for legacy_mode in legacy extra unknown wrong-target bad-count trailing-blank; do
+  legacy_attempt=$((legacy_attempt + 1))
+  if PATH="${tmp}/legacy-ruby-bin:${tmp}/pg8-bin:${PATH}" FAKE_HELPER_MODE="${legacy_mode}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24681 GITHUB_RUN_ATTEMPT="${legacy_attempt}" GITHUB_OUTPUT="${tmp}/pg8-output-legacy-${legacy_mode}" FAKE_TARGET_CAPTURE="${tmp}/target.capture" bash "${tmp}/pg8.sh" >"${tmp}/pg8-legacy-${legacy_mode}.out" 2>&1; then
+    echo "PG8 ${legacy_mode} helper fixture unexpectedly passed" >&2; exit 1
+  fi
+  if [[ "${legacy_mode}" == legacy ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  else
+    grep -qF 'build-failure: category=other count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  fi
+  grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  ! grep -Eq 'PRIVATE-UNKNOWN|PRIVATE-EXTRA-PROTOCOL|Users/PRIVATE' "${tmp}/pg8-legacy-${legacy_mode}.out"
 done
 
 # The source path and temp path are validated before Cargo can run. A source symlink,
