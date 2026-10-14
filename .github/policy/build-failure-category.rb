@@ -5,7 +5,7 @@ require 'json'
 MAX_INPUT_BYTES = 1_048_576
 MAX_LINES = 4_096
 CATEGORIES = %w[linkerfailed package-or-feature-selection missingtarget dependency-resolution process-signal other].freeze
-TARGETS = %w[dbx_pg_tls_live dbx_pg_mtls_live dbx_pg8_performance_live selected-live-proof-target].freeze
+TARGETS = %w[dbx_pg_tls_live dbx_pg_mtls_live dbx_pg8_performance_live pg8-uat-release selected-live-proof-target].freeze
 
 def emit(category, count, target)
   category = 'other' unless CATEGORIES.include?(category)
@@ -44,7 +44,7 @@ end
 
 begin
   format, target, status_text = ARGV
-  unless %w[text json].include?(format) && TARGETS.include?(target) && status_text&.match?(/\A[1-9][0-9]{0,2}\z/)
+  unless %w[text json].include?(format) && TARGETS.include?(target) && status_text&.match?(/\A[1-9][0-9]{0,2}\z/) && status_text.to_i <= 255
     emit('other', 1, target)
     exit 0
   end
@@ -59,9 +59,18 @@ begin
     exit 0
   end
 
+  malformed_json = false
   text = if format == 'json'
     messages = input.lines.map do |line|
-      record = JSON.parse(line)
+      begin
+        record = JSON.parse(line)
+      rescue JSON::ParserError
+        if line.lstrip.start_with?('{')
+          malformed_json = true
+          next ''
+        end
+        next line
+      end
       next '' unless record.is_a?(Hash) && record['reason'] == 'compiler-message'
       message = record.dig('message', 'message')
       rendered = record.dig('message', 'rendered')
@@ -73,7 +82,7 @@ begin
   else
     input
   end
-  category = category_for(text)
+  category = malformed_json ? 'other' : category_for(text)
   error_lines = text.lines.count { |line| line.match?(/\berror(?:\[E[0-9]{4}\])?:/i) }
   emit(category, error_lines.zero? ? 1 : error_lines, target)
 rescue StandardError

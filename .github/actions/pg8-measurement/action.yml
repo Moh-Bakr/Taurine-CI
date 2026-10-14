@@ -63,7 +63,7 @@ runs:
           else
             build_status=$?
             echo 'UAT desktop release build failed; detailed output withheld' >&2
-            ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text dbx_pg8_performance_live "${build_status}" <"${log}" >&2
+            ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text pg8-uat-release "${build_status}" <"${log}" >&2
             exit 1
           fi
           local executable="${target_dir}/${target}/release/taurine-desktop"

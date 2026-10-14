@@ -39,6 +39,13 @@ cat >"${tmp}/linker.jsonl" <<'JSONL'
 {"reason":"compiler-message","message":{"message":"linker command failed PRIVATE SECRET ghp_abcdefghijklmnopqrstuvwxyz0123456789","rendered":"error: linking failed at /Users/PRIVATE/path"}}
 JSONL
 expect json dbx_pg8_performance_live 101 "${tmp}/linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg8_performance_live'
+{
+  printf '%s\n' 'Compiling PRIVATE-CRATE v1.2.3 (/Users/PRIVATE/source)' '    Finished `test` profile [unoptimized + debuginfo]'
+  cat "${tmp}/linker.jsonl"
+} >"${tmp}/mixed-progress.jsonl"
+expect json dbx_pg8_performance_live 101 "${tmp}/mixed-progress.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg8_performance_live'
+printf '%s\n' 'error: no test target named PRIVATE-TARGET' >"${tmp}/plain-target.log"
+expect json dbx_pg8_performance_live 101 "${tmp}/plain-target.log" 'build-failure: category=missingtarget count=1 target=dbx_pg8_performance_live'
 cat >"${tmp}/mixed.jsonl" <<'JSONL'
 {"reason":"compiler-message","message":{"message":"linker command failed SECRET"}}
 {"reason":"compiler-message","message":{"message":"no test target named PRIVATE"}}
@@ -46,6 +53,9 @@ JSONL
 expect json dbx_pg8_performance_live 101 "${tmp}/mixed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
 printf '%s\n' '{not-json PRIVATE}' >"${tmp}/malformed.jsonl"
 expect json dbx_pg8_performance_live 101 "${tmp}/malformed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
+expect text dbx_pg8_performance_live 999 "${tmp}/linker.log" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
+printf '%s\n' 'error: linking with cc failed PRIVATE path' >"${tmp}/release.log"
+expect text pg8-uat-release 101 "${tmp}/release.log" 'build-failure: category=linkerfailed count=1 target=pg8-uat-release'
 printf '%s\n' '{"reason":"compiler-message","message":{"message":"error: PRIVATE raw message"}}' >"${tmp}/oversize.jsonl"
 truncate -s 1048577 "${tmp}/oversize.jsonl"
 expect json dbx_pg8_performance_live 101 "${tmp}/oversize.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
@@ -80,6 +90,38 @@ if PATH="${tmp}/bin:${PATH}" FAKE_CARGO_STATUS=137 GITHUB_WORKSPACE="${root}" RU
 fi
 grep -qF 'build-failure: category=process-signal count=1 target=selected-live-proof-target' "${tmp}/live-signal.out"
 ! grep -Eq 'PRIVATE-TARGET|PRIVATE raw message' "${tmp}/live-signal.out"
+
+# Exercise the actual PGTLS multi-suite path with stub target files. Cargo succeeds twice, then
+# fails only the fixed mTLS suite; the emitted target label must be the fixed mTLS target.
+mkdir -p "${tmp}/pgtls-workspace/.github/policy" "${tmp}/pgtls-temp" "${tmp}/pgtls-bin"
+mkdir -p "${tmp}/pgtls-src/taurine-backend/taurine-db-conformance/tests"
+cp "${classifier}" "${tmp}/pgtls-workspace/.github/policy/build-failure-category.rb"
+printf '%s\n' 'synthetic target-presence fixture' >"${tmp}/pgtls-src/taurine-backend/taurine-db-conformance/tests/dbx_pg_tls_live.rs"
+printf '%s\n' 'synthetic target-presence fixture' >"${tmp}/pgtls-src/taurine-backend/taurine-db-conformance/tests/dbx_pg_mtls_live.rs"
+cat >"${tmp}/pgtls-temp/live-arm.json" <<'JSON'
+{"engine":"pgtls","cargo_features":["taurine-db-dbx/dbx-pg","taurine-db-dbx/legacy-tls"],"suites":["taurine-db-postgres live_tls","taurine-db-conformance dbx_pg_tls_live dbx_tls_","taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]}
+JSON
+cat >"${tmp}/pgtls-bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+count=0
+[[ ! -f "${FAKE_CARGO_COUNT}" ]] || read -r count <"${FAKE_CARGO_COUNT}"
+count=$((count + 1))
+printf '%s\n' "${count}" >"${FAKE_CARGO_COUNT}"
+printf '%s\n' "$*" >>"${FAKE_CARGO_ARGS}"
+if (( count == 3 )); then
+  printf '%s\n' 'error: linking with `cc` failed: PRIVATE-MTLS-SENTINEL ghp_abcdefghijklmnopqrstuvwxyz0123456789' >&2
+  exit 101
+fi
+exit 0
+STUB
+chmod +x "${tmp}/pgtls-bin/cargo"
+if (cd "${tmp}/pgtls-src" && PATH="${tmp}/pgtls-bin:${PATH}" GITHUB_WORKSPACE="${tmp}/pgtls-workspace" RUNNER_TEMP="${tmp}/pgtls-temp" FAKE_CARGO_COUNT="${tmp}/cargo-count" FAKE_CARGO_ARGS="${tmp}/cargo-args" bash "${tmp}/live.sh") >"${tmp}/pgtls.out" 2>&1; then
+  echo 'PGTLS mTLS failure fixture unexpectedly passed' >&2
+  exit 1
+fi
+grep -qF 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' "${tmp}/pgtls.out"
+grep -qF -- '--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live' "${tmp}/cargo-args"
+! grep -Eq 'PRIVATE-MTLS-SENTINEL|ghp_abcdefghijklmnopqrstuvwxyz' "${tmp}/pgtls.out"
 
 # Exercise the actual PG8 failure branch; fake mkdir avoids touching its fixed /mnt target path.
 mkdir -p "${tmp}/src" "${tmp}/pg8-temp" "${tmp}/pg8-bin" "${tmp}/.github/policy"
