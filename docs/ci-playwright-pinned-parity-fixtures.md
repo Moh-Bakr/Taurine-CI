@@ -2,7 +2,7 @@
 
 ## Status
 
-Prepared for hosted review. This ADR does not enable a workflow, selector, producer, or admission decision.
+The fixtures and the fixture-only harness remain shadow-only and prove nothing about the real suites. The separate case-evidence contract they belong to **is** now activated in the Linux browser concerns; see `case-evidence-contract.md`. This ADR still enables no selector and no admission decision.
 
 ## Decision
 
@@ -22,7 +22,7 @@ The harness copies the reviewed process-group timeout, pipe-drain deadline, and 
 
 ## Hosted boundary and limits
 
-The assets remain unadmitted by deployed bootstrap policy `1bf4d4a82cb2fcaeff0fca7e257e31680a7a7891`: `.github/policy/` currently permits only flat `.sh` and `.rb` files, and the nested `.cjs`/`.json` fixtures fail its path/extension rules. Do not widen those rules generally. A separately reviewed policy change must allow only the exact reporter, fixture, and manifest paths, and the static validator must be explicitly invoked. The public workflow and feature-selection/admission path are unchanged.
+The path problem this paragraph used to describe is resolved without touching the rule. `.github/policy/` still permits only flat `.sh` and `.rb`; the reporter and the fixtures are no longer tracked files at all. They live in `.github/policy/case-evidence-assets.rb` and are materialised into the private mode-0700 staging directories at run time, so the public repository tracks no JavaScript or JSON and no path exception was reviewed or granted. The producers bound each fixture to the control commit with `git show` on its path; they now bind the asset module the same way, so the staged bytes are still pinned to the verified control commit. The static validator and both fake-runner harnesses are invoked explicitly by `validate-public-changes.yml`. The public workflow and feature-selection/admission path are unchanged.
 
 A hosted proof must run only on a protected control revision and exact source SHA. It must preserve the current source-read ordering: preflight, exact checkout and identity verification, token revocation before project commands, then root removal before dependency setup or tests. It must use the same fixed fixture-only commands, check child exit and completion markers, cap output and report sizes, include pipe draining in its deadline, and publish aggregate counts only. It must not run app project tests as a substitute for these fixtures.
 

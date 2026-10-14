@@ -1,6 +1,26 @@
-# Case evidence contract (standalone proposal)
+# Case evidence contract
 
-Status: **local structural contract only; producer trust and runner completeness are unverified.** This document and validator do not enable test selection, change CI workflows, or qualify a partial run for admission. The existing full validation baseline remains authoritative.
+Status: **activated in the Linux browser concerns; producer honesty and runner completeness remain unverified.** The validator now runs inside the protected concern job and a reconciliation failure fails that concern. It still does not enable test selection and does not qualify a partial run for admission: the full validation baseline remains authoritative, and the validator's clean status is still `shadow_valid_unverified_producer`.
+
+## Activation (owner decision, 2026-10-14)
+
+`.github/policy/case-evidence-admission.rb` is the trusted producer for the admission path, invoked by `.github/actions/linux-concern-case-evidence/action.yml` from `linux-validation-concern.yml` after the source token is revoked and root is dropped.
+
+It adds only the discovery half. The reviewed browser concern already writes a Playwright JSON execution report to `RUNNER_TEMP/test-ids/<concern>.json`; the producer runs one `playwright test --list --project <project>` per project with the control-owned reporter — no browser, no web server, no second execution of the suite — and hands both halves to the unchanged validator, once per project.
+
+Reconciled concerns and their scopes:
+
+| Concern | Tier | Projects |
+| --- | --- | --- |
+| `e2e-critical` | `feedback` | `smoke`, `critical`, `shell-browser` |
+| `e2e-a11y` | `a11y` | `a11y` |
+| `e2e-visual` | `visual` | `visual` |
+
+Because `e2e-critical` runs three projects in one command while the validator binds one project per envelope, the producer partitions the execution report by `projectName` in control code and validates each partition separately. Before partitioning it asserts that every executed case belongs to one of that concern's reviewed projects, so a case no project owns blocks instead of being silently dropped; afterwards it asserts the partitions account for every executed case and, where the runner supplied `stats`, that those totals equal the reconciled total.
+
+The four `e2e-regression-*` concerns are **not** reconciled. Each runs `--shard=N/4`, so its execution report holds a quarter of the project while a `--list` for that project enumerates all of it, and whether the pinned runner applies `--shard` to `--list` has not been proven on 1.62.0. The producer refuses those concerns rather than carrying a weaker subset rule for four of seven.
+
+Nothing is relaxed by this activation: no coverage floor, suite floor or required concern changed, no selector was enabled, and the result is an additional fail-closed step on an already-mandatory concern.
 
 ## What the validator checks
 
@@ -35,6 +55,12 @@ Vitest's three config files are the private manifest's existing desktop, mobile,
 Playwright uses one fixed invocation per project. Desktop project allowlists are: feedback (`smoke`, `critical`, `shell-browser`), regression (`regression`), benchmark (`bench`), accessibility (`a11y`), and visual (`visual`). Mobile allowlists are `smoke`, `critical`, and `regression`. The public collector currently supports desktop Playwright only; adding mobile Playwright is a separate coverage change. A control-owned list reporter and its exact machine-readable output are not implemented or verified here. The command form above is a proposal, not evidence that the pinned Playwright version supports it.
 
 For every adapter, the producer must capture the exact locked runner version from the source lockfile, execute only the fixed command ID for that phase, verify successful process exit and complete structured output, and derive IDs/status/counts from the parsed report. For execution, the trusted audit re-parses the report and requires exact equality between discovery IDs, execution IDs, and `discovered_case_ids`; additions, omissions, duplicates, malformed records, empty required reports, or non-passing statuses cannot be converted into a clean result. Raw reports and IDs stay in an ephemeral `RUNNER_TEMP` directory with restrictive permissions and are not uploaded as artifacts.
+
+## What activation does and does not establish
+
+It establishes, on every reconciled concern: that the pinned runner's discovery and its execution agree case for case, that no executed case lacks a discovered identity and no discovered case went unexecuted, that no two cases share an identity, that no suite came back unexpectedly empty, and that every executed case belongs to a reviewed project of that concern.
+
+It does not establish that the producer is honest about having invoked the command it names; that the four sharded regression concerns are case-complete; that the mobile Playwright adapter works at all (no mobile concern is reconciled); or anything whatsoever about Vitest, whose list/run parity is still unproven and whose adapters below remain proposals.
 
 ## Gaps and admission boundary
 

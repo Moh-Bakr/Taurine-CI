@@ -339,6 +339,10 @@ def sanitize_result(discovery, execution)
   }
 end
 
+# Guarded so the identity derivation above can be required by the trusted
+# admission producer: requiring this file must not run the CLI. Invoked as a
+# program it behaves exactly as before.
+if $PROGRAM_NAME == __FILE__
 begin
   expected_path, discovery_path, execution_path = ARGV
   reject!('arguments_invalid') unless expected_path && discovery_path && execution_path && ARGV.length == 3
@@ -363,4 +367,5 @@ rescue ContractError => error
 rescue JSON::ParserError, KeyError, TypeError, SystemCallError, ArgumentError, NoMethodError
   puts JSON.generate({ 'schema_version' => 1, 'status' => 'shadow_blocked', 'error_class' => 'invalid_input' })
   exit 1
+end
 end
