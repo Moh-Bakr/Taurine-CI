@@ -9,12 +9,23 @@ runs:
   using: composite
   steps:
     - name: Run fixed PG8 probe and UAT release comparisons
+      id: measure
       shell: bash
       working-directory: ${{ github.workspace }}
       env:
         SOURCE_PATH: ${{ inputs.source-path }}
       run: |
         set -euo pipefail
+        step_output="${GITHUB_OUTPUT:-}"
+        unset GITHUB_OUTPUT
+        target_root=''
+        summary_dir=''
+        build_log=''
+        record_allocated_paths() {
+          [[ -n "${step_output}" ]] || return 0
+          printf 'target_root=%s\nsummary_dir=%s\nbuild_log=%s\n' "${target_root}" "${summary_dir}" "${build_log}" >>"${step_output}" || true
+        }
+        trap record_allocated_paths EXIT
         owner_uid() { python3 - "$1" 2>/dev/null <<'PY'
         import os, sys
         print(os.stat(sys.argv[1], follow_symlinks=False).st_uid)
@@ -46,24 +57,31 @@ runs:
         if [[ "${CARGO_TARGET_DIR:-}" == /mnt/cargo-target && -d /mnt/cargo-target && ! -L /mnt/cargo-target && -w /mnt/cargo-target && "$(owner_uid /mnt/cargo-target || true)" == "$(id -u)" && "$(cd /mnt/cargo-target && pwd -P)" == /mnt/cargo-target ]]; then
           target_base=/mnt/cargo-target
         fi
-        target_root="${target_base}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-        if [[ -e "${target_root}" || -L "${target_root}" ]]; then
+        target_candidate="${target_base}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        if [[ -e "${target_candidate}" || -L "${target_candidate}" ]]; then
           echo 'PG8 run target directory already exists' >&2
           exit 1
         fi
-        mkdir -m 0700 -- "${target_root}"
+        mkdir -m 0700 -- "${target_candidate}"
+        target_root="${target_candidate}"
         probe_target="${target_root}/probe"
         product_off_target="${target_root}/product-off"
         product_on_target="${target_root}/product-on"
         mkdir -m 0700 -- "${probe_target}" "${product_off_target}" "${product_on_target}"
         export CARGO_TARGET_DIR="${probe_target}"
-        summary_dir="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-summary"
-        if [[ -e "${summary_dir}" || -L "${summary_dir}" ]]; then
+        summary_candidate="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-summary"
+        if [[ -e "${summary_candidate}" || -L "${summary_candidate}" ]]; then
           echo 'PG8 run summary directory already exists' >&2
           exit 1
         fi
-        mkdir -m 0700 -- "${summary_dir}"
-        build_log="${summary_dir}/probe-build.log"
+        run_nonce="$$"
+        build_log_candidate="${runner_temp_real}/pg8-probe-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${run_nonce}.log"
+        if [[ -e "${build_log_candidate}" || -L "${build_log_candidate}" ]]; then
+          echo 'PG8 run build log already exists' >&2
+          exit 1
+        fi
+        (umask 077 && : >"${build_log_candidate}")
+        build_log="${build_log_candidate}"
         emit_build_failure_category() {
           local format="$1" target="$2" status="$3" log="$4" category_line='' suffix=''
           case "${target}" in
@@ -89,6 +107,12 @@ runs:
           exit 1
         fi
         probe_bin="$(python3 "${policy}" artifact "${probe_target}" <"${build_log}")"
+        if [[ -e "${summary_candidate}" || -L "${summary_candidate}" ]]; then
+          echo 'PG8 run summary directory became unavailable' >&2
+          exit 1
+        fi
+        mkdir -m 0700 -- "${summary_candidate}"
+        summary_dir="${summary_candidate}"
         for mode in paired legacy dbx; do
           output="${summary_dir}/${mode}.out"
           if [[ "${mode}" == paired ]]; then
@@ -147,8 +171,13 @@ runs:
       if: ${{ always() }}
       shell: bash
       working-directory: ${{ github.workspace }}
+      env:
+        PG8_TARGET_ROOT: ${{ steps.measure.outputs.target_root }}
+        PG8_SUMMARY_DIR: ${{ steps.measure.outputs.summary_dir }}
+        PG8_BUILD_LOG: ${{ steps.measure.outputs.build_log }}
       run: |
         set -euo pipefail
+        pg8_build_log="${PG8_BUILD_LOG:-}"
         owner_uid() { python3 - "$1" 2>/dev/null <<'PY'
         import os, sys
         print(os.stat(sys.argv[1], follow_symlinks=False).st_uid)
@@ -159,20 +188,23 @@ runs:
           runner_temp_real="$(cd "${RUNNER_TEMP}" && pwd -P 2>/dev/null || true)"
         fi
         if [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]{1,20}$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]{1,6}$ ]]; then
-          for base in /mnt/cargo-target "${RUNNER_TEMP:-}"; do
-            [[ -d "${base}" && ! -L "${base}" ]] || continue
-            base_real="$(cd "${base}" && pwd -P)" || continue
-            [[ "${base_real}" == /mnt/cargo-target || ( -n "${runner_temp_real}" && "${base_real}" == "${runner_temp_real}" ) ]] || continue
-            [[ "$(owner_uid "${base_real}" || true)" == "$(id -u)" ]] || continue
-            owned_root="${base_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            if [[ -d "${owned_root}" && ! -L "${owned_root}" && "$(owner_uid "${owned_root}" || true)" == "$(id -u)" ]]; then
+          temp_root="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mount_root="/mnt/cargo-target/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ -n "${PG8_TARGET_ROOT:-}" && ( "${PG8_TARGET_ROOT}" == "${temp_root}" || "${PG8_TARGET_ROOT}" == "${mount_root}" ) ]]; then
+            owned_root="${PG8_TARGET_ROOT}"
+            owned_base="${owned_root%/pg8-measurement-*}"
+            if [[ -d "${owned_base}" && ! -L "${owned_base}" && "$(cd "${owned_base}" && pwd -P)" == "${owned_base}" && "$(owner_uid "${owned_base}" || true)" == "$(id -u)" && -d "${owned_root}" && ! -L "${owned_root}" && "$(owner_uid "${owned_root}" || true)" == "$(id -u)" ]]; then
               rm -rf -- "${owned_root}"
             fi
-          done
-          if [[ -n "${runner_temp_real}" ]]; then
-            summary="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-summary"
-            if [[ -d "${summary}" && ! -L "${summary}" && "$(owner_uid "${summary}" || true)" == "$(id -u)" ]]; then
-              rm -rf -- "${summary}"
-            fi
+          fi
+          expected_summary="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-summary"
+          if [[ -n "${runner_temp_real}" && "${PG8_SUMMARY_DIR:-}" == "${expected_summary}" && -d "${expected_summary}" && ! -L "${expected_summary}" && "$(owner_uid "${expected_summary}" || true)" == "$(id -u)" ]]; then
+            rm -rf -- "${expected_summary}"
+          fi
+          log_prefix="${runner_temp_real}/pg8-probe-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
+          log_suffix="${pg8_build_log#"${log_prefix}"}"
+          log_pid="${log_suffix%.log}"
+          if [[ -n "${runner_temp_real}" && "${pg8_build_log}" == "${log_prefix}"* && "${log_suffix}" == *.log && "${log_pid}" =~ ^[0-9]+$ && -f "${pg8_build_log}" && ! -L "${pg8_build_log}" && "$(owner_uid "${pg8_build_log}" || true)" == "$(id -u)" ]]; then
+            rm -f -- "${pg8_build_log}"
           fi
         fi
