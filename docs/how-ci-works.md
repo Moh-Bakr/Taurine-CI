@@ -640,11 +640,30 @@ It is split three ways:
 
 The policy pins both halves of the fan-out. `test-live-roster.sh` runs the real plan step and checks
 which arms it selects; `check-live-proof-fanout.rb` checks that selection is what runs. The plan job's
-`arms` and `roster` outputs must come from that step, whose name, inputs and shell are fixed. The
-`prove` job must be exactly one arm-workflow call per selected arm, with no `include`, `exclude`,
-extra axis or condition. In the arm workflow, input validation, the build and the run may not be
-skipped or tolerated for any arm. Changing any of these is a reviewed policy change that lands in two
-steps (see "Changing the policy").
+`arms` and `roster` outputs must come from that step, whose name, inputs and shell are fixed, and its
+`if` is exactly the protected-ref condition, because `prove` needs `plan` and a skipped plan skips
+every arm. The `prove` job must be exactly one arm-workflow call per selected arm, with no `include`,
+`exclude`, extra axis or condition. In the arm workflow, the job and its workflow-level environment
+are pinned, and the input validation, build and run steps are pinned in full and in that order: the
+action or script, `if`, `continue-on-error`, `env`, `with`, shell and directory of each, so replacing
+a body, swapping an action or overriding `RUNNER_TEMP` fails the check. The validation script is
+pinned by SHA-256 (the recompute command is in the check). Workflow files are read as text and YAML
+and refused, with the cause named, when they are missing, symlinks, too large, not UTF-8, not YAML,
+ambiguous (a repeated key, an anchor or an alias) or not a mapping. Changing any of these is a
+reviewed policy change that lands in two steps (see "Changing the policy").
+
+Two residuals are known and not closed by this check. Neither makes a bypass possible that a pull
+request could not already make, since a pull request controls the workflow YAML itself; each makes it
+quieter, and the likely fix is the environment isolation described under "Changing the policy".
+
+- **The select step's environment is not closed.** A plan step before `select` that writes
+  `GITHUB_PATH`, or a workflow-level `BASH_ENV`, can change what `select` executes; `test-live-roster.sh`
+  runs the extracted select script alone and cannot see either. The steps before `select` are
+  composites whose contents this check does not read.
+- **An arm can be narrowed between validation and run.** A new step between the pinned validation and
+  run steps can rewrite `${RUNNER_TEMP}/live-arm.json`, for example to one suite of a multi-suite arm,
+  and the arm still passes with less proved. The pinned order does not forbid a step in between, and
+  the contents of the `live-build` and `live-run` composites are not read here either.
 
 Each selection has its own concurrency group, runs are never cancelled, and only check titles and counts
 are published.
