@@ -123,6 +123,76 @@ grep -qF 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' 
 grep -qF -- '--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live' "${tmp}/cargo-args"
 ! grep -Eq 'PRIVATE-MTLS-SENTINEL|ghp_abcdefghijklmnopqrstuvwxyz' "${tmp}/pgtls.out"
 
+# Exercise the extracted Windows rust-db failure reporter. No Rust command runs: fake Cargo
+# supplies a private sentinel and the actual protected report library performs classification.
+awk "/cat > .*sanitize.sh.* <<'TCI_SANITIZE_LIBRARY'/{on=1; next} /^        TCI_SANITIZE_LIBRARY/{on=0} on" "${root}/.github/actions/sanitize/action.yml" | sed -E 's/^        //' >"${tmp}/sanitize.sh"
+awk "/cat > .*report.sh.* <<'TCI_REPORT_LIBRARY'/{on=1; next} /^        TCI_REPORT_LIBRARY/{on=0} on" "${root}/.github/actions/concern-report/action.yml" | sed -E 's/^        //' >"${tmp}/report.sh"
+[[ -s "${tmp}/sanitize.sh" && -s "${tmp}/report.sh" ]] || { echo 'the shared report libraries were not found' >&2; exit 1; }
+mkdir -p "${tmp}/windows-workspace/.github/policy" "${tmp}/windows-bin" "${tmp}/windows-runner"
+cp "${classifier}" "${tmp}/windows-workspace/.github/policy/build-failure-category.rb"
+cat >"${tmp}/windows-bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' 'error[E0599]: PRIVATE-WINDOWS-COMPILER-SENTINEL' '  --> C:\Users\Private\src\lib.rs:9:5' >&2
+exit "${FAKE_CARGO_STATUS:-101}"
+STUB
+chmod +x "${tmp}/windows-bin/cargo"
+run_windows_report() {
+  local os="$1" concern="$2" label="$3" status="$4" runtime="$5" rc test_path="${tmp}/windows-bin"
+  local output="${tmp}/windows-${os}-${concern}-${label}-${runtime}.out"
+  if [[ "${runtime}" == broken ]]; then test_path="${tmp}/windows-rubyfail-bin:${tmp}/windows-bin"; fi
+  set +e
+  PATH="${test_path}:${PATH}" RUNNER_TEMP="${tmp}/windows-runner" GITHUB_WORKSPACE="${tmp}/windows-workspace" OS_LABEL="${os}" CONCERN="${concern}" FAKE_CARGO_STATUS="${status}" bash -c '
+    set -euo pipefail
+    source "$1/sanitize.sh"
+    source "$1/report.sh"
+    if [[ "$2" == unavailable ]]; then
+      command() { [[ "$*" != "-v ruby" ]] && builtin command "$@"; }
+    fi
+    run_quiet "$3" cargo test --locked --no-run
+  ' _ "${tmp}" "${runtime}" "${label}" >"${output}" 2>&1
+  rc=$?
+  set -e
+  [[ "${rc}" -ne 0 ]] || { echo 'Windows report fixture unexpectedly passed' >&2; exit 1; }
+  if [[ "${os}:${concern}:${label}:${runtime}" == 'Windows:rust-db:rust-db-build:available' ]]; then
+    if [[ "${status}" == 137 ]]; then
+      grep -qF 'build-failure: category=process-signal count=1 target=selected-live-proof-target' "${output}"
+    else
+      grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
+    fi
+  elif [[ "${runtime}" != available && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
+  else
+    ! grep -qF 'build-failure:' "${output}"
+  fi
+  ! grep -Eq 'PRIVATE-WINDOWS-COMPILER-SENTINEL|Users\\Private|Users/Private' "${output}"
+}
+run_windows_report Windows rust-db rust-db-build 137 available
+run_windows_report Windows rust-db rust-db-build 101 unavailable
+mkdir -p "${tmp}/windows-rubyfail-bin"
+cat >"${tmp}/windows-rubyfail-bin/ruby" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' 'PRIVATE-RUBY-ERROR /Users/PRIVATE/path' >&2
+exit 1
+STUB
+chmod +x "${tmp}/windows-rubyfail-bin/ruby"
+run_windows_report Windows rust-db rust-db-build 101 broken
+run_windows_report Linux rust-db rust-db-build 101 available
+run_windows_report Windows rust-domain rust-domain-build 101 available
+run_windows_report Windows rust-db rust-db-tests 101 available
+set +e
+PATH="${tmp}/windows-bin:${PATH}" RUNNER_TEMP="${tmp}/windows-runner" GITHUB_WORKSPACE="${tmp}/windows-workspace" OS_LABEL=Windows CONCERN=rust-db FAKE_CARGO_STATUS=0 bash -c '
+  set -euo pipefail
+  source "$1/sanitize.sh"
+  source "$1/report.sh"
+  run_quiet rust-db-build cargo test --locked --no-run
+' _ "${tmp}" >"${tmp}/windows-success.out" 2>&1
+windows_success_status=$?
+set -e
+[[ "${windows_success_status}" -eq 0 ]] || { echo 'Windows success fixture unexpectedly failed' >&2; exit 1; }
+! grep -qF 'build-failure:' "${tmp}/windows-success.out"
+! grep -qE 'PRIVATE-WINDOWS-COMPILER-SENTINEL|PRIVATE-RUBY-ERROR|Users\\Private|Users/Private' "${tmp}/windows-success.out"
+echo 'Windows rust-db compile-category fixtures: passed failure-only guard, fixed fallback, actual rc, and privacy checks'
+
 # Exercise the actual PG8 failure branch; fake mkdir avoids touching its fixed /mnt target path.
 mkdir -p "${tmp}/src" "${tmp}/pg8-temp" "${tmp}/pg8-bin" "${tmp}/.github/policy"
 cp "${classifier}" "${tmp}/.github/policy/build-failure-category.rb"
