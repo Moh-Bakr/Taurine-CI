@@ -695,6 +695,16 @@ the old one, merge, then land the change that relies on it. The pull request's o
 base pass is caught only by review: treat any change to `validate-public-changes.yml` or
 `.github/policy/` as a policy change and review it as one.
 
+Earlier steps of that job run the pull request's own policy scripts, and any of them can append
+to `GITHUB_ENV` or `GITHUB_PATH`. The base pass therefore runs each base script, Ruby and shell
+alike, with an allow-listed environment (`env -i`, a fixed `PATH`, a clean `HOME`, only the
+`GITHUB_*`/`RUNNER_*` and token variables it needs) and names `ruby` and `bash` by absolute path, so
+a planted `RUBYOPT`, `RUBYLIB`, `BASH_ENV` or `PATH` shim cannot turn a rejection into a pass.
+`test-base-policy-env.sh` runs the step's own script over rejecting fixtures with those planted.
+What a script inside the step cannot defend is the step's own shell, which reads `BASH_ENV` and
+resolves `bash` before the script starts; closing that needs a `shell:` override or running the base
+pass in a separate job, and until then review of workflow and policy changes is the control for it.
+
 ## Accepted residual risks
 
 These are known, reviewed and accepted; each is limited by the controls named.
