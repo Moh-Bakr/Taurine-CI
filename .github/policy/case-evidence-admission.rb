@@ -58,7 +58,8 @@ end
 
 CONTROL_ROOT = File.expand_path('../..', __dir__).freeze
 CONTRACT = File.join(__dir__, 'case-evidence-contract.rb').freeze
-REPORTER = File.join(__dir__, 'case-evidence-assets', 'playwright-case-list-reporter.cjs').freeze
+REPORTER_RELATIVE = '.github/policy/case-evidence-assets/playwright-case-list-reporter.cjs'.freeze
+REPORTER = File.join(CONTROL_ROOT, REPORTER_RELATIVE).freeze
 MATRIX_RELATIVE = '.github/ci-matrix.json'.freeze
 MANIFEST_RELATIVE = 'scripts/ci/suite-ownership.json'.freeze
 MAX_INPUT_BYTES = 8 * 1024 * 1024
@@ -116,7 +117,8 @@ CONTRACT_ERROR_CLASSES = %w[
 
 ERROR_CLASSES = (CONTRACT_ERROR_CLASSES + %w[
   catalog_binding_invalid config_binding_invalid control_checkout_invalid control_sha_mismatch
-  git_untrusted manifest_absent manifest_binding_invalid runner_version_unpinned
+  git_untrusted manifest_absent manifest_binding_invalid project_executed_nothing
+  reporter_binding_invalid runner_version_unpinned
   source_checkout_dirty source_sha_mismatch suite_scope_mismatch
   arguments_invalid concern_unsupported contract_rejected discovery_failed
   execution_report_invalid identity_env_invalid lock_binding_invalid node_runtime_invalid
@@ -552,7 +554,10 @@ begin
   unexpected = observed.uniq - scope.fetch('projects')
   block!('project_unexpected') unless unexpected.empty?
 
-  block!('control_checkout_invalid') unless File.file?(REPORTER)
+  # The reporter is loaded by Playwright inside the concern job, so its bytes
+  # are bound to the verified control commit like every other asset here --
+  # existing on disk is not the same as being the reviewed file.
+  tracked_bytes!(git, CONTROL_ROOT, control_sha, REPORTER_RELATIVE, 'reporter_binding_invalid')
   reporter = REPORTER
   totals = Hash.new(0)
   per_project = []
@@ -581,6 +586,10 @@ begin
 
     result = reconcile!(expected_path, discovery_path, execution_envelope_path)
     counts = result.fetch('counts')
+    # Every case skipped is not a green project. Reconciliation would hold
+    # perfectly -- discovery and execution agree on a set that ran nothing --
+    # and that is the vacuous pass this gate exists to refuse elsewhere.
+    block!('project_executed_nothing') unless counts.fetch('passed') + counts.fetch('retried_pass') > 0
     REPORTED_COUNTS.each { |key| totals[key] += counts.fetch(key) }
     per_project << REPORTED_COUNTS.each_with_object({ 'project' => project }) do |key, row|
       row[key] = counts.fetch(key)

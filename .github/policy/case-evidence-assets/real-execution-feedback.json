@@ -1,7 +1,7 @@
 {
   "config": {
     "argv": [
-      "/opt/homebrew/Cellar/node/26.8.1/bin/node",
+      "node",
       "__APP_ROOT__/node_modules/playwright/cli.js",
       "test",
       "--config",

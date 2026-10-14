@@ -16,11 +16,19 @@ assets="${root}/.github/policy/case-evidence-assets"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/case-evidence-admission-test.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 
-control_sha="$(git -C "${root}" rev-parse HEAD)"
-if ! git -C "${root}" diff --quiet HEAD -- .github/ci-matrix.json; then
-  echo 'the control checkout has uncommitted .github/ci-matrix.json changes; commit them before running this fixture' >&2
-  exit 1
-fi
+# A copy of the control tree, committed here, so the fixture can perturb a
+# control-owned asset without touching the real checkout, and does not depend
+# on that checkout being clean.
+control="$tmp/control"
+mkdir -p "$control"
+cp -R "${root}/.github" "$control/.github"
+git -C "$control" init -q
+git -C "$control" config user.name 'Synthetic control'
+git -C "$control" config user.email 'control@example.invalid'
+git -C "$control" add -A
+git -C "$control" commit -qm 'synthetic control'
+control_sha="$(git -C "$control" rev-parse HEAD)"
+admission="$control/.github/policy/case-evidence-admission.rb"
 
 ruby -rjson -rfileutils -rrbconfig -rdigest -e '
   tmp, assets, root = ARGV
@@ -166,6 +174,17 @@ execution_fixture() {
         suite["specs"] << rogue unless suite["specs"].any? { |s| s["title"] == rogue["title"] }
         report["stats"]["expected"] += 1
       end
+    when "all-skipped"
+      total = 0
+      w.call(report["suites"]) do |_suite, spec|
+        spec["tests"].each do |test|
+          test["status"] = "skipped"
+          test["expectedStatus"] = "skipped"
+          test["results"] = [{"status" => "skipped"}]
+          total += 1
+        end
+      end
+      report["stats"] = {"expected" => 0, "skipped" => total, "unexpected" => 0, "flaky" => 0}
     when "stats-wrong"
       report["stats"]["expected"] -= 1
     when "empty"
@@ -191,7 +210,7 @@ run_admission() {
     CI_EXPECTED_SELECTION_MODE=full \
     CI_EXPECTED_SELECTED_SUITE_IDS="$selected" \
     CI_PLATFORM=linux \
-    ruby "$root/.github/policy/case-evidence-admission.rb" "$concern" "$tmp/source" "$tmp/execution.json" "$tmp/work"
+    ruby "$admission" "$concern" "$tmp/source" "$tmp/execution.json" "$tmp/work"
 }
 
 expect_blocked() {
@@ -308,6 +327,20 @@ real_source_sha="$source_sha"
 source_sha="$(printf 'a%.0s' {1..40})"
 expect_blocked 'a source SHA that is not the checked-out commit' source_sha_mismatch
 source_sha="$real_source_sha"
+
+# A project in which every case skipped reconciles perfectly and ran nothing.
+echo outcomes > "$tmp/mode"
+execution_fixture "$assets/real-execution-outcomes.json" all-skipped
+expect_blocked 'a project in which every case was skipped' project_executed_nothing e2e-a11y
+: > "$tmp/mode"
+execution_fixture "$assets/real-execution-feedback.json"
+
+# The reporter runs inside Playwright on the runner, so its bytes are bound to
+# the control commit: a modified copy is refused even though the file exists.
+cp "$control/.github/policy/case-evidence-assets/playwright-case-list-reporter.cjs" "$tmp/reporter.keep"
+printf '\n// modified after the control commit\n' >> "$control/.github/policy/case-evidence-assets/playwright-case-list-reporter.cjs"
+expect_blocked 'a reporter modified after the control commit' reporter_binding_invalid
+cp "$tmp/reporter.keep" "$control/.github/policy/case-evidence-assets/playwright-case-list-reporter.cjs"
 
 # The sharded regression concerns are refused rather than quietly passed.
 expect_blocked 'a sharded concern' concern_unsupported e2e-regression-1
