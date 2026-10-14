@@ -26,9 +26,9 @@ expect() {
   fi
 }
 expect_disposition() {
-  local format="$1" target="$2" status="$3" input="$4" wanted_category="$5" wanted_disposition="$6" output
+  local format="$1" target="$2" status="$3" input="$4" wanted_category="$5" wanted_disposition="$6" wanted_matches="$7" output
   output="$(classify "${format}" "${target}" "${status}" "${input}" disposition)"
-  [[ "${output}" == "${wanted_category}"$'\n'"build-failure-disposition: value=${wanted_disposition}" ]] || {
+  [[ "${output}" == "${wanted_category}"$'\n'"build-failure-disposition: value=${wanted_disposition}"$'\n'"build-failure-matches: values=${wanted_matches}" ]] || {
     echo 'build category disposition fixture mismatch' >&2; exit 1;
   }
   if grep -Eq 'PRIVATE|SECRET|/Users/|/home/|token|raw message|ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+' <<<"${output}"; then
@@ -52,11 +52,13 @@ expect text dbx_pg_tls_live 101 "${tmp}/target.log" 'build-failure: category=mis
 expect text dbx_pg_tls_live 101 "${tmp}/dependency.log" 'build-failure: category=dependency-resolution count=1 target=dbx_pg_tls_live'
 expect text dbx_pg_tls_live 137 "${tmp}/unknown.log" 'build-failure: category=process-signal count=1 target=dbx_pg_tls_live'
 expect text dbx_pg_tls_live 101 "${tmp}/unknown.log" 'build-failure: category=other count=1 target=dbx_pg_tls_live'
-expect_disposition text dbx_pg_tls_live 101 "${tmp}/linker.log" 'build-failure: category=linkerfailed count=1 target=dbx_pg_tls_live' classified
-expect_disposition text dbx_pg_tls_live 101 "${tmp}/unknown.log" 'build-failure: category=other count=1 target=dbx_pg_tls_live' no-match
+expect_disposition text dbx_pg_tls_live 101 "${tmp}/linker.log" 'build-failure: category=linkerfailed count=1 target=dbx_pg_tls_live' classified linkerfailed
+expect_disposition text dbx_pg_tls_live 101 "${tmp}/unknown.log" 'build-failure: category=other count=1 target=dbx_pg_tls_live' no-match none
 printf '%s\n' 'error: linking with cc failed' 'error: no test target named PRIVATE-TARGET' >"${tmp}/ambiguous.log"
-expect_disposition text dbx_pg_tls_live 101 "${tmp}/ambiguous.log" 'build-failure: category=other count=2 target=dbx_pg_tls_live' ambiguous
-expect_disposition text dbx_pg_tls_live 137 "${tmp}/unknown.log" 'build-failure: category=process-signal count=1 target=dbx_pg_tls_live' classified
+expect_disposition text dbx_pg_tls_live 101 "${tmp}/ambiguous.log" 'build-failure: category=other count=2 target=dbx_pg_tls_live' ambiguous 'linkerfailed,missingtarget'
+expect_disposition text dbx_pg_tls_live 137 "${tmp}/unknown.log" 'build-failure: category=process-signal count=1 target=dbx_pg_tls_live' classified none
+printf '%s\n' 'error: linking with cc failed' 'error: no matching package named PRIVATE found' 'error: no test target named PRIVATE-TARGET' 'error: failed to select a version for SECRET-CRATE' >"${tmp}/all-patterns.log"
+expect_disposition text dbx_pg_mtls_live 101 "${tmp}/all-patterns.log" 'build-failure: category=other count=4 target=dbx_pg_mtls_live' ambiguous 'linkerfailed,package-or-feature-selection,missingtarget,dependency-resolution'
 
 cat >"${tmp}/linker.jsonl" <<'JSONL'
 {"reason":"compiler-message","message":{"message":"linker command failed PRIVATE SECRET ghp_abcdefghijklmnopqrstuvwxyz0123456789","rendered":"error: linking failed at /Users/PRIVATE/path"}}
@@ -71,13 +73,13 @@ printf '%s\n' 'error: no test target named PRIVATE-TARGET' >"${tmp}/plain-target
 expect json dbx_pg8_performance_live 101 "${tmp}/plain-target.log" 'build-failure: category=missingtarget count=1 target=dbx_pg8_performance_live'
 printf '%s\n' '[]' 'error: linking with cc failed' >"${tmp}/array-plus-linker.jsonl"
 expect json dbx_pg_mtls_live 101 "${tmp}/array-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live'
-expect_disposition json dbx_pg_mtls_live 101 "${tmp}/array-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' malformed
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/array-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' malformed linkerfailed
 printf '%s\n' '{"reason":"compiler-message","message":{}}' 'error: linking with cc failed' >"${tmp}/empty-message-plus-linker.jsonl"
 expect json dbx_pg_mtls_live 101 "${tmp}/empty-message-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live'
-expect_disposition json dbx_pg_mtls_live 101 "${tmp}/empty-message-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' malformed
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/empty-message-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' malformed linkerfailed
 printf '%s\n' '{"reason":"compiler-message","message":{"message":42}}' 'error: linking with cc failed' >"${tmp}/parser-exception.jsonl"
 expect json dbx_pg_mtls_live 101 "${tmp}/parser-exception.jsonl" 'build-failure: category=other count=1 target=dbx_pg_mtls_live'
-expect_disposition json dbx_pg_mtls_live 101 "${tmp}/parser-exception.jsonl" 'build-failure: category=other count=1 target=dbx_pg_mtls_live' malformed
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/parser-exception.jsonl" 'build-failure: category=other count=1 target=dbx_pg_mtls_live' malformed none
 cat >"${tmp}/mixed.jsonl" <<'JSONL'
 {"reason":"compiler-message","message":{"message":"linker command failed SECRET"}}
 {"reason":"compiler-message","message":{"message":"no test target named PRIVATE"}}
@@ -85,18 +87,18 @@ JSONL
 expect json dbx_pg8_performance_live 101 "${tmp}/mixed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
 printf '%s\n' '{not-json PRIVATE}' >"${tmp}/malformed.jsonl"
 expect json dbx_pg8_performance_live 101 "${tmp}/malformed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
-expect_disposition json dbx_pg8_performance_live 101 "${tmp}/malformed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' malformed
+expect_disposition json dbx_pg8_performance_live 101 "${tmp}/malformed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' malformed none
 printf '%s\n' '{"reason":"compiler-message","message":{"message":42}}' >"${tmp}/malformed-shape.jsonl"
-expect_disposition json dbx_pg8_performance_live 101 "${tmp}/malformed-shape.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' malformed
+expect_disposition json dbx_pg8_performance_live 101 "${tmp}/malformed-shape.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' malformed none
 expect text dbx_pg8_performance_live 999 "${tmp}/linker.log" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
 printf '%s\n' 'error: linking with cc failed PRIVATE path' >"${tmp}/release.log"
 expect text pg8-uat-release 101 "${tmp}/release.log" 'build-failure: category=linkerfailed count=1 target=pg8-uat-release'
 printf '%s\n' '{"reason":"compiler-message","message":{"message":"error: PRIVATE raw message"}}' >"${tmp}/oversize.jsonl"
 truncate -s 1048577 "${tmp}/oversize.jsonl"
 expect json dbx_pg8_performance_live 101 "${tmp}/oversize.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
-expect_disposition json dbx_pg8_performance_live 101 "${tmp}/oversize.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' input-limit
+expect_disposition json dbx_pg8_performance_live 101 "${tmp}/oversize.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' input-limit none
 awk 'BEGIN { for (i = 0; i < 4097; i++) print "x" }' >"${tmp}/too-many-lines.log"
-expect_disposition text dbx_pg8_performance_live 101 "${tmp}/too-many-lines.log" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' input-limit
+expect_disposition text dbx_pg8_performance_live 101 "${tmp}/too-many-lines.log" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' input-limit none
 
 # Extract and execute the actual live-build action with only Cargo replaced by a fixed failing stub.
 mkdir -p "${tmp}/bin" "${tmp}/live-temp"
@@ -115,6 +117,7 @@ if PATH="${tmp}/bin:${PATH}" GITHUB_WORKSPACE="${root}" RUNNER_TEMP="${tmp}/live
 fi
 grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${tmp}/live.out"
 grep -qF 'build-failure-disposition: value=classified' "${tmp}/live.out"
+grep -qF 'build-failure-matches: values=missingtarget' "${tmp}/live.out"
 ! grep -Eq 'PRIVATE-TARGET|PRIVATE raw message' "${tmp}/live.out"
 if PATH="${tmp}/bin:${PATH}" FAKE_CARGO_STATUS=0 GITHUB_WORKSPACE="${root}" RUNNER_TEMP="${tmp}/live-temp" bash "${tmp}/live.sh" >"${tmp}/live-success.out" 2>&1; then
   :
@@ -150,6 +153,49 @@ cat >"${tmp}/legacy-ruby-bin/ruby" <<'STUB'
 target="$3"
 case "${FAKE_HELPER_MODE:-legacy}" in
   legacy) printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}" ;;
+  two-line)
+    printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}"
+    printf '%s\n' 'build-failure-disposition: value=classified'
+    ;;
+  metadata-valid)
+    printf 'build-failure: category=other count=2 target=%s\n' "${target}"
+    printf '%s\n' 'build-failure-disposition: value=ambiguous' 'build-failure-matches: values=linkerfailed,missingtarget'
+    ;;
+  metadata-valid-crlf)
+    printf 'build-failure: category=other count=2 target=%s\r\n' "${target}"
+    printf '%s\r\n' 'build-failure-disposition: value=ambiguous' 'build-failure-matches: values=linkerfailed,missingtarget'
+    ;;
+  metadata-two-line-crlf)
+    printf 'build-failure: category=missingtarget count=1 target=%s\r\n' "${target}"
+    printf '%s\r\n' 'build-failure-disposition: value=classified'
+    ;;
+  metadata-legacy-crlf)
+    printf 'build-failure: category=missingtarget count=1 target=%s\r\n' "${target}"
+    ;;
+  metadata-bare-cr)
+    printf 'build-failure: category=other count=2 target=%s\r' "${target}"
+    printf 'build-failure-disposition: value=ambiguous\rbuild-failure-matches: values=linkerfailed,missingtarget\r'
+    ;;
+  metadata-extra-crlf)
+    printf 'build-failure: category=other count=2 target=%s\r\n' "${target}"
+    printf '%s\r\n' 'build-failure-disposition: value=ambiguous' 'build-failure-matches: values=linkerfailed,missingtarget' 'PRIVATE-EXTRA-METADATA'
+    ;;
+  metadata-unsorted)
+    printf 'build-failure: category=other count=2 target=%s\n' "${target}"
+    printf '%s\n' 'build-failure-disposition: value=ambiguous' 'build-failure-matches: values=missingtarget,linkerfailed'
+    ;;
+  metadata-duplicate)
+    printf 'build-failure: category=other count=2 target=%s\n' "${target}"
+    printf '%s\n' 'build-failure-disposition: value=ambiguous' 'build-failure-matches: values=linkerfailed,linkerfailed'
+    ;;
+  metadata-invalid)
+    printf 'build-failure: category=other count=2 target=%s\n' "${target}"
+    printf '%s\n' 'build-failure-disposition: value=ambiguous' 'build-failure-matches: values=PRIVATE-CLASS'
+    ;;
+  metadata-extra)
+    printf 'build-failure: category=other count=2 target=%s\n' "${target}"
+    printf '%s\n' 'build-failure-disposition: value=ambiguous' 'build-failure-matches: values=linkerfailed,missingtarget' 'PRIVATE-EXTRA-METADATA'
+    ;;
   extra)
     printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}"
     printf '%s\n' 'PRIVATE-EXTRA-PROTOCOL /Users/PRIVATE/path'
@@ -183,16 +229,32 @@ for helper_case in missing broken malformed; do
   grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-${helper_case}-helper.out"
   ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/live-${helper_case}-helper.out"
 done
-for legacy_mode in legacy extra unknown wrong-target bad-count trailing-blank; do
+for legacy_mode in legacy two-line metadata-valid metadata-unsorted metadata-duplicate metadata-invalid metadata-extra extra unknown wrong-target bad-count trailing-blank; do
   if PATH="${tmp}/legacy-ruby-bin:${tmp}/bin:${PATH}" FAKE_HELPER_MODE="${legacy_mode}" GITHUB_WORKSPACE="${root}" RUNNER_TEMP="${tmp}/live-temp" bash "${tmp}/live.sh" >"${tmp}/live-legacy-${legacy_mode}.out" 2>&1; then
     echo "live-build ${legacy_mode} helper fixture unexpectedly passed" >&2; exit 1
   fi
-  if [[ "${legacy_mode}" == legacy ]]; then
+  if [[ "${legacy_mode}" == legacy || "${legacy_mode}" == two-line || "${legacy_mode}" == metadata-valid ]]; then
+    if [[ "${legacy_mode}" == metadata-valid ]]; then
+      grep -qF 'build-failure: category=other count=2 target=selected-live-proof-target' "${tmp}/live-legacy-${legacy_mode}.out"
+      grep -qF 'build-failure-disposition: value=ambiguous' "${tmp}/live-legacy-${legacy_mode}.out"
+      grep -qF 'build-failure-matches: values=linkerfailed,missingtarget' "${tmp}/live-legacy-${legacy_mode}.out"
+    elif [[ "${legacy_mode}" == two-line ]]; then
+      grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${tmp}/live-legacy-${legacy_mode}.out"
+      grep -qF 'build-failure-disposition: value=classified' "${tmp}/live-legacy-${legacy_mode}.out"
+      ! grep -qF 'build-failure-matches:' "${tmp}/live-legacy-${legacy_mode}.out"
+    else
     grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${tmp}/live-legacy-${legacy_mode}.out"
+    fi
   else
     grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${tmp}/live-legacy-${legacy_mode}.out"
   fi
-  grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-legacy-${legacy_mode}.out"
+  if [[ "${legacy_mode}" == legacy ]]; then
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-legacy-${legacy_mode}.out"
+  elif [[ "${legacy_mode}" != two-line && "${legacy_mode}" != metadata-valid ]]; then
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-legacy-${legacy_mode}.out"
+  else
+    ! grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-legacy-${legacy_mode}.out"
+  fi
   ! grep -Eq 'PRIVATE-UNKNOWN|PRIVATE-EXTRA-PROTOCOL|Users/PRIVATE' "${tmp}/live-legacy-${legacy_mode}.out"
 done
 
@@ -226,6 +288,7 @@ if (cd "${tmp}/pgtls-src" && PATH="${tmp}/pgtls-bin:${PATH}" GITHUB_WORKSPACE="$
 fi
 grep -qF 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' "${tmp}/pgtls.out"
 grep -qF 'build-failure-disposition: value=classified' "${tmp}/pgtls.out"
+grep -qF 'build-failure-matches: values=linkerfailed' "${tmp}/pgtls.out"
 grep -qF -- '--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live' "${tmp}/cargo-args"
 ! grep -Eq 'PRIVATE-MTLS-SENTINEL|ghp_abcdefghijklmnopqrstuvwxyz' "${tmp}/pgtls.out"
 
@@ -247,7 +310,7 @@ run_windows_report() {
   local output="${tmp}/windows-${os}-${concern}-${label}-${runtime}.out"
   if [[ "${runtime}" == broken ]]; then test_path="${tmp}/windows-rubyfail-bin:${tmp}/windows-bin"; fi
   if [[ "${runtime}" == malformed ]]; then test_path="${tmp}/malformed-ruby-bin:${tmp}/windows-bin"; fi
-  if [[ "${runtime}" == legacy || "${runtime}" == extra || "${runtime}" == unknown || "${runtime}" == wrong-target || "${runtime}" == bad-count || "${runtime}" == trailing-blank ]]; then test_path="${tmp}/legacy-ruby-bin:${tmp}/windows-bin"; fi
+  if [[ "${runtime}" == legacy || "${runtime}" == two-line || "${runtime}" == metadata-* || "${runtime}" == extra || "${runtime}" == unknown || "${runtime}" == wrong-target || "${runtime}" == bad-count || "${runtime}" == trailing-blank ]]; then test_path="${tmp}/legacy-ruby-bin:${tmp}/windows-bin"; fi
   set +e
   PATH="${test_path}:${PATH}" RUNNER_TEMP="${tmp}/windows-runner" GITHUB_WORKSPACE="${tmp}/windows-workspace" OS_LABEL="${os}" CONCERN="${concern}" FAKE_CARGO_STATUS="${status}" FAKE_HELPER_MODE="${runtime}" bash -c '
     set -euo pipefail
@@ -265,13 +328,34 @@ run_windows_report() {
     if [[ "${status}" == 137 ]]; then
       grep -qF 'build-failure: category=process-signal count=1 target=selected-live-proof-target' "${output}"
       grep -qF 'build-failure-disposition: value=classified' "${output}"
+      grep -qF 'build-failure-matches: values=none' "${output}"
     else
       grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
       grep -qF 'build-failure-disposition: value=no-match' "${output}"
+      grep -qF 'build-failure-matches: values=none' "${output}"
     fi
   elif [[ "${runtime}" == legacy && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
     grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${output}"
     grep -qF 'build-failure-disposition: value=helper-unavailable' "${output}"
+  elif [[ "${runtime}" == two-line && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${output}"
+    grep -qF 'build-failure-disposition: value=classified' "${output}"
+    ! grep -qF 'build-failure-matches:' "${output}"
+  elif [[ "${runtime}" == metadata-valid && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure-matches: values=linkerfailed,missingtarget' "${output}"
+  elif [[ "${runtime}" == metadata-valid-crlf && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure-matches: values=linkerfailed,missingtarget' "${output}"
+  elif [[ "${runtime}" == metadata-two-line-crlf && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${output}"
+    grep -qF 'build-failure-disposition: value=classified' "${output}"
+    ! grep -qF 'build-failure-matches:' "${output}"
+  elif [[ "${runtime}" == metadata-legacy-crlf && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${output}"
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${output}"
+  elif [[ "${runtime}" == metadata-* && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${output}"
+    ! grep -qF 'build-failure-matches:' "${output}"
   elif [[ "${runtime}" != available && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
     grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
     grep -qF 'build-failure-disposition: value=helper-unavailable' "${output}"
@@ -292,6 +376,17 @@ chmod +x "${tmp}/windows-rubyfail-bin/ruby"
 run_windows_report Windows rust-db rust-db-build 101 broken
 run_windows_report Windows rust-db rust-db-build 101 malformed
 run_windows_report Windows rust-db rust-db-build 101 legacy
+run_windows_report Windows rust-db rust-db-build 101 two-line
+run_windows_report Windows rust-db rust-db-build 101 metadata-valid
+run_windows_report Windows rust-db rust-db-build 101 metadata-valid-crlf
+run_windows_report Windows rust-db rust-db-build 101 metadata-two-line-crlf
+run_windows_report Windows rust-db rust-db-build 101 metadata-legacy-crlf
+run_windows_report Windows rust-db rust-db-build 101 metadata-bare-cr
+run_windows_report Windows rust-db rust-db-build 101 metadata-extra-crlf
+run_windows_report Windows rust-db rust-db-build 101 metadata-unsorted
+run_windows_report Windows rust-db rust-db-build 101 metadata-duplicate
+run_windows_report Windows rust-db rust-db-build 101 metadata-invalid
+run_windows_report Windows rust-db rust-db-build 101 metadata-extra
 run_windows_report Windows rust-db rust-db-build 101 extra
 run_windows_report Windows rust-db rust-db-build 101 unknown
 run_windows_report Windows rust-db rust-db-build 101 wrong-target
@@ -333,6 +428,7 @@ if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/p
 fi
 grep -qF 'build-failure: category=dependency-resolution count=1 target=dbx_pg8_performance_live' "${tmp}/pg8.out"
 grep -qF 'build-failure-disposition: value=classified' "${tmp}/pg8.out"
+grep -qF 'build-failure-matches: values=dependency-resolution' "${tmp}/pg8.out"
 ! grep -Eq 'PRIVATE-CRATE|PRIVATE raw message' "${tmp}/pg8.out"
 pg8_temp_real="$(cd "${tmp}/pg8-temp" && pwd -P)"
 pg8_output_value() { sed -n "s/^$2=//p" "$1"; }
@@ -366,17 +462,33 @@ for helper_case in missing broken malformed; do
   ! grep -qF 'PRIVATE-EXTRA' "${tmp}/pg8-${helper_case}-helper.out"
 done
 legacy_attempt=20
-for legacy_mode in legacy extra unknown wrong-target bad-count trailing-blank; do
+for legacy_mode in legacy two-line metadata-valid metadata-unsorted metadata-duplicate metadata-invalid metadata-extra extra unknown wrong-target bad-count trailing-blank; do
   legacy_attempt=$((legacy_attempt + 1))
   if PATH="${tmp}/legacy-ruby-bin:${tmp}/pg8-bin:${PATH}" FAKE_HELPER_MODE="${legacy_mode}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24681 GITHUB_RUN_ATTEMPT="${legacy_attempt}" GITHUB_OUTPUT="${tmp}/pg8-output-legacy-${legacy_mode}" FAKE_TARGET_CAPTURE="${tmp}/target.capture" bash "${tmp}/pg8.sh" >"${tmp}/pg8-legacy-${legacy_mode}.out" 2>&1; then
     echo "PG8 ${legacy_mode} helper fixture unexpectedly passed" >&2; exit 1
   fi
-  if [[ "${legacy_mode}" == legacy ]]; then
+  if [[ "${legacy_mode}" == legacy || "${legacy_mode}" == two-line || "${legacy_mode}" == metadata-valid ]]; then
+    if [[ "${legacy_mode}" == metadata-valid ]]; then
+      grep -qF 'build-failure: category=other count=2 target=dbx_pg8_performance_live' "${tmp}/pg8-legacy-${legacy_mode}.out"
+      grep -qF 'build-failure-disposition: value=ambiguous' "${tmp}/pg8-legacy-${legacy_mode}.out"
+      grep -qF 'build-failure-matches: values=linkerfailed,missingtarget' "${tmp}/pg8-legacy-${legacy_mode}.out"
+    elif [[ "${legacy_mode}" == two-line ]]; then
+      grep -qF 'build-failure: category=missingtarget count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-legacy-${legacy_mode}.out"
+      grep -qF 'build-failure-disposition: value=classified' "${tmp}/pg8-legacy-${legacy_mode}.out"
+      ! grep -qF 'build-failure-matches:' "${tmp}/pg8-legacy-${legacy_mode}.out"
+    else
     grep -qF 'build-failure: category=missingtarget count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-legacy-${legacy_mode}.out"
+    fi
   else
     grep -qF 'build-failure: category=other count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-legacy-${legacy_mode}.out"
   fi
-  grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  if [[ "${legacy_mode}" == legacy ]]; then
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  elif [[ "${legacy_mode}" != two-line && "${legacy_mode}" != metadata-valid ]]; then
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  else
+    ! grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  fi
   ! grep -Eq 'PRIVATE-UNKNOWN|PRIVATE-EXTRA-PROTOCOL|Users/PRIVATE' "${tmp}/pg8-legacy-${legacy_mode}.out"
 done
 

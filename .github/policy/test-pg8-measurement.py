@@ -30,6 +30,34 @@ class ContractTests(unittest.TestCase):
     def test_single_owned_artifact(self):
         self.assertEqual(pg8.select_artifact([json.dumps(self.artifact())], self.root), str(self.exe.resolve()))
 
+    def test_documented_local_cargo_package_id_forms(self):
+        path_ids = [
+            "path+file:///verified/source/taurine-backend/taurine-db-conformance#1.0.0",
+            "path+file://localhost/verified/source/taurine-backend/taurine-db-conformance#1.0.0",
+            "path+file:///verified/source/encoded%20parent/taurine-db-conformance#1.0.0",
+            "path+file:///verified/source/taurine-backend/taurine-db-conformance#taurine-db-conformance@1.0.0",
+        ]
+        for package_id in path_ids:
+            with self.subTest(package_id_kind="valid path package ID"):
+                self.assertEqual(pg8.select_artifact([json.dumps(self.artifact(package=package_id))], self.root), str(self.exe.resolve()))
+
+    def test_local_cargo_package_id_rejects_host_path_fragment_and_encoding_mismatches(self):
+        invalid_ids = [
+            "path+file://localhost.evil/verified/source/taurine-db-conformance#1.0.0",
+            "path+file://user@localhost/verified/source/taurine-db-conformance#1.0.0",
+            "path+file://localhost:443/verified/source/taurine-db-conformance#1.0.0",
+            "path+file:///verified/source/other-crate#1.0.0",
+            "path+file:///verified/source/taurine-db-conformance#not-a-version",
+            "path+file:///verified/source/taurine-db-conformance#other-crate@1.0.0",
+            "path+file:///verified/source/taurine-db%2Fconformance#1.0.0",
+            "path+file:///verified/source/%ZZ/taurine-db-conformance#1.0.0",
+            "path+file:///verified/source/../taurine-db-conformance#1.0.0",
+            "path+file:///verified/source/taurine-db-conformance#1.0.0?unexpected=yes",
+        ]
+        for package_id in invalid_ids:
+            with self.subTest(package_id_kind="invalid path package ID"), self.assertRaises(ValueError):
+                pg8.select_artifact([json.dumps(self.artifact(package=package_id))], self.root)
+
     def test_multiple_and_wrong_target_artifacts_rejected(self):
         with self.assertRaises(ValueError): pg8.select_artifact([json.dumps(self.artifact()),json.dumps(self.artifact())], self.root)
         wrong=self.artifact(); wrong["target"]["kind"]=["bin"]
