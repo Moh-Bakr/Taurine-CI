@@ -16,8 +16,12 @@ while IFS= read -r -d '' path; do
   if [[ "$path" =~ ^\.github/actions/[a-z0-9-]+/action\.yml$ ]]; then
     continue
   fi
-  # The policy's own scripts: shell and Ruby, nothing else, flat in one directory.
-  if [[ "$path" =~ ^\.github/policy/[a-z0-9-]+\.(sh|rb)$ ]]; then
+  # The policy's own scripts: shell and Ruby, plus the exact reviewed PG8
+  # parser/fixture pair. Keep every other extension and filename outside this
+  # bootstrap allowlist.
+  if [[ "$path" =~ ^\.github/policy/[a-z0-9-]+\.(sh|rb)$ ||
+        "$path" == .github/policy/pg8-measurement.py ||
+        "$path" == .github/policy/test-pg8-measurement.py ]]; then
     continue
   fi
   if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt ]]; then
