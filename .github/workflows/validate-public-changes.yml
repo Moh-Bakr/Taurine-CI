@@ -185,6 +185,14 @@ jobs:
         shell: bash
         run: bash .github/policy/test-live-roster.sh
 
+      - name: Require every registered live-proof arm
+        shell: bash
+        run: ruby .github/policy/check-live-arm-coverage.rb
+
+      - name: Test the live-arm coverage guard on weakened fixtures
+        shell: bash
+        run: ruby .github/policy/test-live-arm-coverage.rb
+
       - name: Parse PostgreSQL fixture action shell blocks without executing them
         shell: bash
         run: bash .github/policy/test-live-start-pg-shell.sh
