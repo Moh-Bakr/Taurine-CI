@@ -64,7 +64,10 @@ ruby -rjson -rfileutils -rrbconfig -e '
     fixture_path = File.join(File.dirname(config), fixture)
     if list
       reporter = args[args.index("--reporter") + 1]
-      exit 0 if reporter.include?("callback-failure-reporter")
+      if reporter.include?("callback-failure-reporter")
+        File.write(ENV.fetch("TAURINE_PARITY_CALLBACK_SENTINEL"), "synthetic-onBegin-failure-v1")
+        exit 1
+      end
       specs = names.map do |parts|
         {"title" => parts.join(" > "), "file" => fixture_path,
          "tests" => [{"projectName" => project, "status" => "discovered", "results" => []}]}
@@ -82,6 +85,16 @@ ruby -rjson -rfileutils -rrbconfig -e '
           {"parts" => names[2], "status" => "skipped", "expectedStatus" => "skipped", "attempts" => []} ]
       when "flaky.config.cjs"
         [{"parts" => names[0], "status" => "flaky", "expectedStatus" => "passed", "attempts" => ["failed", "passed"]}]
+    end
+    if File.basename(config) == "outcomes.config.cjs"
+      case ENV["TAURINE_PARITY_TEST_OUTCOME_MUTATION"]
+      when "extra"
+        records << {"parts" => ["outcome group", "unlisted extra"], "status" => "expected", "expectedStatus" => "passed", "attempts" => ["passed"]}
+      when "duplicate"
+        records << Marshal.load(Marshal.dump(records.first))
+      when "missing"
+        records.pop
+      end
     end
     root_suite = {"title" => fixture, "file" => fixture_path, "specs" => [], "suites" => []}
     records.each do |record|
@@ -120,7 +133,13 @@ ruby -rjson -rfileutils -rrbconfig -e '
 ' "$tmp/control" "$tmp/source" "$tmp/fake-bin"
 
 producer_status=0
-PATH="$tmp/fake-bin:$PATH" ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$tmp/result.json" || producer_status=$?
+control_sha="$(git -C "$tmp/control" rev-parse HEAD)"
+source_sha="$(git -C "$tmp/source" rev-parse HEAD)"
+run_producer() {
+  env TAURINE_PARITY_EXPECTED_CONTROL_SHA="$control_sha" TAURINE_PARITY_EXPECTED_SOURCE_SHA="$source_sha" \
+    PATH="$tmp/fake-bin:$PATH" "$@"
+}
+run_producer ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$tmp/result.json" || producer_status=$?
 cat "$tmp/result.json"
 [[ "$producer_status" -eq 0 ]] || { echo 'synthetic parity producer returned blocked status' >&2; exit 1; }
 ruby -rjson -ropen3 -e '
@@ -164,7 +183,7 @@ blocked() {
   shift
   output_file="$tmp/blocked.json"
   status=0
-  "$@" >"$output_file" || status=$?
+  env TAURINE_PARITY_EXPECTED_CONTROL_SHA="$control_sha" TAURINE_PARITY_EXPECTED_SOURCE_SHA="$source_sha" "$@" >"$output_file" || status=$?
   [[ "$status" -eq 1 ]] || { echo "expected fixed blocked result: $expected" >&2; exit 1; }
   ruby -rjson -e '
     result = JSON.parse(File.read(ARGV.fetch(0)))
@@ -184,7 +203,8 @@ ruby -e '
 ' "$tmp/fake-bin/node" "$tmp/tampered-bin/node"
 tampered_output="$tmp/tampered-result.json"
 tampered_status=0
-PATH="$tmp/tampered-bin:$PATH" ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$tampered_output" || tampered_status=$?
+env TAURINE_PARITY_EXPECTED_CONTROL_SHA="$control_sha" TAURINE_PARITY_EXPECTED_SOURCE_SHA="$source_sha" \
+  PATH="$tmp/tampered-bin:$PATH" ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$tampered_output" || tampered_status=$?
 [[ "$tampered_status" -eq 1 ]] || { echo 'tampered synthetic report was accepted' >&2; exit 1; }
 ! rg -q 'RAW_PRIVATE_SENTINEL|/playwright-pinned-parity-test\.' "$tampered_output" || {
   echo 'synthetic private report detail escaped the producer output' >&2
@@ -201,6 +221,38 @@ git -C "$tmp/source" add taurine-desktop/package-lock.json
 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME='Synthetic parity' GIT_AUTHOR_EMAIL='parity@example.invalid' \
 GIT_COMMITTER_NAME='Synthetic parity' GIT_COMMITTER_EMAIL='parity@example.invalid' \
   git -C "$tmp/source" commit -qm 'synthetic wrong package integrity'
+source_sha="$(git -C "$tmp/source" rev-parse HEAD)"
 blocked lock_binding_invalid env PATH="$tmp/fake-bin:$PATH" ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source"
+git -C "$tmp/source" checkout -q HEAD^ -- taurine-desktop/package-lock.json
+git -C "$tmp/source" add taurine-desktop/package-lock.json
+GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME='Synthetic parity' GIT_AUTHOR_EMAIL='parity@example.invalid' \
+GIT_COMMITTER_NAME='Synthetic parity' GIT_COMMITTER_EMAIL='parity@example.invalid' \
+  git -C "$tmp/source" commit -qm 'restore synthetic valid package integrity'
+source_sha="$(git -C "$tmp/source" rev-parse HEAD)"
+
+cp "$tmp/fake-bin/node" "$tmp/fake-bin/node.baseline"
+for mutation in extra duplicate missing; do
+  ruby -e 'path, mutation = ARGV; source = File.read(path); needle = %q{case ENV["TAURINE_PARITY_TEST_OUTCOME_MUTATION"]}; abort "mutation seam missing" unless source.include?(needle); File.write(path, source.sub(needle, "case #{mutation.dump}")); File.chmod(0700, path)' "$tmp/fake-bin/node" "$mutation"
+  status=0
+  output_file="$tmp/outcome-$mutation.json"
+  env TAURINE_PARITY_EXPECTED_CONTROL_SHA="$control_sha" TAURINE_PARITY_EXPECTED_SOURCE_SHA="$source_sha" PATH="$tmp/fake-bin:$PATH" \
+    ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$output_file" || status=$?
+  [[ "$status" -eq 1 ]] || { echo "outcome mutation was accepted: $mutation" >&2; exit 1; }
+  ruby -rjson -e 'result=JSON.parse(File.read(ARGV.fetch(0))); abort "wrong outcome mutation disposition: #{result.inspect}" unless result["status"] == "shadow_fixture_parity_blocked" && %w[fixture_outcome_mismatch report_shape_invalid].include?(result["error_class"])' "$output_file"
+  cp "$tmp/fake-bin/node.baseline" "$tmp/fake-bin/node"
+done
+
+printf '#!/bin/sh\nprintf called > %q\nexec %q "$@"\n' "$tmp/runner-was-called" "$(command -v ruby)" >"$tmp/tampered-bin/node"
+chmod 700 "$tmp/tampered-bin/node"
+status=0
+env TAURINE_PARITY_EXPECTED_CONTROL_SHA="0000000000000000000000000000000000000000" TAURINE_PARITY_EXPECTED_SOURCE_SHA="$source_sha" \
+  PATH="$tmp/tampered-bin:$PATH" ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$tmp/control-sha-mismatch.json" || status=$?
+[[ "$status" -eq 1 && ! -e "$tmp/runner-was-called" ]] || { echo 'control SHA mismatch reached a child process' >&2; exit 1; }
+ruby -rjson -e 'result=JSON.parse(File.read(ARGV.fetch(0))); abort "wrong control SHA disposition" unless result["error_class"] == "control_sha_mismatch"' "$tmp/control-sha-mismatch.json"
+status=0
+env TAURINE_PARITY_EXPECTED_CONTROL_SHA="$control_sha" TAURINE_PARITY_EXPECTED_SOURCE_SHA="0000000000000000000000000000000000000000" \
+  PATH="$tmp/tampered-bin:$PATH" ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$tmp/source-sha-mismatch.json" || status=$?
+[[ "$status" -eq 1 && ! -e "$tmp/runner-was-called" ]] || { echo 'source SHA mismatch reached a child process' >&2; exit 1; }
+ruby -rjson -e 'result=JSON.parse(File.read(ARGV.fetch(0))); abort "wrong source SHA disposition" unless result["error_class"] == "source_sha_mismatch"' "$tmp/source-sha-mismatch.json"
 
 echo 'Pinned Playwright parity producer: synthetic fixtures and bounded-child tests passed'

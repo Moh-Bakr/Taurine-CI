@@ -66,7 +66,7 @@ ERROR_CLASSES = %w[
   fixture_duplicate_missing fixture_outcome_mismatch fixture_scope_mismatch lock_binding_invalid
   node_runtime_invalid parity_blocked private_output_invalid process_output_limit process_timeout
   report_file_invalid report_invalid report_path_invalid report_permissions_invalid report_shape_invalid runner_failed runner_version_mismatch source_checkout_dirty
-  source_identity_invalid source_path_invalid tool_binding_invalid
+  source_identity_invalid source_path_invalid source_sha_mismatch expected_sha_invalid control_sha_mismatch tool_binding_invalid
 ].sort.freeze
 
 def within?(path, root)
@@ -286,6 +286,12 @@ def child_env(node, work, report: nil, completion: nil, json: nil)
   env
 end
 
+def expected_sha!(name, error_code)
+  value = ENV[name]
+  reject!('expected_sha_invalid') unless value.is_a?(String) && value.match?(/\A[0-9a-f]{40}\z/)
+  reject!(error_code) unless value == yield
+end
+
 def private_path!(path, root, max_bytes)
   reject!('report_path_invalid') unless path && File.exist?(path) && within?(path, root)
   stat = File.lstat(path)
@@ -419,6 +425,11 @@ def list_phase(node, cli, app_root, stage, project, report, completion, config_n
   create_private_output(report) if reporter == REPORTER_PATH
   create_private_output(completion) if reporter == REPORTER_PATH
   env = child_env(node, File.dirname(report), report: report, completion: completion)
+  if File.basename(reporter) == 'callback-failure-reporter.cjs'
+    sentinel = File.join(File.dirname(report), 'callback-failure.sentinel')
+    create_private_output(sentinel)
+    env['TAURINE_PARITY_CALLBACK_SENTINEL'] = sentinel
+  end
   argv = [node, cli, 'test', '--config', File.join(stage, config_name), '--list', '--project', project,
     '--reporter', reporter]
   run_bounded(argv, chdir: app_root, env: env)
@@ -487,11 +498,12 @@ def run_negative_outcomes!(node, cli, app_root, stage, work)
     chdir: app_root, env: run_env)
   report = private_path!(execution_path, work, MAX_REPORT_BYTES)
   cases = execution_cases(report, stage, File.join(stage, 'outcomes.spec.cjs'), 'smoke')
-  expected_statuses = cases.to_h { |test| [test.fetch('title'), test] }
   expected_titles = [
     'outcome group > expected failure', 'outcome group > unexpected pass', 'outcome group > intentional skip'
   ].sort
-  reject!('fixture_outcome_mismatch') unless expected_statuses.keys.sort == expected_titles
+  reject!('fixture_outcome_mismatch') unless cases.length == 3 && cases.map { |test| test.fetch('title') }.sort == expected_titles &&
+    cases.map { |test| test.fetch('title') }.uniq.length == 3
+  expected_statuses = cases.to_h { |test| [test.fetch('title'), test] }
   expected_failure = expected_statuses.fetch('outcome group > expected failure')
   unexpected_pass = expected_statuses.fetch('outcome group > unexpected pass')
   skipped = expected_statuses.fetch('outcome group > intentional skip')
@@ -518,12 +530,14 @@ def run_duplicate_block!(node, cli, app_root, stage, work)
   report = File.join(work, 'duplicate-discovery.json')
   marker = File.join(work, 'duplicate-completion.json')
   status, = list_phase(node, cli, app_root, stage, 'smoke', report, marker, config_name: 'duplicate-identity.config.cjs')
-  return true unless status == 0 && File.exist?(report) && File.exist?(marker)
+  return false unless status == 0 && File.exist?(report) && File.exist?(marker)
 
   data = private_path!(report, work, MAX_REPORT_BYTES)
   sentinel = private_path!(marker, work, 4096)
   rows = list_rows(data, sentinel, 'playwright-desktop', 'desktop-playwright-projects', 'feedback', 'linux',
     'smoke', 'taurine-desktop/.case-evidence-fixtures/duplicate-identity.spec.cjs', stage)
+  expected_title = 'duplicate group > part > leaf'
+  return false unless rows.length == 2 && rows.all? { |row| row[4] == 'smoke' && row[8] == expected_title }
   ids = identity_digests(rows)
   ids.uniq.length < ids.length
 end
@@ -533,7 +547,13 @@ def run_callback_block!(node, cli, app_root, stage, work)
   marker = File.join(work, 'callback-completion.json')
   status, = list_phase(node, cli, app_root, stage, 'smoke', report, marker,
     reporter: File.join(stage, 'callback-failure-reporter.cjs'))
-  !File.exist?(report) && !File.exist?(marker) && [0, 1].include?(status)
+  sentinel = File.join(work, 'callback-failure.sentinel')
+  return false unless status == 1 && File.exist?(sentinel) && !File.exist?(report) && !File.exist?(marker)
+  stat = File.lstat(sentinel)
+  stat.file? && (stat.mode & 0o077).zero? && stat.size == 'synthetic-onBegin-failure-v1'.bytesize &&
+    File.binread(sentinel) == 'synthetic-onBegin-failure-v1'
+rescue SystemCallError
+  false
 end
 
 def safe_output(status:, positive_scopes: 0, positive_cases: 0, negative_checks: 0, expected_checks: 0, blocked_checks: 0, error_class: nil)
@@ -556,6 +576,8 @@ begin
   source_sha = git_head(git, source_root, 'source_identity_invalid')
   reject!('control_identity_invalid') unless control_sha.match?(/\A[0-9a-f]{40}\z/)
   reject!('source_identity_invalid') unless source_sha.match?(/\A[0-9a-f]{40}\z/)
+  expected_sha!('TAURINE_PARITY_EXPECTED_CONTROL_SHA', 'control_sha_mismatch') { control_sha }
+  expected_sha!('TAURINE_PARITY_EXPECTED_SOURCE_SHA', 'source_sha_mismatch') { source_sha }
   require_clean!(git, ROOT, 'control_checkout_dirty')
   require_clean!(git, source_root, 'source_checkout_dirty')
   data = validate_manifest!(git, control_sha)
