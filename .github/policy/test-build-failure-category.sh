@@ -91,6 +91,29 @@ fi
 grep -qF 'build-failure: category=process-signal count=1 target=selected-live-proof-target' "${tmp}/live-signal.out"
 ! grep -Eq 'PRIVATE-TARGET|PRIVATE raw message' "${tmp}/live-signal.out"
 
+# If the classifier file or Ruby runtime is unavailable, only the fixed fallback is emitted.
+mkdir -p "${tmp}/live-nohelper-workspace" "${tmp}/broken-ruby-bin"
+cat >"${tmp}/broken-ruby-bin/ruby" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' 'PRIVATE-RUBY-ERROR /Users/PRIVATE/path' >&2
+exit 1
+STUB
+chmod +x "${tmp}/broken-ruby-bin/ruby"
+for helper_case in missing broken; do
+  test_path="${tmp}/bin:${PATH}"
+  workspace="${tmp}/live-nohelper-workspace"
+  if [[ "${helper_case}" == broken ]]; then
+    workspace="${root}"
+    test_path="${tmp}/broken-ruby-bin:${tmp}/bin:${PATH}"
+  fi
+  if PATH="${test_path}" GITHUB_WORKSPACE="${workspace}" RUNNER_TEMP="${tmp}/live-temp" bash "${tmp}/live.sh" >"${tmp}/live-${helper_case}-helper.out" 2>&1; then
+    echo "live-build ${helper_case}-helper fixture unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${tmp}/live-${helper_case}-helper.out"
+  ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/live-${helper_case}-helper.out"
+done
+
 # Exercise the actual PGTLS multi-suite path with stub target files. Cargo succeeds twice, then
 # fails only the fixed mTLS suite; the emitted target label must be the fixed mTLS target.
 mkdir -p "${tmp}/pgtls-workspace/.github/policy" "${tmp}/pgtls-temp" "${tmp}/pgtls-bin"
@@ -214,4 +237,19 @@ if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/p
 fi
 grep -qF 'build-failure: category=dependency-resolution count=1 target=dbx_pg8_performance_live' "${tmp}/pg8.out"
 ! grep -Eq 'PRIVATE-CRATE|PRIVATE raw message' "${tmp}/pg8.out"
+for helper_case in missing broken; do
+  pg8_workspace="${tmp}/pg8-nohelper-workspace"
+  test_path="${tmp}/pg8-bin:${PATH}"
+  mkdir -p "${pg8_workspace}/src"
+  if [[ "${helper_case}" == broken ]]; then
+    pg8_workspace="${tmp}"
+    test_path="${tmp}/broken-ruby-bin:${tmp}/pg8-bin:${PATH}"
+  fi
+  if PATH="${test_path}" GITHUB_WORKSPACE="${pg8_workspace}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src bash "${tmp}/pg8.sh" >"${tmp}/pg8-${helper_case}-helper.out" 2>&1; then
+    echo "PG8 ${helper_case}-helper fixture unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF 'build-failure: category=other count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-${helper_case}-helper.out"
+  ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/pg8-${helper_case}-helper.out"
+done
 echo 'build-failure category fixtures: classifications, privacy, failure preservation, live-build and PG8 callsites pass'
