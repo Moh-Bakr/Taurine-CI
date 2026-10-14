@@ -75,6 +75,7 @@ jobs:
   measure:
     needs: [plan]
     permissions:
+      actions: read
       contents: read
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/pg8-measurement-arm.yml  # zizmor: ignore[self-repository]
