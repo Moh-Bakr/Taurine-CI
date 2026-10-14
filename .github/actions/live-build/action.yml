@@ -20,10 +20,36 @@ runs:
             sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
             cut -c1-200
         }
-        cargo_detail() {
-          cargo_sanitize "$1" |
-            grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^test result: |^failures:$' |
-            head -40 >&2 || true
+        cargo_diagnostic_summary() {
+          local log="$1" target="$2" codes="" diagnostic_count="0" coded_count="0" unclassified_count="0"
+          diagnostic_count="$(cargo_sanitize "${log}" | grep -Ec '^error(\[E[0-9]{4}\])?:' || true)"
+          codes="$(cargo_sanitize "${log}" |
+            { grep -E '^error\[E[0-9]{4}\]:' || true; } |
+            sed -E 's/^error\[([^]]+)\]:.*/\1/' |
+            LC_ALL=C sort | uniq -c |
+            awk '{ if (out != "") out = out ","; out = out $2 "=" $1; total += $1 } END { printf "%s\n%s", out, total+0 }')"
+          coded_lines="${codes%%$'\n'*}"
+          coded_count="${codes##*$'\n'}"
+          if (( coded_count > 0 )); then
+            unclassified_count=$((diagnostic_count - coded_count))
+            if [[ -n "${coded_lines}" ]]; then
+              echo "proof-build: compiler diagnostics target=${target} codes=${coded_lines}" >&2
+            fi
+            if (( unclassified_count > 0 )); then
+              echo "proof-build: compiler diagnostics target=${target} code=unclassified count=${unclassified_count}" >&2
+            fi
+          else
+            echo "proof-build: compiler diagnostics target=${target} code=unclassified count=${diagnostic_count}" >&2
+          fi
+        }
+        fixed_target_label() {
+          case "$1:$2:$3" in
+            pgtls:taurine-db-conformance:dbx_pg_tls_live|tls-legacy:taurine-db-conformance:dbx_pg_tls_live)
+              printf '%s' 'dbx_pg_tls_live' ;;
+            pgtls:taurine-db-conformance:dbx_pg_mtls_live)
+              printf '%s' 'dbx_pg_mtls_live' ;;
+            *) printf '%s' 'selected-live-proof-target' ;;
+          esac
         }
         # Multi-suite arms run several cargo suites each, the ones
         # scripts/check-db.sh in the private repository lists for that engine.
@@ -66,8 +92,8 @@ runs:
             for t in "${tl[@]}"; do build_args+=(--test "${t}"); done
             if ! cargo test -p "${pkg}" "${build_args[@]}" --no-run \
               </dev/null >>"${RUNNER_TEMP}/build.log" 2>&1; then
-              echo "proof-build: failed for ${pkg}; sanitized detail below" >&2
-              cargo_detail "${RUNNER_TEMP}/build.log"
+              echo 'proof-build: failed; compiler diagnostics follow' >&2
+              cargo_diagnostic_summary "${RUNNER_TEMP}/build.log" "$(fixed_target_label "${engine}" "${pkg}" "${targets}")"
               exit 1
             fi
           done < "${suites}"
@@ -75,8 +101,8 @@ runs:
           target="$(jq -er '.target' "${arm}")"
           if ! cargo test -p taurine-db-conformance --test "${target}" --no-run \
             >"${RUNNER_TEMP}/build.log" 2>&1; then
-            echo 'proof-build: failed; sanitized detail below' >&2
-            cargo_detail "${RUNNER_TEMP}/build.log"
+            echo 'proof-build: failed; compiler diagnostics follow' >&2
+            cargo_diagnostic_summary "${RUNNER_TEMP}/build.log" "$(fixed_target_label "${engine}" 'taurine-db-conformance' "${target}")"
             exit 1
           fi
         fi
