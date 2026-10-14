@@ -65,6 +65,8 @@ assets="$(new_fixture)"
 mkdir -p "${assets}/.github/policy/case-evidence-assets"
 printf "'use strict';\n" > "${assets}/.github/policy/case-evidence-assets/playwright-case-list-reporter.cjs"
 printf '{"suites":[]}\n' > "${assets}/.github/policy/case-evidence-assets/real-runner-list.json"
+printf "module.exports = {};\n" > "${assets}/.github/policy/case-evidence-assets/all-pass.config.cjs"
+printf "// spec\n" > "${assets}/.github/policy/case-evidence-assets/all-pass.spec.cjs"
 git -C "${assets}" add .github/policy/case-evidence-assets
 expect_pass "${assets}" 'the reviewed case-evidence asset directory'
 
@@ -74,6 +76,9 @@ for rejected in \
   'case-evidence-assets/reporter.ts' \
   'case-evidence-assets/reporter.js' \
   'case-evidence-assets/reporter.sh.cjs.ts' \
+  'case-evidence-assets/reporter.ts.cjs' \
+  'case-evidence-assets/secret.pem.json' \
+  'case-evidence-assets/reporter.config.spec.cjs' \
   'other-assets/reporter.cjs'
 do
   narrow="$(new_fixture)"
@@ -83,4 +88,4 @@ do
   expect_reject "${narrow}" "a path outside the reviewed asset exception: ${rejected}" 'Unexpected tracked path in the public CI repository'
 done
 
-echo 'repository path fixtures: exact PG8 parser/test pair and the flat case-evidence asset directory allowed; a third Python file, nested/upper-case/other-extension assets, another directory, private source, and credential material rejected'
+echo 'repository path fixtures: exact PG8 parser/test pair and the flat case-evidence asset directory (including the Playwright .config.cjs/.spec.cjs pair) allowed; a third Python file, nested, upper-case, other-extension, smuggled-extension and doubly-compound asset names, another directory, private source, and credential material rejected'
