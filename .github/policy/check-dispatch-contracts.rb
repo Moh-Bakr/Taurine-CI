@@ -214,6 +214,20 @@ workflows.each do |path, spec|
   end
   expected_job = PREFLIGHT.fetch(path)
   jobs = doc['jobs'] || {}
+  if path == PG8_WORKFLOW
+    caller_permissions = jobs.dig('measure', 'permissions')
+    unless caller_permissions == { 'actions' => 'read', 'contents' => 'read' }
+      failures << "#{path}: reusable caller must grant exactly actions: read and contents: read for the nested pre-flight"
+    end
+    arm = load_yaml(File.join(ROOT, '.github/workflows/pg8-measurement-arm.yml'))
+    arm_jobs = arm.is_a?(Hash) ? arm['jobs'] || {} : {}
+    unless arm_jobs.dig('preflight', 'permissions') == { 'actions' => 'read', 'contents' => 'read' }
+      failures << '.github/workflows/pg8-measurement-arm.yml: nested pre-flight must request exactly actions: read and contents: read'
+    end
+    unless arm_jobs.dig('measure', 'permissions') == { 'contents' => 'read' }
+      failures << '.github/workflows/pg8-measurement-arm.yml: source-bearing measurement job must remain limited to contents: read'
+    end
+  end
   job = jobs[expected_job]
   steps = job.is_a?(Hash) ? job['steps'] || [] : []
   proofs = []
