@@ -12,29 +12,9 @@ def require_fixture(condition, label)
   abort("playwright parity fixture invalid: #{label}") unless condition
 end
 
-# The recorded runner reports came off a developer machine, and a real report
-# carries absolute paths: the runner binary in config.argv[0], rootDir,
-# configFile. A placeholder is substituted for the app root when they are
-# recorded, but that is a step a person has to remember, and one of them was
-# missed once already -- the node binary path shipped in a public repository.
-# So the check is here rather than in the recording instructions.
-HOST_STRINGS = Regexp.union(
-  %r{(?<![a-z])/(opt|usr|home|private|etc|srv|mnt)/},
-  %r{(?<![a-z])/Users/}, %r{(?<![a-z])/var/}, %r{(?<![a-z])/tmp/},
-  /\b[A-Za-z]:\\/,
-  /homebrew|Cellar|mohamedbakr/i
-).freeze
-
-ASSET_DIR = File.expand_path('case-evidence-assets', __dir__).freeze
-Dir.glob(File.join(ASSET_DIR, '*')).sort.each do |asset|
-  File.read(asset).each_line.with_index(1) do |line, number|
-    match = HOST_STRINGS.match(line)
-    next unless match
-
-    abort("playwright parity fixture invalid: #{File.basename(asset)}:#{number} carries a host-specific " \
-      "string (#{match[0].inspect}); recorded reports must use the committed placeholders")
-  end
-end
+# Absolute paths in the committed assets are checked structurally by
+# check-case-evidence-assets.rb; a literal-string scan belongs nowhere near a
+# rule about host strings, because it has to spell them out to work.
 
 require_fixture(EXPECTED.is_a?(Hash) && EXPECTED.keys.sort == %w[
   all_pass callback_failure duplicate_identity outcomes runner_bindings schema_version
