@@ -66,7 +66,7 @@ ruby -rjson -rfileutils -rrbconfig -e '
       reporter = args[args.index("--reporter") + 1]
       if reporter.include?("callback-failure-reporter")
         File.write(ENV.fetch("TAURINE_PARITY_CALLBACK_SENTINEL"), "synthetic-onBegin-failure-v1")
-        exit 1
+        exit 0
       end
       specs = names.map do |parts|
         {"title" => parts.join(" > "), "file" => fixture_path,
@@ -241,6 +241,58 @@ for mutation in extra duplicate missing; do
   ruby -rjson -e 'result=JSON.parse(File.read(ARGV.fetch(0))); abort "wrong outcome mutation disposition: #{result.inspect}" unless result["status"] == "shadow_fixture_parity_blocked" && %w[fixture_outcome_mismatch report_shape_invalid].include?(result["error_class"])' "$output_file"
   cp "$tmp/fake-bin/node.baseline" "$tmp/fake-bin/node"
 done
+
+direct_sentinel="$tmp/direct-callback.sentinel"
+direct_status=0
+TAURINE_PARITY_CALLBACK_SENTINEL="$direct_sentinel" node -e '
+  const Reporter = require(process.argv[1]);
+  try { new Reporter().onBegin(); } catch (error) {
+    if (error.message !== "SYNTHETIC_REPORTER_CALLBACK_FAILURE") throw error;
+  }
+' "$tmp/control/.github/policy/fixtures/playwright-case-parity/callback-failure-reporter.cjs" || direct_status=$?
+[[ "$direct_status" -eq 0 && "$(cat "$direct_sentinel")" == 'synthetic-onBegin-failure-v1' ]] || {
+  echo 'direct fake reporter callback did not throw-and-swallow with its sentinel' >&2
+  exit 1
+}
+[[ "$(stat -f '%Lp' "$direct_sentinel")" == '600' ]] || { echo 'direct callback sentinel permissions are too broad' >&2; exit 1; }
+
+run_callback_variant() {
+  name="$1"
+  mode="$2"
+  cp "$tmp/fake-bin/node.baseline" "$tmp/fake-bin/node"
+  ruby -e '
+    path, mode = ARGV
+    source = File.read(path)
+    start = source.index("if reporter.include?(\"callback-failure-reporter\")")
+    finish = source.index("specs = names.map", start)
+    abort "callback block missing" unless start && finish
+    block = source[start...finish]
+    if mode.include?("missing")
+      block.sub!(/^\s*File.write\(ENV.fetch\("TAURINE_PARITY_CALLBACK_SENTINEL"\), "synthetic-onBegin-failure-v1"\)\n/, "")
+    end
+    if mode.include?("exit1")
+      abort "callback status seam missing" unless block.include?("exit 0")
+      block.sub!("exit 0", "exit 1")
+    end
+    source = source[0...start] + block + source[finish..]
+    File.write(path, source)
+    File.chmod(0700, path)
+  ' "$tmp/fake-bin/node" "$mode"
+  output_file="$tmp/callback-$name.json"
+  status=0
+  env TAURINE_PARITY_EXPECTED_CONTROL_SHA="$control_sha" TAURINE_PARITY_EXPECTED_SOURCE_SHA="$source_sha" PATH="$tmp/fake-bin:$PATH" \
+    ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$output_file" || status=$?
+  if [[ "$mode" == *missing* ]]; then
+    [[ "$status" -eq 1 ]] || { echo "callback without sentinel was accepted: $name" >&2; exit 1; }
+    ruby -rjson -e 'result=JSON.parse(File.read(ARGV.fetch(0))); abort "wrong callback no-sentinel error" unless result["error_class"] == "fixture_outcome_mismatch"' "$output_file"
+  else
+    [[ "$status" -eq 0 ]] || { echo "callback with sentinel was rejected: $name" >&2; exit 1; }
+    ruby -rjson -e 'result=JSON.parse(File.read(ARGV.fetch(0))); abort "wrong callback sentinel result" unless result["status"] == "shadow_fixture_parity_unverified"' "$output_file"
+  fi
+}
+run_callback_variant exit1-sentinel exit1
+run_callback_variant exit0-no-sentinel missing
+run_callback_variant exit1-no-sentinel missing-exit1
 
 printf '#!/bin/sh\nprintf called > %q\nexec %q "$@"\n' "$tmp/runner-was-called" "$(command -v ruby)" >"$tmp/tampered-bin/node"
 chmod 700 "$tmp/tampered-bin/node"

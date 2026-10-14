@@ -548,7 +548,7 @@ def run_callback_block!(node, cli, app_root, stage, work)
   status, = list_phase(node, cli, app_root, stage, 'smoke', report, marker,
     reporter: File.join(stage, 'callback-failure-reporter.cjs'))
   sentinel = File.join(work, 'callback-failure.sentinel')
-  return false unless status == 1 && File.exist?(sentinel) && !File.exist?(report) && !File.exist?(marker)
+  return false unless [0, 1].include?(status) && File.exist?(sentinel) && !File.exist?(report) && !File.exist?(marker)
   stat = File.lstat(sentinel)
   stat.file? && (stat.mode & 0o077).zero? && stat.size == 'synthetic-onBegin-failure-v1'.bytesize &&
     File.binread(sentinel) == 'synthetic-onBegin-failure-v1'
