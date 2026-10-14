@@ -142,10 +142,12 @@ expect_reject "${unanchored}" 'the asset directory under another prefix' 'Unexpe
 # The accepted compound pair, both extensions.
 compound="$(new_fixture)"
 mkdir -p "${compound}/.github/policy/case-evidence-assets"
+printf "'use strict';\n" > "${compound}/.github/policy/case-evidence-assets/a.cjs"
+printf '{}\n' > "${compound}/.github/policy/case-evidence-assets/a.json"
 printf "'use strict';\n" > "${compound}/.github/policy/case-evidence-assets/a.config.cjs"
 printf '{}\n' > "${compound}/.github/policy/case-evidence-assets/a.spec.json"
 git -C "${compound}" add .github/policy/case-evidence-assets
-expect_pass "${compound}" 'a one-character name and the reviewed .config and .spec compound names'
+expect_pass "${compound}" 'a one-character name, both bare extensions, and the reviewed .config and .spec compound names'
 
 # These assets execute on the runner, so only plain regular files are allowed.
 symlinked="$(new_fixture)"
@@ -165,7 +167,7 @@ expect_reject "${executable}" 'an executable case-evidence asset' 'must be plain
 # data files. Both PEM header forms are covered: the qualified one was not
 # matched by the previous pattern at all. Obviously fake keys, never real ones.
 for leak in 'case-evidence-assets/leak.json' 'case-evidence-assets/leak.cjs'; do
-  for header in '-----BEGIN RSA PRIVATE KEY-----' '-----BEGIN PRIVATE KEY-----' 'GH_APP_PRIVATE_KEY=TEST_FIXTURE_SENTINEL'; do
+  for header in '-----BEGIN RSA PRIVATE KEY-----' '-----BEGIN PRIVATE KEY-----' '-----BEGIN OPENSSH PRIVATE KEY-----' '-----BEGIN PGP PRIVATE KEY BLOCK-----' 'GH_APP_PRIVATE_KEY=TEST_FIXTURE_SENTINEL'; do
     planted="$(new_fixture)"
     mkdir -p "${planted}/.github/policy/case-evidence-assets"
     printf -- '%s\nTEST_FIXTURE_NOT_A_REAL_KEY\n' "${header}" > "${planted}/.github/policy/${leak}"
@@ -174,4 +176,29 @@ for leak in 'case-evidence-assets/leak.json' 'case-evidence-assets/leak.cjs'; do
   done
 done
 
-echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, another directory, private source and starter documents rejected'
+# A single NUL byte makes git call a file binary, which is how a planted key
+# used to walk past the credential scan. The key must still be found, and a
+# NUL has no business in a JSON or JavaScript asset in the first place.
+for leak in 'case-evidence-assets/leak.json' 'case-evidence-assets/leak.cjs'; do
+  hidden="$(new_fixture)"
+  mkdir -p "${hidden}/.github/policy/case-evidence-assets"
+  printf -- '\000-----BEGIN OPENSSH PRIVATE KEY-----\nTEST_FIXTURE_NOT_A_REAL_KEY\n' > "${hidden}/.github/policy/${leak}"
+  git -C "${hidden}" add ".github/policy/${leak}"
+  expect_reject "${hidden}" "credential material hidden behind a NUL byte in ${leak}" 'must not contain NUL bytes'
+done
+
+nul_asset="$(new_fixture)"
+mkdir -p "${nul_asset}/.github/policy/case-evidence-assets"
+printf -- '{"a":\000"b"}\n' > "${nul_asset}/.github/policy/case-evidence-assets/binary.json"
+git -C "${nul_asset}" add .github/policy/case-evidence-assets/binary.json
+expect_reject "${nul_asset}" 'a NUL byte in an otherwise clean asset' 'must not contain NUL bytes'
+
+# With the NUL rule removed the scan must still find the key on its own, so
+# check the credential message directly on a tree the NUL rule cannot see.
+nul_docs="$(new_fixture)"
+mkdir -p "${nul_docs}/docs"
+printf -- '\000-----BEGIN RSA PRIVATE KEY-----\nTEST_FIXTURE_NOT_A_REAL_KEY\n' > "${nul_docs}/docs/nul-fixture.md"
+git -C "${nul_docs}" add docs/nul-fixture.md
+expect_reject "${nul_docs}" 'credential material behind a NUL byte outside the asset directory' 'A reusable source, signing, or deployment credential pattern was found'
+
+echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; NUL bytes, leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, another directory, private source and starter documents rejected'

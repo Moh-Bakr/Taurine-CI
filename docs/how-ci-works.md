@@ -638,6 +638,33 @@ It is split three ways:
 - **The `live-*` composites** hold the per-engine server start-up (image digest pins, ports, readiness),
   the cargo build, the run and the summary.
 
+The policy pins both halves of the fan-out. `test-live-roster.sh` runs the real plan step and checks
+which arms it selects; `check-live-proof-fanout.rb` checks that selection is what runs. The plan job's
+`arms` and `roster` outputs must come from that step, whose name, inputs and shell are fixed, and its
+`if` is exactly the protected-ref condition, because `prove` needs `plan` and a skipped plan skips
+every arm. The `prove` job must be exactly one arm-workflow call per selected arm, with no `include`,
+`exclude`, extra axis or condition. In the arm workflow, the job and its workflow-level environment
+are pinned, and the input validation, build and run steps are pinned in full and in that order: the
+action or script, `if`, `continue-on-error`, `env`, `with`, shell and directory of each, so replacing
+a body, swapping an action or overriding `RUNNER_TEMP` fails the check. The validation script is
+pinned by SHA-256 (the recompute command is in the check). Workflow files are read as text and YAML
+and refused, with the cause named, when they are missing, symlinks, too large, not UTF-8, not YAML,
+ambiguous (a repeated key, an anchor or an alias) or not a mapping. Changing any of these is a
+reviewed policy change that lands in two steps (see "Changing the policy").
+
+Two residuals are known and not closed by this check. Neither makes a bypass possible that a pull
+request could not already make, since a pull request controls the workflow YAML itself; each makes it
+quieter, and the likely fix is the environment isolation described under "Changing the policy".
+
+- **The select step's environment is not closed.** A plan step before `select` that writes
+  `GITHUB_PATH`, or a workflow-level `BASH_ENV`, can change what `select` executes; `test-live-roster.sh`
+  runs the extracted select script alone and cannot see either. The steps before `select` are
+  composites whose contents this check does not read.
+- **An arm can be narrowed between validation and run.** A new step between the pinned validation and
+  run steps can rewrite `${RUNNER_TEMP}/live-arm.json`, for example to one suite of a multi-suite arm,
+  and the arm still passes with less proved. The pinned order does not forbid a step in between, and
+  the contents of the `live-build` and `live-run` composites are not read here either.
+
 Each selection has its own concurrency group, runs are never cancelled, and only check titles and counts
 are published.
 
@@ -694,6 +721,33 @@ the old one, merge, then land the change that relies on it. The pull request's o
 `validate-public-changes.yml` is what runs, so a pull request that edits that file to drop the
 base pass is caught only by review: treat any change to `validate-public-changes.yml` or
 `.github/policy/` as a policy change and review it as one.
+
+Earlier steps of that job run the pull request's own policy scripts, and any of them can append
+to `GITHUB_ENV` or `GITHUB_PATH`. The base pass therefore runs each base script, Ruby and shell
+alike, with an allow-listed environment (`env -i`, a fixed `PATH`, a clean `HOME`, only the
+`GITHUB_*`/`RUNNER_*` variables it needs, and the token for `lint.sh` alone) and names `ruby` and
+`bash` by absolute path, so a planted `RUBYOPT`, `RUBYLIB`, `BASH_ENV` or `PATH` shim cannot turn a
+rejection into a pass.
+
+The step's own shell is closed the same way. It declares `shell: /usr/bin/env -u BASH_ENV -u ENV
+/bin/bash --noprofile --norc -p -eo pipefail {0}`: the absolute paths cannot be intercepted by a
+`PATH` shim, no startup file is read, and privileged mode (`-p`) stops bash importing exported
+functions (`BASH_FUNC_*`) and `SHELLOPTS`/`PS4`, which would otherwise run planted code in the step
+shell. The script then fixes its own `PATH` before it does anything, so `rm`, `mv`, `cp`, `mkdir` and
+`diff` cannot be shimmed, and it fails unless the copied base policy is identical to the base
+checkout and it ran exactly as many base scripts as that checkout holds, so a pass cannot mean that
+nothing ran. `test-base-policy-env.sh` runs the step as declared, over rejecting fixtures, with each
+of those planted, and fails on a step that does not hold.
+
+What none of this stops is code the pull request contributes that the base pass itself executes.
+Several base tests extract a step from the pull request's workflows or actions and run it, as the
+same user, with write access to `.github/policy/`, so that code can rewrite a later base script on
+disk, and a background process left by an earlier pull-request step can do the same. An environment
+scrub cannot close this, and no `sudo` is needed. It is known and not fixed here. The follow-up is
+to run the base pass in its own job, with no pull-request step before it, record a SHA-256 manifest
+of every base policy file in memory and re-verify it before each script, and run each script in its
+own session and kill its process group afterwards. Until then review of workflow and policy changes
+is the control for it.
 
 ## Accepted residual risks
 
