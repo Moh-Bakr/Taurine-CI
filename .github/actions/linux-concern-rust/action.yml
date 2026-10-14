@@ -280,11 +280,12 @@ runs:
             # dbx-core's engine tests recurse deeply enough that the default
             # main-thread stack is not enough — the retired `npm run
             # test:dbx-core` script carried the same value, and the workspace
-            # run keeps it. The two-pass shape is deliberate: pass 1 is every
-            # default-feature test; the legacy-tls pass runs dbx-core again
-            # with `--features legacy-tls`, so both the `legacy_tls=true`
-            # refusal test (compiled only without the feature) and the OpenSSL
-            # TLS-server tests (compiled only with it) run. dbx-core's
+            # run keeps it. dbx-core is tested once, with its default
+            # features: it carries no OpenSSL and no `legacy-tls` feature
+            # (the OpenSSL door is `taurine-tls-openssl`, tested by
+            # `rust-tls-openssl`, and is opened only by `taurine-db-dbx`'s
+            # own `legacy-tls`, which the rust-db concern's registered feature
+            # cases cover). dbx-core's
             # Postgres-backed tests start a disposable container when Docker
             # answers, which it does on this runner. `vendor/boringtun`'s
             # standalone run stays outside every concern (its lock is
@@ -309,8 +310,6 @@ runs:
               if grep -qx 'dbx-core' <<<"${dbx_members}"; then
                 run_deferred rust-dbx-core-tests \
                   env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core
-                run_deferred rust-dbx-core-legacy-tls-tests \
-                  env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core --features legacy-tls
                 # The Linux Secret Service half of dbx-core's `os-keyring` feature
                 # (`all(feature = "os-keyring", target_os = "linux", not(test))`) is
                 # compiled by no other job: the tests above run without the feature and
@@ -322,7 +321,6 @@ runs:
               else
                 echo 'rust-dbx: skipped: dbx-core is not a workspace member on this branch'
                 deferred_results+=('rust-dbx-core-tests|skipped: dbx-core is not a workspace member on this branch')
-                deferred_results+=('rust-dbx-core-legacy-tls-tests|skipped: dbx-core is not a workspace member on this branch')
                 deferred_results+=('rust-dbx-core-keyring-check|skipped: dbx-core is not a workspace member on this branch')
               fi
               if grep -qx 'dbx-sqlite-worker' <<<"${dbx_members}"; then
