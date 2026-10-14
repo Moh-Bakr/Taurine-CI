@@ -638,6 +638,14 @@ It is split three ways:
 - **The `live-*` composites** hold the per-engine server start-up (image digest pins, ports, readiness),
   the cargo build, the run and the summary.
 
+The policy pins both halves of the fan-out. `test-live-roster.sh` runs the real plan step and checks
+which arms it selects; `check-live-proof-fanout.rb` checks that selection is what runs. The plan job's
+`arms` and `roster` outputs must come from that step, whose name, inputs and shell are fixed. The
+`prove` job must be exactly one arm-workflow call per selected arm, with no `include`, `exclude`,
+extra axis or condition. In the arm workflow, input validation, the build and the run may not be
+skipped or tolerated for any arm. Changing any of these is a reviewed policy change that lands in two
+steps (see "Changing the policy").
+
 Each selection has its own concurrency group, runs are never cancelled, and only check titles and counts
 are published.
 
