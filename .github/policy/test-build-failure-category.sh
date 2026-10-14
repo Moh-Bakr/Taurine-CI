@@ -8,11 +8,29 @@ classifier="${root}/.github/policy/build-failure-category.rb"
 live_action="${root}/.github/actions/live-build/action.yml"
 pg8_action="${root}/.github/actions/pg8-measurement/action.yml"
 
-classify() { ruby "${classifier}" "$1" "$2" "$3" <"$4"; }
+classify() {
+  local format="$1" target="$2" status="$3" input="$4" mode="${5:-}"
+  if [[ "${mode}" == disposition ]]; then
+    ruby "${classifier}" "${format}" "${target}" "${status}" --disposition <"${input}"
+  else
+    ruby "${classifier}" "${format}" "${target}" "${status}" <"${input}"
+  fi
+}
 expect() {
   local format="$1" target="$2" status="$3" input="$4" wanted="$5" output
   output="$(classify "${format}" "${target}" "${status}" "${input}")"
   [[ "${output}" == "${wanted}" ]] || { echo 'build category fixture mismatch' >&2; exit 1; }
+  if grep -Eq 'PRIVATE|SECRET|/Users/|/home/|token|raw message|ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+' <<<"${output}"; then
+    echo 'private diagnostic fixture text was emitted' >&2
+    exit 1
+  fi
+}
+expect_disposition() {
+  local format="$1" target="$2" status="$3" input="$4" wanted_category="$5" wanted_disposition="$6" output
+  output="$(classify "${format}" "${target}" "${status}" "${input}" disposition)"
+  [[ "${output}" == "${wanted_category}"$'\n'"build-failure-disposition: value=${wanted_disposition}" ]] || {
+    echo 'build category disposition fixture mismatch' >&2; exit 1;
+  }
   if grep -Eq 'PRIVATE|SECRET|/Users/|/home/|token|raw message|ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+' <<<"${output}"; then
     echo 'private diagnostic fixture text was emitted' >&2
     exit 1
@@ -34,6 +52,11 @@ expect text dbx_pg_tls_live 101 "${tmp}/target.log" 'build-failure: category=mis
 expect text dbx_pg_tls_live 101 "${tmp}/dependency.log" 'build-failure: category=dependency-resolution count=1 target=dbx_pg_tls_live'
 expect text dbx_pg_tls_live 137 "${tmp}/unknown.log" 'build-failure: category=process-signal count=1 target=dbx_pg_tls_live'
 expect text dbx_pg_tls_live 101 "${tmp}/unknown.log" 'build-failure: category=other count=1 target=dbx_pg_tls_live'
+expect_disposition text dbx_pg_tls_live 101 "${tmp}/linker.log" 'build-failure: category=linkerfailed count=1 target=dbx_pg_tls_live' classified
+expect_disposition text dbx_pg_tls_live 101 "${tmp}/unknown.log" 'build-failure: category=other count=1 target=dbx_pg_tls_live' no-match
+printf '%s\n' 'error: linking with cc failed' 'error: no test target named PRIVATE-TARGET' >"${tmp}/ambiguous.log"
+expect_disposition text dbx_pg_tls_live 101 "${tmp}/ambiguous.log" 'build-failure: category=other count=2 target=dbx_pg_tls_live' ambiguous
+expect_disposition text dbx_pg_tls_live 137 "${tmp}/unknown.log" 'build-failure: category=process-signal count=1 target=dbx_pg_tls_live' classified
 
 cat >"${tmp}/linker.jsonl" <<'JSONL'
 {"reason":"compiler-message","message":{"message":"linker command failed PRIVATE SECRET ghp_abcdefghijklmnopqrstuvwxyz0123456789","rendered":"error: linking failed at /Users/PRIVATE/path"}}
@@ -46,6 +69,15 @@ expect json dbx_pg8_performance_live 101 "${tmp}/linker.jsonl" 'build-failure: c
 expect json dbx_pg8_performance_live 101 "${tmp}/mixed-progress.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg8_performance_live'
 printf '%s\n' 'error: no test target named PRIVATE-TARGET' >"${tmp}/plain-target.log"
 expect json dbx_pg8_performance_live 101 "${tmp}/plain-target.log" 'build-failure: category=missingtarget count=1 target=dbx_pg8_performance_live'
+printf '%s\n' '[]' 'error: linking with cc failed' >"${tmp}/array-plus-linker.jsonl"
+expect json dbx_pg_mtls_live 101 "${tmp}/array-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live'
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/array-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' malformed
+printf '%s\n' '{"reason":"compiler-message","message":{}}' 'error: linking with cc failed' >"${tmp}/empty-message-plus-linker.jsonl"
+expect json dbx_pg_mtls_live 101 "${tmp}/empty-message-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live'
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/empty-message-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' malformed
+printf '%s\n' '{"reason":"compiler-message","message":{"message":42}}' 'error: linking with cc failed' >"${tmp}/parser-exception.jsonl"
+expect json dbx_pg_mtls_live 101 "${tmp}/parser-exception.jsonl" 'build-failure: category=other count=1 target=dbx_pg_mtls_live'
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/parser-exception.jsonl" 'build-failure: category=other count=1 target=dbx_pg_mtls_live' malformed
 cat >"${tmp}/mixed.jsonl" <<'JSONL'
 {"reason":"compiler-message","message":{"message":"linker command failed SECRET"}}
 {"reason":"compiler-message","message":{"message":"no test target named PRIVATE"}}
@@ -53,12 +85,18 @@ JSONL
 expect json dbx_pg8_performance_live 101 "${tmp}/mixed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
 printf '%s\n' '{not-json PRIVATE}' >"${tmp}/malformed.jsonl"
 expect json dbx_pg8_performance_live 101 "${tmp}/malformed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
+expect_disposition json dbx_pg8_performance_live 101 "${tmp}/malformed.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' malformed
+printf '%s\n' '{"reason":"compiler-message","message":{"message":42}}' >"${tmp}/malformed-shape.jsonl"
+expect_disposition json dbx_pg8_performance_live 101 "${tmp}/malformed-shape.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' malformed
 expect text dbx_pg8_performance_live 999 "${tmp}/linker.log" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
 printf '%s\n' 'error: linking with cc failed PRIVATE path' >"${tmp}/release.log"
 expect text pg8-uat-release 101 "${tmp}/release.log" 'build-failure: category=linkerfailed count=1 target=pg8-uat-release'
 printf '%s\n' '{"reason":"compiler-message","message":{"message":"error: PRIVATE raw message"}}' >"${tmp}/oversize.jsonl"
 truncate -s 1048577 "${tmp}/oversize.jsonl"
 expect json dbx_pg8_performance_live 101 "${tmp}/oversize.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live'
+expect_disposition json dbx_pg8_performance_live 101 "${tmp}/oversize.jsonl" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' input-limit
+awk 'BEGIN { for (i = 0; i < 4097; i++) print "x" }' >"${tmp}/too-many-lines.log"
+expect_disposition text dbx_pg8_performance_live 101 "${tmp}/too-many-lines.log" 'build-failure: category=other count=1 target=dbx_pg8_performance_live' input-limit
 
 # Extract and execute the actual live-build action with only Cargo replaced by a fixed failing stub.
 mkdir -p "${tmp}/bin" "${tmp}/live-temp"
@@ -76,6 +114,7 @@ if PATH="${tmp}/bin:${PATH}" GITHUB_WORKSPACE="${root}" RUNNER_TEMP="${tmp}/live
   exit 1
 fi
 grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${tmp}/live.out"
+grep -qF 'build-failure-disposition: value=classified' "${tmp}/live.out"
 ! grep -Eq 'PRIVATE-TARGET|PRIVATE raw message' "${tmp}/live.out"
 if PATH="${tmp}/bin:${PATH}" FAKE_CARGO_STATUS=0 GITHUB_WORKSPACE="${root}" RUNNER_TEMP="${tmp}/live-temp" bash "${tmp}/live.sh" >"${tmp}/live-success.out" 2>&1; then
   :
@@ -99,19 +138,62 @@ printf '%s\n' 'PRIVATE-RUBY-ERROR /Users/PRIVATE/path' >&2
 exit 1
 STUB
 chmod +x "${tmp}/broken-ruby-bin/ruby"
-for helper_case in missing broken; do
+mkdir -p "${tmp}/malformed-ruby-bin"
+cat >"${tmp}/malformed-ruby-bin/ruby" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' 'build-failure: category=linkerfailed count=1 target=selected-live-proof-target' 'PRIVATE-EXTRA /Users/PRIVATE/path'
+STUB
+chmod +x "${tmp}/malformed-ruby-bin/ruby"
+mkdir -p "${tmp}/legacy-ruby-bin"
+cat >"${tmp}/legacy-ruby-bin/ruby" <<'STUB'
+#!/usr/bin/env bash
+target="$3"
+case "${FAKE_HELPER_MODE:-legacy}" in
+  legacy) printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}" ;;
+  extra)
+    printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}"
+    printf '%s\n' 'PRIVATE-EXTRA-PROTOCOL /Users/PRIVATE/path'
+    ;;
+  unknown) printf 'build-failure: category=PRIVATE-UNKNOWN count=1 target=%s\n' "${target}" ;;
+  wrong-target) printf '%s\n' 'build-failure: category=missingtarget count=1 target=dbx_pg_tls_live' ;;
+  bad-count) printf 'build-failure: category=missingtarget count=1000 target=%s\n' "${target}" ;;
+  trailing-blank)
+    printf 'build-failure: category=missingtarget count=1 target=%s\n' "${target}"
+    printf '\n'
+    ;;
+  *) exit 9 ;;
+esac
+STUB
+chmod +x "${tmp}/legacy-ruby-bin/ruby"
+for helper_case in missing broken malformed; do
   test_path="${tmp}/bin:${PATH}"
   workspace="${tmp}/live-nohelper-workspace"
   if [[ "${helper_case}" == broken ]]; then
     workspace="${root}"
     test_path="${tmp}/broken-ruby-bin:${tmp}/bin:${PATH}"
+  elif [[ "${helper_case}" == malformed ]]; then
+    workspace="${root}"
+    test_path="${tmp}/malformed-ruby-bin:${tmp}/bin:${PATH}"
   fi
   if PATH="${test_path}" GITHUB_WORKSPACE="${workspace}" RUNNER_TEMP="${tmp}/live-temp" bash "${tmp}/live.sh" >"${tmp}/live-${helper_case}-helper.out" 2>&1; then
     echo "live-build ${helper_case}-helper fixture unexpectedly passed" >&2
     exit 1
   fi
   grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${tmp}/live-${helper_case}-helper.out"
+  grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-${helper_case}-helper.out"
   ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/live-${helper_case}-helper.out"
+done
+for legacy_mode in legacy extra unknown wrong-target bad-count trailing-blank; do
+  if PATH="${tmp}/legacy-ruby-bin:${tmp}/bin:${PATH}" FAKE_HELPER_MODE="${legacy_mode}" GITHUB_WORKSPACE="${root}" RUNNER_TEMP="${tmp}/live-temp" bash "${tmp}/live.sh" >"${tmp}/live-legacy-${legacy_mode}.out" 2>&1; then
+    echo "live-build ${legacy_mode} helper fixture unexpectedly passed" >&2; exit 1
+  fi
+  if [[ "${legacy_mode}" == legacy ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${tmp}/live-legacy-${legacy_mode}.out"
+  else
+    grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${tmp}/live-legacy-${legacy_mode}.out"
+  fi
+  grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/live-legacy-${legacy_mode}.out"
+  ! grep -Eq 'PRIVATE-UNKNOWN|PRIVATE-EXTRA-PROTOCOL|Users/PRIVATE' "${tmp}/live-legacy-${legacy_mode}.out"
 done
 
 # Exercise the actual PGTLS multi-suite path with stub target files. Cargo succeeds twice, then
@@ -143,6 +225,7 @@ if (cd "${tmp}/pgtls-src" && PATH="${tmp}/pgtls-bin:${PATH}" GITHUB_WORKSPACE="$
   exit 1
 fi
 grep -qF 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' "${tmp}/pgtls.out"
+grep -qF 'build-failure-disposition: value=classified' "${tmp}/pgtls.out"
 grep -qF -- '--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live' "${tmp}/cargo-args"
 ! grep -Eq 'PRIVATE-MTLS-SENTINEL|ghp_abcdefghijklmnopqrstuvwxyz' "${tmp}/pgtls.out"
 
@@ -163,8 +246,10 @@ run_windows_report() {
   local os="$1" concern="$2" label="$3" status="$4" runtime="$5" rc test_path="${tmp}/windows-bin"
   local output="${tmp}/windows-${os}-${concern}-${label}-${runtime}.out"
   if [[ "${runtime}" == broken ]]; then test_path="${tmp}/windows-rubyfail-bin:${tmp}/windows-bin"; fi
+  if [[ "${runtime}" == malformed ]]; then test_path="${tmp}/malformed-ruby-bin:${tmp}/windows-bin"; fi
+  if [[ "${runtime}" == legacy || "${runtime}" == extra || "${runtime}" == unknown || "${runtime}" == wrong-target || "${runtime}" == bad-count || "${runtime}" == trailing-blank ]]; then test_path="${tmp}/legacy-ruby-bin:${tmp}/windows-bin"; fi
   set +e
-  PATH="${test_path}:${PATH}" RUNNER_TEMP="${tmp}/windows-runner" GITHUB_WORKSPACE="${tmp}/windows-workspace" OS_LABEL="${os}" CONCERN="${concern}" FAKE_CARGO_STATUS="${status}" bash -c '
+  PATH="${test_path}:${PATH}" RUNNER_TEMP="${tmp}/windows-runner" GITHUB_WORKSPACE="${tmp}/windows-workspace" OS_LABEL="${os}" CONCERN="${concern}" FAKE_CARGO_STATUS="${status}" FAKE_HELPER_MODE="${runtime}" bash -c '
     set -euo pipefail
     source "$1/sanitize.sh"
     source "$1/report.sh"
@@ -179,11 +264,17 @@ run_windows_report() {
   if [[ "${os}:${concern}:${label}:${runtime}" == 'Windows:rust-db:rust-db-build:available' ]]; then
     if [[ "${status}" == 137 ]]; then
       grep -qF 'build-failure: category=process-signal count=1 target=selected-live-proof-target' "${output}"
+      grep -qF 'build-failure-disposition: value=classified' "${output}"
     else
       grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
+      grep -qF 'build-failure-disposition: value=no-match' "${output}"
     fi
+  elif [[ "${runtime}" == legacy && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=selected-live-proof-target' "${output}"
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${output}"
   elif [[ "${runtime}" != available && "${os}:${concern}:${label}" == 'Windows:rust-db:rust-db-build' ]]; then
     grep -qF 'build-failure: category=other count=1 target=selected-live-proof-target' "${output}"
+    grep -qF 'build-failure-disposition: value=helper-unavailable' "${output}"
   else
     ! grep -qF 'build-failure:' "${output}"
   fi
@@ -199,6 +290,13 @@ exit 1
 STUB
 chmod +x "${tmp}/windows-rubyfail-bin/ruby"
 run_windows_report Windows rust-db rust-db-build 101 broken
+run_windows_report Windows rust-db rust-db-build 101 malformed
+run_windows_report Windows rust-db rust-db-build 101 legacy
+run_windows_report Windows rust-db rust-db-build 101 extra
+run_windows_report Windows rust-db rust-db-build 101 unknown
+run_windows_report Windows rust-db rust-db-build 101 wrong-target
+run_windows_report Windows rust-db rust-db-build 101 bad-count
+run_windows_report Windows rust-db rust-db-build 101 trailing-blank
 run_windows_report Linux rust-db rust-db-build 101 available
 run_windows_report Windows rust-domain rust-domain-build 101 available
 run_windows_report Windows rust-db rust-db-tests 101 available
@@ -234,6 +332,7 @@ if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/p
   exit 1
 fi
 grep -qF 'build-failure: category=dependency-resolution count=1 target=dbx_pg8_performance_live' "${tmp}/pg8.out"
+grep -qF 'build-failure-disposition: value=classified' "${tmp}/pg8.out"
 ! grep -Eq 'PRIVATE-CRATE|PRIVATE raw message' "${tmp}/pg8.out"
 pg8_temp_real="$(cd "${tmp}/pg8-temp" && pwd -P)"
 pg8_output_value() { sed -n "s/^$2=//p" "$1"; }
@@ -243,22 +342,42 @@ grep -qF "target_root=${pg8_temp_real}/pg8-measurement-24680-1" "${tmp}/pg8-outp
 grep -qF 'summary_dir=' "${tmp}/pg8-output-1"
 pg8_build_log_1="$(pg8_output_value "${tmp}/pg8-output-1" build_log)"
 [[ "${pg8_build_log_1}" == "${pg8_temp_real}/pg8-probe-build-24680-1-"*.log ]]
-for helper_case in missing broken; do
+for helper_case in missing broken malformed; do
   pg8_workspace="${tmp}/pg8-nohelper-workspace"
   test_path="${tmp}/pg8-bin:${PATH}"
   mkdir -p "${pg8_workspace}/src"
   if [[ "${helper_case}" == broken ]]; then
     pg8_workspace="${tmp}"
     test_path="${tmp}/broken-ruby-bin:${tmp}/pg8-bin:${PATH}"
+  elif [[ "${helper_case}" == malformed ]]; then
+    pg8_workspace="${tmp}"
+    test_path="${tmp}/malformed-ruby-bin:${tmp}/pg8-bin:${PATH}"
   fi
   helper_attempt=3
   [[ "${helper_case}" != broken ]] || helper_attempt=4
+  [[ "${helper_case}" != malformed ]] || helper_attempt=5
   if PATH="${test_path}" GITHUB_WORKSPACE="${pg8_workspace}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT="${helper_attempt}" GITHUB_OUTPUT="${tmp}/pg8-output-${helper_attempt}" FAKE_TARGET_CAPTURE="${tmp}/target.capture" bash "${tmp}/pg8.sh" >"${tmp}/pg8-${helper_case}-helper.out" 2>&1; then
     echo "PG8 ${helper_case}-helper fixture unexpectedly passed" >&2
     exit 1
   fi
   grep -qF 'build-failure: category=other count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-${helper_case}-helper.out"
+  grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/pg8-${helper_case}-helper.out"
   ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/pg8-${helper_case}-helper.out"
+  ! grep -qF 'PRIVATE-EXTRA' "${tmp}/pg8-${helper_case}-helper.out"
+done
+legacy_attempt=20
+for legacy_mode in legacy extra unknown wrong-target bad-count trailing-blank; do
+  legacy_attempt=$((legacy_attempt + 1))
+  if PATH="${tmp}/legacy-ruby-bin:${tmp}/pg8-bin:${PATH}" FAKE_HELPER_MODE="${legacy_mode}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24681 GITHUB_RUN_ATTEMPT="${legacy_attempt}" GITHUB_OUTPUT="${tmp}/pg8-output-legacy-${legacy_mode}" FAKE_TARGET_CAPTURE="${tmp}/target.capture" bash "${tmp}/pg8.sh" >"${tmp}/pg8-legacy-${legacy_mode}.out" 2>&1; then
+    echo "PG8 ${legacy_mode} helper fixture unexpectedly passed" >&2; exit 1
+  fi
+  if [[ "${legacy_mode}" == legacy ]]; then
+    grep -qF 'build-failure: category=missingtarget count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  else
+    grep -qF 'build-failure: category=other count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  fi
+  grep -qF 'build-failure-disposition: value=helper-unavailable' "${tmp}/pg8-legacy-${legacy_mode}.out"
+  ! grep -Eq 'PRIVATE-UNKNOWN|PRIVATE-EXTRA-PROTOCOL|Users/PRIVATE' "${tmp}/pg8-legacy-${legacy_mode}.out"
 done
 
 # The source path and temp path are validated before Cargo can run. A source symlink,

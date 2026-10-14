@@ -43,19 +43,30 @@ runs:
           fi
         }
         emit_build_failure_category() {
-          local target="$1" status="$2" log="$3" category_line='' suffix=''
+          local target="$1" status="$2" log="$3" category_output='' expected=''
           case "${target}" in
             dbx_pg_tls_live|dbx_pg_mtls_live|dbx_pg8_performance_live|pg8-uat-release|selected-live-proof-target) ;;
             *) target='selected-live-proof-target' ;;
           esac
           if command -v ruby >/dev/null 2>&1; then
-            category_line="$(ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text "${target}" "${status}" <"${log}" 2>/dev/null)" || category_line=''
+            category_output="$(if ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text "${target}" "${status}" --disposition <"${log}" 2>/dev/null; then helper_status=0; else helper_status=$?; fi; printf '\034'; exit "${helper_status}")" || category_output=''
+            if [[ "${category_output}" == *$'\034' ]]; then
+              category_output="${category_output%$'\034'}"
+              if [[ "${category_output}" == *$'\n' ]]; then category_output="${category_output%$'\n'}"; else category_output=''; fi
+            else
+              category_output=''
+            fi
           fi
-          suffix=" target=${target}"
-          if [[ "${category_line}" =~ ^build-failure:\ category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other)\ count=[1-9][0-9]{0,2}${suffix}$ ]]; then
-            printf '%s\n' "${category_line}" >&2
+          expected="^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=${target}"$'\n''build-failure-disposition: value=(input-limit|malformed|ambiguous|no-match|helper-unavailable|classified)$'
+          legacy_expected="^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=${target}$"
+          if [[ "${category_output}" =~ ${expected} ]]; then
+            printf '%s\n' "${category_output}" >&2
+          elif [[ "${category_output}" =~ ${legacy_expected} ]]; then
+            printf '%s\n' "${category_output}" >&2
+            printf 'build-failure-disposition: value=helper-unavailable\n' >&2
           else
             printf 'build-failure: category=other count=1 target=%s\n' "${target}" >&2
+            printf 'build-failure-disposition: value=helper-unavailable\n' >&2
           fi
         }
         fixed_target_label() {

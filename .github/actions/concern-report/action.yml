@@ -286,14 +286,26 @@ runs:
             tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
             echo "${rc}" >"${log}.exit"
             if [[ "${OS_LABEL:-}" == Windows && "${CONCERN:-}" == rust-db && "${label}" == rust-*-build ]]; then
-              category_line=''
+              category_output=''
               if command -v ruby >/dev/null 2>&1; then
-                category_line="$(ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text selected-live-proof-target "${rc}" <"${log}" 2>/dev/null)" || category_line=''
+                category_output="$(if ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text selected-live-proof-target "${rc}" --disposition <"${log}" 2>/dev/null; then helper_status=0; else helper_status=$?; fi; printf '\034'; exit "${helper_status}")" || category_output=''
+                if [[ "${category_output}" == *$'\034' ]]; then
+                  category_output="${category_output%$'\034'}"
+                  if [[ "${category_output}" == *$'\n' ]]; then category_output="${category_output%$'\n'}"; else category_output=''; fi
+                else
+                  category_output=''
+                fi
               fi
-              if [[ "${category_line}" =~ ^build-failure:\ category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other)\ count=[1-9][0-9]{0,2}\ target=selected-live-proof-target$ ]]; then
-                echo "${category_line}" >&2
+              expected_category_output="^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=selected-live-proof-target"$'\n''build-failure-disposition: value=(input-limit|malformed|ambiguous|no-match|helper-unavailable|classified)$'
+              legacy_category_output='^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=selected-live-proof-target$'
+              if [[ "${category_output}" =~ ${expected_category_output} ]]; then
+                printf '%s\n' "${category_output}" >&2
+              elif [[ "${category_output}" =~ ${legacy_category_output} ]]; then
+                printf '%s\n' "${category_output}" >&2
+                echo 'build-failure-disposition: value=helper-unavailable' >&2
               else
                 echo 'build-failure: category=other count=1 target=selected-live-proof-target' >&2
+                echo 'build-failure-disposition: value=helper-unavailable' >&2
               fi
             fi
             if [[ "${label}" == cli-* ]]; then
