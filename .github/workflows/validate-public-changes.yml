@@ -220,7 +220,7 @@ jobs:
           rm -rf .github/policy
           cp -R "${base}/.github/policy" .github/policy
           status=0
-          for check in .github/policy/check-*.rb .github/policy/check-*.sh .github/policy/lint.sh .github/policy/test-*.sh; do
+          for check in .github/policy/check-*.rb .github/policy/check-*.sh .github/policy/lint.sh .github/policy/test-*.sh .github/policy/test-*.rb; do
             [[ -f "${check}" ]] || continue
             echo "::group::base policy: ${check##*/}"
             case "${check}" in
