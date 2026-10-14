@@ -88,4 +88,87 @@ do
   expect_reject "${narrow}" "a path outside the reviewed asset exception: ${rejected}" 'Unexpected tracked path in the public CI repository'
 done
 
-echo 'repository path fixtures: exact PG8 parser/test pair and the flat case-evidence asset directory (including the Playwright .config.cjs/.spec.cjs pair) allowed; a third Python file, nested, upper-case, other-extension, smuggled-extension and doubly-compound asset names, another directory, private source, and credential material rejected'
+
+# The exact asset names the case-evidence activation ships. The exception
+# exists to admit these and nothing wider, so the list is tracked here: if a
+# later change to either side stops admitting one of them, this fails rather
+# than the activation failing in its own base-policy step.
+real_assets="$(new_fixture)"
+mkdir -p "${real_assets}/.github/policy/case-evidence-assets"
+for asset in \
+  all-pass.config.cjs all-pass.spec.cjs callback-failure-reporter.cjs \
+  duplicate-identity.config.cjs duplicate-identity.spec.cjs expected-cases.json \
+  flaky.config.cjs flaky.spec.cjs outcomes.config.cjs outcomes.spec.cjs \
+  playwright-case-list-reporter.cjs real-execution-feedback.json \
+  real-execution-outcomes.json real-list-critical.json real-list-outcomes.json \
+  real-list-shell-browser.json real-list-smoke.json real-runner-provenance.json
+do
+  case "${asset}" in
+    *.json) printf '{}\n' > "${real_assets}/.github/policy/case-evidence-assets/${asset}" ;;
+    *) printf "'use strict';\n" > "${real_assets}/.github/policy/case-evidence-assets/${asset}" ;;
+  esac
+done
+git -C "${real_assets}" add .github/policy/case-evidence-assets
+expect_pass "${real_assets}" 'every case-evidence asset name the activation ships'
+
+# Four mutations of the new rule survived an earlier review because no fixture
+# covered the path each one admits. One fixture per admitted path.
+for rejected in \
+  'case-evidence-assets/a.js.cjs' \
+  'case-evidence-assets/a.mjs' \
+  'case-evidence-assets/.hidden.cjs' \
+  'case-evidence-assets/a.test.cjs' \
+  'case-evidence-assets/a.config.spec.cjs' \
+  'case-evidence-assets/a..cjs' \
+  'case-evidence-assets/a.cjs/x.rb'
+do
+  mutant="$(new_fixture)"
+  mkdir -p "${mutant}/.github/policy/$(dirname "${rejected}")"
+  printf 'fixture\n' > "${mutant}/.github/policy/${rejected}"
+  git -C "${mutant}" add ".github/policy/${rejected}"
+  expect_reject "${mutant}" "a path the dropped anchors or a wider class would admit: ${rejected}" 'Unexpected tracked path in the public CI repository'
+done
+
+# Dropping the leading anchor would admit the same directory under any prefix.
+unanchored="$(new_fixture)"
+mkdir -p "${unanchored}/x/.github/policy/case-evidence-assets"
+printf 'fixture\n' > "${unanchored}/x/.github/policy/case-evidence-assets/a.cjs"
+git -C "${unanchored}" add x/.github/policy/case-evidence-assets/a.cjs
+expect_reject "${unanchored}" 'the asset directory under another prefix' 'Unexpected tracked path in the public CI repository'
+
+# The accepted compound pair, both extensions.
+compound="$(new_fixture)"
+mkdir -p "${compound}/.github/policy/case-evidence-assets"
+printf "'use strict';\n" > "${compound}/.github/policy/case-evidence-assets/a.config.cjs"
+printf '{}\n' > "${compound}/.github/policy/case-evidence-assets/a.spec.json"
+git -C "${compound}" add .github/policy/case-evidence-assets
+expect_pass "${compound}" 'the reviewed .config and .spec compound names'
+
+# These assets execute on the runner, so only plain regular files are allowed.
+symlinked="$(new_fixture)"
+mkdir -p "${symlinked}/.github/policy/case-evidence-assets"
+ln -s /etc/passwd "${symlinked}/.github/policy/case-evidence-assets/reporter.cjs"
+git -C "${symlinked}" add .github/policy/case-evidence-assets/reporter.cjs
+expect_reject "${symlinked}" 'a symlinked case-evidence asset' 'must be plain regular files'
+
+executable="$(new_fixture)"
+mkdir -p "${executable}/.github/policy/case-evidence-assets"
+printf "'use strict';\n" > "${executable}/.github/policy/case-evidence-assets/reporter.cjs"
+chmod 755 "${executable}/.github/policy/case-evidence-assets/reporter.cjs"
+git -C "${executable}" add .github/policy/case-evidence-assets/reporter.cjs
+expect_reject "${executable}" 'an executable case-evidence asset' 'must be plain regular files'
+
+# The credential sweep used to skip the whole policy directory, which hid these
+# data files. Both PEM header forms are covered: the qualified one was not
+# matched by the previous pattern at all. Obviously fake keys, never real ones.
+for leak in 'case-evidence-assets/leak.json' 'case-evidence-assets/leak.cjs'; do
+  for header in '-----BEGIN RSA PRIVATE KEY-----' '-----BEGIN PRIVATE KEY-----' 'GH_APP_PRIVATE_KEY=TEST_FIXTURE_SENTINEL'; do
+    planted="$(new_fixture)"
+    mkdir -p "${planted}/.github/policy/case-evidence-assets"
+    printf -- '%s\nTEST_FIXTURE_NOT_A_REAL_KEY\n' "${header}" > "${planted}/.github/policy/${leak}"
+    git -C "${planted}" add ".github/policy/${leak}"
+    expect_reject "${planted}" "credential material planted in ${leak} (${header})" 'A reusable source, signing, or deployment credential pattern was found'
+  done
+done
+
+echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name and the reviewed .config/.spec pair allowed; nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, another directory, private source and starter documents rejected'
