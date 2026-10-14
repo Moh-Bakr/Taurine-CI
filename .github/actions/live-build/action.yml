@@ -90,19 +90,27 @@ runs:
             fi
             IFS=, read -ra tl <<< "${targets}"
             for t in "${tl[@]}"; do build_args+=(--test "${t}"); done
-            if ! cargo test -p "${pkg}" "${build_args[@]}" --no-run \
+            if cargo test -p "${pkg}" "${build_args[@]}" --no-run \
               </dev/null >>"${RUNNER_TEMP}/build.log" 2>&1; then
+              :
+            else
+              build_status=$?
               echo 'proof-build: failed; compiler diagnostics follow' >&2
               cargo_diagnostic_summary "${RUNNER_TEMP}/build.log" "$(fixed_target_label "${engine}" "${pkg}" "${targets}")"
+              ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text "$(fixed_target_label "${engine}" "${pkg}" "${targets}")" "${build_status}" <"${RUNNER_TEMP}/build.log" >&2
               exit 1
             fi
           done < "${suites}"
         else
           target="$(jq -er '.target' "${arm}")"
-          if ! cargo test -p taurine-db-conformance --test "${target}" --no-run \
+          if cargo test -p taurine-db-conformance --test "${target}" --no-run \
             >"${RUNNER_TEMP}/build.log" 2>&1; then
+            :
+          else
+            build_status=$?
             echo 'proof-build: failed; compiler diagnostics follow' >&2
             cargo_diagnostic_summary "${RUNNER_TEMP}/build.log" "$(fixed_target_label "${engine}" 'taurine-db-conformance' "${target}")"
+            ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text "$(fixed_target_label "${engine}" 'taurine-db-conformance' "${target}")" "${build_status}" <"${RUNNER_TEMP}/build.log" >&2
             exit 1
           fi
         fi

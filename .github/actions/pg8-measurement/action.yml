@@ -22,8 +22,12 @@ runs:
         mkdir -p "${probe_target}"
         export CARGO_TARGET_DIR="${probe_target}"
         build_log="${RUNNER_TEMP}/pg8-probe-build.log"
-        if ! (cd "${source_dir}" && cargo test --locked -p taurine-db-conformance --test dbx_pg8_performance_live --no-run --message-format=json --target "${target}") >"${build_log}" 2>&1; then
+        if (cd "${source_dir}" && cargo test --locked -p taurine-db-conformance --test dbx_pg8_performance_live --no-run --message-format=json --target "${target}") >"${build_log}" 2>&1; then
+          :
+        else
+          build_status=$?
           echo 'PG8 probe compilation failed; detailed output withheld' >&2
+          ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" json dbx_pg8_performance_live "${build_status}" <"${build_log}" >&2
           exit 1
         fi
         probe_bin="$(python3 "${policy}" artifact "${probe_target}" <"${build_log}")"
@@ -54,8 +58,12 @@ runs:
           export CARGO_TARGET_DIR="${target_dir}"
           local -a args=(--no-bundle --ci --config src-tauri/tauri.conf.uat.json --target "${target}")
           [[ "${feature}" == on ]] && args+=(--features taurine-app/dbx-pg)
-          if ! (cd "${source_dir}" && npm --prefix taurine-desktop run tauri -- build "${args[@]}") >"${log}" 2>&1; then
+          if (cd "${source_dir}" && npm --prefix taurine-desktop run tauri -- build "${args[@]}") >"${log}" 2>&1; then
+            :
+          else
+            build_status=$?
             echo 'UAT desktop release build failed; detailed output withheld' >&2
+            ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text dbx_pg8_performance_live "${build_status}" <"${log}" >&2
             exit 1
           fi
           local executable="${target_dir}/${target}/release/taurine-desktop"
