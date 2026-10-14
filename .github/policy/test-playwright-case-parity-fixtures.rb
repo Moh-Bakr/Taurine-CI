@@ -3,9 +3,15 @@
 require 'digest'
 require 'json'
 require 'pathname'
+require_relative 'case-evidence-assets'
 
-FIXTURE_DIR = File.expand_path('fixtures/playwright-case-parity', __dir__).freeze
-EXPECTED = JSON.parse(File.binread(File.join(FIXTURE_DIR, 'expected-cases.json'))).freeze
+# The fixtures are control-owned assets rather than tracked files; read them
+# from the module the producers stage, so this validator checks the same bytes.
+def fixture_source(name)
+  CaseEvidenceAssets::ASSETS.fetch(name).dup
+end
+
+EXPECTED = JSON.parse(fixture_source('expected-cases.json')).freeze
 WRAPPER = File.binread(File.join(__dir__, 'playwright-case-evidence-producer.rb'))
 
 def require_fixture(condition, label)
@@ -70,7 +76,7 @@ end
 require_fixture(all_pass['scopes'].map { |scope| [scope['runner_id'], scope['project']] }.sort ==
   expected_scopes.map { |row| row.first(1) + [row[2]] }.sort, 'all-pass project registry')
 require_fixture(all_pass['cases'].is_a?(Array) && all_pass['cases'].length == 3, 'all-pass case count')
-all_pass_source = File.binread(File.join(FIXTURE_DIR, all_pass['file']))
+all_pass_source = fixture_source(all_pass['file'])
 all_pass_source = all_pass_source.force_encoding(Encoding::UTF_8)
 all_pass['cases'].each do |entry|
   require_fixture(entry.is_a?(Hash) && entry.keys.sort == %w[describe title].sort &&
@@ -104,7 +110,7 @@ require_fixture(duplicate.is_a?(Hash) && duplicate.keys.sort == %w[config expect
   duplicate['project'] == 'smoke' && duplicate['expected_disposition'] == 'duplicate_case_identity' &&
   duplicate['expected_phase'] == 'control_identity_normalization' && duplicate['paths'].is_a?(Array) && duplicate['paths'].length == 2,
   'duplicate fixture scope')
-duplicate_source = File.binread(File.join(FIXTURE_DIR, duplicate.fetch('file')))
+duplicate_source = fixture_source(duplicate.fetch('file'))
 normalized_titles = duplicate['paths'].map do |path|
   require_fixture(path.is_a?(Hash) && path.keys.sort == %w[describe title].sort && path['describe'].is_a?(Array), 'duplicate path shape')
   require_fixture(path['describe'].all? { |part| !part.empty? } && !path['title'].empty?, 'nonempty path parts')
@@ -137,7 +143,7 @@ outcomes.each do |outcome_group|
   require_fixture(outcome_group.is_a?(Hash) && outcome_group.keys.sort == %w[cases config file project retries].sort &&
     outcome_group['project'] == 'smoke' && outcome_group['config'] == (outcome_group['file'] == 'flaky.spec.cjs' ? 'flaky.config.cjs' : 'outcomes.config.cjs'),
     'outcome group shape')
-  outcome_source = File.binread(File.join(FIXTURE_DIR, outcome_group.fetch('file')))
+  outcome_source = fixture_source(outcome_group.fetch('file'))
   require_fixture(outcome_group['cases'].is_a?(Array), 'outcome cases')
   outcome_group['cases'].each do |entry|
     require_fixture(entry.is_a?(Hash) && entry.keys.sort == %w[aggregate attempts describe disposition expected_status title].sort,
@@ -149,15 +155,15 @@ outcomes.each do |outcome_group|
     seen_outcome_titles << entry['title']
   end
 end
-outcome_source = File.binread(File.join(FIXTURE_DIR, 'outcomes.spec.cjs'))
-flaky_source = File.binread(File.join(FIXTURE_DIR, 'flaky.spec.cjs'))
+outcome_source = fixture_source('outcomes.spec.cjs')
+flaky_source = fixture_source('flaky.spec.cjs')
 require_fixture(seen_outcome_titles.sort == expected_outcomes.keys.sort && outcome_source.include?('test.fail();') &&
   outcome_source.include?("test.skip('intentional skip'") && flaky_source.include?('testInfo.retry === 0') &&
-  File.binread(File.join(FIXTURE_DIR, 'outcomes.config.cjs')).include?('retries: 0') &&
-  File.binread(File.join(FIXTURE_DIR, 'flaky.config.cjs')).include?('retries: 1'), 'outcome source retry behavior')
+  fixture_source('outcomes.config.cjs').include?('retries: 0') &&
+  fixture_source('flaky.config.cjs').include?('retries: 1'), 'outcome source retry behavior')
 
 callback = EXPECTED.fetch('callback_failure')
-callback_source = File.binread(File.join(FIXTURE_DIR, callback.fetch('reporter')))
+callback_source = fixture_source(callback.fetch('reporter'))
 require_fixture(callback.keys.sort == %w[callback expected_completion_marker expected_disposition reporter].sort &&
   callback['callback'] == 'onBegin' && callback['expected_completion_marker'] == 'absent' &&
   callback['expected_disposition'] == 'blocked' && callback_source.include?('onBegin()') &&

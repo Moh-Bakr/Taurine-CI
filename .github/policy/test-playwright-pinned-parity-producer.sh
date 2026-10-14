@@ -6,15 +6,18 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/playwright-pinned-parity-test.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 
-mkdir -p "$tmp/control/.github/policy/fixtures/playwright-case-parity" "$tmp/source" "$tmp/fake-bin"
+mkdir -p "$tmp/control/.github/policy" "$tmp/source" "$tmp/fake-bin"
 cp "$root/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/control/.github/policy/"
-cp "$root/.github/policy/playwright-case-list-reporter.cjs" "$tmp/control/.github/policy/"
-cp "$root/.github/policy/fixtures/playwright-case-parity/"* "$tmp/control/.github/policy/fixtures/playwright-case-parity/"
+cp "$root/.github/policy/case-evidence-assets.rb" "$tmp/control/.github/policy/"
+# The expected-case manifest is an asset, not a tracked file; write the copy
+# this harness reads out of the same module the producer stages from.
+ruby -r"$root/.github/policy/case-evidence-assets" \
+  -e 'File.binwrite(ARGV.fetch(0), CaseEvidenceAssets::ASSETS.fetch("expected-cases.json"))' \
+  "$tmp/expected-cases.json"
 
 ruby -rjson -rfileutils -rrbconfig -e '
   control, source, fakebin = ARGV
-  expected_path = File.join(control, ".github/policy/fixtures/playwright-case-parity/expected-cases.json")
-  expected = JSON.parse(File.read(expected_path))
+  expected = JSON.parse(File.read(File.join(File.dirname(control), "expected-cases.json")))
   expected.fetch("runner_bindings").each do |binding|
     app = binding.fetch("runner_id") == "playwright-desktop" ? "taurine-desktop" : "taurine-mobile"
     app_root = File.join(source, app)
@@ -206,10 +209,17 @@ tampered_status=0
 env TAURINE_PARITY_EXPECTED_CONTROL_SHA="$control_sha" TAURINE_PARITY_EXPECTED_SOURCE_SHA="$source_sha" \
   PATH="$tmp/tampered-bin:$PATH" ruby "$tmp/control/.github/policy/playwright-pinned-parity-producer.rb" "$tmp/source" >"$tampered_output" || tampered_status=$?
 [[ "$tampered_status" -eq 1 ]] || { echo 'tampered synthetic report was accepted' >&2; exit 1; }
-! rg -q 'RAW_PRIVATE_SENTINEL|/playwright-pinned-parity-test\.' "$tampered_output" || {
-  echo 'synthetic private report detail escaped the producer output' >&2
+# grep, not rg: rg is absent on some runners, and `! rg ...` turns a missing
+# tool into a silent pass. Require a tool that is always present, and prove the
+# pattern can match before trusting that it did not.
+grep -E -q 'RAW_PRIVATE_SENTINEL|/playwright-pinned-parity-test\.' <<<'RAW_PRIVATE_SENTINEL' || {
+  echo 'the escaped-detail pattern no longer matches its own sentinel' >&2
   exit 1
 }
+if grep -E -q 'RAW_PRIVATE_SENTINEL|/playwright-pinned-parity-test\.' "$tampered_output"; then
+  echo 'synthetic private report detail escaped the producer output' >&2
+  exit 1
+fi
 
 ruby -rjson -e '
   path = ARGV.fetch(0)
@@ -242,6 +252,11 @@ for mutation in extra duplicate missing; do
   cp "$tmp/fake-bin/node.baseline" "$tmp/fake-bin/node"
 done
 
+# The synthetic callback reporter is an asset too; write the copy this direct
+# check loads beside the harness's other scratch files.
+ruby -r"$root/.github/policy/case-evidence-assets" \
+  -e 'File.binwrite(ARGV.fetch(0), CaseEvidenceAssets::ASSETS.fetch("callback-failure-reporter.cjs"))' \
+  "$tmp/callback-failure-reporter.cjs"
 direct_sentinel="$tmp/direct-callback.sentinel"
 direct_status=0
 TAURINE_PARITY_CALLBACK_SENTINEL="$direct_sentinel" node -e '
@@ -249,7 +264,7 @@ TAURINE_PARITY_CALLBACK_SENTINEL="$direct_sentinel" node -e '
   try { new Reporter().onBegin(); } catch (error) {
     if (error.message !== "SYNTHETIC_REPORTER_CALLBACK_FAILURE") throw error;
   }
-' "$tmp/control/.github/policy/fixtures/playwright-case-parity/callback-failure-reporter.cjs" || direct_status=$?
+' "$tmp/callback-failure-reporter.cjs" || direct_status=$?
 [[ "$direct_status" -eq 0 && "$(cat "$direct_sentinel")" == 'synthetic-onBegin-failure-v1' ]] || {
   echo 'direct fake reporter callback did not throw-and-swallow with its sentinel' >&2
   exit 1

@@ -202,7 +202,17 @@ ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
     commands = logs.select { |entry| entry.key?("args") }
     raise "runner inherited a secret" unless commands.none? { |entry| entry["secret_inherited"] }
     raise "private output permissions were too broad" unless logs.select { |entry| entry.key?("private_modes_ok") }.all? { |entry| entry["private_modes_ok"] }
-    raise "list command was not fixed" unless commands[0]["args"] == ["test", "--config", "playwright.config.ts", "--list", "--project", "smoke", "--reporter", File.join(control, ".github/policy/playwright-case-list-reporter.cjs")]
+    # The reporter is materialised into the RUNNER_TEMP directory owned by this
+    # job, so assert the stronger property: an absolute path with the fixed
+    # basename, inside the private runtime temp and outside both checkouts.
+    private_reporter = lambda do |argv|
+      path = argv.last
+      path.is_a?(String) && path.start_with?(File.join(temp, "runtime-tmp") + "/") &&
+        File.basename(path) == "playwright-case-list-reporter.cjs" &&
+        !path.start_with?(control + "/") && !path.start_with?(source + "/")
+    end
+    raise "list command was not fixed" unless commands[0]["args"].first(7) == ["test", "--config", "playwright.config.ts", "--list", "--project", "smoke", "--reporter"] &&
+      commands[0]["args"].length == 8 && private_reporter.call(commands[0]["args"])
     raise "execution command was not fixed" unless commands[1]["args"] == ["test", "--config", "playwright.config.ts", "--project", "smoke", "--reporter", "json"]
     raise "producer temp data survived" unless Dir.children(File.join(temp, "runtime-tmp")).empty?
 
@@ -222,7 +232,8 @@ ruby -rjson -rdigest -ropen3 -rrbconfig -rfileutils -rtmpdir -e '
     mobile_positive, mobile_status = invoke.call(mobile_expected_path)
     raise "mobile adapter pin failed" unless mobile_status == 0 && JSON.parse(mobile_positive)["status"] == "shadow_valid_unverified_producer"
     mobile_commands = File.readlines(log_file).map { |line| JSON.parse(line) }.select { |entry| entry.key?("args") }.drop(2)
-    raise "mobile argv was not fixed" unless mobile_commands[0]["args"] == ["test", "--config", "playwright.config.ts", "--list", "--project", "smoke", "--reporter", File.join(control, ".github/policy/playwright-case-list-reporter.cjs")] &&
+    raise "mobile argv was not fixed" unless mobile_commands[0]["args"].first(7) == ["test", "--config", "playwright.config.ts", "--list", "--project", "smoke", "--reporter"] &&
+      mobile_commands[0]["args"].length == 8 && private_reporter.call(mobile_commands[0]["args"]) &&
       mobile_commands[1]["args"] == ["test", "--config", "playwright.config.ts", "--project", "smoke", "--reporter", "json"]
 
     bad_args, bad_args_status = invoke.call(expected_path, "--reporter=source-controlled")

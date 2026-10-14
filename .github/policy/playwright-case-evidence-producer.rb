@@ -8,6 +8,7 @@ require 'open3'
 require 'pathname'
 require 'rbconfig'
 require 'tmpdir'
+require_relative 'case-evidence-assets'
 
 class ProducerError < StandardError
   attr_reader :code
@@ -23,7 +24,7 @@ def reject!(code)
 end
 
 ROOT = File.expand_path('../..', __dir__).freeze
-REPORTER = File.join(__dir__, 'playwright-case-list-reporter.cjs').freeze
+REPORTER_NAME = 'playwright-case-list-reporter.cjs'.freeze
 CONTRACT = File.join(__dir__, 'case-evidence-contract.rb').freeze
 MAX_INPUT_BYTES = 1 * 1024 * 1024
 MAX_REPORT_BYTES = 64 * 1024 * 1024
@@ -465,6 +466,10 @@ begin
         [adapter['version'], "Version #{adapter['version']}"].include?(version_output.strip)
 
       project = expected.fetch('project')
+      # The control reporter is written into this job's own mode-0700 directory
+      # from the control-owned asset module, so the runner loads it from a
+      # private path rather than from the control checkout.
+      reporter_path = CaseEvidenceAssets.materialize(work, [REPORTER_NAME]).fetch(0)
       list_report_path = File.join(work, 'discovery.json')
       marker_path = File.join(work, 'completion.json')
       File.open(list_report_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |file| file.close }
@@ -472,7 +477,7 @@ begin
       list_env = child_environment(node, work, browser_cache: browser_cache,
         report_path: list_report_path, marker_path: marker_path)
       list_argv = [node, cli, 'test', '--config', 'playwright.config.ts', '--list', '--project', project,
-        '--reporter', REPORTER]
+        '--reporter', reporter_path]
       list_status, = run_bounded(list_argv, chdir: app_root, env: list_env)
       reject!('runner_failed') unless list_status == 0
       marker = checked_file(marker_path, work, 4096)
