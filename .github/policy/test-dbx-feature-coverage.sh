@@ -20,6 +20,7 @@ export RUNNER_TEMP="${fixture}" GITHUB_STEP_SUMMARY="${fixture}/summary"
 touch "${fixture}/source/.config/nextest.toml"
 cd "${fixture}/source"
 calls="${fixture}/calls"
+path_calls="${fixture}/path-calls"
 simulation=''
 # The real run_deferred/build splitter executes only this synthetic command stand-in.
 run_quiet() {
@@ -27,6 +28,7 @@ run_quiet() {
   printf '%s|' "${label}" >> "${calls}"
   printf '%s ' "$@" >> "${calls}"
   printf '\n' >> "${calls}"
+  printf '%s|%s\n' "${label}" "${PATH}" >> "${path_calls}"
   case "${simulation}" in
     missing-feature) [[ " $* " != *' --features=legacy-tls '* ]] || return 42 ;;
     missing-target) [[ " $* " != *' --test=dbx_route_dial '* ]] || return 42 ;;
@@ -40,7 +42,7 @@ run_quiet() {
 }
 cargo_test_reason() { printf '%s\n' 'synthetic required-case failure'; }
 reset_case() {
-  : > "${calls}"; : > "${GITHUB_STEP_SUMMARY}"
+  : > "${calls}"; : > "${path_calls}"; : > "${GITHUB_STEP_SUMMARY}"
   deferred_results=(); deferred_failed=0; deferred_timing=''; simulation=''
 }
 reset_case
@@ -66,6 +68,37 @@ rust_tests rust-db-tests --package=taurine-db-engine
 grep -qF 'rust-db-doctests|cargo test ' "${calls}"
 ! grep -E -- '^rust-db-tests\|.*--no-tests|^rust-db-tests\|.*--features=' "${calls}"
 [[ -z "${NEXTEST_DOCTESTS:-}" && -z "${NEXTEST_REQUIRE_TESTS:-}" ]]
+
+# Exercise the exact PATH-scoped invocation extracted from the Windows rust-db action.
+# The shared helper above expands it into the real fixed build, test and legacy doctest
+# commands; run_quiet records the environment while standing in for Cargo.
+windows_db_call="$(ruby -ryaml -e 'w=YAML.safe_load(File.read(ARGV[0]),aliases:false); run=w.fetch("runs").fetch("steps").map { |s| s["run"].to_s }.join("\n"); branch=run[/^\s*rust-db\)(.*?)^\s*;;/m,1] or abort "missing rust-db"; call=branch.lines.find { |line| line.include?("PATH=\"${dbx_feature_path}\" dbx_registered_feature_tests") } or abort "missing PATH-scoped call"; print call.strip' "${root}/.github/actions/windows-concern-rust/action.yml")"
+[[ "${windows_db_call}" == 'PATH="${dbx_feature_path}" dbx_registered_feature_tests "${db_packages[@]}"' ]]
+reset_case
+original_path="${PATH}"
+dbx_feature_path="/c/Strawberry/perl/bin:/c/Program Files/NASM:${PATH}"
+db_packages=(--package=taurine-db-engine --package=taurine-db-dbx)
+eval "${windows_db_call}"
+[[ "${PATH}" == "${original_path}" && "${deferred_failed}" -eq 0 ]]
+for label in rust-db-dbx-legacy-tls-build rust-db-dbx-legacy-tls-tests rust-db-dbx-legacy-tls-doctests rust-db-engine-dbx-route-build rust-db-engine-dbx-route-tests; do
+  grep -F "${label}|/c/Strawberry/perl/bin:/c/Program Files/NASM:${original_path}" "${path_calls}" >/dev/null || { echo "${label}: fixed Windows PATH was not inherited" >&2; exit 1; }
+done
+# The preceding ordinary database tests use the original PATH; no feature flags leak.
+reset_case
+rust_tests rust-db-tests --package=taurine-db-engine
+[[ "${PATH}" == "${original_path}" ]]
+grep -F "rust-db-tests|${original_path}" "${path_calls}" >/dev/null
+grep -F "rust-db-doctests|${original_path}" "${path_calls}" >/dev/null
+! grep -E -- '^rust-db-tests\|.*--no-tests|^rust-db-tests\|.*--features=' "${calls}"
+# A required feature failure remains a failure and the caller's PATH is still restored.
+reset_case
+simulation=missing-target
+eval "${windows_db_call}"
+[[ "${PATH}" == "${original_path}" && "${deferred_failed}" -eq 1 ]]
+if (finish_deferred) >/dev/null 2>&1; then
+  echo 'feature failure unexpectedly passed aggregation' >&2; exit 1
+fi
+grep -F 'rust-db-engine-dbx-route-build|' "${calls}" >/dev/null
 
 for failure in missing-feature missing-target no-tests; do
   reset_case; simulation="${failure}"

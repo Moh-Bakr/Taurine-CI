@@ -203,7 +203,7 @@ jobs:
               echo 'only: no concern name given' >&2
               exit 1
             fi
-            unknown="$(jq -n -c --argjson only "${only_list}" --argjson known "${known}" '$only - $known | join(",")')"
+            unknown="$(jq -n -r --argjson only "${only_list}" --argjson known "${known}" '$only - $known | join(",")')"
             if [[ -n "${unknown}" ]]; then
               echo "only: not a Windows concern of this dispatch (unknown name, or rust=false): ${unknown}" >&2
               exit 1

@@ -4,7 +4,7 @@ require 'json'
 require 'yaml'
 
 ROOT = ARGV[0] || '.'
-EXPECTED_WORKFLOWS = %w[
+DEPLOYED_WORKFLOWS = %w[
   .github/workflows/android-validation.yml
   .github/workflows/ios-validation.yml
   .github/workflows/linux-validation.yml
@@ -13,6 +13,11 @@ EXPECTED_WORKFLOWS = %w[
   .github/workflows/orchestrate-validation.yml
   .github/workflows/windows-validation.yml
 ].freeze
+PG8_WORKFLOW = '.github/workflows/pg8-measurement.yml'.freeze
+# Final Stage 2 recognizes only the exact deployed set with the standalone PG8
+# dispatcher. The predecessor rollout policy separately permits the old set.
+COMPATIBLE_WORKFLOW_SETS = [(DEPLOYED_WORKFLOWS + [PG8_WORKFLOW]).sort].freeze
+EXPECTED_WORKFLOWS = (DEPLOYED_WORKFLOWS + [PG8_WORKFLOW]).freeze
 PREFLIGHT = {
   '.github/workflows/android-validation.yml' => 'plan',
   '.github/workflows/ios-validation.yml' => 'plan',
@@ -20,7 +25,8 @@ PREFLIGHT = {
   '.github/workflows/live-proofs.yml' => 'plan',
   '.github/workflows/macos-validation.yml' => 'plan',
   '.github/workflows/orchestrate-validation.yml' => 'validate-input',
-  '.github/workflows/windows-validation.yml' => 'validate-input'
+  '.github/workflows/windows-validation.yml' => 'validate-input',
+  PG8_WORKFLOW => 'plan'
 }.freeze
 EXPECTED_RUN_NAME = 'Taurine validation ${{ inputs.source_sha }} ${{ inputs.dispatch_key }}'
 SHA40 = { 'type' => 'string', 'required' => true, 'format' => 'sha40', 'digest_include' => true }.freeze
@@ -54,7 +60,8 @@ EXPECTED_INPUTS = {
     'engine' => { 'type' => 'string', 'required' => true, 'format' => 'engine-selection',
                   'options' => LIVE_ENGINE_ROSTER, 'digest_include' => true },
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY
-  }
+  },
+  PG8_WORKFLOW => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY }
 }.freeze
 SOURCE_SHA_RUN = <<~'SH'.freeze
   set -euo pipefail
@@ -115,6 +122,11 @@ SOURCE_SHA_STEPS = {
     'name' => 'Validate exact source SHA', 'shell' => 'bash',
     'env' => { 'REQUESTED_SOURCE_SHA' => '${{ inputs.source_sha }}' },
     'run' => SOURCE_SHA_RUN
+  },
+  PG8_WORKFLOW => {
+    'name' => 'Validate exact source SHA', 'shell' => 'bash',
+    'env' => { 'REQUESTED_SOURCE_SHA' => '${{ inputs.source_sha }}' },
+    'run' => SOURCE_SHA_RUN
   }
 }.freeze
 failures = []
@@ -150,7 +162,9 @@ unless contract.is_a?(Hash) && contract['version'] == 1 &&
   contract = {}
 end
 workflows = contract['workflows'] || {}
-failures << '.github/ci-matrix.json: dispatch workflow set differs from the reviewed protected entrypoints' unless workflows.keys.sort == EXPECTED_WORKFLOWS.sort
+unless COMPATIBLE_WORKFLOW_SETS.include?(workflows.keys.sort)
+  failures << '.github/ci-matrix.json: dispatch workflow set must match the exact deployed PG8 set'
+end
 EXPECTED_INPUTS.each do |path, expected_inputs|
   actual_inputs = workflows.dig(path, 'inputs')
   matches = actual_inputs == expected_inputs
@@ -200,6 +214,20 @@ workflows.each do |path, spec|
   end
   expected_job = PREFLIGHT.fetch(path)
   jobs = doc['jobs'] || {}
+  if path == PG8_WORKFLOW
+    caller_permissions = jobs.dig('measure', 'permissions')
+    unless caller_permissions == { 'actions' => 'read', 'contents' => 'read' }
+      failures << "#{path}: reusable caller must grant exactly actions: read and contents: read for the nested pre-flight"
+    end
+    arm = load_yaml(File.join(ROOT, '.github/workflows/pg8-measurement-arm.yml'))
+    arm_jobs = arm.is_a?(Hash) ? arm['jobs'] || {} : {}
+    unless arm_jobs.dig('preflight', 'permissions') == { 'actions' => 'read', 'contents' => 'read' }
+      failures << '.github/workflows/pg8-measurement-arm.yml: nested pre-flight must request exactly actions: read and contents: read'
+    end
+    unless arm_jobs.dig('measure', 'permissions') == { 'contents' => 'read' }
+      failures << '.github/workflows/pg8-measurement-arm.yml: source-bearing measurement job must remain limited to contents: read'
+    end
+  end
   job = jobs[expected_job]
   steps = job.is_a?(Hash) ? job['steps'] || [] : []
   proofs = []

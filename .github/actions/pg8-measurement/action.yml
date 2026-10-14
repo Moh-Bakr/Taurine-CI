@@ -1,0 +1,233 @@
+name: Measure the fixed DBX PG8 probe and desktop release size
+description: Runs one fixed probe binary and compares the real UAT desktop executable with DBX disabled and enabled.
+inputs:
+  source-path:
+    description: Verified source checkout path
+    required: false
+    default: src
+runs:
+  using: composite
+  steps:
+    - name: Run fixed PG8 probe and UAT release comparisons
+      id: measure
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        SOURCE_PATH: ${{ inputs.source-path }}
+      run: |
+        set -euo pipefail
+        step_output="${GITHUB_OUTPUT:-}"
+        unset GITHUB_OUTPUT
+        target_root=''
+        summary_dir=''
+        build_log=''
+        record_allocated_paths() {
+          [[ -n "${step_output}" ]] || return 0
+          printf 'target_root=%s\nsummary_dir=%s\nbuild_log=%s\n' "${target_root}" "${summary_dir}" "${build_log}" >>"${step_output}" || true
+        }
+        trap record_allocated_paths EXIT
+        owner_uid() { python3 - "$1" 2>/dev/null <<'PY'
+        import os, sys
+        print(os.stat(sys.argv[1], follow_symlinks=False).st_uid)
+        PY
+        }
+        if [[ "${SOURCE_PATH}" != src || ! -d "${GITHUB_WORKSPACE}/src" || -L "${GITHUB_WORKSPACE}/src" ]]; then
+          echo 'PG8 source path is not the fixed checkout directory' >&2
+          exit 1
+        fi
+        workspace_real="$(cd "${GITHUB_WORKSPACE}" && pwd -P)"
+        source_dir="${workspace_real}/src"
+        source_real="$(cd "${source_dir}" && pwd -P)"
+        if [[ "${source_real}" != "${workspace_real}/src" || ! -d "${RUNNER_TEMP}" || -L "${RUNNER_TEMP}" || ! -w "${RUNNER_TEMP}" || "$(owner_uid "${RUNNER_TEMP}" || true)" != "$(id -u)" ]]; then
+          echo 'PG8 source or runner directory failed fixed path validation' >&2
+          exit 1
+        fi
+        runner_temp_real="$(cd "${RUNNER_TEMP}" && pwd -P)"
+        if [[ "${runner_temp_real}" == "${source_real}" || "${runner_temp_real}" == "${source_real}/"* ]]; then
+          echo 'PG8 runner directory must be outside the source checkout' >&2
+          exit 1
+        fi
+        if [[ ! "${GITHUB_RUN_ID:-}" =~ ^[0-9]{1,20}$ || ! "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]{1,6}$ ]]; then
+          echo 'PG8 run identity is invalid' >&2
+          exit 1
+        fi
+        policy="${GITHUB_WORKSPACE}/.github/policy/pg8-measurement.py"
+        target="x86_64-unknown-linux-gnu"
+        target_base="${runner_temp_real}"
+        if [[ "${CARGO_TARGET_DIR:-}" == /mnt/cargo-target && -d /mnt/cargo-target && ! -L /mnt/cargo-target && -w /mnt/cargo-target && "$(owner_uid /mnt/cargo-target || true)" == "$(id -u)" && "$(cd /mnt/cargo-target && pwd -P)" == /mnt/cargo-target ]]; then
+          target_base=/mnt/cargo-target
+        fi
+        target_candidate="${target_base}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        if [[ -e "${target_candidate}" || -L "${target_candidate}" ]]; then
+          echo 'PG8 run target directory already exists' >&2
+          exit 1
+        fi
+        mkdir -m 0700 -- "${target_candidate}"
+        target_root="${target_candidate}"
+        probe_target="${target_root}/probe"
+        product_off_target="${target_root}/product-off"
+        product_on_target="${target_root}/product-on"
+        mkdir -m 0700 -- "${probe_target}" "${product_off_target}" "${product_on_target}"
+        export CARGO_TARGET_DIR="${probe_target}"
+        summary_candidate="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-summary"
+        if [[ -e "${summary_candidate}" || -L "${summary_candidate}" ]]; then
+          echo 'PG8 run summary directory already exists' >&2
+          exit 1
+        fi
+        run_nonce="$$"
+        build_log_candidate="${runner_temp_real}/pg8-probe-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${run_nonce}.log"
+        if [[ -e "${build_log_candidate}" || -L "${build_log_candidate}" ]]; then
+          echo 'PG8 run build log already exists' >&2
+          exit 1
+        fi
+        (umask 077 && : >"${build_log_candidate}")
+        build_log="${build_log_candidate}"
+        emit_build_failure_category() {
+          local format="$1" target="$2" status="$3" log="$4" category_output='' expected=''
+          case "${target}" in
+            dbx_pg8_performance_live|pg8-uat-release) ;;
+            *) target='dbx_pg8_performance_live' ;;
+          esac
+          if command -v ruby >/dev/null 2>&1; then
+            category_output="$(if ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" "${format}" "${target}" "${status}" --disposition <"${log}" 2>/dev/null; then helper_status=0; else helper_status=$?; fi; printf '\034'; exit "${helper_status}")" || category_output=''
+            if [[ "${category_output}" == *$'\034' ]]; then
+              category_output="${category_output%$'\034'}"
+              if [[ "${category_output}" == *$'\n' ]]; then category_output="${category_output%$'\n'}"; else category_output=''; fi
+            else
+              category_output=''
+            fi
+          fi
+          category_line="^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=${target}$"
+          disposition_line='^build-failure-disposition: value=(input-limit|malformed|ambiguous|no-match|helper-unavailable|classified)$'
+          match_values='^build-failure-matches: values=(none|linkerfailed(,package-or-feature-selection)?(,missingtarget)?(,dependency-resolution)?|package-or-feature-selection(,missingtarget)?(,dependency-resolution)?|missingtarget(,dependency-resolution)?|dependency-resolution)$'
+          output_first="${category_output%%$'\n'*}"
+          output_second=''
+          output_third=''
+          output_rest=''
+          if [[ "${category_output}" == *$'\n'* ]]; then
+            output_rest="${category_output#*$'\n'}"
+            output_second="${output_rest%%$'\n'*}"
+            if [[ "${output_rest}" == *$'\n'* ]]; then output_third="${output_rest#*$'\n'}"; fi
+          fi
+          if [[ "${output_rest}" == *$'\n'* && "${output_third}" != *$'\n'* && "${output_first}" =~ ${category_line} && "${output_second}" =~ ${disposition_line} && "${output_third}" =~ ${match_values} ]]; then
+            printf '%s\n' "${category_output}" >&2
+          elif [[ "${output_rest}" != *$'\n'* && "${output_first}" =~ ${category_line} && "${output_second}" =~ ${disposition_line} && -z "${output_third}" ]]; then
+            printf '%s\n' "${category_output}" >&2
+          elif [[ "${category_output}" != *$'\n'* && "${output_first}" =~ ${category_line} && -z "${output_second}" && -z "${output_third}" ]]; then
+            printf '%s\n' "${category_output}" >&2
+            printf 'build-failure-disposition: value=helper-unavailable\n' >&2
+          else
+            printf 'build-failure: category=other count=1 target=%s\n' "${target}" >&2
+            printf 'build-failure-disposition: value=helper-unavailable\n' >&2
+          fi
+        }
+        if (cd "${source_dir}" && cargo test --locked -p taurine-db-conformance --test dbx_pg8_performance_live --no-run --message-format=json --target "${target}") >"${build_log}" 2>&1; then
+          :
+        else
+          build_status=$?
+          echo 'PG8 probe compilation failed; detailed output withheld' >&2
+          emit_build_failure_category json dbx_pg8_performance_live "${build_status}" "${build_log}"
+          exit 1
+        fi
+        probe_bin="$(python3 "${policy}" artifact "${probe_target}" <"${build_log}")"
+        if [[ -e "${summary_candidate}" || -L "${summary_candidate}" ]]; then
+          echo 'PG8 run summary directory became unavailable' >&2
+          exit 1
+        fi
+        mkdir -m 0700 -- "${summary_candidate}"
+        summary_dir="${summary_candidate}"
+        for mode in paired legacy dbx; do
+          output="${summary_dir}/${mode}.out"
+          if [[ "${mode}" == paired ]]; then
+            set +e
+            (cd "${source_dir}" && TAURINE_TEST_DBX_PG8_REQUIRED=1 TAURINE_TEST_DBX_PG8_MODE="${mode}" "${probe_bin}" --exact dbx_pg8_performance_probe --nocapture --test-threads=1) >"${output}" 2>&1
+            status=$?
+            set -e
+            python3 "${policy}" probe "${mode}" "${status}" <"${output}" >"${summary_dir}/${mode}.json"
+          else
+            time_file="${summary_dir}/${mode}.time"
+            set +e
+            (cd "${source_dir}" && TAURINE_TEST_DBX_PG8_REQUIRED=1 TAURINE_TEST_DBX_PG8_MODE="${mode}" /usr/bin/time -v -o "${time_file}" "${probe_bin}" --exact dbx_pg8_performance_probe --nocapture --test-threads=1) >"${output}" 2>&1
+            status=$?
+            set -e
+            python3 "${policy}" probe "${mode}" "${status}" <"${output}" >"${summary_dir}/${mode}.json"
+            python3 "${policy}" rss "${status}" <"${time_file}" >"${summary_dir}/${mode}.rss"
+          fi
+        done
+
+        build_desktop() {
+          local flavor="$1" feature="$2" target_dir="${target_root}/product-${1}" log="${summary_dir}/product-${1}.log"
+          export CARGO_TARGET_DIR="${target_dir}"
+          local -a args=(--no-bundle --ci --config src-tauri/tauri.conf.uat.json --target "${target}")
+          [[ "${feature}" == on ]] && args+=(--features taurine-app/dbx-pg)
+          if (cd "${source_dir}" && npm --prefix taurine-desktop run tauri -- build "${args[@]}") >"${log}" 2>&1; then
+            :
+          else
+            build_status=$?
+            echo 'UAT desktop release build failed; detailed output withheld' >&2
+            emit_build_failure_category text pg8-uat-release "${build_status}" "${log}"
+            exit 1
+          fi
+          local executable="${target_dir}/${target}/release/taurine-desktop"
+          local resolved
+          resolved="$(python3 "${policy}" release "${executable}" "${target_dir}")"
+          wc -c <"${resolved}" | tr -d '[:space:]' >"${summary_dir}/size-${flavor}"
+        }
+        build_desktop off off
+        build_desktop on on
+        python3 - "${summary_dir}" "${GITHUB_STEP_SUMMARY}" <<'PY'
+        import json, pathlib, sys
+        root=pathlib.Path(sys.argv[1]); summary=pathlib.Path(sys.argv[2])
+        paired=json.loads((root/'paired.json').read_text())
+        legacy_rss=int((root/'legacy.rss').read_text())
+        dbx_rss=int((root/'dbx.rss').read_text())
+        off=int((root/'size-off').read_text()); on=int((root/'size-on').read_text())
+        with summary.open('a') as f:
+            f.write('## PostgreSQL DBX PG8 measurement\n\n')
+            f.write('- Paired probe: passed; 5 warmups, 30 alternating samples.\n')
+            f.write(f"- Connect-ready median: legacy {paired['connect_legacy_p50_us']} µs; DBX {paired['connect_dbx_p50_us']} µs; ratio {paired['connect_ratio_p50']}.\n")
+            f.write(f"- First-batch median: legacy {paired['first_row_legacy_p50_us']} µs; DBX {paired['first_row_dbx_p50_us']} µs; ratio {paired['first_row_ratio_p50']}; budget 1.1000.\n")
+            f.write(f'- Direct probe process peak RSS: legacy {legacy_rss} KiB; DBX {dbx_rss} KiB.\n')
+            f.write(f'- UAT desktop release executable size: feature off {off} bytes; feature on {on} bytes; delta {on-off:+d} bytes.\n')
+        PY
+    - name: Remove private measurement files and build outputs
+      if: ${{ always() }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        PG8_TARGET_ROOT: ${{ steps.measure.outputs.target_root }}
+        PG8_SUMMARY_DIR: ${{ steps.measure.outputs.summary_dir }}
+        PG8_BUILD_LOG: ${{ steps.measure.outputs.build_log }}
+      run: |
+        set -euo pipefail
+        pg8_build_log="${PG8_BUILD_LOG:-}"
+        owner_uid() { python3 - "$1" 2>/dev/null <<'PY'
+        import os, sys
+        print(os.stat(sys.argv[1], follow_symlinks=False).st_uid)
+        PY
+        }
+        runner_temp_real=''
+        if [[ -d "${RUNNER_TEMP:-}" && ! -L "${RUNNER_TEMP:-}" && -w "${RUNNER_TEMP}" && "$(owner_uid "${RUNNER_TEMP}" || true)" == "$(id -u)" ]]; then
+          runner_temp_real="$(cd "${RUNNER_TEMP}" && pwd -P 2>/dev/null || true)"
+        fi
+        if [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]{1,20}$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]{1,6}$ ]]; then
+          temp_root="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mount_root="/mnt/cargo-target/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ -n "${PG8_TARGET_ROOT:-}" && ( "${PG8_TARGET_ROOT}" == "${temp_root}" || "${PG8_TARGET_ROOT}" == "${mount_root}" ) ]]; then
+            owned_root="${PG8_TARGET_ROOT}"
+            owned_base="${owned_root%/pg8-measurement-*}"
+            if [[ -d "${owned_base}" && ! -L "${owned_base}" && "$(cd "${owned_base}" && pwd -P)" == "${owned_base}" && "$(owner_uid "${owned_base}" || true)" == "$(id -u)" && -d "${owned_root}" && ! -L "${owned_root}" && "$(owner_uid "${owned_root}" || true)" == "$(id -u)" ]]; then
+              rm -rf -- "${owned_root}"
+            fi
+          fi
+          expected_summary="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-summary"
+          if [[ -n "${runner_temp_real}" && "${PG8_SUMMARY_DIR:-}" == "${expected_summary}" && -d "${expected_summary}" && ! -L "${expected_summary}" && "$(owner_uid "${expected_summary}" || true)" == "$(id -u)" ]]; then
+            rm -rf -- "${expected_summary}"
+          fi
+          log_prefix="${runner_temp_real}/pg8-probe-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
+          log_suffix="${pg8_build_log#"${log_prefix}"}"
+          log_pid="${log_suffix%.log}"
+          if [[ -n "${runner_temp_real}" && "${pg8_build_log}" == "${log_prefix}"* && "${log_suffix}" == *.log && "${log_pid}" =~ ^[0-9]+$ && -f "${pg8_build_log}" && ! -L "${pg8_build_log}" && "$(owner_uid "${pg8_build_log}" || true)" == "$(id -u)" ]]; then
+            rm -f -- "${pg8_build_log}"
+          fi
+        fi

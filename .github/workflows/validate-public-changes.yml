@@ -104,6 +104,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-extractors.sh
 
+      - name: Test sanitized build-failure category classification
+        shell: bash
+        run: bash .github/policy/test-build-failure-category.sh
+
       # The concern table, the dispatcher's matrix and the result check agree.
       - name: Check the concern table against the dispatcher
         shell: bash
@@ -153,9 +157,21 @@ jobs:
         shell: bash
         run: bash .github/policy/test-live-roster.sh
 
+      - name: Parse PostgreSQL fixture action shell blocks without executing them
+        shell: bash
+        run: bash .github/policy/test-live-start-pg-shell.sh
+
+      - name: Test control-owned PostgreSQL TLS fixtures without certificates or containers
+        shell: bash
+        run: bash .github/policy/test-pgtls-control-fixtures.sh
+
       - name: Test registered DBX feature coverage and old-source compatibility
         shell: bash
         run: bash .github/policy/test-dbx-feature-coverage.sh
+
+      - name: Test PG8 measurement parsers on adversarial fixtures
+        shell: bash
+        run: python3 .github/policy/test-pg8-measurement.py
 
       - name: Test the dispatch contract policy against weakened fixtures
         shell: bash

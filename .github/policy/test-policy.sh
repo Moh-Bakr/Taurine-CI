@@ -504,3 +504,5 @@ conc_fail "$(conc_file 'concurrency:
   group: wf-${{ github.run_id }}
   cancel-in-progress: true' cancelling)" 'cancel-in-progress true' 'cancel-in-progress'
 echo 'concurrency fixtures: per-run groups pass; shared groups and cancel-in-progress true are refused'
+
+bash .github/policy/test-repository.sh

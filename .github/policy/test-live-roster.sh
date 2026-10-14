@@ -35,7 +35,8 @@ jq -e '
   (keys | sort) == (["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"] | sort) and
   (."pg-dbx".suites == ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
   (.pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]) and
-  (.pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"]) and
+  ((.pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] or
+    .pgtls.cargo_features == ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"])) and
   (."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]) and
   (."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"]) and
   (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string"))
@@ -61,6 +62,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 legacy_config="$(jq -c '."tls-legacy"' <<< "${roster}")"
 pgtls_config="$(jq -c '.pgtls' <<< "${roster}")"
+pgtls_engine_feature="$(jq -r '.pgtls.cargo_features[0]' <<< "${roster}")"
 validate_arm() {
   local engine="$1" config="$2" expected="$3" label="$4"
   local status=0
@@ -85,6 +87,7 @@ validate_arm tls-legacy "$(jq -c 'del(.cargo_features)' <<< "${legacy_config}")"
 validate_arm tls-legacy "$(jq -c '.suites=["taurine-db-conformance dbx_pg_tls_live dbx_tls_"]' <<< "${legacy_config}")" reject 'ordinary target in legacy arm'
 validate_arm pgtls "$(jq -c '.suites=["taurine-db-postgres live_tls"]' <<< "${pgtls_config}")" reject 'missing ordinary DBX TLS target'
 validate_arm pgtls "$(jq -c '. + {cargo_features:["unreviewed/feature"]}' <<< "${pgtls_config}")" reject 'unreviewed mTLS feature'
+validate_arm pgtls "$(jq -c '. + {cargo_features:["taurine-db-dbx/dbx-pg","taurine-db-dbx/legacy-tls"]}' <<< "${pgtls_config}")" reject 'old package feature reference'
 validate_arm pgtls "$(jq -c '.suites |= .[0:2]' <<< "${pgtls_config}")" reject 'missing mTLS target'
 validate_arm tls-legacy "$(jq -c '. + {cargo_command:"echo untrusted"}' <<< "${legacy_config}")" reject 'unreviewed project command'
 
@@ -92,6 +95,8 @@ validate_arm tls-legacy "$(jq -c '. + {cargo_command:"echo untrusted"}' <<< "${l
 # and a synthetic target file. This proves the fixed feature and exact test
 # filters reach Cargo while never invoking a source build or test binary.
 mkdir -p "${work}/runner" "${work}/fake-source/taurine-backend/taurine-db-conformance/tests" "${work}/fakebin"
+mkdir -p "${work}/fake-source/.github/policy"
+cp .github/policy/build-failure-category.rb "${work}/fake-source/.github/policy/build-failure-category.rb"
 printf '// synthetic target marker\n' > "${work}/fake-source/taurine-backend/taurine-db-conformance/tests/dbx_pg_tls_live.rs"
 printf '// synthetic target marker\n' > "${work}/fake-source/taurine-backend/taurine-db-conformance/tests/dbx_pg_mtls_live.rs"
 cat > "${work}/fakebin/cargo" <<'FAKE_CARGO'
@@ -99,6 +104,19 @@ cat > "${work}/fakebin/cargo" <<'FAKE_CARGO'
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_CARGO_LOG}"
 if [[ "$*" == *--no-run* ]]; then
+  if [[ "${FAKE_CARGO_MODE:-}" == compiler-heavy ]]; then
+    printf 'error[E0046]: private message SECRET_COMPILER_MESSAGE\n  --> /private/var/runner/SECRET_PATH/src/private.rs:9:7\n'
+    for index in $(seq 1 80); do printf 'warning: PRIVATE_WARNING_%s SECRET_WARNING_VALUE\n' "${index}"; done
+    exit 101
+  fi
+  if [[ "${FAKE_CARGO_MODE:-}" == compiler-nocode ]]; then
+    printf 'error: private compiler failure SECRET_NONCODE_MESSAGE /home/runner/work/private/src/lib.rs:4:2\n'
+    exit 101
+  fi
+  if [[ "${FAKE_CARGO_MODE:-}" == compiler-empty ]]; then
+    printf 'cargo process failed before diagnostics SECRET_EMPTY_MESSAGE /home/runner/work/private/src/lib.rs\n'
+    exit 2
+  fi
   echo 'Finished synthetic proof binary build'
   exit 0
 fi
@@ -135,7 +153,9 @@ for required in TAURINE_TEST_DBX_MTLS_REQUIRED TAURINE_TEST_PG_MTLS_SERVER_CA TA
   grep -Fq "${required}" "${work}/start-pg.sh" || { echo "live roster fixture: pgtls does not export ${required}" >&2; exit 1; }
 done
 grep -Fq 'ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1' "${work}/start-pg.sh" || {
-  echo 'live roster fixture: TLS10 endpoint is not pinned to TLS 1.0 only' >&2; exit 1;
+  if ! grep -Fq 'tls10)' .github/policy/pgtls-postgres-entrypoint.sh || ! grep -Fq 'ssl_max_protocol_version=TLSv1' .github/policy/pgtls-postgres-entrypoint.sh; then
+    echo 'live roster fixture: TLS10 endpoint is not pinned to TLS 1.0 only' >&2; exit 1;
+  fi
 }
 grep -Fq '[[ "${got}" == "TLSv1" && -z "${refused}" ]] && tls10_ok=1' "${work}/start-pg.sh" || {
   echo 'live roster fixture: TLS10 readiness does not require a TLSv1 handshake' >&2; exit 1;
@@ -150,7 +170,7 @@ run_fake_actions() {
   (
     set -e
     cd "${work}/fake-source"
-    RUNNER_TEMP="${runner}" FAKE_CARGO_LOG="${log}" FAKE_CARGO_MODE="${mode}" PATH="${work}/fakebin:${PATH}" bash "${work}/build.sh"
+    RUNNER_TEMP="${runner}" GITHUB_WORKSPACE="${work}/fake-source" FAKE_CARGO_LOG="${log}" FAKE_CARGO_MODE="${mode}" PATH="${work}/fakebin:${PATH}" bash "${work}/build.sh"
     RUNNER_TEMP="${runner}" FAKE_CARGO_LOG="${log}" FAKE_CARGO_MODE="${mode}" PATH="${work}/fakebin:${PATH}" bash "${work}/run.sh"
   ) > "${work}/fake-${label}.out" 2> "${work}/fake-${label}.err" || command_status=$?
   if [[ "${expected}" == pass && "${command_status}" -ne 0 ]]; then
@@ -169,16 +189,55 @@ grep -Fq -- '-p taurine-db-conformance --test dbx_pg_tls_live dbx_tls_ -- --noca
 grep -Fq 'taurine-db-conformance [dbx_pg_tls_live] dbx_tls_ passed=2 skipped=0' "${work}/runner-pgtls/suite-results.txt" || {
   echo 'live roster fixture: ordinary DBX TLS suite did not produce the required two executed tests' >&2; exit 1;
 }
-grep -Fq -- '-p taurine-db-conformance --features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live dbx_pg_mtls_ -- --nocapture' "${work}/cargo-pgtls.log" || {
+grep -Fq -- "-p taurine-db-conformance --features ${pgtls_engine_feature} --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live dbx_pg_mtls_ -- --nocapture" "${work}/cargo-pgtls.log" || {
   echo 'live roster fixture: pgtls did not scope both fixed mTLS features and filter to the mTLS target' >&2; exit 1;
 }
-if grep -F -- '-p taurine-db-conformance --features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live' "${work}/cargo-pgtls.log" >/dev/null; then
+if grep -F -- "-p taurine-db-conformance --features ${pgtls_engine_feature} --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live" "${work}/cargo-pgtls.log" >/dev/null; then
   echo 'live roster fixture: mTLS-only features leaked to the ordinary TLS suite' >&2; exit 1;
 fi
 grep -Fq 'taurine-db-conformance [dbx_pg_mtls_live] dbx_pg_mtls_ passed=8 skipped=0' "${work}/runner-pgtls/suite-results.txt" || {
   echo 'live roster fixture: mTLS suite did not produce the required eight executed cases' >&2; exit 1;
 }
 run_fake_actions tls-legacy "${legacy_config}" tls-legacy pass2 pass
+run_fake_actions tls-legacy "${legacy_config}" compiler-heavy compiler-heavy reject
+grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live codes=E0046=1' "${work}/fake-compiler-heavy.err" || {
+  echo 'live roster fixture: an early Rust compiler code was hidden by warning-heavy output' >&2; exit 1;
+}
+grep -Fq 'build-failure: category=other count=1 target=dbx_pg_tls_live' "${work}/fake-compiler-heavy.err" || {
+  echo 'live roster fixture: compiler-heavy failure omitted its protected category summary' >&2; exit 1;
+}
+if grep -E 'LoadError|cannot load such file' "${work}/fake-compiler-heavy.err" >/dev/null; then
+  echo 'live roster fixture: protected classifier helper was unavailable in the fake workspace' >&2; exit 1;
+fi
+if grep -E 'SECRET_|PRIVATE_WARNING_|/private/var|/home/runner/work' "${work}/fake-compiler-heavy.err" >/dev/null; then
+  echo 'live roster fixture: compiler diagnostic summary leaked a private message, path, or warning' >&2; exit 1;
+fi
+run_fake_actions tls-legacy "${legacy_config}" compiler-nocode compiler-nocode reject
+grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live code=unclassified count=1' "${work}/fake-compiler-nocode.err" || {
+  echo 'live roster fixture: code-less compiler error was not classified as unclassified' >&2; exit 1;
+}
+grep -Fq 'build-failure: category=other count=1 target=dbx_pg_tls_live' "${work}/fake-compiler-nocode.err" || {
+  echo 'live roster fixture: code-less compiler failure omitted its protected category summary' >&2; exit 1;
+}
+if grep -E 'LoadError|cannot load such file' "${work}/fake-compiler-nocode.err" >/dev/null; then
+  echo 'live roster fixture: protected classifier helper was unavailable for the code-less case' >&2; exit 1;
+fi
+if grep -E 'SECRET_|/home/runner/work' "${work}/fake-compiler-nocode.err" >/dev/null; then
+  echo 'live roster fixture: code-less diagnostic leaked private content' >&2; exit 1;
+fi
+run_fake_actions tls-legacy "${legacy_config}" compiler-empty compiler-empty reject
+grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live code=unclassified count=0' "${work}/fake-compiler-empty.err" || {
+  echo 'live roster fixture: failure without compiler diagnostics was not visibly unclassified' >&2; exit 1;
+}
+grep -Fq 'build-failure: category=other count=1 target=dbx_pg_tls_live' "${work}/fake-compiler-empty.err" || {
+  echo 'live roster fixture: empty compiler failure omitted its protected category summary' >&2; exit 1;
+}
+if grep -E 'LoadError|cannot load such file' "${work}/fake-compiler-empty.err" >/dev/null; then
+  echo 'live roster fixture: protected classifier helper was unavailable for the empty case' >&2; exit 1;
+fi
+if grep -E 'SECRET_|/home/runner/work' "${work}/fake-compiler-empty.err" >/dev/null; then
+  echo 'live roster fixture: noncompiler failure leaked private content' >&2; exit 1;
+fi
 grep -Fq -- '-p taurine-db-conformance --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live legacy -- --nocapture' "${work}/cargo-tls-legacy.log" || {
   echo 'live roster fixture: tls-legacy did not pass the fixed feature and filter to cargo' >&2; exit 1;
 }
@@ -214,3 +273,12 @@ grep -q 'parse error' "${work}/invalid-stderr" || {
 }
 
 echo 'live roster: extracted plan selects all 13 arms; arm schema binds exact DBX TLS tests and feature'
+if [[ "${LIVE_ROSTER_HOST_PREFIX_CHILD:-}" != 1 ]]; then
+  hosted_temp="${work}/hosted-prefix/home/runner/work/_temp"
+  mkdir -p "${hosted_temp}"
+  if ! RUNNER_TEMP="${hosted_temp}" LIVE_ROSTER_HOST_PREFIX_CHILD=1 bash "${BASH_SOURCE[0]}" >"${work}/hosted-prefix.out" 2>"${work}/hosted-prefix.err"; then
+    echo 'live roster fixture: hosted-style /home/runner/work/_temp prefix failed' >&2
+    exit 1
+  fi
+  echo 'live roster fixture: hosted-style /home/runner/work/_temp prefix passed'
+fi

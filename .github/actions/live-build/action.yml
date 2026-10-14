@@ -20,10 +20,75 @@ runs:
             sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' |
             cut -c1-200
         }
-        cargo_detail() {
-          cargo_sanitize "$1" |
-            grep -E '^(error(\[E[0-9]{4}\])?|warning): |^[[:space:]]*--> |^test result: |^failures:$' |
-            head -40 >&2 || true
+        cargo_diagnostic_summary() {
+          local log="$1" target="$2" codes="" diagnostic_count="0" coded_count="0" unclassified_count="0"
+          diagnostic_count="$(cargo_sanitize "${log}" | grep -Ec '^error(\[E[0-9]{4}\])?:' || true)"
+          codes="$(cargo_sanitize "${log}" |
+            { grep -E '^error\[E[0-9]{4}\]:' || true; } |
+            sed -E 's/^error\[([^]]+)\]:.*/\1/' |
+            LC_ALL=C sort | uniq -c |
+            awk '{ if (out != "") out = out ","; out = out $2 "=" $1; total += $1 } END { printf "%s\n%s", out, total+0 }')"
+          coded_lines="${codes%%$'\n'*}"
+          coded_count="${codes##*$'\n'}"
+          if (( coded_count > 0 )); then
+            unclassified_count=$((diagnostic_count - coded_count))
+            if [[ -n "${coded_lines}" ]]; then
+              echo "proof-build: compiler diagnostics target=${target} codes=${coded_lines}" >&2
+            fi
+            if (( unclassified_count > 0 )); then
+              echo "proof-build: compiler diagnostics target=${target} code=unclassified count=${unclassified_count}" >&2
+            fi
+          else
+            echo "proof-build: compiler diagnostics target=${target} code=unclassified count=${diagnostic_count}" >&2
+          fi
+        }
+        emit_build_failure_category() {
+          local target="$1" status="$2" log="$3" category_output='' expected=''
+          case "${target}" in
+            dbx_pg_tls_live|dbx_pg_mtls_live|dbx_pg8_performance_live|pg8-uat-release|selected-live-proof-target) ;;
+            *) target='selected-live-proof-target' ;;
+          esac
+          if command -v ruby >/dev/null 2>&1; then
+            category_output="$(if ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text "${target}" "${status}" --disposition <"${log}" 2>/dev/null; then helper_status=0; else helper_status=$?; fi; printf '\034'; exit "${helper_status}")" || category_output=''
+            if [[ "${category_output}" == *$'\034' ]]; then
+              category_output="${category_output%$'\034'}"
+              if [[ "${category_output}" == *$'\n' ]]; then category_output="${category_output%$'\n'}"; else category_output=''; fi
+            else
+              category_output=''
+            fi
+          fi
+          category_line="^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=${target}$"
+          disposition_line='^build-failure-disposition: value=(input-limit|malformed|ambiguous|no-match|helper-unavailable|classified)$'
+          match_values='^build-failure-matches: values=(none|linkerfailed(,package-or-feature-selection)?(,missingtarget)?(,dependency-resolution)?|package-or-feature-selection(,missingtarget)?(,dependency-resolution)?|missingtarget(,dependency-resolution)?|dependency-resolution)$'
+          output_first="${category_output%%$'\n'*}"
+          output_second=''
+          output_third=''
+          output_rest=''
+          if [[ "${category_output}" == *$'\n'* ]]; then
+            output_rest="${category_output#*$'\n'}"
+            output_second="${output_rest%%$'\n'*}"
+            if [[ "${output_rest}" == *$'\n'* ]]; then output_third="${output_rest#*$'\n'}"; fi
+          fi
+          if [[ "${output_rest}" == *$'\n'* && "${output_third}" != *$'\n'* && "${output_first}" =~ ${category_line} && "${output_second}" =~ ${disposition_line} && "${output_third}" =~ ${match_values} ]]; then
+            printf '%s\n' "${category_output}" >&2
+          elif [[ "${output_rest}" != *$'\n'* && "${output_first}" =~ ${category_line} && "${output_second}" =~ ${disposition_line} && -z "${output_third}" ]]; then
+            printf '%s\n' "${category_output}" >&2
+          elif [[ "${category_output}" != *$'\n'* && "${output_first}" =~ ${category_line} && -z "${output_second}" && -z "${output_third}" ]]; then
+            printf '%s\n' "${category_output}" >&2
+            printf 'build-failure-disposition: value=helper-unavailable\n' >&2
+          else
+            printf 'build-failure: category=other count=1 target=%s\n' "${target}" >&2
+            printf 'build-failure-disposition: value=helper-unavailable\n' >&2
+          fi
+        }
+        fixed_target_label() {
+          case "$1:$2:$3" in
+            pgtls:taurine-db-conformance:dbx_pg_tls_live|tls-legacy:taurine-db-conformance:dbx_pg_tls_live)
+              printf '%s' 'dbx_pg_tls_live' ;;
+            pgtls:taurine-db-conformance:dbx_pg_mtls_live)
+              printf '%s' 'dbx_pg_mtls_live' ;;
+            *) printf '%s' 'selected-live-proof-target' ;;
+          esac
         }
         # Multi-suite arms run several cargo suites each, the ones
         # scripts/check-db.sh in the private repository lists for that engine.
@@ -37,7 +102,7 @@ runs:
           if .engine == "tls-legacy" then
             .cargo_features == ["taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]
           elif .engine == "pgtls" then
-            .cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]
+            .cargo_features == ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"] and .suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]
           else (.cargo_features // []) == []
           end
         ' "${arm}" >/dev/null || { echo 'proof-build: unreviewed features or DBX suite definition' >&2; exit 1; }
@@ -60,23 +125,31 @@ runs:
             if [[ "${engine}" == 'tls-legacy' ]]; then
               build_args+=(--features taurine-db-dbx/legacy-tls)
             elif [[ "${engine}" == 'pgtls' && "${targets}" == dbx_pg_mtls_live ]]; then
-              build_args+=(--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls)
+              build_args+=(--features taurine-db-engine/dbx-pg --features taurine-db-dbx/legacy-tls)
             fi
             IFS=, read -ra tl <<< "${targets}"
             for t in "${tl[@]}"; do build_args+=(--test "${t}"); done
-            if ! cargo test -p "${pkg}" "${build_args[@]}" --no-run \
+            if cargo test -p "${pkg}" "${build_args[@]}" --no-run \
               </dev/null >>"${RUNNER_TEMP}/build.log" 2>&1; then
-              echo "proof-build: failed for ${pkg}; sanitized detail below" >&2
-              cargo_detail "${RUNNER_TEMP}/build.log"
+              :
+            else
+              build_status=$?
+              echo 'proof-build: failed; compiler diagnostics follow' >&2
+              cargo_diagnostic_summary "${RUNNER_TEMP}/build.log" "$(fixed_target_label "${engine}" "${pkg}" "${targets}")"
+              emit_build_failure_category "$(fixed_target_label "${engine}" "${pkg}" "${targets}")" "${build_status}" "${RUNNER_TEMP}/build.log"
               exit 1
             fi
           done < "${suites}"
         else
           target="$(jq -er '.target' "${arm}")"
-          if ! cargo test -p taurine-db-conformance --test "${target}" --no-run \
+          if cargo test -p taurine-db-conformance --test "${target}" --no-run \
             >"${RUNNER_TEMP}/build.log" 2>&1; then
-            echo 'proof-build: failed; sanitized detail below' >&2
-            cargo_detail "${RUNNER_TEMP}/build.log"
+            :
+          else
+            build_status=$?
+            echo 'proof-build: failed; compiler diagnostics follow' >&2
+            cargo_diagnostic_summary "${RUNNER_TEMP}/build.log" "$(fixed_target_label "${engine}" 'taurine-db-conformance' "${target}")"
+            emit_build_failure_category "$(fixed_target_label "${engine}" 'taurine-db-conformance' "${target}")" "${build_status}" "${RUNNER_TEMP}/build.log"
             exit 1
           fi
         fi
