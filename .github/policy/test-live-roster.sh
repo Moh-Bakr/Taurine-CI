@@ -35,7 +35,8 @@ jq -e '
   (keys | sort) == (["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"] | sort) and
   (."pg-dbx".suites == ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
   (.pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]) and
-  (.pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"]) and
+  ((.pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] or
+    .pgtls.cargo_features == ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"])) and
   (."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]) and
   (."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"]) and
   (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string"))
@@ -61,6 +62,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 legacy_config="$(jq -c '."tls-legacy"' <<< "${roster}")"
 pgtls_config="$(jq -c '.pgtls' <<< "${roster}")"
+pgtls_engine_feature="$(jq -r '.pgtls.cargo_features[0]' <<< "${roster}")"
 validate_arm() {
   local engine="$1" config="$2" expected="$3" label="$4"
   local status=0
@@ -85,6 +87,7 @@ validate_arm tls-legacy "$(jq -c 'del(.cargo_features)' <<< "${legacy_config}")"
 validate_arm tls-legacy "$(jq -c '.suites=["taurine-db-conformance dbx_pg_tls_live dbx_tls_"]' <<< "${legacy_config}")" reject 'ordinary target in legacy arm'
 validate_arm pgtls "$(jq -c '.suites=["taurine-db-postgres live_tls"]' <<< "${pgtls_config}")" reject 'missing ordinary DBX TLS target'
 validate_arm pgtls "$(jq -c '. + {cargo_features:["unreviewed/feature"]}' <<< "${pgtls_config}")" reject 'unreviewed mTLS feature'
+validate_arm pgtls "$(jq -c '. + {cargo_features:["taurine-db-dbx/dbx-pg","taurine-db-dbx/legacy-tls"]}' <<< "${pgtls_config}")" reject 'old package feature reference'
 validate_arm pgtls "$(jq -c '.suites |= .[0:2]' <<< "${pgtls_config}")" reject 'missing mTLS target'
 validate_arm tls-legacy "$(jq -c '. + {cargo_command:"echo untrusted"}' <<< "${legacy_config}")" reject 'unreviewed project command'
 
@@ -186,10 +189,10 @@ grep -Fq -- '-p taurine-db-conformance --test dbx_pg_tls_live dbx_tls_ -- --noca
 grep -Fq 'taurine-db-conformance [dbx_pg_tls_live] dbx_tls_ passed=2 skipped=0' "${work}/runner-pgtls/suite-results.txt" || {
   echo 'live roster fixture: ordinary DBX TLS suite did not produce the required two executed tests' >&2; exit 1;
 }
-grep -Fq -- '-p taurine-db-conformance --features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live dbx_pg_mtls_ -- --nocapture' "${work}/cargo-pgtls.log" || {
+grep -Fq -- "-p taurine-db-conformance --features ${pgtls_engine_feature} --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live dbx_pg_mtls_ -- --nocapture" "${work}/cargo-pgtls.log" || {
   echo 'live roster fixture: pgtls did not scope both fixed mTLS features and filter to the mTLS target' >&2; exit 1;
 }
-if grep -F -- '-p taurine-db-conformance --features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live' "${work}/cargo-pgtls.log" >/dev/null; then
+if grep -F -- "-p taurine-db-conformance --features ${pgtls_engine_feature} --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live" "${work}/cargo-pgtls.log" >/dev/null; then
   echo 'live roster fixture: mTLS-only features leaked to the ordinary TLS suite' >&2; exit 1;
 fi
 grep -Fq 'taurine-db-conformance [dbx_pg_mtls_live] dbx_pg_mtls_ passed=8 skipped=0' "${work}/runner-pgtls/suite-results.txt" || {

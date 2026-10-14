@@ -265,9 +265,6 @@ mkdir -p "${tmp}/pgtls-src/taurine-backend/taurine-db-conformance/tests"
 cp "${classifier}" "${tmp}/pgtls-workspace/.github/policy/build-failure-category.rb"
 printf '%s\n' 'synthetic target-presence fixture' >"${tmp}/pgtls-src/taurine-backend/taurine-db-conformance/tests/dbx_pg_tls_live.rs"
 printf '%s\n' 'synthetic target-presence fixture' >"${tmp}/pgtls-src/taurine-backend/taurine-db-conformance/tests/dbx_pg_mtls_live.rs"
-cat >"${tmp}/pgtls-temp/live-arm.json" <<'JSON'
-{"engine":"pgtls","cargo_features":["taurine-db-dbx/dbx-pg","taurine-db-dbx/legacy-tls"],"suites":["taurine-db-postgres live_tls","taurine-db-conformance dbx_pg_tls_live dbx_tls_","taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]}
-JSON
 cat >"${tmp}/pgtls-bin/cargo" <<'STUB'
 #!/usr/bin/env bash
 count=0
@@ -282,15 +279,29 @@ fi
 exit 0
 STUB
 chmod +x "${tmp}/pgtls-bin/cargo"
-if (cd "${tmp}/pgtls-src" && PATH="${tmp}/pgtls-bin:${PATH}" GITHUB_WORKSPACE="${tmp}/pgtls-workspace" RUNNER_TEMP="${tmp}/pgtls-temp" FAKE_CARGO_COUNT="${tmp}/cargo-count" FAKE_CARGO_ARGS="${tmp}/cargo-args" bash "${tmp}/live.sh") >"${tmp}/pgtls.out" 2>&1; then
-  echo 'PGTLS mTLS failure fixture unexpectedly passed' >&2
-  exit 1
-fi
-grep -qF 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' "${tmp}/pgtls.out"
-grep -qF 'build-failure-disposition: value=classified' "${tmp}/pgtls.out"
-grep -qF 'build-failure-matches: values=linkerfailed' "${tmp}/pgtls.out"
-grep -qF -- '--features taurine-db-dbx/dbx-pg --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live' "${tmp}/cargo-args"
-! grep -Eq 'PRIVATE-MTLS-SENTINEL|ghp_abcdefghijklmnopqrstuvwxyz' "${tmp}/pgtls.out"
+accepted_pgtls_feature_pairs=0
+for dbx_feature in taurine-db-dbx/dbx-pg taurine-db-engine/dbx-pg; do
+  printf '{"engine":"pgtls","cargo_features":["%s","taurine-db-dbx/legacy-tls"],"suites":["taurine-db-postgres live_tls","taurine-db-conformance dbx_pg_tls_live dbx_tls_","taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]}\n' "${dbx_feature}" >"${tmp}/pgtls-temp/live-arm.json"
+  rm -f "${tmp}/cargo-count" "${tmp}/cargo-args"
+  if (cd "${tmp}/pgtls-src" && PATH="${tmp}/pgtls-bin:${PATH}" GITHUB_WORKSPACE="${tmp}/pgtls-workspace" RUNNER_TEMP="${tmp}/pgtls-temp" FAKE_CARGO_COUNT="${tmp}/cargo-count" FAKE_CARGO_ARGS="${tmp}/cargo-args" bash "${tmp}/live.sh") >"${tmp}/pgtls-${dbx_feature//\//-}.out" 2>&1; then
+    echo 'PGTLS mTLS failure fixture unexpectedly passed' >&2
+    exit 1
+  fi
+  output="${tmp}/pgtls-${dbx_feature//\//-}.out"
+  if [[ -f "${tmp}/cargo-count" ]]; then
+    accepted_pgtls_feature_pairs=$((accepted_pgtls_feature_pairs + 1))
+    [[ "$(cat "${tmp}/cargo-count")" == 3 ]] || { echo 'PGTLS fixture accepted the pair but did not execute its three fixed suites' >&2; exit 1; }
+    grep -qF 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' "${output}"
+    grep -qF 'build-failure-disposition: value=classified' "${output}"
+    grep -qF 'build-failure-matches: values=linkerfailed' "${output}"
+    grep -qF -- "--features ${dbx_feature} --features taurine-db-dbx/legacy-tls --test dbx_pg_mtls_live" "${tmp}/cargo-args"
+    ! grep -Eq 'PRIVATE-MTLS-SENTINEL|ghp_abcdefghijklmnopqrstuvwxyz' "${output}"
+  else
+    grep -qF 'proof-build: unreviewed features or DBX suite definition' "${output}"
+    ! grep -Eq 'PRIVATE-MTLS-SENTINEL|ghp_abcdefghijklmnopqrstuvwxyz' "${output}"
+  fi
+done
+[[ "${accepted_pgtls_feature_pairs}" == 1 ]] || { echo 'PGTLS fixture must accept exactly one of the two reviewed feature pairs' >&2; exit 1; }
 
 # Exercise the extracted Windows rust-db failure reporter. No Rust command runs: fake Cargo
 # supplies a private sentinel and the actual protected report library performs classification.
