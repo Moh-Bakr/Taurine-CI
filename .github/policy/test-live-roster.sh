@@ -99,6 +99,19 @@ cat > "${work}/fakebin/cargo" <<'FAKE_CARGO'
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_CARGO_LOG}"
 if [[ "$*" == *--no-run* ]]; then
+  if [[ "${FAKE_CARGO_MODE:-}" == compiler-heavy ]]; then
+    printf 'error[E0046]: private message SECRET_COMPILER_MESSAGE\n  --> /private/var/runner/SECRET_PATH/src/private.rs:9:7\n'
+    for index in $(seq 1 80); do printf 'warning: PRIVATE_WARNING_%s SECRET_WARNING_VALUE\n' "${index}"; done
+    exit 101
+  fi
+  if [[ "${FAKE_CARGO_MODE:-}" == compiler-nocode ]]; then
+    printf 'error: private compiler failure SECRET_NONCODE_MESSAGE /home/runner/work/private/src/lib.rs:4:2\n'
+    exit 101
+  fi
+  if [[ "${FAKE_CARGO_MODE:-}" == compiler-empty ]]; then
+    printf 'cargo process failed before diagnostics SECRET_EMPTY_MESSAGE /home/runner/work/private/src/lib.rs\n'
+    exit 2
+  fi
   echo 'Finished synthetic proof binary build'
   exit 0
 fi
@@ -152,7 +165,7 @@ run_fake_actions() {
   (
     set -e
     cd "${work}/fake-source"
-    RUNNER_TEMP="${runner}" FAKE_CARGO_LOG="${log}" FAKE_CARGO_MODE="${mode}" PATH="${work}/fakebin:${PATH}" bash "${work}/build.sh"
+    RUNNER_TEMP="${runner}" GITHUB_WORKSPACE="${work}/fake-source" FAKE_CARGO_LOG="${log}" FAKE_CARGO_MODE="${mode}" PATH="${work}/fakebin:${PATH}" bash "${work}/build.sh"
     RUNNER_TEMP="${runner}" FAKE_CARGO_LOG="${log}" FAKE_CARGO_MODE="${mode}" PATH="${work}/fakebin:${PATH}" bash "${work}/run.sh"
   ) > "${work}/fake-${label}.out" 2> "${work}/fake-${label}.err" || command_status=$?
   if [[ "${expected}" == pass && "${command_status}" -ne 0 ]]; then
@@ -181,6 +194,27 @@ grep -Fq 'taurine-db-conformance [dbx_pg_mtls_live] dbx_pg_mtls_ passed=8 skippe
   echo 'live roster fixture: mTLS suite did not produce the required eight executed cases' >&2; exit 1;
 }
 run_fake_actions tls-legacy "${legacy_config}" tls-legacy pass2 pass
+run_fake_actions tls-legacy "${legacy_config}" compiler-heavy compiler-heavy reject
+grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live codes=E0046=1' "${work}/fake-compiler-heavy.err" || {
+  echo 'live roster fixture: an early Rust compiler code was hidden by warning-heavy output' >&2; exit 1;
+}
+if grep -E 'SECRET_|PRIVATE_WARNING_|/private/var|/home/runner/work' "${work}/fake-compiler-heavy.err" >/dev/null; then
+  echo 'live roster fixture: compiler diagnostic summary leaked a private message, path, or warning' >&2; exit 1;
+fi
+run_fake_actions tls-legacy "${legacy_config}" compiler-nocode compiler-nocode reject
+grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live code=unclassified count=1' "${work}/fake-compiler-nocode.err" || {
+  echo 'live roster fixture: code-less compiler error was not classified as unclassified' >&2; exit 1;
+}
+if grep -E 'SECRET_|/home/runner/work' "${work}/fake-compiler-nocode.err" >/dev/null; then
+  echo 'live roster fixture: code-less diagnostic leaked private content' >&2; exit 1;
+fi
+run_fake_actions tls-legacy "${legacy_config}" compiler-empty compiler-empty reject
+grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live code=unclassified count=0' "${work}/fake-compiler-empty.err" || {
+  echo 'live roster fixture: failure without compiler diagnostics was not visibly unclassified' >&2; exit 1;
+}
+if grep -E 'SECRET_|/home/runner/work' "${work}/fake-compiler-empty.err" >/dev/null; then
+  echo 'live roster fixture: noncompiler failure leaked private content' >&2; exit 1;
+fi
 grep -Fq -- '-p taurine-db-conformance --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live legacy -- --nocapture' "${work}/cargo-tls-legacy.log" || {
   echo 'live roster fixture: tls-legacy did not pass the fixed feature and filter to cargo' >&2; exit 1;
 }
