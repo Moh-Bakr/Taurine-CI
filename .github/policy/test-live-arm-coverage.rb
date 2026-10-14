@@ -29,6 +29,7 @@ class LiveArmCoverageTest < Minitest::Test
 
   def write_tree(roster: G::REQUIRED_ARMS.map { |arm| entry(arm) }, options: G::REQUIRED_ARMS,
                  matrix_text: nil, workflow_text: nil)
+    FileUtils.rm_rf(@root)
     FileUtils.mkdir_p(File.join(@root, '.github/workflows'))
     body = JSON.pretty_generate(roster).lines.map { |line| "          #{line}" }.join
     workflow = workflow_text || <<~YAML
@@ -239,8 +240,130 @@ class LiveArmCoverageTest < Minitest::Test
 
   def test_the_report_exposes_only_fixed_fields_and_no_paths
     out, _err, _status = run_guard(@root)
-    assert_equal %w[status required_count registered_count contract_count missing unrequired].sort,
+    assert_equal %w[status required_count registered_count contract_count missing unrequired reason].sort,
                  JSON.parse(out).keys.sort
     refute_includes out, @tmp
+    FileUtils.rm(File.join(@root, G::MATRIX_PATH))
+    out, _err, _status = run_guard(@root)
+    refute_includes out, @tmp
+  end
+
+  # Input failures must not read as coverage loss: empty arm lists and a reason that names the file
+  # and the cause. Every one of them still fails closed.
+  def assert_input_failure(expected_status, expected_reason)
+    report = G.evaluate(@root)
+    assert_equal expected_status, report['status'], report.inspect
+    assert_equal expected_reason, report['reason']
+    assert_empty report['missing'], 'an input failure must not list arms as missing'
+    assert_empty report['unrequired']
+    assert_equal 0, report['registered_count']
+    assert_equal 0, report['contract_count']
+  end
+
+  def test_input_failures_name_the_file_and_the_cause_without_listing_arms_as_missing
+    write_tree(workflow_text: "jobs: {}\n")
+    assert_input_failure 'invalid_input', 'live-proofs.yml: no roster marker'
+
+    block = "cat > \"${RUNNER_TEMP}/roster.json\" <<'TCI_LIVE_ROSTER'\n[]\nTCI_LIVE_ROSTER\n"
+    write_tree(workflow_text: block + block)
+    assert_input_failure 'invalid_input', 'live-proofs.yml: more than one roster marker'
+
+    write_tree(workflow_text: "cat > \"${RUNNER_TEMP}/roster.json\" <<'TCI_LIVE_ROSTER'\n[]\n")
+    assert_input_failure 'invalid_input', 'live-proofs.yml: roster block is not terminated'
+
+    write_tree(workflow_text: "cat > \"${RUNNER_TEMP}/roster.json\" <<'TCI_LIVE_ROSTER'\n{\nTCI_LIVE_ROSTER\n")
+    assert_input_failure 'invalid_input', 'live-proofs.yml: malformed JSON'
+
+    write_tree(workflow_text: "cat > \"${RUNNER_TEMP}/roster.json\" <<'TCI_LIVE_ROSTER'\n{}\nTCI_LIVE_ROSTER\n")
+    assert_input_failure 'invalid_input', 'live-proofs.yml: roster is not a list of objects'
+
+    write_tree(workflow_text: "cat > \"${RUNNER_TEMP}/roster.json\" <<'TCI_LIVE_ROSTER'\n[{\"engine\":\"PG\"}]\nTCI_LIVE_ROSTER\n")
+    assert_input_failure 'invalid_input', 'live-proofs.yml: roster entry without a valid engine id'
+
+    write_tree(matrix_text: '{"dispatch_contracts":{"workflows":{}}}')
+    assert_input_failure 'invalid_input', 'ci-matrix.json: no live-proofs engine options'
+
+    write_tree(matrix_text: '{')
+    assert_input_failure 'invalid_input', 'ci-matrix.json: malformed JSON'
+
+    write_tree(matrix_text: ('[' * 40) + (']' * 40))
+    assert_input_failure 'invalid_input', 'ci-matrix.json: JSON nested too deeply'
+
+    write_tree(matrix_text: '{"a":1,"a":2}')
+    assert_match(/\Aci-matrix\.json: (duplicate JSON key|malformed JSON)\z/, G.evaluate(@root)['reason'])
+    assert_equal 'invalid_input', status
+  end
+
+  def test_unsafe_input_failures_name_the_file_and_the_cause
+    write_tree(matrix_text: ' ' * (G::MAX_MATRIX_BYTES + 1))
+    assert_input_failure 'unsafe_input', 'ci-matrix.json: too large'
+
+    write_tree(workflow_text: ' ' * (G::MAX_WORKFLOW_BYTES + 1))
+    assert_input_failure 'unsafe_input', 'live-proofs.yml: too large'
+
+    write_tree
+    File.binwrite(File.join(@root, G::MATRIX_PATH), "{\"a\":\"\xff\"}")
+    assert_input_failure 'unsafe_input', 'ci-matrix.json: not valid UTF-8'
+
+    FileUtils.rm(File.join(@root, G::MATRIX_PATH))
+    assert_input_failure 'unsafe_input', 'ci-matrix.json: unreadable'
+
+    write_tree
+    real = File.join(@tmp, 'real-workflow.yml')
+    FileUtils.mv(File.join(@root, G::WORKFLOW_PATH), real)
+    File.symlink(real, File.join(@root, G::WORKFLOW_PATH))
+    assert_input_failure 'unsafe_input', 'live-proofs.yml: symlink'
+
+    write_tree
+    File.delete(File.join(@root, G::MATRIX_PATH))
+    Dir.mkdir(File.join(@root, G::MATRIX_PATH))
+    assert_input_failure 'unsafe_input', 'ci-matrix.json: not a regular file'
+
+    link = File.join(@tmp, 'root-link')
+    File.symlink(@root, link)
+    report = G.evaluate(link)
+    assert_equal ['unsafe_input', 'repository root: symlink'], report.values_at('status', 'reason')
+    report = G.evaluate(File.join(@tmp, 'absent'))
+    assert_equal ['unsafe_input', 'repository root: unreadable'], report.values_at('status', 'reason')
+    File.write(File.join(@tmp, 'plain-file'), '')
+    report = G.evaluate(File.join(@tmp, 'plain-file'))
+    assert_equal ['unsafe_input', 'repository root: not a directory'], report.values_at('status', 'reason')
+  end
+
+  def test_unknown_roster_key_names_the_key_and_the_arm
+    roster = G::REQUIRED_ARMS.map { |a| entry(a) }
+    roster[7] = roster[7].merge('optional' => true)
+    write_tree(roster: roster)
+    report = G.evaluate(@root)
+    assert_equal 'unknown_roster_key', report['status']
+    assert_equal "live-proofs.yml: key 'optional' in arm 'pg-dbx'", report['reason']
+    assert_equal [13, 13], report.values_at('registered_count', 'contract_count')
+
+    roster[7] = entry('pg-dbx').merge("bad key\n::error::" => 1)
+    write_tree(roster: roster)
+    assert_equal "live-proofs.yml: key '(unprintable)' in arm 'pg-dbx'", G.evaluate(@root)['reason']
+  end
+
+  def test_comparison_failures_still_list_the_arms_and_say_where
+    write_tree(roster: (G::REQUIRED_ARMS - ['pg-dbx']).map { |a| entry(a) })
+    report = G.evaluate(@root)
+    assert_equal ['roster_mismatch', ['pg-dbx'], 'live-proofs.yml: roster differs from the required set'],
+                 report.values_at('status', 'missing', 'reason')
+
+    write_tree(options: G::REQUIRED_ARMS - ['tls-legacy'])
+    report = G.evaluate(@root)
+    assert_equal ['contract_mismatch', ['tls-legacy'], 'ci-matrix.json: engine options differ from the required set'],
+                 report.values_at('status', 'missing', 'reason')
+
+    write_tree(roster: (G::REQUIRED_ARMS + ['pg-dbx']).map { |a| entry(a) })
+    assert_equal 'live-proofs.yml: repeated arm pg-dbx', G.evaluate(@root)['reason']
+  end
+
+  def test_the_cli_reports_a_usage_error_with_a_reason
+    out, _err, status = run_guard(@root, 'extra')
+    assert_equal 1, status.exitstatus
+    report = JSON.parse(out)
+    assert_equal 'usage: at most one repository root argument', report['reason']
+    assert_empty report['missing']
   end
 end
