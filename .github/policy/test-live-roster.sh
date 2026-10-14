@@ -35,8 +35,7 @@ jq -e '
   (keys | sort) == (["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"] | sort) and
   (."pg-dbx".suites == ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
   (.pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]) and
-  ((.pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] or
-    .pgtls.cargo_features == ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"])) and
+  (.pgtls.cargo_features == ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"]) and
   (."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]) and
   (."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"]) and
   (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string"))
@@ -87,6 +86,7 @@ validate_arm tls-legacy "$(jq -c 'del(.cargo_features)' <<< "${legacy_config}")"
 validate_arm tls-legacy "$(jq -c '.suites=["taurine-db-conformance dbx_pg_tls_live dbx_tls_"]' <<< "${legacy_config}")" reject 'ordinary target in legacy arm'
 validate_arm pgtls "$(jq -c '.suites=["taurine-db-postgres live_tls"]' <<< "${pgtls_config}")" reject 'missing ordinary DBX TLS target'
 validate_arm pgtls "$(jq -c '. + {cargo_features:["unreviewed/feature"]}' <<< "${pgtls_config}")" reject 'unreviewed mTLS feature'
+validate_arm pgtls "$(jq -c '. + {cargo_features:["taurine-db-dbx/dbx-pg","taurine-db-dbx/legacy-tls"]}' <<< "${pgtls_config}")" reject 'old package feature reference'
 validate_arm pgtls "$(jq -c '.suites |= .[0:2]' <<< "${pgtls_config}")" reject 'missing mTLS target'
 validate_arm tls-legacy "$(jq -c '. + {cargo_command:"echo untrusted"}' <<< "${legacy_config}")" reject 'unreviewed project command'
 
