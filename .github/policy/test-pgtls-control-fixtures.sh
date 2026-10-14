@@ -169,4 +169,44 @@ grep -Fq 'ssl_max_protocol_version=TLSv1' "${entrypoint}"
 grep -Fq 'install -o postgres -g postgres -m 0600' "${entrypoint}"
 grep -Fq 'exec /usr/local/bin/docker-entrypoint.sh postgres' "${entrypoint}"
 
+# Execute the exact fixed-profile argv-selection case with a fake official
+# entrypoint boundary. The real container command receives these same values.
+{
+  printf '%s\n' '#!/bin/sh' 'set -eu' 'profile=$1' 'dest=/var/lib/postgresql/certs' 'shift'
+  awk '
+    /^case "\$profile" in$/ { seen++; if (seen == 2) capture=1 }
+    capture { print }
+    capture && /^esac$/ { exit }
+  ' "${entrypoint}"
+  printf '%s\n' 'printf "%s\\n" "$@"'
+} > "${work}/profile-argv.sh"
+expect_profile() {
+  local profile="$1" expected="$2" actual
+  actual="$(sh "${work}/profile-argv.sh" "${profile}")"
+  [[ "${actual}" == "${expected}" ]] || { echo "fixed ${profile} container argv changed" >&2; exit 1; }
+}
+expect_profile pgtls "$(printf '%s\n' -c ssl=on -c ssl_cert_file=/var/lib/postgresql/certs/server.crt -c ssl_key_file=/var/lib/postgresql/certs/server.key)"
+expect_profile mtls "$(printf '%s\n' -c ssl=on -c ssl_cert_file=/var/lib/postgresql/certs/server.crt -c ssl_key_file=/var/lib/postgresql/certs/server.key -c ssl_ca_file=/var/lib/postgresql/certs/ca.crt -c hba_file=/var/lib/postgresql/certs/pg_hba.conf)"
+expect_profile tls10 "$(printf '%s\n' -c ssl=on -c ssl_cert_file=/var/lib/postgresql/certs/server.crt -c ssl_key_file=/var/lib/postgresql/certs/server.key -c ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1 -c ssl_ciphers=DEFAULT@SECLEVEL=0)"
+expect_profile tls11 "$(printf '%s\n' -c ssl=on -c ssl_cert_file=/var/lib/postgresql/certs/server.crt -c ssl_key_file=/var/lib/postgresql/certs/server.key -c ssl_min_protocol_version=TLSv1.1 -c ssl_max_protocol_version=TLSv1.1 -c ssl_ciphers=DEFAULT@SECLEVEL=0)"
+expect_profile rsakex "$(printf '%s\n' -c ssl=on -c ssl_cert_file=/var/lib/postgresql/certs/server.crt -c ssl_key_file=/var/lib/postgresql/certs/server.key -c ssl_min_protocol_version=TLSv1.2 -c ssl_max_protocol_version=TLSv1.2 -c ssl_ciphers=AES128-GCM-SHA256:AES256-GCM-SHA384)"
+mutation_changes_profile() {
+  local profile="$1" expected="$2" before="$3" after="$4" actual
+  ruby -e 'source=File.read(ARGV.fetch(0)); before=ARGV.fetch(1); after=ARGV.fetch(2); abort "mutation input absent" unless source.sub!(before, after); File.write(ARGV.fetch(3), source)' \
+    "${work}/profile-argv.sh" "${before}" "${after}" "${work}/mutated-profile-argv.sh"
+  actual="$(sh "${work}/mutated-profile-argv.sh" "${profile}")"
+  [[ "${actual}" != "${expected}" ]] || { echo 'protocol profile mutation escaped the fixed-argv fixture' >&2; exit 1; }
+}
+tls10_expected="$(printf '%s\n' -c ssl=on -c ssl_cert_file=/var/lib/postgresql/certs/server.crt -c ssl_key_file=/var/lib/postgresql/certs/server.key -c ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1 -c ssl_ciphers=DEFAULT@SECLEVEL=0)"
+tls11_expected="$(printf '%s\n' -c ssl=on -c ssl_cert_file=/var/lib/postgresql/certs/server.crt -c ssl_key_file=/var/lib/postgresql/certs/server.key -c ssl_min_protocol_version=TLSv1.1 -c ssl_max_protocol_version=TLSv1.1 -c ssl_ciphers=DEFAULT@SECLEVEL=0)"
+rsakex_expected="$(printf '%s\n' -c ssl=on -c ssl_cert_file=/var/lib/postgresql/certs/server.crt -c ssl_key_file=/var/lib/postgresql/certs/server.key -c ssl_min_protocol_version=TLSv1.2 -c ssl_max_protocol_version=TLSv1.2 -c ssl_ciphers=AES128-GCM-SHA256:AES256-GCM-SHA384)"
+mutation_changes_profile tls10 "${tls10_expected}" 'ssl_min_protocol_version=TLSv1 ' 'ssl_min_protocol_version=TLSv1.1 '
+mutation_changes_profile tls10 "${tls10_expected}" 'ssl_max_protocol_version=TLSv1 ' 'ssl_max_protocol_version=TLSv1.1 '
+mutation_changes_profile tls10 "${tls10_expected}" 'ssl_ciphers=DEFAULT@SECLEVEL=0' 'ssl_ciphers=DEFAULT@SECLEVEL=1'
+mutation_changes_profile tls11 "${tls11_expected}" 'ssl_min_protocol_version=TLSv1.1 ' 'ssl_min_protocol_version=TLSv1.2 '
+mutation_changes_profile tls11 "${tls11_expected}" 'ssl_max_protocol_version=TLSv1.1 ' 'ssl_max_protocol_version=TLSv1.2 '
+mutation_changes_profile rsakex "${rsakex_expected}" 'ssl_min_protocol_version=TLSv1.2 ' 'ssl_min_protocol_version=TLSv1.1 '
+mutation_changes_profile rsakex "${rsakex_expected}" 'ssl_max_protocol_version=TLSv1.2 ' 'ssl_max_protocol_version=TLSv1.1 '
+mutation_changes_profile rsakex "${rsakex_expected}" 'AES128-GCM-SHA256:AES256-GCM-SHA384' 'ECDHE-RSA-AES128-GCM-SHA256'
+
 printf 'Control-owned TLS fixtures and pgtls/tls-legacy source isolation checks passed.\n'
