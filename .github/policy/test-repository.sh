@@ -120,6 +120,9 @@ for rejected in \
   'case-evidence-assets/a.test.cjs' \
   'case-evidence-assets/a.config.spec.cjs' \
   'case-evidence-assets/a..cjs' \
+  'case-evidence-assets/-x.cjs' \
+  'case-evidence-assets/-.cjs' \
+  'case-evidence-assets/---.json' \
   'case-evidence-assets/a.cjs/x.rb'
 do
   mutant="$(new_fixture)"
@@ -142,7 +145,7 @@ mkdir -p "${compound}/.github/policy/case-evidence-assets"
 printf "'use strict';\n" > "${compound}/.github/policy/case-evidence-assets/a.config.cjs"
 printf '{}\n' > "${compound}/.github/policy/case-evidence-assets/a.spec.json"
 git -C "${compound}" add .github/policy/case-evidence-assets
-expect_pass "${compound}" 'the reviewed .config and .spec compound names'
+expect_pass "${compound}" 'a one-character name and the reviewed .config and .spec compound names'
 
 # These assets execute on the runner, so only plain regular files are allowed.
 symlinked="$(new_fixture)"
@@ -171,4 +174,4 @@ for leak in 'case-evidence-assets/leak.json' 'case-evidence-assets/leak.cjs'; do
   done
 done
 
-echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name and the reviewed .config/.spec pair allowed; nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, another directory, private source and starter documents rejected'
+echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, another directory, private source and starter documents rejected'
