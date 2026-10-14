@@ -231,4 +231,18 @@ git -C "${index_key}" add .github/policy/case-evidence-assets/leak.json
 printf '{}\n' > "${index_key}/.github/policy/case-evidence-assets/leak.json"
 expect_reject "${index_key}" 'a key in the index copy behind a clean file on disk' 'A reusable source, signing, or deployment credential pattern was found'
 
-echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; NUL bytes, leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, index content that differs from the working tree, another directory, private source and starter documents rejected'
+# An index entry whose object does not exist. git grep --cached reports that as
+# an error yet exits 1, the "no match" status, so the scan used to pass a tree
+# it never read. It must fail closed, naming the unreadable path.
+unreadable="$(new_fixture)"
+mkdir -p "${unreadable}/docs"
+git -C "${unreadable}" update-index --add --cacheinfo 100644,1234567890abcdef1234567890abcdef12345678,docs/unreadable.md
+expect_reject "${unreadable}" 'an index entry naming an object that does not exist' 'names objects that cannot be read'
+
+# The same for an asset, where the NUL check reads it first: a read failure is
+# reported as one, not as a NUL byte.
+unreadable_asset="$(new_fixture)"
+git -C "${unreadable_asset}" update-index --add --cacheinfo 100644,1234567890abcdef1234567890abcdef12345678,.github/policy/case-evidence-assets/report.json
+expect_reject "${unreadable_asset}" 'an asset whose object does not exist' 'could not be read from the index'
+
+echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; NUL bytes, leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, index content that differs from the working tree, unreadable index objects, another directory, private source and starter documents rejected'

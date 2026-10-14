@@ -77,7 +77,16 @@ while IFS= read -r -d '' record; do
   # the base-policy pass .github/policy on disk is the base commit's copy while
   # the index still lists the pull request's assets, so a path read from disk
   # is a different file or no file at all.
-  if [[ "$(git cat-file blob "$oid" | LC_ALL=C tr -d '\000' | wc -c | tr -d ' ')" != "$(git cat-file -s "$oid")" ]]; then
+  #
+  # A read that fails is reported as that, not as a NUL byte: the two need
+  # different fixes, and a missing object is not something the author put in
+  # the file.
+  if ! size="$(git cat-file -s "$oid" 2>/dev/null)" ||
+     ! stripped="$(git cat-file blob "$oid" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d ' ')"; then
+    echo "Case-evidence asset could not be read from the index: $asset" >&2
+    exit 1
+  fi
+  if [[ "$stripped" != "$size" ]]; then
     echo "Case-evidence assets must not contain NUL bytes: $asset" >&2
     exit 1
   fi
@@ -108,6 +117,28 @@ fi
 # qualifiers is now allowed in front of PRIVATE KEY, which also covers
 # "BEGIN PGP PRIVATE KEY BLOCK" and anything added later. It only widens what
 # is caught, and it matches nothing already in this repository.
+# Every object the index names must be readable before the scan runs. git grep
+# --cached reports an object it cannot read as an error but exits 1 -- the same
+# status as "no match" -- so the scan below would pass a tree whose blobs it
+# never saw. Fail closed instead, and name the paths.
+unreadable="$(git ls-files -s -z | while IFS= read -r -d '' entry; do
+  entry_oid="${entry#* }"
+  entry_oid="${entry_oid%% *}"
+  printf '%s %s\n' "${entry_oid}" "${entry#*$'\t'}"
+done | while read -r entry_oid entry_path; do
+  # A missing object prints "<oid> missing" whatever --batch-check format is
+  # asked for, so test the last word rather than compare the whole line.
+  object_state="$(git cat-file --batch-check <<<"${entry_oid}")"
+  if [[ "${object_state##* }" == missing ]]; then
+    printf '%s\n' "${entry_path}"
+  fi
+done)"
+if [[ -n "${unreadable}" ]]; then
+  echo "The index names objects that cannot be read, so the credential scan could not see them:" >&2
+  printf '  %s\n' ${unreadable} >&2
+  exit 1
+fi
+
 # --cached: the scan reads what the index holds, which is what this tree
 # commits. Reading the working tree instead missed every pull-request file the
 # base-policy pass had replaced on disk -- the case-evidence assets among them.
