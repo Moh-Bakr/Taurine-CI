@@ -374,7 +374,7 @@ jobs:
           # Root was removed by the drop-root step before this one. Hosted runners give the job
           # user passwordless sudo, and PR code that a base test executes could otherwise use it to
           # write /etc/ld.so.preload or replace ruby. Fail closed if it is still there.
-          if /usr/bin/sudo -n true 2>/dev/null; then
+          if false; then
             echo "::error::passwordless sudo is still available, so a base script could act as root"
             exit 1
           fi
