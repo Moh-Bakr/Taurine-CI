@@ -30,12 +30,14 @@ while IFS= read -r -d '' path; do
   # tests replay. They are JavaScript and JSON because that is what the pinned
   # runner loads and emits; a Ruby or shell file cannot be either.
   #
-  # One flat directory and lower-case names. The only compound names allowed
+  # One flat directory and lower-case names, each starting with a letter or a
+  # digit: a leading dash reads as an option to any shell tool that later
+  # handles the path unquoted. The only compound names allowed
   # are the `.config.cjs` and `.spec.cjs` pair Playwright itself expects, so a
   # name cannot smuggle another extension past the forbidden-extension sweep
   # below: `x.ts.cjs` and `x.pem.json` stay rejected. No nesting, no other
   # extension, and no other path in the repository gains an exception.
-  if [[ "$path" =~ ^\.github/policy/case-evidence-assets/[a-z0-9-]+(\.(config|spec))?\.(cjs|json)$ ]]; then
+  if [[ "$path" =~ ^\.github/policy/case-evidence-assets/[a-z0-9][a-z0-9-]*(\.(config|spec))?\.(cjs|json)$ ]]; then
     continue
   fi
   if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt ]]; then
@@ -67,7 +69,7 @@ while IFS= read -r -d '' record; do
 done < <(git ls-files -s -z -- .github/policy/case-evidence-assets)
 
 if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' \
-  | grep -vE '^\.github/policy/case-evidence-assets/[a-z0-9-]+(\.(config|spec))?\.json$' \
+  | grep -vE '^\.github/policy/case-evidence-assets/[a-z0-9][a-z0-9-]*(\.(config|spec))?\.json$' \
   | grep -E "$forbidden_path_re|$forbidden_name_re"; then
   echo "The public repository contains a forbidden source, credential, or starter-document path." >&2
   exit 1
