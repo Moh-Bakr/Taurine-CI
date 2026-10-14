@@ -26,10 +26,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The required status check. It waits for the base-policy job and fails when that job did not
+  # pass, so moving the base pass into its own job does not move it off the required check.
+  # `always()` keeps this job running when base-policy is skipped, which it is outside a pull
+  # request.
   policy:
     permissions:
       contents: read
     name: Validate workflow policy
+    needs: [base-policy]
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -192,6 +198,13 @@ jobs:
         shell: bash
         run: bash .github/policy/test-base-policy-env.sh
 
+      # The base-policy job pins the base policy to the base commit's objects, tears down whatever
+      # a base script leaves running, and keeps the loader variables out. This runs that job's step
+      # over fixtures that break each of those, and requires it to notice.
+      - name: Test the base-policy job's pin, process containment and loader scrub
+        shell: bash
+        run: bash .github/policy/test-base-policy-isolation.sh
+
       # Release-installed tools are listed with their pins; Dependabot covers the Actions.
       - name: Check the tool pin list and Dependabot coverage
         shell: bash
@@ -201,12 +214,48 @@ jobs:
       - name: Check the egress allow-list
         shell: bash
         run: bash .github/policy/check-egress-allowlist.sh
+      # The base-policy pass is a separate job (below), so the result it reached cannot be
+      # influenced by anything the checks above exported. This step keeps the required status
+      # check honest: it fails when that job did not pass.
+      - name: Require the base-policy job to have passed
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          BASE_RESULT: ${{ needs.base-policy.result }}
+        run: |
+          set -euo pipefail
+          if [[ "${BASE_RESULT}" != 'success' ]]; then
+            echo "::error::the base-policy job did not pass (result: ${BASE_RESULT})"
+            exit 1
+          fi
+          echo 'base policy: the separate base-policy job passed'
 
-      # The base commit's policy, run against this pull request's tree (see the header). The base
-      # policy replaces the pull request's in the working tree for these checks only; every check
-      # script it has is run, so a base check cannot be skipped by renaming a step here.
+  # The base commit's policy, run against this pull request's tree (see the header), in a job of
+  # its own.
+  #
+  # Its own job because the checks in `policy` run this pull request's scripts, and any of them can
+  # append to GITHUB_ENV or GITHUB_PATH, write into RUNNER_TEMP, or leave a process running. In one
+  # job the base pass had to defend against all of that from inside the same environment. In a
+  # separate job it never shares that environment: a fresh runner, a fresh RUNNER_TEMP, and nothing
+  # of this pull request's has executed before the base scripts do.
+  #
+  # `policy` requires this job's result, so splitting it out does not take it off the required
+  # status check.
+  base-policy:
+    permissions:
+      contents: read
+    name: Validate against the base policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Check out the base commit's policy
-        if: github.event_name == 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -215,14 +264,14 @@ jobs:
           persist-credentials: false
 
       # The shell is named by absolute path and started in privileged mode with the startup files
-      # skipped, so an earlier step cannot steer it through BASH_ENV, ENV, SHELLOPTS, an exported
-      # function (BASH_FUNC_*) or a bash on a GITHUB_PATH directory before this script runs. The
-      # script then pins its own command lookup and guards each base script (see below).
+      # skipped, so nothing can steer it through BASH_ENV, ENV, SHELLOPTS, an exported function
+      # (BASH_FUNC_*), the loader variables, or a bash on a GITHUB_PATH directory before this
+      # script runs. The script then pins its own command lookup and guards each base script.
       - name: Run the base commit's policy against this pull request
-        if: github.event_name == 'pull_request'
-        shell: /usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -p -eo pipefail {0}
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_AUDIT /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           PATH=/usr/bin:/bin:/usr/sbin:/sbin
           set -euo pipefail
@@ -243,14 +292,14 @@ jobs:
           rm -rf .github/policy
           cp -R "${base}/.github/policy" .github/policy
           diff -rq "${base}/.github/policy" .github/policy > /dev/null || { echo "::error::the base policy was not copied faithfully"; exit 1; }
-          # Earlier steps of this job run this pull request's own policy scripts, and any of them can
-          # append to GITHUB_ENV or GITHUB_PATH. Each base script therefore runs with an allow-listed
-          # environment, a fixed PATH, a clean HOME, and ruby and bash named by absolute path, so
-          # nothing a pull request exports (RUBYOPT, RUBYLIB, BASH_ENV, a PATH shim) can change what
-          # the base policy decides. Only lint.sh, whose zizmor audits read the API, gets the token.
+
+          # Only the allow-listed names reach a base script, or any command this step runs on its
+          # behalf. The loader variables are named here because they change what every process
+          # loads before its first instruction, and are asserted absent below rather than merely
+          # left out of the list.
           ruby_bin=/usr/bin/ruby
           bash_bin=/bin/bash
-          for tool in "${ruby_bin}" "${bash_bin}" /usr/bin/env; do
+          for tool in "${ruby_bin}" "${bash_bin}" /usr/bin/env /usr/bin/git; do
             [[ -x "${tool}" ]] || { echo "::error::${tool} is missing, so the base policy cannot run in a clean environment"; exit 1; }
           done
           clean_home="${RUNNER_TEMP}/base-policy-home"
@@ -259,19 +308,109 @@ jobs:
           for name in CI GITHUB_ACTIONS GITHUB_API_URL GITHUB_EVENT_NAME GITHUB_REF GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_SHA GITHUB_WORKSPACE RUNNER_ARCH RUNNER_OS RUNNER_TEMP; do
             [[ -z "${!name+x}" ]] || scrub+=("${name}=${!name}")
           done
+          loaders="$("${scrub[@]}" /usr/bin/env | grep -E '^(LD_|DYLD_)' || true)"
+          [[ -z "${loaders}" ]] || { echo "::error::loader variables reached the base policy environment: ${loaders%%=*}"; exit 1; }
+
+          # What the base policy is, pinned to the base commit's own git objects rather than to
+          # whatever is on disk: SHA-256 over each blob's bytes, read out of the base checkout's
+          # object store. HEAD of that checkout is the base commit, because the step above checked
+          # it out at `ref: base.sha`; reading the commit from the checkout rather than from an
+          # expression keeps this script free of template interpolation.
+          #
+          # The manifest is re-verified before every script, so a base script that rewrote a later
+          # one -- or anything it spawned that did -- is caught between them. It is held in this
+          # shell's memory and handed to the verifier on stdin, never written to disk: a base script
+          # runs as the same user and can see RUNNER_TEMP, so a manifest file there is one more file
+          # it could rewrite to match its own edit. It is built and checked by the pinned ruby in
+          # the same scrubbed environment as the base scripts, so RUBYOPT cannot steer the check
+          # that pins them either.
+          # The pin is only as good as the commit it reads, so the checkout's HEAD must be the base
+          # commit this pull request names. Arrives through the environment, never interpolated
+          # into the script.
+          [[ "${BASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the base commit is not a full SHA"; exit 1; }
+          checked_out="$("${scrub[@]}" /usr/bin/git -C "${base}" rev-parse --verify HEAD)"
+          [[ "${checked_out}" == "${BASE_SHA}" ]] || { echo "::error::the base checkout is ${checked_out}, not the base commit ${BASE_SHA}"; exit 1; }
+          pins="$("${scrub[@]}" "${ruby_bin}" -e '
+            require "digest"
+            require "open3"
+            base = ARGV.fetch(0)
+            listing, status = Open3.capture2("/usr/bin/git", "-C", base, "ls-tree", "-r", "-z", "HEAD", "--", ".github/policy")
+            abort("::error::cannot read the base commit tree") unless status.success?
+            rows = listing.split("\0").reject(&:empty?).map do |entry|
+              meta, path = entry.split("\t", 2)
+              oid = meta.split(" ").fetch(2)
+              blob, blob_status = Open3.capture2("/usr/bin/git", "-C", base, "cat-file", "blob", oid)
+              abort("::error::cannot read #{path} from the base commit") unless blob_status.success?
+              [Digest::SHA256.hexdigest(blob), path]
+            end
+            abort("::error::the base commit lists no policy files to pin") if rows.empty?
+            print rows.sort_by(&:last).map { |digest, path| "#{digest}  #{path}\n" }.join
+          ' "${base}")"
+          pinned="$(printf '%s\n' "${pins}" | wc -l | tr -d ' ')"
+          verify_manifest() {
+            printf '%s\n' "${pins}" | "${scrub[@]}" "${ruby_bin}" -e '
+              require "digest"
+              pinned = STDIN.read.lines.map { |line| line.chomp.split("  ", 2) }.reject { |pair| pair.length != 2 }.to_h { |d, p| [p, d] }
+              present = Dir.glob(".github/policy/**/*").select { |path| File.file?(path) }.sort
+              missing = pinned.keys.sort - present
+              extra = present - pinned.keys.sort
+              unless missing.empty? && extra.empty?
+                warn "::error::the base policy on disk does not match the files the base commit pinned" \
+                  " (missing: #{missing.join(", ")}; unexpected: #{extra.join(", ")})"
+                exit 1
+              end
+              changed = pinned.reject { |path, digest| Digest::SHA256.hexdigest(File.binread(path)) == digest }
+              unless changed.empty?
+                warn "::error::a base policy file no longer matches the base commit it was pinned to: #{changed.keys.join(", ")}"
+                exit 1
+              end
+            '
+          }
+          verify_manifest || exit 1
+
+          # Each base script runs in a session of its own, so whatever it starts is in that session
+          # too, and the session is torn down when the script returns. A base script that leaves a
+          # listener or a watcher behind cannot outlive its own check.
+          #
+          # The session is created by the already-pinned ruby rather than by setsid: one fewer
+          # binary to depend on, and setsid is not present on every machine these fixtures run on.
+          # env and ruby both exec rather than fork, so the pid this shell started is the pid that
+          # calls Process.setsid and then becomes the base script: it names the session and its
+          # group. It is taken from `$!`, never from a file, because a base script could rewrite a
+          # file to point the teardown at some other group and keep its own child alive.
+          run_guarded() {
+            local status=0 leader
+            "${scrub[@]}" ${token[@]+"${token[@]}"} "${ruby_bin}" -e '
+              Process.setsid
+              exec(*ARGV)
+            ' "$@" &
+            leader=$!
+            wait "${leader}" || status=$?
+            kill -TERM -- "-${leader}" 2>/dev/null || true
+            sleep 1
+            if kill -0 -- "-${leader}" 2>/dev/null; then
+              kill -KILL -- "-${leader}" 2>/dev/null || true
+              echo "::warning::a base policy script left a process group behind; it was killed"
+            fi
+            return "${status}"
+          }
+
           status=0
           executed=0
           for check in .github/policy/check-*.rb .github/policy/check-*.sh .github/policy/lint.sh .github/policy/test-*.sh .github/policy/test-*.rb; do
             [[ -f "${check}" ]] || continue
+            verify_manifest || { status=1; break; }
             executed=$((executed + 1))
             token=()
             if [[ "${check##*/}" == lint.sh && -n "${GH_TOKEN+x}" ]]; then token=("GH_TOKEN=${GH_TOKEN}"); fi
             echo "::group::base policy: ${check##*/}"
             case "${check}" in
-              *.rb) "${scrub[@]}" ${token[@]+"${token[@]}"} "${ruby_bin}" "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
-              *) "${scrub[@]}" ${token[@]+"${token[@]}"} "${bash_bin}" --noprofile --norc "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
+              *.rb) run_guarded "${ruby_bin}" "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
+              *) run_guarded "${bash_bin}" --noprofile --norc "${check}" || { echo "::error::The base commit's ${check##*/} rejects this pull request"; status=1; } ;;
             esac
             echo '::endgroup::'
           done
           [[ "${executed}" -eq "${expected}" ]] || { echo "::error::ran ${executed} of ${expected} base policy scripts"; exit 1; }
+          verify_manifest || status=1
+          echo "base policy: ${executed} scripts run against ${pinned} pinned files"
           exit "${status}"

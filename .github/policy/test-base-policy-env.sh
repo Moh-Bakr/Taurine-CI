@@ -42,11 +42,24 @@ chmod +x "${poison}/shim/"*
 xtrace_marker="${work}/xtrace-code-ran"
 
 # A fresh tree per run: the base policy checked out beside a pull request tree.
+#
+# The base copy is a real git checkout, because that is what `actions/checkout`
+# leaves there and what the step reads its pinning manifest from. `commit_base`
+# below is called once the fixture's base scripts are in place.
 fixture() {
   local dir="$1"
   rm -rf "${dir}"
   mkdir -p "${dir}/tree/base-policy/.github/policy" "${dir}/tree/.github/policy" "${dir}/runner"
   printf '%s\n' "${dir}/tree"
+}
+
+commit_base() {
+  local base="$1/base-policy"
+  git -C "${base}" init -q
+  git -C "${base}" config user.name 'Base Policy Fixture'
+  git -C "${base}" config user.email 'base-policy-fixture@example.invalid'
+  git -C "${base}" add -A
+  git -C "${base}" -c commit.gpgsign=false commit -qm 'base policy fixture'
 }
 
 reject_scripts() {
@@ -86,10 +99,13 @@ RB
 # Run the step the way the job does: the environment the earlier steps left, then the script.
 # $1 tree, $2 poisoned? (yes/no). The outer shell is invoked by absolute path on purpose.
 run_step() {
-  local tree="$1" poisoned="$2" runner="$1/../runner"
+  local tree="$1" poisoned="$2" runner="$1/../runner" base_sha=''
+  # The base commit the pull request names is the fixture checkout's own HEAD. A fixture with no
+  # base scripts has no commit, and the step refuses it before reading one.
+  base_sha="$(git -C "${tree}/base-policy" rev-parse HEAD 2>/dev/null || true)"
   local -a environment=(
     "RUNNER_TEMP=${runner}" GH_TOKEN=fixture-token "GITHUB_WORKSPACE=${tree}"
-    GITHUB_REPOSITORY=Moh-Bakr/Taurine-CI GITHUB_EVENT_NAME=pull_request
+    GITHUB_REPOSITORY=Moh-Bakr/Taurine-CI GITHUB_EVENT_NAME=pull_request "BASE_SHA=${base_sha}"
   )
   if [[ "${poisoned}" == yes ]]; then
     environment+=(
@@ -115,6 +131,7 @@ expect_rejects() {
   local label="$1" poisoned="$2" dir="${work}/$1" tree rc=0
   tree="$(fixture "${dir}")"
   reject_scripts "${tree}"
+  commit_base "${tree}"
   rm -f "${xtrace_marker}"
   run_step "${tree}" "${poisoned}" > "${dir}.out" 2>&1 || rc=$?
   if [[ -e "${xtrace_marker}" ]]; then
@@ -138,6 +155,7 @@ expect_clean_environment() {
   local label="$1" poisoned="$2" dir="${work}/$1" tree rc=0
   tree="$(fixture "${dir}")"
   witness_scripts "${tree}"
+  commit_base "${tree}"
   rm -f "${xtrace_marker}"
   run_step "${tree}" "${poisoned}" > "${dir}.out" 2>&1 || rc=$?
   if [[ -e "${xtrace_marker}" ]]; then
