@@ -22,16 +22,21 @@ protected_source_workflows=(
   # and publishes only a sanitized summary (check titles and counts, never data
   # values).
   ".github/workflows/live-proof-arm.yml"
+  # The standalone DBX PG8 measurement arm shares the same source-read rules.
+  ".github/workflows/pg8-measurement-arm.yml"
 )
 reusable_protected_workflows=(
   ".github/workflows/windows-validation-concern.yml"
   ".github/workflows/linux-validation-concern.yml"
   ".github/workflows/select-concerns.yml"
   ".github/workflows/live-proof-arm.yml"
+  ".github/workflows/pg8-measurement-arm.yml"
 )
 protected_dispatch_workflows=(
   ".github/workflows/windows-validation.yml"
   ".github/workflows/linux-validation.yml"
   # Dispatch-only: validates the engine selection and fans out to live-proof-arm.yml.
   ".github/workflows/live-proofs.yml"
+  # Dispatch-only: binds a PG8 measurement request and fans out to its protected arm.
+  ".github/workflows/pg8-measurement.yml"
 )

@@ -204,6 +204,11 @@ runs:
               db_packages+=("--package=${db_package}")
             done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
             rust_tests rust-db-tests "${db_packages[@]}"
+            # The registered legacy-tls feature cases can enter openssl-sys' vendored
+            # build. Match the fixed Strawberry Perl/NASM PATH used by the Windows
+            # OpenSSL and keyring concerns, scoped to these feature-only sub-steps.
+            dbx_feature_path="/c/Strawberry/perl/bin:/c/Program Files/NASM:${PATH}"
+            PATH="${dbx_feature_path}" dbx_registered_feature_tests "${db_packages[@]}"
             ;;
           rust-net)
             # The dialer, the egress verifier, the userspace WireGuard conformance

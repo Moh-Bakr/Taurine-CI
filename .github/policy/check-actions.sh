@@ -46,6 +46,7 @@ check_action_references() {
       ./.github/actions/linux-test-identities) ;;
       ./.github/actions/rust-target-cache) ;;
       ./.github/workflows/live-proof-arm.yml) ;;
+      ./.github/workflows/pg8-measurement-arm.yml) ;;
       ./.github/actions/mobile-report) ;;
       ./.github/actions/android-sdk-setup) ;;
       ./.github/actions/ios-project-init) ;;
@@ -58,6 +59,7 @@ check_action_references() {
       ./.github/actions/live-start-iris) ;;
       ./.github/actions/live-start-mpp) ;;
       ./.github/actions/live-start-pg) ;;
+      ./.github/actions/pg8-measurement) ;;
       ./.github/actions/live-start-rocketmq) ;;
       ./.github/actions/live-start-sql) ;;
       ./.github/actions/egress-audit) ;;

@@ -285,6 +285,42 @@ runs:
             # pattern below; normalise before classifying.
             tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"
             echo "${rc}" >"${log}.exit"
+            if [[ "${OS_LABEL:-}" == Windows && "${CONCERN:-}" == rust-db && "${label}" == rust-*-build ]]; then
+              category_output=''
+              if command -v ruby >/dev/null 2>&1; then
+                category_output="$(if ruby "${GITHUB_WORKSPACE}/.github/policy/build-failure-category.rb" text selected-live-proof-target "${rc}" --disposition <"${log}" 2>/dev/null; then helper_status=0; else helper_status=$?; fi; printf '\034'; exit "${helper_status}")" || category_output=''
+                if [[ "${category_output}" == *$'\034' ]]; then
+                  category_output="${category_output%$'\034'}"
+                  category_output="${category_output//$'\r\n'/$'\n'}"
+                  if [[ "${category_output}" == *$'\n' ]]; then category_output="${category_output%$'\n'}"; else category_output=''; fi
+                else
+                  category_output=''
+                fi
+              fi
+              category_line='^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=selected-live-proof-target$'
+              disposition_line='^build-failure-disposition: value=(input-limit|malformed|ambiguous|no-match|helper-unavailable|classified)$'
+              match_values='^build-failure-matches: values=(none|linkerfailed(,package-or-feature-selection)?(,missingtarget)?(,dependency-resolution)?|package-or-feature-selection(,missingtarget)?(,dependency-resolution)?|missingtarget(,dependency-resolution)?|dependency-resolution)$'
+              output_first="${category_output%%$'\n'*}"
+              output_second=''
+              output_third=''
+              output_rest=''
+              if [[ "${category_output}" == *$'\n'* ]]; then
+                output_rest="${category_output#*$'\n'}"
+                output_second="${output_rest%%$'\n'*}"
+                if [[ "${output_rest}" == *$'\n'* ]]; then output_third="${output_rest#*$'\n'}"; fi
+              fi
+              if [[ "${output_rest}" == *$'\n'* && "${output_third}" != *$'\n'* && "${output_first}" =~ ${category_line} && "${output_second}" =~ ${disposition_line} && "${output_third}" =~ ${match_values} ]]; then
+                printf '%s\n' "${category_output}" >&2
+              elif [[ "${output_rest}" != *$'\n'* && "${output_first}" =~ ${category_line} && "${output_second}" =~ ${disposition_line} && -z "${output_third}" ]]; then
+                printf '%s\n' "${category_output}" >&2
+              elif [[ "${category_output}" != *$'\n'* && "${output_first}" =~ ${category_line} && -z "${output_second}" && -z "${output_third}" ]]; then
+                printf '%s\n' "${category_output}" >&2
+                echo 'build-failure-disposition: value=helper-unavailable' >&2
+              else
+                echo 'build-failure: category=other count=1 target=selected-live-proof-target' >&2
+                echo 'build-failure-disposition: value=helper-unavailable' >&2
+              fi
+            fi
             if [[ "${label}" == cli-* ]]; then
               echo "${label}: failed ($(cargo_reason "${log}"); exit ${rc}; sanitized detail below)" >&2
               cargo_detail "${log}"
@@ -405,8 +441,8 @@ runs:
             arg="$1"; shift
             case "${arg}" in
               --no-fail-fast | --fail-fast) ;;
-              --status-level | --final-status-level | --partition | --profile) shift ;;
-              --status-level=* | --final-status-level=* | --partition=* | --profile=*) ;;
+              --status-level | --final-status-level | --partition | --profile | --no-tests) shift ;;
+              --status-level=* | --final-status-level=* | --partition=* | --profile=* | --no-tests=*) ;;
               *) rust_build_cmd+=("${arg}") ;;
             esac
           done
@@ -515,16 +551,52 @@ runs:
         # cargo test, exactly as before. Usage: rust_tests <label> <cargo package args...>
         rust_tests() {
           local label="$1"; shift
+          local required_test_args=''
+          if [[ "${NEXTEST_REQUIRE_TESTS:-false}" == true ]]; then
+            required_test_args=--no-tests=fail
+          fi
           if command -v cargo-nextest >/dev/null 2>&1 && [[ -f .config/nextest.toml ]]; then
             # Failing tests are named on their FAIL lines whatever the profile's own verbosity
             # says: ask for them on the command line (status shown while running, repeated in
             # the final list) so a failure is never reduced to counts.
-            run_deferred "${label}" cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail ${NEXTEST_PARTITION:+--partition "${NEXTEST_PARTITION}"} "$@"
+            run_deferred "${label}" cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail ${NEXTEST_PARTITION:+--partition "${NEXTEST_PARTITION}"} ${required_test_args:+"${required_test_args}"} "$@"
             if [[ "${NEXTEST_DOCTESTS:-run}" != skip ]]; then
               run_deferred "${label%-tests}-doctests" cargo test --locked --doc --no-fail-fast "$@"
             fi
           else
             run_deferred "${label}" cargo test --locked --no-fail-fast "$@"
           fi
+        }
+        # Existing source revisions can have no Stage2 adapter. They receive an explicit
+        # uncovered state, never legacy tests credited as these cases. Once registered,
+        # the two fixed feature cases are mandatory and the concern fails if either fails.
+        # The separate live pg-dbx arm remains mandatory on every source revision.
+        dbx_registered_feature_tests() {
+          local package registered=false message
+          for package in "$@"; do
+            if [[ "${package}" == --package=taurine-db-dbx ]]; then registered=true; fi
+          done
+          if [[ "${registered}" != true ]]; then
+            message='DBX Stage2 feature coverage: uncovered / not executed (adapter not registered in the requested source); live pg-dbx remains required.'
+            echo "${message}"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then printf '%s\n' "${message}" >> "${GITHUB_STEP_SUMMARY}"; fi
+            return 0
+          fi
+          message='DBX Stage2 feature coverage: registered adapter; both fixed feature cases are required.'
+          echo "${message}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then printf '%s\n' "${message}" >> "${GITHUB_STEP_SUMMARY}"; fi
+          if ! command -v cargo-nextest >/dev/null 2>&1 || [[ ! -f .config/nextest.toml ]]; then
+            deferred_results+=('rust-db-dbx-legacy-tls-tests|failed: required tests not executed (nextest or CI profile unavailable)')
+            deferred_results+=('rust-db-engine-dbx-route-tests|failed: required tests not executed (nextest or CI profile unavailable)')
+            deferred_failed=1
+            return 0
+          fi
+          NEXTEST_REQUIRE_TESTS=true rust_tests rust-db-dbx-legacy-tls-tests \
+            --package=taurine-db-dbx --features=legacy-tls
+          # A specific integration target cannot accompany cargo test --doc. Only this
+          # invocation suppresses the doctest companion; ordinary/adapter doctests stay.
+          NEXTEST_REQUIRE_TESTS=true NEXTEST_DOCTESTS=skip rust_tests rust-db-engine-dbx-route-tests \
+            --package=taurine-db-engine --features=dbx-pg,engine-override,taurine-db-dbx/legacy-tls \
+            --test=dbx_route_dial
         }
         TCI_REPORT_LIBRARY
