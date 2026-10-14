@@ -57,11 +57,23 @@ runs:
               category_output=''
             fi
           fi
-          expected="^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=${target}"$'\n''build-failure-disposition: value=(input-limit|malformed|ambiguous|no-match|helper-unavailable|classified)$'
-          legacy_expected="^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=${target}$"
-          if [[ "${category_output}" =~ ${expected} ]]; then
+          category_line="^build-failure: category=(linkerfailed|package-or-feature-selection|missingtarget|dependency-resolution|process-signal|other) count=[1-9][0-9]{0,2} target=${target}$"
+          disposition_line='^build-failure-disposition: value=(input-limit|malformed|ambiguous|no-match|helper-unavailable|classified)$'
+          match_values='^build-failure-matches: values=(none|linkerfailed(,package-or-feature-selection)?(,missingtarget)?(,dependency-resolution)?|package-or-feature-selection(,missingtarget)?(,dependency-resolution)?|missingtarget(,dependency-resolution)?|dependency-resolution)$'
+          output_first="${category_output%%$'\n'*}"
+          output_second=''
+          output_third=''
+          output_rest=''
+          if [[ "${category_output}" == *$'\n'* ]]; then
+            output_rest="${category_output#*$'\n'}"
+            output_second="${output_rest%%$'\n'*}"
+            if [[ "${output_rest}" == *$'\n'* ]]; then output_third="${output_rest#*$'\n'}"; fi
+          fi
+          if [[ "${output_rest}" == *$'\n'* && "${output_third}" != *$'\n'* && "${output_first}" =~ ${category_line} && "${output_second}" =~ ${disposition_line} && "${output_third}" =~ ${match_values} ]]; then
             printf '%s\n' "${category_output}" >&2
-          elif [[ "${category_output}" =~ ${legacy_expected} ]]; then
+          elif [[ "${output_rest}" != *$'\n'* && "${output_first}" =~ ${category_line} && "${output_second}" =~ ${disposition_line} && -z "${output_third}" ]]; then
+            printf '%s\n' "${category_output}" >&2
+          elif [[ "${category_output}" != *$'\n'* && "${output_first}" =~ ${category_line} && -z "${output_second}" && -z "${output_third}" ]]; then
             printf '%s\n' "${category_output}" >&2
             printf 'build-failure-disposition: value=helper-unavailable\n' >&2
           else

@@ -7,6 +7,7 @@ import re
 import stat
 import sys
 from pathlib import Path
+from urllib.parse import unquote_to_bytes, urlsplit
 
 TARGET = "dbx_pg8_performance_live"
 PACKAGE = "taurine-db-conformance"
@@ -15,6 +16,36 @@ MARKER = "TAURINE_DBX_PG8_RESULT"
 MAX_CARGO_JSON_CHARS = 64 * 1024 * 1024
 MAX_PROBE_OUTPUT_CHARS = 1024 * 1024
 MAX_RSS_OUTPUT_CHARS = 64 * 1024
+SEMVER = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+EXPLICIT_PACKAGE_ID = re.compile(r"(?:^|#)" + re.escape(PACKAGE) + r"(?:@|:)[0-9][0-9A-Za-z.+-]*\Z")
+
+
+def package_id_matches(package_id):
+    if not isinstance(package_id, str) or not package_id.isascii():
+        return False
+    # Preserve Cargo's explicit-name package IDs, but validate path package IDs
+    # structurally: Cargo may omit the name from a path URL's version fragment.
+    try:
+        parsed = urlsplit(package_id)
+        if parsed.scheme != "path+file":
+            return bool(EXPLICIT_PACKAGE_ID.search(package_id))
+        if parsed.query or parsed.username is not None or parsed.password is not None or parsed.port is not None:
+            return False
+        if parsed.hostname not in (None, "localhost"):
+            return False
+        raw_path = parsed.path
+        if not raw_path.startswith("/") or raw_path.endswith("/") or re.search(r"%(?![0-9A-Fa-f]{2})", raw_path):
+            return False
+        decoded_path = unquote_to_bytes(raw_path).decode("utf-8", errors="strict")
+        if "\\" in decoded_path or "\x00" in decoded_path or any(part in {".", ".."} for part in decoded_path.split("/")):
+            return False
+        if decoded_path.rsplit("/", 1)[-1] != PACKAGE:
+            return False
+        fragment = parsed.fragment
+        return bool(re.fullmatch(SEMVER, fragment) or
+                    re.fullmatch(re.escape(PACKAGE) + r"(?:@|:)" + SEMVER, fragment))
+    except (UnicodeDecodeError, ValueError):
+        return False
 
 
 def read_bounded(stream, limit):
@@ -56,7 +87,7 @@ def select_artifact(lines, target_dir):
             continue
         if not isinstance(package_id, str):
             continue
-        if not re.search(r"(?:^|#)" + re.escape(PACKAGE) + r"(?:@|$)", package_id):
+        if not package_id_matches(package_id):
             continue
         executable = obj.get("executable")
         if not isinstance(executable, str) or not executable:
