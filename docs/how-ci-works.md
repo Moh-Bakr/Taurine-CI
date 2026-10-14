@@ -778,9 +778,11 @@ What this does **not** do, plainly:
 
 - **It hardens the base pass as an honest workflow runs it. It does not defend against a pull
   request that edits the workflow.** Under `pull_request`, the pull request's own copy of this
-  file defines both jobs. It can delete the pin, change `BASE_SHA` or the checkout `ref:`, add
-  `if: false`, drop `needs`, or replace the step outright, and no check that this workflow runs
-  can stop that, because the pull request also controls which checks run. Until the owner
+  file defines every job here -- `policy`, `base-policy` and `base-policy-fixtures` alike. It can
+  delete the pin, change `BASE_SHA` or the checkout `ref:`, add `if: false`, drop `needs`,
+  replace the step outright, or empty `base-policy-fixtures` so that the tests of the step stop
+  testing it, and no check that this workflow runs can stop that, because the pull request also
+  controls which checks run. Until the owner
   decides on a ruleset-required workflow run from the default branch, review of every change to
   this workflow and to `.github/policy/` is the only control for it.
 - **Pull-request code runs inside the base pass.** The two test scripts named above execute steps
@@ -789,10 +791,15 @@ What this does **not** do, plainly:
 - **The pull request's tree is not pinned.** The base scripts judge the files in the workspace,
   and pull-request code running inside the pass could change those between one script and the
   next. Only the base policy is pinned.
-- **An escapee that clears its environment is not seen.** The marker is inherited, so a process
-  that deliberately starts with a clean environment after leaving the session carries none. The
-  marker is read from `/proc`, which exists on the Linux runner; on macOS the fixture that tests
-  it reports that it did not run.
+- **An escapee that clears its environment, or starts with a fresh one, is not seen.** The marker
+  is inherited, so any process that does not inherit it carries none. That includes a process
+  handed to `cron`, `at` or `systemd-run --user`, which the scheduler starts with its own
+  environment; a process under a nested `env -i`; and one whose `/proc/<pid>/environ` cannot be
+  read -- a setuid or non-dumpable process -- because a failed read is skipped silently rather
+  than treated as a match. What such a process can do is what the residuals on pull-request code
+  running inside the pass and on the unpinned tree already describe. The marker is read from
+  `/proc`, which exists on the Linux runner; on macOS the fixture that tests it reports that it
+  did not run.
 - **A window between scripts.** An escaped process is found when the script that started it
   returns. Until then it runs alongside that script and can act -- including on the base files the
   next verification will check, though any change it makes there is caught by that verification.
