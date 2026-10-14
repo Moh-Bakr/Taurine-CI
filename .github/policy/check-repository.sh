@@ -25,13 +25,17 @@ while IFS= read -r -d '' path; do
     continue
   fi
   # The reviewed case-evidence assets, and nothing else: the control-owned
-  # Playwright list reporter the producers hand to the pinned runner, and the
-  # recorded runner reports their tests replay. They are JavaScript and JSON
-  # because that is what the pinned runner loads and emits; a Ruby or shell
-  # file cannot be either. One flat directory, lower-case names, those two
-  # extensions: no nesting, no other extension, and no other path in the
-  # repository gains an exception from this rule.
-  if [[ "$path" =~ ^\.github/policy/case-evidence-assets/[a-z0-9-]+\.(cjs|json)$ ]]; then
+  # Playwright list reporter the producers hand to the pinned runner, the
+  # fixture configs and specs it stages, and the recorded runner reports their
+  # tests replay. They are JavaScript and JSON because that is what the pinned
+  # runner loads and emits; a Ruby or shell file cannot be either.
+  #
+  # One flat directory and lower-case names. The only compound names allowed
+  # are the `.config.cjs` and `.spec.cjs` pair Playwright itself expects, so a
+  # name cannot smuggle another extension past the forbidden-extension sweep
+  # below: `x.ts.cjs` and `x.pem.json` stay rejected. No nesting, no other
+  # extension, and no other path in the repository gains an exception.
+  if [[ "$path" =~ ^\.github/policy/case-evidence-assets/[a-z0-9-]+(\.(config|spec))?\.(cjs|json)$ ]]; then
     continue
   fi
   if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt ]]; then
