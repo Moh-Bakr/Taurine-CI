@@ -69,6 +69,15 @@ expect json dbx_pg8_performance_live 101 "${tmp}/linker.jsonl" 'build-failure: c
 expect json dbx_pg8_performance_live 101 "${tmp}/mixed-progress.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg8_performance_live'
 printf '%s\n' 'error: no test target named PRIVATE-TARGET' >"${tmp}/plain-target.log"
 expect json dbx_pg8_performance_live 101 "${tmp}/plain-target.log" 'build-failure: category=missingtarget count=1 target=dbx_pg8_performance_live'
+printf '%s\n' '[]' 'error: linking with cc failed' >"${tmp}/array-plus-linker.jsonl"
+expect json dbx_pg_mtls_live 101 "${tmp}/array-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live'
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/array-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' malformed
+printf '%s\n' '{"reason":"compiler-message","message":{}}' 'error: linking with cc failed' >"${tmp}/empty-message-plus-linker.jsonl"
+expect json dbx_pg_mtls_live 101 "${tmp}/empty-message-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live'
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/empty-message-plus-linker.jsonl" 'build-failure: category=linkerfailed count=1 target=dbx_pg_mtls_live' malformed
+printf '%s\n' '{"reason":"compiler-message","message":{"message":42}}' 'error: linking with cc failed' >"${tmp}/parser-exception.jsonl"
+expect json dbx_pg_mtls_live 101 "${tmp}/parser-exception.jsonl" 'build-failure: category=other count=1 target=dbx_pg_mtls_live'
+expect_disposition json dbx_pg_mtls_live 101 "${tmp}/parser-exception.jsonl" 'build-failure: category=other count=1 target=dbx_pg_mtls_live' malformed
 cat >"${tmp}/mixed.jsonl" <<'JSONL'
 {"reason":"compiler-message","message":{"message":"linker command failed SECRET"}}
 {"reason":"compiler-message","message":{"message":"no test target named PRIVATE"}}

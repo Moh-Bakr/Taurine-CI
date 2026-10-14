@@ -89,20 +89,11 @@ begin
         next ''
       end
       next '' unless record['reason'] == 'compiler-message'
-      unless record['message'].is_a?(Hash)
-        malformed_shape = true
-        next ''
-      end
       message = record.dig('message', 'message')
       rendered = record.dig('message', 'rendered')
-      unless (message.nil? || message.is_a?(String)) && (rendered.nil? || rendered.is_a?(String))
-        malformed_shape = true
-        next ''
-      end
-      unless message.is_a?(String) || rendered.is_a?(String)
-        malformed_shape = true
-        next ''
-      end
+      raise JSON::ParserError unless message.nil? || message.is_a?(String)
+      raise JSON::ParserError unless rendered.nil? || rendered.is_a?(String)
+      malformed_shape = true if message.nil? && rendered.nil?
       [message, rendered].compact.join("\n")
     end
     messages.join("\n")
@@ -110,11 +101,12 @@ begin
     input
   end
 
-  category, disposition = if malformed_json || malformed_shape
+  category, disposition = if malformed_json
     ['other', 'malformed']
   else
     category_for(text)
   end
+  disposition = 'malformed' if malformed_shape
   error_lines = text.lines.count { |line| line.match?(/\berror(?:\[E[0-9]{4}\])?:/i) }
   emit(category, error_lines.zero? ? 1 : error_lines, target, disposition_mode ? disposition : nil)
 rescue StandardError
