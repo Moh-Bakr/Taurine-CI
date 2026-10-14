@@ -61,4 +61,26 @@ printf 'GH_APP_PRIVATE_KEY=TEST_FIXTURE_SENTINEL\n' > "${credential}/docs/reposi
 git -C "${credential}" add docs/repository-fixture.md
 expect_reject "${credential}" 'credential material in an otherwise allowed document' 'A reusable source, signing, or deployment credential pattern was found'
 
-echo 'repository path fixtures: exact PG8 parser/test pair allowed; third Python, private source, and credential material rejected'
+assets="$(new_fixture)"
+mkdir -p "${assets}/.github/policy/case-evidence-assets"
+printf "'use strict';\n" > "${assets}/.github/policy/case-evidence-assets/playwright-case-list-reporter.cjs"
+printf '{"suites":[]}\n' > "${assets}/.github/policy/case-evidence-assets/real-runner-list.json"
+git -C "${assets}" add .github/policy/case-evidence-assets
+expect_pass "${assets}" 'the reviewed case-evidence asset directory'
+
+for rejected in \
+  'case-evidence-assets/nested/reporter.cjs' \
+  'case-evidence-assets/Reporter.cjs' \
+  'case-evidence-assets/reporter.ts' \
+  'case-evidence-assets/reporter.js' \
+  'case-evidence-assets/reporter.sh.cjs.ts' \
+  'other-assets/reporter.cjs'
+do
+  narrow="$(new_fixture)"
+  mkdir -p "${narrow}/.github/policy/$(dirname "${rejected}")"
+  printf 'fixture\n' > "${narrow}/.github/policy/${rejected}"
+  git -C "${narrow}" add ".github/policy/${rejected}"
+  expect_reject "${narrow}" "a path outside the reviewed asset exception: ${rejected}" 'Unexpected tracked path in the public CI repository'
+done
+
+echo 'repository path fixtures: exact PG8 parser/test pair and the flat case-evidence asset directory allowed; a third Python file, nested/upper-case/other-extension assets, another directory, private source, and credential material rejected'
