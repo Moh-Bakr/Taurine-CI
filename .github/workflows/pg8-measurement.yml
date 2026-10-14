@@ -76,7 +76,8 @@ jobs:
     needs: [plan]
     permissions:
       contents: read
-    uses: ./.github/workflows/pg8-measurement-arm.yml
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    uses: ./.github/workflows/pg8-measurement-arm.yml  # zizmor: ignore[self-repository]
     with:
       source_sha: ${{ inputs.source_sha }}
     secrets:
