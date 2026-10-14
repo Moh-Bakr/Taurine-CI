@@ -133,12 +133,20 @@ if env GITHUB_WORKSPACE="${work}/workspace" RUNNER_TEMP="${work}/runner-temp" \
   echo 'fixture generator accepted caller-controlled arguments' >&2; exit 1
 fi
 before="$(wc -l < "${fixture_log}")"
-if env GITHUB_WORKSPACE="${work}/workspace" RUNNER_TEMP="${work}/workspace/src/tmp" \
-  FAKE_OPENSSL_LOG="${fixture_log}" PATH="${work}/fakebin:${PATH}" bash "${generator}" >/dev/null 2>&1; then
-  echo 'fixture generator accepted a runner-temp path inside source checkout' >&2; exit 1
-fi
+mkdir -p "${work}/workspace/src/tmp"
+source_reject="$(env GITHUB_WORKSPACE="${work}/workspace" RUNNER_TEMP="${work}/workspace/src/tmp" \
+  FAKE_OPENSSL_LOG="${fixture_log}" PATH="${work}/fakebin:${PATH}" bash "${generator}" 2>&1 || true)"
+[[ "${source_reject}" == 'pgtls fixtures: runner temp resolves inside the source checkout' ]] || {
+  echo 'fixture generator did not issue its fixed source-checkout containment refusal' >&2; exit 1;
+}
+ln -s "${work}/workspace/src/tmp" "${work}/source-temp-link"
+symlink_reject="$(env GITHUB_WORKSPACE="${work}/workspace" RUNNER_TEMP="${work}/source-temp-link" \
+  FAKE_OPENSSL_LOG="${fixture_log}" PATH="${work}/fakebin:${PATH}" bash "${generator}" 2>&1 || true)"
+[[ "${symlink_reject}" == 'pgtls fixtures: runner temp resolves inside the source checkout' ]] || {
+  echo 'fixture generator did not reject a source-checkout temp symlink' >&2; exit 1;
+}
 after="$(wc -l < "${fixture_log}")"
-[[ "${before}" == "${after}" ]] || { echo 'fixture generator ran OpenSSL after rejecting source path' >&2; exit 1; }
+[[ "${before}" == "${after}" ]] || { echo 'fixture generator ran OpenSSL after rejecting source path or symlink' >&2; exit 1; }
 
 ruby -ryaml -e '
   doc = YAML.safe_load_file(ARGV.fetch(0), aliases: true)
