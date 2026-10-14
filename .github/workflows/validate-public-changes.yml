@@ -161,6 +161,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-dbx-feature-coverage.sh
 
+      - name: Test PG8 measurement parsers on adversarial fixtures
+        shell: bash
+        run: python3 .github/policy/test-pg8-measurement.py
+
       - name: Test the dispatch contract policy against weakened fixtures
         shell: bash
         run: bash .github/policy/test-dispatch-contracts.sh

@@ -1,0 +1,91 @@
+name: Measure the fixed DBX PG8 probe and desktop release size
+description: Runs one fixed probe binary and compares the real UAT desktop executable with DBX disabled and enabled.
+inputs:
+  source-path:
+    description: Verified source checkout path
+    required: false
+    default: src
+runs:
+  using: composite
+  steps:
+    - name: Run fixed PG8 probe and UAT release comparisons
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        SOURCE_PATH: ${{ inputs.source-path }}
+      run: |
+        set -euo pipefail
+        source_dir="${GITHUB_WORKSPACE}/${SOURCE_PATH}"
+        policy="${GITHUB_WORKSPACE}/.github/policy/pg8-measurement.py"
+        target="x86_64-unknown-linux-gnu"
+        probe_target="/mnt/cargo-target/pg8-probe"
+        mkdir -p "${probe_target}"
+        export CARGO_TARGET_DIR="${probe_target}"
+        build_log="${RUNNER_TEMP}/pg8-probe-build.log"
+        if ! (cd "${source_dir}" && cargo test --locked -p taurine-db-conformance --test dbx_pg8_performance_live --no-run --message-format=json --target "${target}") >"${build_log}" 2>&1; then
+          echo 'PG8 probe compilation failed; detailed output withheld' >&2
+          exit 1
+        fi
+        probe_bin="$(python3 "${policy}" artifact "${probe_target}" <"${build_log}")"
+        summary_dir="${RUNNER_TEMP}/pg8-measurement"
+        mkdir -m 0700 -p "${summary_dir}"
+        for mode in paired legacy dbx; do
+          output="${summary_dir}/${mode}.out"
+          if [[ "${mode}" == paired ]]; then
+            set +e
+            (cd "${source_dir}" && TAURINE_TEST_DBX_PG8_REQUIRED=1 TAURINE_TEST_DBX_PG8_MODE="${mode}" "${probe_bin}" --exact dbx_pg8_performance_probe --nocapture --test-threads=1) >"${output}" 2>&1
+            status=$?
+            set -e
+            python3 "${policy}" probe "${mode}" "${status}" <"${output}" >"${summary_dir}/${mode}.json"
+          else
+            time_file="${summary_dir}/${mode}.time"
+            set +e
+            (cd "${source_dir}" && TAURINE_TEST_DBX_PG8_REQUIRED=1 TAURINE_TEST_DBX_PG8_MODE="${mode}" /usr/bin/time -v -o "${time_file}" "${probe_bin}" --exact dbx_pg8_performance_probe --nocapture --test-threads=1) >"${output}" 2>&1
+            status=$?
+            set -e
+            python3 "${policy}" probe "${mode}" "${status}" <"${output}" >"${summary_dir}/${mode}.json"
+            python3 "${policy}" rss "${status}" <"${time_file}" >"${summary_dir}/${mode}.rss"
+          fi
+        done
+
+        build_desktop() {
+          local flavor="$1" feature="$2" target_dir="/mnt/cargo-target/pg8-product-${1}" log="${summary_dir}/product-${1}.log"
+          mkdir -p "${target_dir}"
+          export CARGO_TARGET_DIR="${target_dir}"
+          local -a args=(--no-bundle --ci --config src-tauri/tauri.conf.uat.json --target "${target}")
+          [[ "${feature}" == on ]] && args+=(--features taurine-app/dbx-pg)
+          if ! (cd "${source_dir}" && npm --prefix taurine-desktop run tauri -- build "${args[@]}") >"${log}" 2>&1; then
+            echo 'UAT desktop release build failed; detailed output withheld' >&2
+            exit 1
+          fi
+          local executable="${target_dir}/${target}/release/taurine-desktop"
+          local resolved
+          resolved="$(python3 "${policy}" release "${executable}" "${target_dir}")"
+          wc -c <"${resolved}" | tr -d '[:space:]' >"${summary_dir}/size-${flavor}"
+        }
+        build_desktop off off
+        build_desktop on on
+        python3 - "${summary_dir}" "${GITHUB_STEP_SUMMARY}" <<'PY'
+        import json, pathlib, sys
+        root=pathlib.Path(sys.argv[1]); summary=pathlib.Path(sys.argv[2])
+        paired=json.loads((root/'paired.json').read_text())
+        legacy_rss=int((root/'legacy.rss').read_text())
+        dbx_rss=int((root/'dbx.rss').read_text())
+        off=int((root/'size-off').read_text()); on=int((root/'size-on').read_text())
+        with summary.open('a') as f:
+            f.write('## PostgreSQL DBX PG8 measurement\n\n')
+            f.write('- Paired probe: passed; 5 warmups, 30 alternating samples.\n')
+            f.write(f"- Connect-ready median: legacy {paired['connect_legacy_p50_us']} µs; DBX {paired['connect_dbx_p50_us']} µs; ratio {paired['connect_ratio_p50']}.\n")
+            f.write(f"- First-batch median: legacy {paired['first_row_legacy_p50_us']} µs; DBX {paired['first_row_dbx_p50_us']} µs; ratio {paired['first_row_ratio_p50']}; budget 1.1000.\n")
+            f.write(f'- Direct probe process peak RSS: legacy {legacy_rss} KiB; DBX {dbx_rss} KiB.\n')
+            f.write(f'- UAT desktop release executable size: feature off {off} bytes; feature on {on} bytes; delta {on-off:+d} bytes.\n')
+        PY
+    - name: Remove private measurement files and build outputs
+      if: ${{ always() }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        rm -rf /mnt/cargo-target/pg8-probe /mnt/cargo-target/pg8-product-off /mnt/cargo-target/pg8-product-on
+        rm -rf "${RUNNER_TEMP}/pg8-measurement"
+        rm -f "${RUNNER_TEMP}/pg8-probe-build.log"

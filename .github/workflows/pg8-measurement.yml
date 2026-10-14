@@ -1,0 +1,84 @@
+name: PostgreSQL DBX PG8 measurement
+run-name: Taurine validation ${{ inputs.source_sha }} ${{ inputs.dispatch_key }}
+
+# Manual and protected: public pull requests never enter source-read.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to validate from private Taurine
+        required: true
+        type: string
+      dispatch_key:
+        description: Full SHA-256 key for this exact control revision and normalized inputs
+        required: true
+        type: string
+
+permissions: {}
+concurrency:
+  group: pg8-measurement-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    permissions:
+      actions: read
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
+    name: Plan PG8 measurement
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the source-read deployment branches
+        uses: ./.github/actions/environment-preflight  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+      - name: Validate exact source SHA
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
+      - name: Verify the coordinator dispatch identity
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_WORKFLOW_PATH: .github/workflows/pg8-measurement.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"source_sha":{0}}}', toJSON(inputs.source_sha)) }}
+          CI_DISPATCH_CONTRACT_JSON: ''
+          CI_GENERATE_ONLY: 'false'
+          CI_CONTROL_REPOSITORY: ${{ github.repository }}
+          CI_CONTROL_SHA: ${{ github.sha }}
+          CI_CONTROL_REF: ${{ github.ref }}
+        run: ruby .github/policy/dispatch-identity.rb
+      - name: Refuse a duplicate dispatch
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW_PATH: .github/workflows/pg8-measurement.yml
+          CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
+          CI_RUN_ID: ${{ github.run_id }}
+        run: ruby .github/policy/refuse-duplicate-dispatch.rb
+  measure:
+    needs: [plan]
+    permissions:
+      contents: read
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    uses: ./.github/workflows/pg8-measurement-arm.yml  # zizmor: ignore[self-repository]
+    with:
+      source_sha: ${{ inputs.source_sha }}
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
