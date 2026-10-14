@@ -216,27 +216,27 @@ set -e
 ! grep -qE 'PRIVATE-WINDOWS-COMPILER-SENTINEL|PRIVATE-RUBY-ERROR|Users\\Private|Users/Private' "${tmp}/windows-success.out"
 echo 'Windows rust-db compile-category fixtures: passed failure-only guard, fixed fallback, actual rc, and privacy checks'
 
-# Exercise the actual PG8 failure branch; fake mkdir avoids touching its fixed /mnt target path.
+# Exercise the actual PG8 failure branch with a real owned RUNNER_TEMP fallback.
 mkdir -p "${tmp}/src" "${tmp}/pg8-temp" "${tmp}/pg8-bin" "${tmp}/.github/policy"
 cp "${classifier}" "${tmp}/.github/policy/build-failure-category.rb"
 ruby "${root}/.github/policy/extract-step.rb" "${pg8_action}" 'Run fixed PG8 probe and UAT release comparisons' run >"${tmp}/pg8.sh"
 bash -n "${tmp}/pg8.sh"
-cat >"${tmp}/pg8-bin/mkdir" <<'STUB'
-#!/usr/bin/env bash
-exit 0
-STUB
 cat >"${tmp}/pg8-bin/cargo" <<'STUB'
 #!/usr/bin/env bash
+printf '%s\n' "${CARGO_TARGET_DIR}" >"${FAKE_TARGET_CAPTURE}"
 printf '%s\n' '{"reason":"compiler-message","message":{"message":"error: failed to select a version for PRIVATE-CRATE","rendered":"PRIVATE raw message"}}' >&2
 exit 101
 STUB
-chmod +x "${tmp}/pg8-bin/mkdir" "${tmp}/pg8-bin/cargo"
-if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src bash "${tmp}/pg8.sh" >"${tmp}/pg8.out" 2>&1; then
+chmod +x "${tmp}/pg8-bin/cargo"
+if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=1 FAKE_TARGET_CAPTURE="${tmp}/target.capture" bash "${tmp}/pg8.sh" >"${tmp}/pg8.out" 2>&1; then
   echo 'PG8 action fixture unexpectedly passed' >&2
   exit 1
 fi
 grep -qF 'build-failure: category=dependency-resolution count=1 target=dbx_pg8_performance_live' "${tmp}/pg8.out"
 ! grep -Eq 'PRIVATE-CRATE|PRIVATE raw message' "${tmp}/pg8.out"
+pg8_temp_real="$(cd "${tmp}/pg8-temp" && pwd -P)"
+[[ "$(cat "${tmp}/target.capture")" == "${pg8_temp_real}/pg8-measurement-24680-1/probe" ]]
+[[ -d "${tmp}/pg8-temp/pg8-measurement-24680-1/product-off" && -d "${tmp}/pg8-temp/pg8-measurement-24680-1/product-on" ]]
 for helper_case in missing broken; do
   pg8_workspace="${tmp}/pg8-nohelper-workspace"
   test_path="${tmp}/pg8-bin:${PATH}"
@@ -245,11 +245,74 @@ for helper_case in missing broken; do
     pg8_workspace="${tmp}"
     test_path="${tmp}/broken-ruby-bin:${tmp}/pg8-bin:${PATH}"
   fi
-  if PATH="${test_path}" GITHUB_WORKSPACE="${pg8_workspace}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src bash "${tmp}/pg8.sh" >"${tmp}/pg8-${helper_case}-helper.out" 2>&1; then
+  helper_attempt=3
+  [[ "${helper_case}" != broken ]] || helper_attempt=4
+  if PATH="${test_path}" GITHUB_WORKSPACE="${pg8_workspace}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT="${helper_attempt}" FAKE_TARGET_CAPTURE="${tmp}/target.capture" bash "${tmp}/pg8.sh" >"${tmp}/pg8-${helper_case}-helper.out" 2>&1; then
     echo "PG8 ${helper_case}-helper fixture unexpectedly passed" >&2
     exit 1
   fi
   grep -qF 'build-failure: category=other count=1 target=dbx_pg8_performance_live' "${tmp}/pg8-${helper_case}-helper.out"
   ! grep -Eq 'LoadError|cannot load such file|PRIVATE-RUBY-ERROR|/Users/PRIVATE' "${tmp}/pg8-${helper_case}-helper.out"
 done
+
+# The source path and temp path are validated before Cargo can run. A source symlink,
+# a temp directory inside the checkout, and an attacker-controlled source path all fail.
+mkdir -p "${tmp}/pg8-outside-source" "${tmp}/pg8-symlink-workspace" "${tmp}/pg8-symlink-workspace/.github/policy"
+cp "${classifier}" "${tmp}/pg8-symlink-workspace/.github/policy/build-failure-category.rb"
+ln -s "${tmp}/pg8-outside-source" "${tmp}/pg8-symlink-workspace/src"
+for invalid_case in symlink-source inside-source-temp source-path; do
+  workspace="${tmp}"
+  runner_temp="${tmp}/pg8-temp"
+  source_path=src
+  if [[ "${invalid_case}" == symlink-source ]]; then workspace="${tmp}/pg8-symlink-workspace"; fi
+  if [[ "${invalid_case}" == inside-source-temp ]]; then runner_temp="${tmp}/src/runner-temp"; mkdir -p "${runner_temp}"; fi
+  if [[ "${invalid_case}" == source-path ]]; then source_path=../outside; fi
+  if PATH="${tmp}/pg8-bin:${PATH}" GITHUB_WORKSPACE="${workspace}" RUNNER_TEMP="${runner_temp}" SOURCE_PATH="${source_path}" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=5 FAKE_TARGET_CAPTURE="${tmp}/should-not-run" bash "${tmp}/pg8.sh" >"${tmp}/pg8-${invalid_case}.out" 2>&1; then
+    echo "PG8 ${invalid_case} path fixture unexpectedly passed" >&2; exit 1
+  fi
+  [[ ! -e "${tmp}/should-not-run" ]]
+  ! grep -Eq '/Users/|/home/|PRIVATE|SECRET' "${tmp}/pg8-${invalid_case}.out"
+done
+
+# Exercise the prepared-target branch using an extracted-script copy with the fixed mount
+# path redirected to a synthetic owned temp directory; never touch the real /mnt mount.
+prepared_dir="${tmp}/prepared-mount"
+mkdir -m 0700 "${prepared_dir}"
+prepared="$(cd "${prepared_dir}" && pwd -P)"
+sed "s#/mnt/cargo-target#${prepared}#g" "${tmp}/pg8.sh" >"${tmp}/pg8-prepared.sh"
+bash -n "${tmp}/pg8-prepared.sh"
+if PATH="${tmp}/pg8-bin:${PATH}" CARGO_TARGET_DIR="${prepared}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=6 FAKE_TARGET_CAPTURE="${tmp}/prepared.capture" bash "${tmp}/pg8-prepared.sh" >"${tmp}/pg8-prepared.out" 2>&1; then
+  echo 'PG8 prepared-target failure fixture unexpectedly passed' >&2; exit 1
+fi
+[[ "$(cat "${tmp}/prepared.capture")" == "${prepared}/pg8-measurement-24680-6/probe" ]]
+[[ -d "${prepared}/pg8-measurement-24680-6/product-off" && -d "${prepared}/pg8-measurement-24680-6/product-on" ]]
+
+# An unwritable prepared candidate and a symlink candidate both fall back to the owned
+# runner temp root; neither causes Cargo to write through the rejected candidate.
+chmod 0500 "${prepared}"
+if PATH="${tmp}/pg8-bin:${PATH}" CARGO_TARGET_DIR="${prepared}" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=7 FAKE_TARGET_CAPTURE="${tmp}/unwritable.capture" bash "${tmp}/pg8-prepared.sh" >"${tmp}/pg8-unwritable.out" 2>&1; then
+  echo 'PG8 unwritable-target failure fixture unexpectedly passed' >&2; exit 1
+fi
+chmod 0700 "${prepared}"
+[[ "$(cat "${tmp}/unwritable.capture")" == "${pg8_temp_real}/pg8-measurement-24680-7/probe" ]]
+[[ ! -e "${prepared}/pg8-measurement-24680-7" ]]
+ln -s "${prepared}" "${tmp}/prepared-link"
+sed "s#${prepared}#${tmp}/prepared-link#g" "${tmp}/pg8-prepared.sh" >"${tmp}/pg8-symlink-candidate.sh"
+bash -n "${tmp}/pg8-symlink-candidate.sh"
+if PATH="${tmp}/pg8-bin:${PATH}" CARGO_TARGET_DIR="${tmp}/prepared-link" GITHUB_WORKSPACE="${tmp}" RUNNER_TEMP="${tmp}/pg8-temp" SOURCE_PATH=src GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=8 FAKE_TARGET_CAPTURE="${tmp}/symlink-candidate.capture" bash "${tmp}/pg8-symlink-candidate.sh" >"${tmp}/pg8-symlink-candidate.out" 2>&1; then
+  echo 'PG8 symlink-target failure fixture unexpectedly passed' >&2; exit 1
+fi
+[[ "$(cat "${tmp}/symlink-candidate.capture")" == "${pg8_temp_real}/pg8-measurement-24680-8/probe" ]]
+[[ ! -e "${prepared}/pg8-measurement-24680-8" ]]
+
+# The cleanup step only removes fixed run-owned roots and summary data. It leaves a sibling
+# sentinel untouched; the test runs only against synthetic directories under this fixture.
+ruby "${root}/.github/policy/extract-step.rb" "${pg8_action}" 'Remove private measurement files and build outputs' run >"${tmp}/pg8-cleanup.sh"
+bash -n "${tmp}/pg8-cleanup.sh"
+mkdir -p "${tmp}/pg8-temp/pg8-measurement-24680-6-summary" "${prepared}/pg8-measurement-24680-6" "${tmp}/pg8-temp/pg8-measurement-24680-6"
+printf 'sentinel\n' >"${tmp}/pg8-temp/keep-me"
+sed "s#/mnt/cargo-target#${prepared}#g" "${tmp}/pg8-cleanup.sh" >"${tmp}/pg8-cleanup-prepared.sh"
+RUNNER_TEMP="${tmp}/pg8-temp" GITHUB_RUN_ID=24680 GITHUB_RUN_ATTEMPT=6 bash "${tmp}/pg8-cleanup-prepared.sh"
+[[ ! -e "${prepared}/pg8-measurement-24680-6" && ! -e "${tmp}/pg8-temp/pg8-measurement-24680-6" ]]
+[[ ! -e "${tmp}/pg8-temp/pg8-measurement-24680-6-summary" && -f "${tmp}/pg8-temp/keep-me" ]]
 echo 'build-failure category fixtures: classifications, privacy, failure preservation, live-build and PG8 callsites pass'

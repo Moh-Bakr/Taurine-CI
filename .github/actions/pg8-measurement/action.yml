@@ -15,13 +15,55 @@ runs:
         SOURCE_PATH: ${{ inputs.source-path }}
       run: |
         set -euo pipefail
-        source_dir="${GITHUB_WORKSPACE}/${SOURCE_PATH}"
+        owner_uid() { python3 - "$1" 2>/dev/null <<'PY'
+        import os, sys
+        print(os.stat(sys.argv[1], follow_symlinks=False).st_uid)
+        PY
+        }
+        if [[ "${SOURCE_PATH}" != src || ! -d "${GITHUB_WORKSPACE}/src" || -L "${GITHUB_WORKSPACE}/src" ]]; then
+          echo 'PG8 source path is not the fixed checkout directory' >&2
+          exit 1
+        fi
+        workspace_real="$(cd "${GITHUB_WORKSPACE}" && pwd -P)"
+        source_dir="${workspace_real}/src"
+        source_real="$(cd "${source_dir}" && pwd -P)"
+        if [[ "${source_real}" != "${workspace_real}/src" || ! -d "${RUNNER_TEMP}" || -L "${RUNNER_TEMP}" || ! -w "${RUNNER_TEMP}" || "$(owner_uid "${RUNNER_TEMP}" || true)" != "$(id -u)" ]]; then
+          echo 'PG8 source or runner directory failed fixed path validation' >&2
+          exit 1
+        fi
+        runner_temp_real="$(cd "${RUNNER_TEMP}" && pwd -P)"
+        if [[ "${runner_temp_real}" == "${source_real}" || "${runner_temp_real}" == "${source_real}/"* ]]; then
+          echo 'PG8 runner directory must be outside the source checkout' >&2
+          exit 1
+        fi
+        if [[ ! "${GITHUB_RUN_ID:-}" =~ ^[0-9]{1,20}$ || ! "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]{1,6}$ ]]; then
+          echo 'PG8 run identity is invalid' >&2
+          exit 1
+        fi
         policy="${GITHUB_WORKSPACE}/.github/policy/pg8-measurement.py"
         target="x86_64-unknown-linux-gnu"
-        probe_target="/mnt/cargo-target/pg8-probe"
-        mkdir -p "${probe_target}"
+        target_base="${runner_temp_real}"
+        if [[ "${CARGO_TARGET_DIR:-}" == /mnt/cargo-target && -d /mnt/cargo-target && ! -L /mnt/cargo-target && -w /mnt/cargo-target && "$(owner_uid /mnt/cargo-target || true)" == "$(id -u)" && "$(cd /mnt/cargo-target && pwd -P)" == /mnt/cargo-target ]]; then
+          target_base=/mnt/cargo-target
+        fi
+        target_root="${target_base}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        if [[ -e "${target_root}" || -L "${target_root}" ]]; then
+          echo 'PG8 run target directory already exists' >&2
+          exit 1
+        fi
+        mkdir -m 0700 -- "${target_root}"
+        probe_target="${target_root}/probe"
+        product_off_target="${target_root}/product-off"
+        product_on_target="${target_root}/product-on"
+        mkdir -m 0700 -- "${probe_target}" "${product_off_target}" "${product_on_target}"
         export CARGO_TARGET_DIR="${probe_target}"
-        build_log="${RUNNER_TEMP}/pg8-probe-build.log"
+        summary_dir="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-summary"
+        if [[ -e "${summary_dir}" || -L "${summary_dir}" ]]; then
+          echo 'PG8 run summary directory already exists' >&2
+          exit 1
+        fi
+        mkdir -m 0700 -- "${summary_dir}"
+        build_log="${summary_dir}/probe-build.log"
         emit_build_failure_category() {
           local format="$1" target="$2" status="$3" log="$4" category_line='' suffix=''
           case "${target}" in
@@ -47,8 +89,6 @@ runs:
           exit 1
         fi
         probe_bin="$(python3 "${policy}" artifact "${probe_target}" <"${build_log}")"
-        summary_dir="${RUNNER_TEMP}/pg8-measurement"
-        mkdir -m 0700 -p "${summary_dir}"
         for mode in paired legacy dbx; do
           output="${summary_dir}/${mode}.out"
           if [[ "${mode}" == paired ]]; then
@@ -69,8 +109,7 @@ runs:
         done
 
         build_desktop() {
-          local flavor="$1" feature="$2" target_dir="/mnt/cargo-target/pg8-product-${1}" log="${summary_dir}/product-${1}.log"
-          mkdir -p "${target_dir}"
+          local flavor="$1" feature="$2" target_dir="${target_root}/product-${1}" log="${summary_dir}/product-${1}.log"
           export CARGO_TARGET_DIR="${target_dir}"
           local -a args=(--no-bundle --ci --config src-tauri/tauri.conf.uat.json --target "${target}")
           [[ "${feature}" == on ]] && args+=(--features taurine-app/dbx-pg)
@@ -110,6 +149,30 @@ runs:
       working-directory: ${{ github.workspace }}
       run: |
         set -euo pipefail
-        rm -rf /mnt/cargo-target/pg8-probe /mnt/cargo-target/pg8-product-off /mnt/cargo-target/pg8-product-on
-        rm -rf "${RUNNER_TEMP}/pg8-measurement"
-        rm -f "${RUNNER_TEMP}/pg8-probe-build.log"
+        owner_uid() { python3 - "$1" 2>/dev/null <<'PY'
+        import os, sys
+        print(os.stat(sys.argv[1], follow_symlinks=False).st_uid)
+        PY
+        }
+        runner_temp_real=''
+        if [[ -d "${RUNNER_TEMP:-}" && ! -L "${RUNNER_TEMP:-}" && -w "${RUNNER_TEMP}" && "$(owner_uid "${RUNNER_TEMP}" || true)" == "$(id -u)" ]]; then
+          runner_temp_real="$(cd "${RUNNER_TEMP}" && pwd -P 2>/dev/null || true)"
+        fi
+        if [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]{1,20}$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]{1,6}$ ]]; then
+          for base in /mnt/cargo-target "${RUNNER_TEMP:-}"; do
+            [[ -d "${base}" && ! -L "${base}" ]] || continue
+            base_real="$(cd "${base}" && pwd -P)" || continue
+            [[ "${base_real}" == /mnt/cargo-target || ( -n "${runner_temp_real}" && "${base_real}" == "${runner_temp_real}" ) ]] || continue
+            [[ "$(owner_uid "${base_real}" || true)" == "$(id -u)" ]] || continue
+            owned_root="${base_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            if [[ -d "${owned_root}" && ! -L "${owned_root}" && "$(owner_uid "${owned_root}" || true)" == "$(id -u)" ]]; then
+              rm -rf -- "${owned_root}"
+            fi
+          done
+          if [[ -n "${runner_temp_real}" ]]; then
+            summary="${runner_temp_real}/pg8-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-summary"
+            if [[ -d "${summary}" && ! -L "${summary}" && "$(owner_uid "${summary}" || true)" == "$(id -u)" ]]; then
+              rm -rf -- "${summary}"
+            fi
+          fi
+        fi
