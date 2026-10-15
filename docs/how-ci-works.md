@@ -746,8 +746,16 @@ mappings, a value on the next line, a space before the colon and a complex key a
 `uses` they are. It refuses aliases, duplicate mapping keys (`yaml-guard.rb`, shared with
 `check-structure.rb`), a load error, a non-mapping job or step and a non-string value, and a textual
 tripwire fails the file when more lines look like a `uses` key than the walk found.
-`test-action-uses.sh` carries the fixtures (the spellings a grep missed, each refused) and mutates
-every guard in a copy, failing if a mutant survives.
+The same walk refuses a container image not pinned by an `@sha256:<64 hex>` digest
+(`jobs.<id>.container`, a string or a mapping with `image`, and `jobs.<id>.services.*.image`; an
+expression is read for the quoted `"image"` values inside it, and one with none is refused). Run with
+no arguments it walks the tree itself (the same `.yml` and `.yaml` files `check-workflows.sh`
+checks) and exits non-zero when it checked no file, so a direct run never passes having checked
+nothing. The tripwire fails closed, so any non-comment line holding the text `uses:` (a trailing
+comment, a `run:` script, a description) counts and fails the file when the walk found fewer
+references than such lines: reword the text rather than weaken the guard.
+`test-action-uses.sh` carries the fixtures (the spellings a grep missed, each refused, plus the
+container and no-argument cases) and mutates every guard in a copy, failing if a mutant survives.
 
 ## Changing the policy
 

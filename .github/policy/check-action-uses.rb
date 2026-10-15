@@ -19,7 +19,21 @@
 # lines of the file that look like a `uses` key and fails if the walk found fewer references, so
 # a disagreement between this parser and GitHub's fails closed.
 #
-# Usage: ruby check-action-uses.rb FILE...   (exit 1 on the first file with a finding)
+# The same walk refuses a container image that is not pinned by an `@sha256:<64 hex>` digest:
+# `jobs.<id>.container` (a string or a mapping with `image`) and `jobs.<id>.services.<name>.image`.
+# An expression value is read for the quoted `"image":"..."` values inside it and each must be
+# pinned; an expression with no such value cannot be verified and is refused.
+#
+# The tripwire fails closed, so it has false positives by design: any non-comment line that holds
+# the text `uses:` (a trailing comment, a `run:` script, a description) counts as a line that looks
+# like a `uses` key, and the file fails when the walk found fewer references than such lines. Fix a
+# false positive by rewording the text, not by weakening the guard.
+#
+# Usage: ruby check-action-uses.rb [FILE...]
+#   With files, checks exactly those. With none, walks the tree itself (every .yml and .yaml under
+#   .github/workflows and .github/actions, the set check-workflows.sh checks) from the repository
+#   root. It exits 1 on any finding, and also when it checked no file at all: it never exits 0
+#   having checked nothing.
 require 'yaml'
 require_relative 'yaml-guard'
 require_relative 'action-allowlist'
@@ -28,6 +42,7 @@ PINNED = %r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}\z}
 # A line that looks like a `uses` key: the word, optional quotes and spaces, a colon. Comment-only
 # lines are ignored; a flow mapping can hold several on one line.
 LOOKS_LIKE_USES = /uses["']?\s*:/
+DIGEST = /@sha256:[0-9a-f]{64}\z/
 
 # Every reference in a parsed document, or a finding for a shape this check cannot read.
 def references(doc, findings)
@@ -66,6 +81,46 @@ def references(doc, findings)
   refs
 end
 
+# An image reference must carry a digest. An expression is read for the quoted image values inside
+# it; one with none cannot be verified.
+def image_findings(where, value, findings)
+  unless value.is_a?(String) && !value.strip.empty?
+    findings << "#{where}: the image is not a non-empty string (#{value.inspect})"
+    return
+  end
+  images = value.include?('${{') ? value.scan(/"image"\s*:\s*"([^"]+)"/).flatten : [value]
+  findings << "#{where}: an image expression with no quoted image value cannot be verified: #{value}" if images.empty?
+  images.each do |image|
+    findings << "Every container image must be pinned by an @sha256:<64 hex> digest (#{where}): #{image}" unless image.match?(DIGEST)
+  end
+end
+
+def container_findings(doc, findings)
+  jobs = doc['jobs']
+  return unless jobs.is_a?(Hash)
+
+  jobs.each do |id, job|
+    next unless job.is_a?(Hash)
+
+    if job.key?('container')
+      c = job['container']
+      c.is_a?(Hash) ? image_findings("jobs.#{id}.container.image", c['image'], findings) : image_findings("jobs.#{id}.container", c, findings)
+    end
+    next unless job.key?('services')
+
+    services = job['services']
+    unless services.is_a?(Hash)
+      findings << "jobs.#{id}.services is not a mapping"
+      next
+    end
+    services.each do |name, svc|
+      if svc.is_a?(Hash) then image_findings("jobs.#{id}.services.#{name}.image", svc['image'], findings)
+      else findings << "jobs.#{id}.services.#{name} is not a mapping"
+      end
+    end
+  end
+end
+
 def check_file(path)
   findings = YamlGuard.yaml_duplicates(path)
   text = File.read(path, encoding: 'UTF-8')
@@ -78,6 +133,7 @@ def check_file(path)
   return findings + ['the document is not a mapping'] unless doc.is_a?(Hash)
 
   refs = references(doc, findings)
+  container_findings(doc, findings)
   looking = text.lines.reject { |l| l.lstrip.start_with?('#') }.sum { |l| l.scan(LOOKS_LIKE_USES).size }
   findings << "#{looking} line(s) look like a uses key but the walk found #{refs.size}: the parser and the text disagree" if looking > refs.size
   refs.each do |ref|
@@ -90,12 +146,20 @@ def check_file(path)
   findings
 end
 
+files = ARGV.dup
+files = Dir.glob('.github/{workflows,actions}/**/*.{yml,yaml}').sort if files.empty?
+if files.empty?
+  warn 'no workflow or composite file to check: run from the repository root, or name the files'
+  exit 1
+end
+
 failed = false
-ARGV.each do |path|
+files.each do |path|
   findings = check_file(path)
   next if findings.empty?
 
   failed = true
   findings.each { |f| warn "#{path}: #{f}" }
 end
+puts "action references: #{files.size} file(s) checked" unless failed
 exit(failed ? 1 : 0)

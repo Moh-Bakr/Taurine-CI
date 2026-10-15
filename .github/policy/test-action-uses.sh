@@ -83,6 +83,61 @@ fixture tripwire reject:'the parser and the text disagree' '      - name: n
         run: |
           uses: ./.github/actions/sanitize'
 
+# --- container images (jobs.<id>.container, jobs.<id>.services.*.image) ---
+fixture ok-container-digest pass 'jobs:
+  j:
+    container: alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+fixture ok-container-map-digest pass 'jobs:
+  j:
+    container:
+      image: alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      options: --ipc=host'
+fixture ok-service-digest pass 'jobs:
+  j:
+    services:
+      db:
+        image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+fixture ok-container-expression pass "jobs:
+  j:
+    container: \${{ inputs.x == 'y' && fromJSON('{\"image\":\"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"options\":\"--ipc=host\"}') || null }}"
+fixture container-tag reject:'container image must be pinned' 'jobs:
+  j:
+    container: alpine:3'
+fixture container-map-tag reject:'container image must be pinned' 'jobs:
+  j:
+    container:
+      image: alpine:3'
+fixture service-tag reject:'container image must be pinned' 'jobs:
+  j:
+    services:
+      db:
+        image: postgres:16'
+fixture service-short-digest reject:'container image must be pinned' 'jobs:
+  j:
+    services:
+      db:
+        image: postgres@sha256:abc123'
+fixture container-expression-unpinned reject:'container image must be pinned' "jobs:
+  j:
+    container: \${{ fromJSON('{\"image\":\"alpine:3\"}') }}"
+fixture container-expression-opaque reject:'cannot be verified' 'jobs:
+  j:
+    container: ${{ inputs.image }}'
+fixture container-non-string reject:'not a non-empty string' 'jobs:
+  j:
+    container: 5'
+fixture container-map-no-image reject:'not a non-empty string' 'jobs:
+  j:
+    container:
+      options: --ipc=host'
+fixture services-not-mapping reject:'services is not a mapping' 'jobs:
+  j:
+    services: nope'
+fixture service-not-mapping reject:'is not a mapping' 'jobs:
+  j:
+    services:
+      db: postgres:16'
+
 # run_suite DIR: run every fixture against DIR/check-action-uses.rb; prints the first failure.
 run_suite() {
   local checker="$1/check-action-uses.rb" name expect out rc=0 failed=0
@@ -119,5 +174,44 @@ mutant 'composite steps not read' "steps_of.call('runs', runs['steps']) if runs.
 mutant 'job steps not read' 'steps_of.call("jobs.#{id}", job['"'"'steps'"'"']) if job.is_a?(Hash)' 'nil'
 mutant 'job-level uses not read' 'take.call("jobs.#{id}", job)' 'nil'
 mutant 'a non-mapping step accepted' 'unless mapping.is_a?(Hash)' 'unless true'
+mutant 'the image digest rule removed' 'unless image.match?(DIGEST)' 'if false'
+mutant 'an opaque image expression accepted' 'if images.empty?' 'if false'
+mutant 'container images not walked' '  container_findings(doc, findings)
+' ''
+mutant 'services not walked' '    next unless job.key?('"'"'services'"'"')' '    next'
+mutant 'a non-mapping service accepted' 'else findings << "jobs.#{id}.services.#{name} is not a mapping"' 'else nil'
 mutant 'a non-list steps value accepted' 'else findings << "#{where}.steps is not a list"' 'else nil'
+
+# --- no arguments: the script walks the tree itself and never passes having checked nothing ---
+walk() { # DIR SCRIPT-DIR: run from DIR with no arguments
+  ( cd "$1" && ruby "$2/check-action-uses.rb" 2>&1 )
+}
+mktree() { rm -rf "${dir}/tree"; mkdir -p "${dir}/tree/.github/workflows" "${dir}/tree/.github/actions/demo"; }
+# walk_assertions SCRIPT-DIR: 0 when the no-argument walk behaves; prints the first failure otherwise.
+walk_assertions() {
+  local out
+  mktree; cp "${dir}/fx/ok-plain.yml" "${dir}/tree/.github/workflows/a.yml"; cp "${dir}/fx/ok-composite.yml" "${dir}/tree/.github/actions/demo/action.yml"
+  out="$(walk "${dir}/tree" "$1")" || { echo "refused a clean tree: ${out}" >&2; return 1; }
+  grep -qF '2 file(s) checked' <<<"${out}" || { echo "did not report two files: ${out}" >&2; return 1; }
+  cp "${dir}/fx/esc-flow-map.yml" "${dir}/tree/.github/workflows/b.yaml"
+  if out="$(walk "${dir}/tree" "$1")"; then echo 'passed a tree with a bad .yaml workflow' >&2; return 1; fi
+  grep -qF 'b.yaml' <<<"${out}" || { echo "did not name b.yaml: ${out}" >&2; return 1; }
+  mktree
+  if out="$(walk "${dir}/tree" "$1")"; then echo 'passed having checked nothing' >&2; return 1; fi
+  grep -qF 'no workflow or composite file to check' <<<"${out}" || { echo "empty tree refused for the wrong reason: ${out}" >&2; return 1; }
+}
+walk_assertions "${src}" || { echo 'the no-argument walk does not behave' >&2; exit 1; }
+echo 'accepted  a clean tree walked without arguments; refused an empty tree and a bad .yaml'
+mutant_walk() { # LABEL OLD NEW: the assertions above must fail on the mutant
+  rm -rf "${dir}/m"; mkdir "${dir}/m"
+  cp "${src}/check-action-uses.rb" "${src}/yaml-guard.rb" "${src}/action-allowlist.rb" "${dir}/m/"
+  OLD="$2" NEW="$3" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/m/check-action-uses.rb"
+  if walk_assertions "${dir}/m" >/dev/null 2>&1; then echo "MUTANT SURVIVED: $1" >&2; exit 1; fi
+  echo "bites     $1"
+}
+mutant_walk 'the nothing-checked guard removed' "if files.empty?
+  warn" 'if false
+  warn'
+mutant_walk '.yaml files left out of the walk' '{yml,yaml}' '{yml}'
+mutant_walk 'composites left out of the walk' '{workflows,actions}' '{workflows}'
 echo 'action-uses tests: every spelling is refused and every guard bites'
