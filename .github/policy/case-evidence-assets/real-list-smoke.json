@@ -1,0 +1,48 @@
+{
+  "suites": [
+    {
+      "file": "__APP_ROOT__/tests/e2e/deep/inner.spec.ts",
+      "specs": [
+        {
+          "title": "nested directory group > case in a nested directory @smoke",
+          "file": "__APP_ROOT__/tests/e2e/deep/inner.spec.ts",
+          "tests": [
+            {
+              "projectName": "smoke",
+              "status": "discovered",
+              "results": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "__APP_ROOT__/tests/e2e/flows.spec.ts",
+      "specs": [
+        {
+          "title": "outer group > inner group > parameterized value alpha @smoke",
+          "file": "__APP_ROOT__/tests/e2e/flows.spec.ts",
+          "tests": [
+            {
+              "projectName": "smoke",
+              "status": "discovered",
+              "results": []
+            }
+          ]
+        },
+        {
+          "title": "outer group > inner group > parameterized value beta @smoke",
+          "file": "__APP_ROOT__/tests/e2e/flows.spec.ts",
+          "tests": [
+            {
+              "projectName": "smoke",
+              "status": "discovered",
+              "results": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

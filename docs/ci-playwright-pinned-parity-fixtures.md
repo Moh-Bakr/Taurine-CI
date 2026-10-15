@@ -1,0 +1,39 @@
+# ADR: Pinned Playwright parity fixtures remain shadow-only
+
+## Status
+
+The fixtures and the fixture-only harness remain shadow-only and prove nothing about the real suites. The separate case-evidence contract they belong to **is** now activated in the Linux browser concerns; see `case-evidence-contract.md`. This ADR still enables no selector and no admission decision.
+
+## Decision
+
+Keep deterministic test-owned fixtures for Playwright list/run parity separate from source-project tests. The current public producer adapters pin desktop Playwright `1.62.0` and mobile `1.62.1`; the synthetic manifest copies the exact integrity values from the fixed adapter. Vitest remains unsupported until its own pinned discovery/execution parity is proven.
+
+The all-pass fixture covers nested describe groups, parameterized titles, a file-suite title that differs from its full file path in the static JSON regression, and adapter-specific project/tier/file scopes. Separate fixtures cover a joined-title collision, an expected failure with matching attempts, an intentional unexpected pass, a flaky retry, a skip, and a reporter callback exception. The collision uses distinct valid title paths that normalize to the same joined title. Until hosted parity is proven, the runner may reject collection before the control can classify that identity collision; either result remains fail-closed. Expected outcomes are recorded independently so a negative outcome cannot be counted as an all-pass parity run. Retry-sensitive expected failure, unexpected pass, and skip cases use a zero-retry config; the flaky case has its own one-retry config.
+
+For the all-pass scopes, desktop `smoke` and `critical` use the desktop feedback tier and desktop fixture path. Mobile `smoke` uses the mobile smoke tier and mobile path; mobile `critical` uses the mobile critical tier and mobile path. The manifest records each `(runner, config, project, tier, app file)` tuple explicitly.
+
+## Local shadow harness
+
+`.github/policy/playwright-pinned-parity-producer.rb` is a separate fixture-only harness. It accepts only the source checkout path; it accepts no runner, project, command, filter, or arbitrary argument list. Before starting any project child, it compares the observed control and source checkout heads to externally supplied full 40-character `TAURINE_PARITY_EXPECTED_CONTROL_SHA` and `TAURINE_PARITY_EXPECTED_SOURCE_SHA` bindings. It then verifies both checkouts are clean, reads only the fixed expected-case manifest, and checks each app lockfile and installed package version against the hardcoded desktop `1.62.0` and mobile `1.62.1` integrity bindings.
+
+For all-pass cases it runs exactly four scopes: desktop `smoke` and `critical` at feedback tier, and mobile `smoke` at smoke tier and `critical` at critical tier. For each scope it copies only the fixed config/spec into a mode-0700 temporary directory below that app root, runs a fixed list command with the control reporter, then runs the same config/project with Playwright JSON output. It reconciles the exact three-case identity set and expected attempts. Negative outcome parsing requires exactly three distinct expected titles and complete status/attempt data; duplicate-identity requires exactly two prescribed discovery rows with a real normalized identity collision; the callback-failure reporter must emit its fixed private sentinel before the wrapper treats the callback check as observed. These negative checks run separately and never increase the positive case count. Raw reports, titles, IDs, paths, and runner output stay in mode-0700/0600 temporary locations; stdout contains only fixed aggregate counts or a fixed error class.
+
+The harness copies the reviewed process-group timeout, pipe-drain deadline, and output-cap behavior from the existing case evidence producer. Its synthetic subprocess test uses a fake executable, fake source/control repositories, and fabricated reports only. It does not launch Playwright, npm, a browser, or private app tests. The source-clean check is performed before creating the private fixture directory; that directory is removed on exit.
+
+## Hosted boundary and limits
+
+The path problem this paragraph used to describe is resolved by an explicitly reviewed exception rather than around it. `check-repository.sh` now admits one flat directory, `.github/policy/case-evidence-assets/`, with lower-case `.cjs` and `.json` names and nothing else; nesting, other extensions and every other directory stay rejected, each covered by a fixture in `test-repository.sh`. The reporter, the parity fixtures and the recorded real-runner reports live there as ordinary files, and the producers bind each one to the control commit with `git show` on its path, as before. An earlier attempt embedded the same bytes as strings inside a Ruby file; that satisfied the rule's form while defeating its intent, and an independent review rejected it. The static validator and both fake-runner harnesses are invoked explicitly by `validate-public-changes.yml`.
+
+Two separate statements, because an earlier wording ran them together. **These fixtures, and the pinned-parity harness that stages them, remain shadow-only**: nothing in this ADR feeds an admission decision, and the harness still reports `shadow_fixture_parity_unverified`. **The admission path itself has changed**, though — the case-evidence contract these fixtures belong to is activated in the Linux browser concerns by a different producer, described in `case-evidence-contract.md`. Feature selection is unchanged either way: no suite is filtered or skipped on the strength of any of this.
+
+A hosted proof must run only on a protected control revision and exact source SHA. It must preserve the current source-read ordering: preflight, exact checkout and identity verification, token revocation before project commands, then root removal before dependency setup or tests. It must use the same fixed fixture-only commands, check child exit and completion markers, cap output and report sizes, include pipe draining in its deadline, and publish aggregate counts only. It must not run app project tests as a substitute for these fixtures.
+
+Even a successful hosted run cannot prove its own producer against same-UID modification of the reports, temporary files, or process environment. Its result must remain `shadow_fixture_parity_unverified`; it cannot attest source coverage, producer completeness, selection, or admission. Vitest remains unsupported until a separate real pinned list/run parity proof exists.
+
+## Current limits
+
+The fixture validator checks static files and metadata, and the fake-process harness checks the wrapper contract without launching Playwright, a browser or any source test.
+
+The pinned runner's JSON shape is no longer assumed. Real `@playwright/test` 1.62.0 output was recorded against a synthetic app and committed under `.github/policy/case-evidence-assets/`, with its provenance in `real-runner-provenance.json`; the fake runners in these harnesses were rebuilt to emit that shape. It exposed two defects that the earlier fabricated shape had hidden: the JSON reporter writes a spec's `file` relative to `testDir`, not to the app root, and this harness resolved that relative path against the process working directory instead of the stage directory.
+
+What remains a hosted proof requirement is the rest, and it is worth being exact about which "this" is meant. Real Playwright 1.62.0 **was** run, against a synthetic app, to record the reports described above. What has never run is this harness against a real runner: `playwright-pinned-parity-producer.rb` has only ever been exercised with a fake `node`, so its own contract is unproven on real output. No browser and no source test has run for any of it, the synthetic app is not the private suite, and list/run parity on the real suites is unproven. Vitest is unsupported throughout.
