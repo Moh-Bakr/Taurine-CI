@@ -703,6 +703,27 @@ Source-bearing output is public, so it is treated as hostile:
   commit SHA on the policy allow-list; protected concurrency groups set `cancel-in-progress:
   false` so a cancel cannot skip token revocation.
 
+## Control-plane structure manifest
+
+The ruleset "Protect CI control plane" requires the status check "Validate workflow policy"
+because GitHub's `workflows` rule is Enterprise-only. That check proves each workflow is
+well-formed, not that the set of workflows is unchanged, so `check-structure.rb` compares the
+tree with the committed manifest `.github/policy/control-plane.json`: every workflow with its
+trust tier, triggers and job ids, every local composite, and the required check's workflow, job
+id and name. The two must match in both directions, so deleting or renaming a workflow, adding
+one with no entry, adding or renaming a job (including the required "Validate workflow policy"
+job, which would silently drop the required check), or adding a trigger fails until the
+manifest is edited in the same pull request, where review sees it. `pull_request_target` and
+`workflow_run` are refused outright, whatever the manifest says. A tier must also agree with
+`workflow-lists.sh`.
+
+After a reviewed structural change, regenerate the manifest with
+`ruby .github/policy/check-structure.rb --print > .github/policy/control-plane.json` and read the
+diff. `test-structure.sh` holds the falsifying fixtures and `test-mutations.sh` the mutations. The
+manifest sits under `.github/policy/` so the base-policy pass of an earlier commit still accepts
+the tracked path. It guards against accidental or unreviewed drift; as with the rest of the policy,
+a pull request that edits the manifest and the tree together is caught only by review.
+
 ## Changing the policy
 
 A pull request carries its own `.github/policy/`, so on its own the policy run would let a

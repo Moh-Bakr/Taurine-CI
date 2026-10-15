@@ -24,7 +24,7 @@ missed=0
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb check-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     case "${check}" in
       *.rb) ruby ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
@@ -134,6 +134,15 @@ mutation '9. exit 0 at the start of the environment pre-flight' "${preflight}" '
 '
 mutation '9. protected branches only accepted' "${preflight}" "!= \$'false\\ttrue' ]]; then" "== never ]]; then"
 mutation '9. any branch-policy list accepted' "${preflight}" "!= 'branch:main,branch:untrusted' ]]; then" "== never ]]; then"
+
+mutation '11. the required status check job renamed' "${public}" '    name: Validate workflow policy' '    name: Validate workflow policy (renamed)'
+mutation '11. the required status check job id renamed' "${public}" '  policy:
+' '  policy-renamed:
+'
+mutation '11. a protected dispatcher widened to a push trigger' "${linux}" 'on:
+  workflow_dispatch:' 'on:
+  push:
+  workflow_dispatch:'
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a

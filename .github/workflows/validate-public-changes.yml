@@ -64,6 +64,16 @@ jobs:
         shell: bash
         run: ruby .github/policy/check-universal.rb
 
+      # The reviewed shape of the control plane (workflows, triggers, jobs, composites, the
+      # required check's name) is a committed manifest; any change to it needs a reviewed edit.
+      - name: Check the control-plane structure against the reviewed manifest
+        shell: bash
+        run: ruby .github/policy/check-structure.rb
+
+      - name: Test the control-plane structure check against unreviewed changes
+        shell: bash
+        run: bash .github/policy/test-structure.sh
+
       # Trust tiers: reviewed Actions, token revocation order, cache, secrets, dispatchers.
       - name: Enforce immutable reviewed Actions and safe workflow features
         shell: bash
