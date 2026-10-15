@@ -418,14 +418,23 @@ runs:
           policy_out="${RUNNER_TEMP}/deny-policy-$(echo "${manifest}" | tr '/' '_').jsonl"
           policy_status=0
           "${RUNNER_TEMP}/scan-bin/cargo-deny" --manifest-path "${manifest}" --format json --config deny.toml check bans licenses sources >/dev/null 2>"${policy_out}" || policy_status=$?
-          if [[ "${policy_status}" -gt 1 ]]; then
-            source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-            echo "cargo-deny policy ${lock_label}: did not complete (exit ${policy_status}); error lines:" >&2
-            jq -r 'select(.type == "log") | select(.fields.level == "ERROR") | .fields.message' "${policy_out}" 2>/dev/null | sanitize_stream | head -5 >&2 || true
-            policy_errors=$((policy_errors + 1))
-          fi
           perr="$(jq -s '[.[] | select(.type == "diagnostic") | select((.fields.severity // "" | ascii_downcase) == "error")] | length' "${policy_out}" 2>/dev/null || echo 0)"
           pwarn="$(jq -s '[.[] | select(.type == "diagnostic") | select((.fields.severity // "" | ascii_downcase) == "warning")] | length' "${policy_out}" 2>/dev/null || echo 0)"
+          # The exit status is a bitmask of the failed checks (bans 2, licences 4, sources 8): a
+          # failed check is a finding counted from its error diagnostics, not an incomplete run.
+          # Only a status that is not such a mask means the tool did not run its checks, and that
+          # counts as one error when no diagnostic explains it. Never both: each error is
+          # counted once.
+          if [[ "${policy_status}" -ne 0 ]]; then
+            if failed_checks="$(deny_exit_checks "${policy_status}" 'bans licenses sources')"; then
+              echo "cargo-deny policy ${lock_label}: failed checks (exit ${policy_status}): ${failed_checks}"
+              [[ "${perr}" -gt 0 ]] || perr=1
+            else
+              echo "cargo-deny policy ${lock_label}: did not complete (exit ${policy_status}); error lines:" >&2
+              jq -r 'select(.type == "log") | select(.fields.level == "ERROR") | .fields.message' "${policy_out}" 2>/dev/null | sanitize_stream | head -5 >&2 || true
+              [[ "${perr}" -gt 0 ]] || perr=1
+            fi
+          fi
           echo "cargo-deny policy ${lock_label}: exit ${policy_status}, ${perr} error(s), ${pwarn} warning(s), $(jq -s '[.[] | select(.type == "diagnostic")] | length' "${policy_out}" 2>/dev/null || echo '?') diagnostics"
           echo "  policy diagnostics by severity and lint code:"
           jq -r 'select(.type == "diagnostic") | "\(.fields.severity // "?" | ascii_downcase) \(.fields.code // "-")"' "${policy_out}" 2>/dev/null | sort | uniq -c | sed 's/^/    /' | head -30 || true
