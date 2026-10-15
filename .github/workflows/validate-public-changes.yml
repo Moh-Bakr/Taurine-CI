@@ -110,6 +110,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-extractors.sh
 
+      - name: Test the cargo-deny step's exit-code labels and counts against a stub
+        shell: bash
+        run: bash .github/policy/test-scan-deny.sh
+
       - name: Test sanitized build-failure category classification
         shell: bash
         run: bash .github/policy/test-build-failure-category.sh
