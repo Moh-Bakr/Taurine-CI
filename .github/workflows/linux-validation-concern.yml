@@ -654,8 +654,13 @@ jobs:
             echo "${result}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+          # The producer prints only the fixed aggregate -- status, concern, counts and a fixed error
+          # class -- never a title or a path, so it goes to the log as well as the summary.
+          echo "case evidence: ${result}"
           if [[ "${status}" -ne 0 ]]; then
-            echo 'case evidence: discovery and execution did not reconcile' >&2
+            error_class="$(jq -r '.error_class // "unknown"' <<<"${result}" 2>/dev/null || echo unknown)"
+            [[ "${error_class}" =~ ^[a-z_]+$ ]] || error_class=unknown
+            echo "::error::case evidence: discovery and execution did not reconcile (${error_class})"
             exit "${status}"
           fi
 
