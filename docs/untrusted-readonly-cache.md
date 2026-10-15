@@ -435,7 +435,7 @@ relies on them (the base-commit pass would otherwise reject the workflow change)
 (1) the base-commit policy pass runs the *base* `lint.sh` against the pull request's tree, and
 actionlint 1.7.12 (the latest release) rejects `cache-mode`, so the lint ignore must merge before
 any workflow carries the key; (2) the staged rules (workflow-level `none`, explicit job values, the
-caller split) are inert until a workflow name is added to `.github/policy/cache-mode-enforced.txt`,
+caller split) are inert until a workflow name is added to `ENFORCED_WORKFLOWS` in `.github/policy/check-cache-mode.rb`,
 which the workflow pull request does in the same change as its edits; (3) `macos-validation.yml`
 runs its matrix `validate` job inline and saves caches in it, so the caller split cannot be a
 second `uses:` job there: that job must first become a reusable workflow

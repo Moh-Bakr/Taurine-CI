@@ -13,7 +13,7 @@
 #     caller's grant and can never widen it;
 #  D. `cache-mode: write` only on a job whose `if:` has the exact top-level term
 #     github.ref == 'refs/heads/main' (no unparenthesised ||).
-# Staged, for the basenames in the enforced file (rules F to J):
+# Staged, for the basenames in ENFORCED_WORKFLOWS (rules F to J):
 #  F. workflow-level `cache-mode: none`;
 #  G. every job that has an actions/cache step, or calls a local reusable workflow, declares its
 #     own `cache-mode` (a job with no cache step inherits the workflow-level none);
@@ -73,14 +73,23 @@ def uses_of(steps, pattern)
   steps.any? { |s| s['uses'].to_s.match?(pattern) }
 end
 
+# Workflows (basename) held to the staged rules F to J. Empty in the policy pull request; the
+# workflow pull request that adds `cache-mode` to a workflow adds its name here in the same change
+# (docs/untrusted-readonly-cache.md, section 4.1). The always-on rules A to D and the
+# actions: write rule need no entry. Fixtures pass their own list with --enforced-file.
+ENFORCED_WORKFLOWS = [].freeze
+
 enforced_file = nil
 args = ARGV.dup
 if args.first == '--enforced-file'
   args.shift
   enforced_file = args.shift
 end
-enforced_file ||= File.join(__dir__, 'cache-mode-enforced.txt')
-enforced = File.exist?(enforced_file) ? File.readlines(enforced_file).map(&:strip).reject { |l| l.empty? || l.start_with?('#') } : []
+enforced = if enforced_file
+  File.readlines(enforced_file).map(&:strip).reject { |l| l.empty? || l.start_with?('#') }
+else
+  ENFORCED_WORKFLOWS
+end
 
 failures = []
 docs = {}
