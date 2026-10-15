@@ -251,6 +251,11 @@ runs:
                 ;;
               *) echo "Unsupported packaging flavor: ${FLAVOR}" >&2; exit 2 ;;
             esac
+            # Before the build: no Tauri config may add cargo features or a runner the door
+            # gate cannot see, and no OpenSSL override may bypass the vendored build.
+            source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
+            run_deferred rust-packaging-build-overrides refuse_build_feature_overrides
+            run_deferred rust-packaging-openssl-overrides refuse_openssl_overrides
             run_deferred rust-packaging-smoke \
               env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" \
               npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
@@ -283,7 +288,6 @@ runs:
             # string when the door is in the graph and, with size_probe=true, the same build again
             # without the door (on the runner only) for the size delta. Fixed lines only.
             if [[ "${deferred_failed}" -eq 0 ]]; then
-              source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
               if desktop_artefact_check macOS "${SIZE_PROBE}" \
                 env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}; then
                 deferred_results+=('rust-packaging-artefact|passed')
@@ -292,7 +296,7 @@ runs:
                 deferred_failed=1
               fi
             else
-              deferred_results+=('rust-packaging-artefact|not run (the packaging build failed)')
+              deferred_results+=('rust-packaging-artefact|not run (an earlier packaging sub-step failed)')
             fi
             ;;
           rust-tls-openssl)

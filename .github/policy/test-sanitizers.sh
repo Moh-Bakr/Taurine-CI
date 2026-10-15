@@ -41,3 +41,5 @@ while IFS= read -r expr; do
 done < <(grep -hoE "sed -E 's#[^']*'" "${sanitizer_files[@]}" | cut -c9- | sed 's/.$//' | grep -E 'private-path|private/workspace' | sort -u)
 [[ "${count}" -gt 0 ]] || { echo 'No sanitizer expressions were found to test' >&2; exit 1; }
 echo "sanitizer fixtures: ${count} expressions checked"
+# The shell-artefact library publishes from the private build too: its fixtures run here.
+bash "$(dirname "${BASH_SOURCE[0]}")/test-shell-artefact.sh"

@@ -329,6 +329,11 @@ jobs:
           }
           case "${CONCERN}" in
             ios-native)
+              # Before the build: no Tauri config may add features or a runner the door gate
+              # cannot see, and no OpenSSL override may bypass the vendored build.
+              refuse_build_feature_overrides || exit 1
+              refuse_openssl_overrides || exit 1
+              openssl_door_gate ios-sim-build-openssl-door-only taurine-mobile aarch64-apple-ios-sim || exit 1
               mobile_run ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
               # The built app's executable (`tauri ios build` is a release build): size, no
               # dynamic libssl/libcrypto, the linked OpenSSL 3.5 string when the door is in the

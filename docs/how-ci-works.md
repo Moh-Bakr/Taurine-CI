@@ -613,7 +613,8 @@ in the `ci-matrix.json` rules. The summary also reports how far the locked `open
 behind the newest 300.5.x release, for the develop, uat and main tips. That patch cadence is a
 warning for develop and **fails the run** for a uat or main tip that is behind, off the 300.5
 line, or still on 3.5 after OpenSSL 3.5 LTS ends (2030-04-08): the release line ships the
-OpenSSL it locks.
+OpenSSL it locks. The release line fails closed: an unresolved tip, a failed root-lock fetch,
+a lock without `openssl-src` or an empty crates.io answer is an error, not a pass.
 
 ## The OpenSSL door in the shells
 
@@ -626,19 +627,40 @@ and the public OpenSSL version string only:
   as "absent"; otherwise every direct dependent of `openssl-sys`, `openssl`, `tokio-openssl` and
   the door must be inside the door path (`openssl`, `tokio-openssl`, `taurine-tls-openssl`,
   `taurine-db-dbx`), the door must be present and the single resolved `openssl-src` must be
-  300.5.x. A resolve error fails.
+  300.5.x. A resolve error fails. The graph is the shell crate's default features, which is what
+  `tauri build` compiles only while no Tauri config sets `build.features` or `build.runner`, so a
+  source config that sets either (or a json5/toml Tauri config) is refused.
+- **What the gate cannot see.** It is name- and graph-based: it knows `openssl-sys`, `openssl`,
+  `tokio-openssl`, `taurine-tls-openssl` and `openssl-src` by name. A renamed or forked crate, a
+  `build.rs` that links a library itself, or a libcrypto compiled inside another `-sys` crate is
+  invisible to it; the artefact proof below is the backstop. Its `openssl-src` count reads the
+  root `Cargo.lock` only, because both shells build from the root workspace (`dbx-core` and
+  `dbx-mongo-shell` keep their own locks, which no shell build reads); revisit that if a shell
+  ever builds from another lock.
+- **No OpenSSL override**: `OPENSSL_NO_VENDOR`, `OPENSSL_DIR`, `OPENSSL_STATIC`,
+  `OPENSSL_LIB_DIR` and `OPENSSL_INCLUDE_DIR` (bare or with a `<TARGET>_` prefix) make
+  `openssl-sys` skip the vendored build. They are refused in the job environment and in every
+  `.cargo/config.toml`/`.cargo/config` of the checkout and of `CARGO_HOME`, before each build
+  and in every gate.
 - **Door tests on the device**: the emulator (x86_64) and simulator run the door crate's library
   and integration tests through the same runner as the mobile tests, surfacing the fixed
   `door-roots:` line and, when the source has it, the ignored `public_peer` verify-full
   handshake (`door-public-peer:` line; a resolve/connect failure is classified as "public peer
-  unreachable from device" and still fails). `lockfile_policy` is excluded on the device (it
+  unreachable from device" and still fails). Only whole lines of the fixed shapes
+  `door-roots: (Os|MozillaFallback), N anchors` and `door-public-peer: roots
+  (Os|MozillaFallback), N anchors` are published, one per key; any other door line is dropped
+  and counted. `lockfile_policy` is excluded on the device (it
   reads the host `Cargo.lock`); the host `rust-tls-openssl` concern covers it. The aarch64
   Android door tests are built and linked compile-only.
 - **Artefact linkage** (desktop executable, Android library per ABI, iOS app binary): no
   dynamic `libssl`/`libcrypto` dependency (`readelf -d`, `otool -L`, `dumpbin /dependents`),
-  and the `OpenSSL 3.5.` version string present when the door is in the shell's graph
-  (otherwise "door absent"). A native ceiling in the source's `bundle-budget.json`
-  (`<app>.native.<abi>` or `<app>.nativeBytes`) is enforced when the source sets one.
+  and the distinct set of `OpenSSL X.Y.Z` strings in the binary must be empty when the door is
+  not in that target's graph, and exactly `OpenSSL 3.5.M` when it is, where `3.5.M` is the
+  build metadata of the single locked `openssl-src` 300.5.x. A second copy, another version
+  or another patch fails. Android judges each built ABI on its own target graph.
+- **Native size budget (advisory)**: a ceiling in the source's `bundle-budget.json`
+  (`<app>.native.<abi>` or `<app>.nativeBytes`) is compared when the source sets one. The
+  source sets the number it is judged against, so this is evidence, not a security control.
 - **Windows toolchain**: every Windows Rust concern sets `OPENSSL_SRC_PERL` to the image's
   Strawberry Perl (fails closed when it is missing) and puts NASM on the job PATH before any
   project code, because the vendored OpenSSL builds wherever taurine-app compiles.

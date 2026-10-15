@@ -1,14 +1,10 @@
 name: Weekly develop and main validation (scheduled)
 
-# Once a week, validate the private `develop` tip on every platform (Linux, macOS, Windows,
-# Android and iOS) and the private `main` tip (the production line) on Linux only, so drift
-# is caught even when nobody has dispatched a run. This workflow runs no project
-# code and checks out nothing: it only (1) resolves the current develop tip SHA
-# with the same short-lived, read-only, contents-only source-reader token the
-# protected workflows use, revoking it before anything else happens, and (2)
-# dispatches the three protected validation workflows for that exact SHA with
-# the run's own token. The dispatched workflows do all the source-bearing work
-# under their own protections.
+# Once a week, validate the private `develop` tip on every platform and the `main` tip on Linux
+# only, so drift is caught even when nobody has dispatched a run. It runs no project code and
+# checks out nothing: it (1) resolves the tips with the short-lived, read-only source-reader
+# token, revoked before anything else, and (2) dispatches the protected validations for those
+# exact SHAs with the run's own token; they do all the source-bearing work.
 #
 # Missed-run check. The dispatch job warns in its summary when the previous scheduled run of
 # this workflow is older than 8 days (or absent), so a dropped Monday is noticed on the next
@@ -114,8 +110,7 @@ jobs:
             echo 'The develop tip could not be resolved to a full commit SHA' >&2
             failed=1
           fi
-          # The production line's tip, validated on Linux only. Best effort: an empty value
-          # just skips that run and the summary says so.
+          # The production line's tip (Linux only); an empty value skips that run, as summarised.
           if [[ "${failed}" -eq 0 ]]; then
             main_sha="$(api "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/main" | jq -r '.sha // empty | ascii_downcase' || true)"
             [[ "${main_sha}" =~ ^[0-9a-f]{40}$ ]] || main_sha=''
@@ -126,25 +121,25 @@ jobs:
             since="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
             base="$(api "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits?sha=develop&until=${since}&per_page=1" | jq -r '.[0].sha // empty' || true)"
             [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || base=''
-          # The openssl-src versions the private locks pin, for the freshness check below.
-          # Version strings only (public registry facts); nothing else from the files is kept.
-            # The openssl-src versions every lock pins at one ref (a comma-separated list).
+          # The openssl-src versions the locks pin per ref (version strings only), comma-separated.
+          # A failed root Cargo.lock fetch is `fetch-failed` (never "no openssl-src"; nested locks
+          # may not exist at older refs); an unresolved uat/main tip is `tip-unresolved`.
             locked_openssl_src() {
-              local ref="$1" lock found list=''
+              local ref="$1" lock body list=''
               for lock in Cargo.lock taurine-backend/dbx-core/Cargo.lock taurine-backend/dbx-mongo-shell/Cargo.lock; do
-                found="$(api -H 'Accept: application/vnd.github.raw+json' "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/contents/${lock}?ref=${ref}" 2>/dev/null \
-                  | awk '/^name = "openssl-src"$/ { getline; gsub(/version = "|"/, ""); print }' | head -n 1 || true)"
-                if [[ -n "${found}" ]]; then
-                  list="${list}${list:+,}${found}"
+                if ! body="$(api -H 'Accept: application/vnd.github.raw+json' "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/contents/${lock}?ref=${ref}" 2>/dev/null)"; then
+                  [[ "${lock}" == Cargo.lock ]] && list="${list}${list:+,}fetch-failed"
+                  continue
                 fi
+                body="$(awk '/^name = "openssl-src"$/ { getline; gsub(/version = "|"/, ""); print }' <<<"${body}" | head -n 1)"
+                if [[ -n "${body}" ]]; then list="${list}${list:+,}${body}"; fi
               done
               printf '%s' "${list}"
             }
             openssl_locked="$(locked_openssl_src "${sha}")"
-            # The release line (uat and main tips) is held to the patch cadence: see the
-            # freshness check in the dispatch job, which fails for these and warns for develop.
             uat_sha="$(api "${GITHUB_API_URL}/repos/${SOURCE_REPOSITORY_OWNER}/${SOURCE_REPOSITORY_NAME}/commits/uat" | jq -r '.sha // empty | ascii_downcase' || true)"
             [[ "${uat_sha}" =~ ^[0-9a-f]{40}$ ]] || uat_sha=''
+            openssl_locked_uat=tip-unresolved openssl_locked_main=tip-unresolved
             if [[ -n "${uat_sha}" ]]; then openssl_locked_uat="$(locked_openssl_src "${uat_sha}")"; fi
             if [[ -n "${main_sha}" ]]; then openssl_locked_main="$(locked_openssl_src "${main_sha}")"; fi
           fi
@@ -278,54 +273,54 @@ jobs:
             windows_2025_key="$(make_key .github/workflows/windows-validation.yml "${SOURCE_SHA}" "${windows_2025_inputs}")"
             gh workflow run windows-validation.yml --ref main -f "source_sha=${SOURCE_SHA}" -f dispatch_key="${windows_2025_key}" -f rust=true -f windows_image=windows-2025
           fi
-          # openssl-src freshness (patch cadence). The shells ship the vendored OpenSSL 3.5 LTS
-          # (openssl-src 300.5.x); OpenSSL 3.5 LTS ends on 2030-04-08, after which no 3.5 patch
-          # is published and the line must move to the next LTS before that date. A lock behind
-          # the newest 300.5.x release, or off the 300.5 line, warns for the develop tip and
-          # FAILS this run for a uat or main tip (the release line ships what it locks); from
-          # 2030-04-08 a 300.5 lock on a release tip fails as end-of-life. Only the lock
-          # versions resolved above and one public registry page are read. A failed registry
-          # lookup is a warning, never a pass for the release line's verdict line.
+          # openssl-src patch cadence. The shells ship the vendored OpenSSL 3.5 LTS (openssl-src
+          # 300.5.x), which ends on 2030-04-08: no 3.5 patch follows, so the line must move to the
+          # next LTS first. A lock behind the newest 300.5.x, off 300.5, or on 3.5 past that date
+          # warns for develop and FAILS this run for uat and main. The release line fails closed:
+          # an unresolved tip, a failed lock fetch, no openssl-src in the lock, or a crates.io
+          # lookup that returned nothing is an error there, never a pass.
           latest="$(curl --fail --silent --show-error --retry 3 -H 'User-Agent: Taurine-CI openssl-src freshness (github.com/Moh-Bakr/Taurine-CI)' \
             https://crates.io/api/v1/crates/openssl-src/versions \
             | jq -r '[.versions[] | select(.yanked == false) | .num | select(startswith("300.5."))] | sort_by(split("+")[0] | split(".") | map(tonumber)) | last // empty' || true)"
           OPENSSL_LTS_END=2030-04-08
           OPENSSL_FAILED=0
-          # openssl_cadence <tip-name> <locked-list> <fail: true|false>; prints the summary note.
+          # openssl_cadence <tip> <locked-list> <fail: true|false>: prints the summary note; a
+          # note ending in "fails this run" fails the release line.
           openssl_cadence() {
-            local tip="$1" list="$2" fail="$3" locked lowest behind=0 eol=0 level=warning suffix=''
-            if [[ -z "${list}" ]]; then
-              echo "openssl-src (${tip}): no lock pins it"
-              return 0
-            fi
+            local tip="$1" list="$2" fail="$3" locked lowest bad=0 level=warning problem='' suffix=''
             [[ "${fail}" == true ]] && level=error
+            if [[ -z "${list}" ]]; then problem='no lock pins openssl-src'
+            elif [[ "${list}" == tip-unresolved ]]; then problem='the tip did not resolve'
+            elif [[ ",${list}," == *,fetch-failed,* ]]; then problem='the root Cargo.lock could not be fetched'
+            elif [[ -z "${latest}" ]]; then problem='the crates.io lookup returned no 300.5.x release'
+            fi
+            if [[ -n "${problem}" ]]; then
+              echo "::${level} title=openssl-src cadence unknown::${tip}: ${problem}" >&2
+              bad=1
+            fi
             IFS=',' read -r -a locked_versions <<<"${list}"
-            for locked in "${locked_versions[@]}"; do
+            for locked in ${locked_versions[@]+"${locked_versions[@]}"}; do
+              [[ "${locked}" == tip-unresolved || "${locked}" == fetch-failed ]] && continue
               if [[ "${locked}" != 300.5.* ]]; then
                 echo "::${level} title=openssl-src off the 3.5 LTS line::the ${tip} tip locks openssl-src ${locked}, not 300.5.x" >&2
-                behind=1
+                bad=1
               elif [[ -n "${latest}" ]]; then
                 lowest="$(printf '%s\n%s\n' "${locked%%+*}" "${latest%%+*}" | sort -V | head -n 1)"
                 if [[ "${locked%%+*}" != "${latest%%+*}" && "${lowest}" == "${locked%%+*}" ]]; then
                   echo "::${level} title=openssl-src behind::the ${tip} tip locks openssl-src ${locked}; the newest 300.5.x release is ${latest}" >&2
-                  behind=1
+                  bad=1
                 fi
               fi
               if [[ "${locked}" == 300.5.* && ! "$(date -u +%F)" < "${OPENSSL_LTS_END}" ]]; then
                 echo "::${level} title=OpenSSL 3.5 LTS ended::the ${tip} tip locks openssl-src ${locked}; OpenSSL 3.5 LTS ended on ${OPENSSL_LTS_END}" >&2
-                eol=1
+                bad=1
               fi
             done
-            if [[ "${behind}" == 1 || "${eol}" == 1 ]]; then
-              suffix=' (BEHIND)'
-              if [[ "${fail}" == true ]]; then suffix=' (BEHIND: fails this run)'; fi
+            if [[ "${bad}" == 1 ]]; then
+              suffix=' (BEHIND or UNKNOWN)'
+              [[ "${fail}" == true ]] && suffix=' (BEHIND or UNKNOWN: fails this run)'
             fi
-            if [[ -n "${latest}" ]]; then
-              echo "openssl-src (${tip}): locks pin ${list}; newest 300.5.x is ${latest}${suffix}"
-            else
-              echo "::warning title=openssl-src lookup::the crates.io lookup returned no 300.5.x release" >&2
-              echo "openssl-src (${tip}): locks pin ${list}; the crates.io lookup returned no 300.5.x release${suffix}"
-            fi
+            echo "openssl-src (${tip}): locks pin ${list:-nothing}; newest 300.5.x is ${latest:-unknown}${problem:+; ${problem}}${suffix}"
           }
           OPENSSL_NOTE="$(openssl_cadence develop "${OPENSSL_LOCKED}" false)"
           OPENSSL_NOTE_UAT="$(openssl_cadence uat "${OPENSSL_LOCKED_UAT}" true)"
@@ -358,9 +353,8 @@ jobs:
             exit 1
           fi
 
-  # Freshness of the pinned tools (.github/tool-pins.json): warn-only, like the develop
-  # tip's openssl-src note (the uat and main tips' openssl-src cadence fails the dispatch job). It reads that committed list and each tool's public release list; it uses no source
-  # token, checks nothing out, and never fails the run.
+  # Freshness of the pinned tools (.github/tool-pins.json): warn-only. It reads that list and
+  # each tool's public releases; no source token, no checkout, never fails the run.
   tool-freshness:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     name: Pinned tool freshness

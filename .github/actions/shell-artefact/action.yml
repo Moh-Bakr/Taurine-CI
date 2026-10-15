@@ -74,9 +74,79 @@ runs:
           sed -nE 's/^1([A-Za-z0-9_-]+) v.*/\1/p' "$1" | sort -u
         }
 
-        # door_in_graph <package> <target|->: prints present or absent; fails on a resolve error.
+        # The graph queries below use the shell crate's default features, which is exactly what
+        # `tauri build` / `tauri android|ios build` compile while no Tauri config the build can
+        # load sets `build.features` (extra cargo features) or `build.runner` (another build
+        # command). A source that sets either, or carries a config format this check cannot read
+        # (json5/toml), is refused: the gate's graph would no longer be the built graph.
+        refuse_build_feature_overrides() {
+          local dir file bad=0
+          for dir in taurine-desktop/src-tauri taurine-mobile/src-tauri; do
+            [[ -d "${dir}" ]] || continue
+            for file in "${dir}"/tauri*.json5 "${dir}"/Tauri*.toml "${dir}"/tauri*.toml; do
+              [[ -e "${file}" ]] || continue
+              echo "build-features: FAILED - a Tauri config in json5/toml form is not checked; refusing (${dir##*/}/..)" >&2
+              bad=1
+            done
+            for file in "${dir}"/tauri*.json; do
+              [[ -e "${file}" ]] || continue
+              if ! jq -e '(.build // {}) | (has("features") or has("runner")) | not' "${file}" >/dev/null 2>&1; then
+                echo "build-features: FAILED - a Tauri config sets build.features or build.runner (or does not parse); the door gate would not see the built graph" >&2
+                bad=1
+              fi
+            done
+          done
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        # openssl-sys skips the vendored openssl-src when any of these is set (bare, or prefixed
+        # with the upper-cased target triple). They are refused in the job environment and in
+        # every cargo config file of the checkout and of CARGO_HOME, whatever the section.
+        TCI_OPENSSL_OVERRIDE='([A-Za-z0-9_-]+_)?OPENSSL_(NO_VENDOR|DIR|STATIC|LIB_DIR|INCLUDE_DIR)'
+        refuse_openssl_overrides() {
+          local file bad=0 names
+          names="$(compgen -e | grep -xE "${TCI_OPENSSL_OVERRIDE}" || true)"
+          if [[ -n "${names}" ]]; then
+            echo "openssl-overrides: FAILED - the job environment sets an OpenSSL override that bypasses the vendored build: $(printf '%s' "${names}" | tr '\n' ' ')" >&2
+            bad=1
+          fi
+          while IFS= read -r file; do
+            [[ -n "${file}" ]] || continue
+            if LC_ALL=C grep -qE "(^|[^A-Za-z0-9_-])${TCI_OPENSSL_OVERRIDE}([^A-Za-z0-9_]|\$)" "${file}"; then
+              echo 'openssl-overrides: FAILED - a cargo config file sets an OpenSSL override that bypasses the vendored build' >&2
+              bad=1
+            fi
+          done < <( { find . \( -name node_modules -o -name target \) -prune -o \( -path '*/.cargo/config.toml' -o -path '*/.cargo/config' \) -type f -print 2>/dev/null
+                      for file in "${CARGO_HOME:-${HOME}/.cargo}/config.toml" "${CARGO_HOME:-${HOME}/.cargo}/config"; do [[ -f "${file}" ]] && echo "${file}"; done; } )
+          [[ "${bad}" -eq 0 ]] && echo 'openssl-overrides: none (the vendored OpenSSL build is not bypassed)'
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        # The OpenSSL version the single locked openssl-src 300.5.x vendors: the `+3.5.M` build
+        # metadata of its root Cargo.lock entry. Fails unless exactly one entry is on 300.5.
+        locked_openssl_version() {
+          local versions
+          versions="$(awk '/^name = "openssl-src"$/ { getline; gsub(/version = "|"/, ""); print }' Cargo.lock 2>/dev/null || true)"
+          [[ "$(printf '%s\n' "${versions}" | grep -c .)" -eq 1 && "${versions}" =~ ^300\.5\.[0-9]+\+(3\.5\.[0-9]+)$ ]] || return 1
+          echo "${BASH_REMATCH[1]}"
+        }
+
+        # The ABI directory name Android uses for each Rust target, and back.
+        android_abi_triple() {
+          case "$1" in
+            arm64-v8a) echo aarch64-linux-android ;;
+            armeabi-v7a) echo armv7-linux-androideabi ;;
+            x86) echo i686-linux-android ;;
+            x86_64) echo x86_64-linux-android ;;
+            *) return 1 ;;
+          esac
+        }
+
+        # door_in_graph <package> <target|->: prints present or absent; fails on a resolve error
+        # or a refused build-feature override.
         door_in_graph() {
           local state
+          refuse_build_feature_overrides || return 1
           state="$(tci_inverted "${RUNNER_TEMP}/door-in-graph.log" "$1" "$2" normal taurine-tls-openssl 0)"
           case "${state}" in
             present | absent) echo "${state}" ;;
@@ -94,6 +164,10 @@ runs:
         openssl_door_gate() {
           local label="$1" package="$2" target="$3" log state crate parents parent allowed bad=0 src_line locks
           log="${RUNNER_TEMP}/${label}.log"
+          if ! refuse_build_feature_overrides || ! refuse_openssl_overrides >/dev/null; then
+            echo "${label}: FAILED - the build's features or OpenSSL source are overridden (see above)" >&2
+            return 1
+          fi
           state="$(tci_inverted "${log}" "${package}" "${target}" normal openssl-sys 1)"
           case "${state}" in
             absent)
@@ -132,6 +206,8 @@ runs:
           fi
           state="$(tci_inverted "${log}" "${package}" "${target}" normal,build openssl-src 0)"
           src_line="$(grep -E '^0openssl-src v' "${log}" | head -n 2 || true)"
+          # The root lock only: both shells build from the root workspace. dbx-core and
+          # dbx-mongo-shell keep their own locks, which no shell build reads.
           locks="$(grep -c '^name = "openssl-src"$' Cargo.lock 2>/dev/null || true)"
           if [[ "${state}" != present || "$(printf '%s\n' "${src_line}" | grep -c .)" -ne 1 || "${locks}" != 1 ]]; then
             echo "${label}: FAILED - expected exactly one resolved openssl-src (lock entries: ${locks:-0})" >&2
@@ -153,9 +229,15 @@ runs:
           wc -c <"$1" | tr -d ' \r'
         }
 
-        # The first linked "OpenSSL 3.5.N" version string in a binary, or nothing.
+        # Every distinct "OpenSSL X.Y.Z[a]" version string in a binary, one per line, sorted.
+        # Each statically linked OpenSSL carries its own; two lines mean two copies.
+        artefact_openssl_versions() {
+          LC_ALL=C grep -a -o -E 'OpenSSL [0-9]+\.[0-9]+\.[0-9]+[a-z]?' "$1" 2>/dev/null | LC_ALL=C sort -u || true
+        }
+
+        # The first of them (the device door tests' informational line).
         artefact_openssl_version() {
-          LC_ALL=C grep -a -o -m 1 'OpenSSL 3\.5\.[0-9][0-9]*' "$1" 2>/dev/null | head -n 1 || true
+          artefact_openssl_versions "$1" | head -n 1
         }
 
         # The dynamic library names a binary depends on, one per line (base names only).
@@ -187,15 +269,18 @@ runs:
         }
 
         # artefact_check <label> <file> <profile> <door: present|absent> [<budget-app> <budget-key>]
-        # Size (always), then the linkage proof: no dynamic libssl/libcrypto dependency (any
-        # source), and the pinned "OpenSSL 3.5." string in the binary when the door is in the
-        # shell's graph (an absent door prints "door absent" instead). A static archive has no
-        # dynamic dependencies to read. With a budget app and key, a native ceiling in the
+        # Size (always), then the linkage proof, which is the backstop for everything the
+        # name-based gate cannot see (a renamed or forked crate, a build.rs link, a libcrypto
+        # compiled inside another -sys crate): no dynamic libssl/libcrypto dependency, and the
+        # distinct set of "OpenSSL X.Y.Z" strings in the binary is EMPTY when the door is not in
+        # the shell's graph and EXACTLY the version the single locked openssl-src 300.5.x vendors
+        # when it is. A second copy, another version or another patch fails. A static archive
+        # has no dynamic dependencies to read. With a budget app and key, a native ceiling in the
         # source's bundle-budget.json (`.<app>.native.<key>`, else `.<app>.nativeBytes`) is
-        # compared; a source without one prints that no native budget exists.
+        # compared; the source sets that number, so it is advisory evidence, not a control.
         artefact_check() {
           local label="$1" file="$2" profile="$3" door="$4" budget_app="${5:-}" budget_key="${6:-}"
-          local bytes version deps dynamic budget bad=0
+          local bytes versions expected deps dynamic budget bad=0
           if [[ ! -f "${file}" ]]; then
             echo "${label}: FAILED - the built artefact was not found" >&2
             return 1
@@ -217,17 +302,23 @@ runs:
               echo "${label}: no dynamic libssl/libcrypto dependency"
             fi
           fi
-          version="$(artefact_openssl_version "${file}")"
+          versions="$(artefact_openssl_versions "${file}")"
           if [[ "${door}" == present ]]; then
-            if [[ -n "${version}" ]]; then
-              echo "${label}: statically linked ${version}"
-              echo "- ${label}: statically linked ${version}" >> "${GITHUB_STEP_SUMMARY}"
-            else
-              echo "${label}: FAILED - the door is in the graph but the binary carries no OpenSSL 3.5 version string" >&2
+            if ! expected="$(locked_openssl_version)"; then
+              echo "${label}: FAILED - the door is in the graph but Cargo.lock has no single openssl-src 300.5.x" >&2
               bad=1
+            elif [[ "${versions}" != "OpenSSL ${expected}" ]]; then
+              echo "${label}: FAILED - expected exactly OpenSSL ${expected} (the locked openssl-src); found: $(printf '%s' "${versions:-none}" | tr '\n' ',')" >&2
+              bad=1
+            else
+              echo "${label}: statically linked OpenSSL ${expected} only (matches the locked openssl-src)"
+              echo "- ${label}: statically linked OpenSSL ${expected} only" >> "${GITHUB_STEP_SUMMARY}"
             fi
+          elif [[ -n "${versions}" ]]; then
+            echo "${label}: FAILED - the door is not in the graph, yet the binary carries: $(printf '%s' "${versions}" | tr '\n' ',')" >&2
+            bad=1
           else
-            echo "${label}: door absent (no OpenSSL version required)"
+            echo "${label}: door absent and no OpenSSL in the binary"
           fi
           if [[ -n "${budget_app}" ]]; then
             budget="$(jq -r --arg app "${budget_app}" --arg key "${budget_key}" \

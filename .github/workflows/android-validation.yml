@@ -271,11 +271,15 @@ jobs:
           source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
           case "${CONCERN}" in
             android-native)
+              # Before the build: no Tauri config may add features or a runner the door gate
+              # cannot see, and no OpenSSL override may bypass the vendored build.
+              refuse_build_feature_overrides || exit 1
+              refuse_openssl_overrides || exit 1
               mobile_run android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
-              # The built library per ABI: size, no dynamic libssl/libcrypto, the linked
-              # OpenSSL 3.5 string when the door is in the graph, and any native budget the
-              # source's bundle-budget.json sets (`taurine-mobile.native.<abi>`).
-              door="$(door_in_graph taurine-mobile aarch64-linux-android)" || { echo 'android-artefact: the door graph query did not resolve' >&2; exit 1; }
+              # Per built ABI, judged on that ABI's own target graph: the door-only gate, then
+              # the library's size, no dynamic libssl/libcrypto, exactly the locked OpenSSL (or
+              # none when the door is not in that graph), and any native budget the source's
+              # bundle-budget.json sets (`taurine-mobile.native.<abi>`, advisory).
               # Tauri places the library in the Gradle project's jniLibs/<abi>/; when it is
               # not there, the cargo target directory's aarch64 output is the arm64-v8a one.
               android_libraries() {
@@ -305,6 +309,9 @@ jobs:
               [[ -n "${libraries}" ]] || { echo 'android-artefact: FAILED - no libtaurine_mobile_lib.so was built' >&2; exit 1; }
               while IFS= read -r library; do
                 abi="$(android_abi "${library}")"
+                triple="$(android_abi_triple "${abi}")" || { echo "android-artefact: FAILED - unknown Android ABI ${abi}" >&2; exit 1; }
+                openssl_door_gate "android-${abi}-openssl-door-only" taurine-mobile "${triple}" || exit 1
+                door="$(door_in_graph taurine-mobile "${triple}")" || { echo 'android-artefact: the door graph query did not resolve' >&2; exit 1; }
                 artefact_check "android-${abi}-library" "${library}" debug "${door}" taurine-mobile "${abi}" || exit 1
               done <<<"${libraries}"
               if [[ "${SIZE_PROBE}" == true ]]; then

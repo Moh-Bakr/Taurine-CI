@@ -149,15 +149,28 @@ runs:
           mobile_door_lines "${label}-public-peer"
         }
 
-        # The door tests' own fixed evidence lines (`door-roots: ...`, `door-public-peer: roots
-        # <kind>, <n> anchors`), restricted to a fixed character set, from that label's logs.
+        # The door tests' own evidence lines, held to a fixed schema because the test binaries
+        # are built from the private source: only `door-roots: (Os|MozillaFallback), N anchors`
+        # and `door-public-peer: roots (Os|MozillaFallback), N anchors` (the exact formats the
+        # door's tests print), whole lines, at most one per key. Anything else that names a door
+        # key is dropped and only counted; no other text from the logs is published.
         mobile_door_lines() {
-          local found
-          found="$(cat "${RUNNER_TEMP}/$1"-[0-9]*.log 2>/dev/null | tr -d '\r' |
-            grep -oE 'door-(roots|public-peer): [A-Za-z0-9 ,:()_-]{1,80}' | sed -E 's/[[:space:]]+$//' | awk '!seen[$0]++' | head -10 || true)"
-          [[ -n "${found}" ]] || return 0
-          printf '%s\n' "${found}" | sed "s/^/$1: /"
-          printf '%s\n' "${found}" | sed "s/^/- $1: /" >> "${GITHUB_STEP_SUMMARY}"
+          local label="$1" roots peer dropped line
+          cat "${RUNNER_TEMP}/${label}"-[0-9]*.log 2>/dev/null | tr -d '\r' >"${RUNNER_TEMP}/${label}-door-lines.txt" || true
+          roots="$(grep -xE 'door-roots: (Os|MozillaFallback), [0-9]{1,5} anchors' "${RUNNER_TEMP}/${label}-door-lines.txt" | head -n 1 || true)"
+          peer="$(grep -xE 'door-public-peer: roots (Os|MozillaFallback), [0-9]{1,5} anchors' "${RUNNER_TEMP}/${label}-door-lines.txt" | head -n 1 || true)"
+          dropped="$(grep -cE 'door-(roots|public-peer)' "${RUNNER_TEMP}/${label}-door-lines.txt" || true)"
+          dropped=$(( ${dropped:-0} - $([[ -n "${roots}" ]] && echo 1 || echo 0) - $([[ -n "${peer}" ]] && echo 1 || echo 0) ))
+          for line in "${roots}" "${peer}"; do
+            [[ -n "${line}" ]] || continue
+            echo "${label}: ${line}"
+            echo "- ${label}: ${line}" >> "${GITHUB_STEP_SUMMARY}"
+          done
+          if [[ "${dropped}" -gt 0 ]]; then
+            echo "${label}: unrecognised door line dropped (${dropped})"
+            echo "- ${label}: unrecognised door line dropped (${dropped})" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          return 0
         }
 
         # mobile_test_execute <label> <where> <runner> <binary>...

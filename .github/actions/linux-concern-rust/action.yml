@@ -263,6 +263,11 @@ runs:
             # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
             # CLI, to prove the app still bundles on this OS. Nothing is signed, notarised
             # or uploaded; the output stays on the runner.
+            # Before the build: no Tauri config may add cargo features or a runner the door
+            # gate cannot see, and no OpenSSL override may bypass the vendored build.
+            source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
+            run_deferred rust-packaging-build-overrides refuse_build_feature_overrides
+            run_deferred rust-packaging-openssl-overrides refuse_openssl_overrides
             run_deferred rust-packaging-smoke \
               npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci
             # The artefact proof (shell-artefact): the door-only gate on the desktop graph, the
@@ -270,7 +275,6 @@ runs:
             # string when the door is in the graph and, with size_probe=true, the same build again
             # without the door (on the runner only) for the size delta. Fixed lines only.
             if [[ "${deferred_failed}" -eq 0 ]]; then
-              source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
               if desktop_artefact_check Linux "${SIZE_PROBE}" \
                 npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci; then
                 deferred_results+=('rust-packaging-artefact|passed')
@@ -279,7 +283,7 @@ runs:
                 deferred_failed=1
               fi
             else
-              deferred_results+=('rust-packaging-artefact|not run (the packaging build failed)')
+              deferred_results+=('rust-packaging-artefact|not run (an earlier packaging sub-step failed)')
             fi
             ;;
           rust-tls-openssl)
