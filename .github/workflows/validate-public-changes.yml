@@ -318,18 +318,30 @@ jobs:
         shell: bash
         run: bash .github/policy/test-base-policy-sudo.sh --require
 
-      # cron and at start what the job user hands them later, outside this job's process tree,
-      # where the per-script containment cannot see it. Deny both to the job user while root is
-      # still available; the base-policy step asserts it, and that no user systemd manager is
-      # reachable either.
-      - name: Deny the job user cron and at
+      # cron, at and a user systemd manager start what the job user hands them later, outside this
+      # job's process tree, where the per-script containment cannot see it. Hosted ubuntu-24.04
+      # runs a user manager for the job user (its bus is at /run/user/<uid>/bus). While root is
+      # still available, deny cron and at to the job user and stop that manager; the base-policy
+      # step asserts all three.
+      - name: Deny the job user cron, at and a user systemd manager
         shell: bash
         run: |
           set -euo pipefail
           user="$(id -un)"
+          uid="$(id -u)"
           for tool in cron at; do
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
+          done
+          sudo loginctl disable-linger "${user}" || true
+          if systemctl is-active --quiet "user@${uid}.service"; then
+            sudo systemctl stop "user@${uid}.service"
+          fi
+          for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
+            if [[ -S "${socket}" ]]; then
+              echo "::error::${socket} is still there after the user manager was stopped"
+              exit 1
+            fi
           done
 
       - name: Remove root before the remaining fixtures
@@ -370,18 +382,30 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # cron and at start what the job user hands them later, outside this job's process tree,
-      # where the per-script containment cannot see it. Deny both to the job user while root is
-      # still available; the base-policy step asserts it, and that no user systemd manager is
-      # reachable either.
-      - name: Deny the job user cron and at
+      # cron, at and a user systemd manager start what the job user hands them later, outside this
+      # job's process tree, where the per-script containment cannot see it. Hosted ubuntu-24.04
+      # runs a user manager for the job user (its bus is at /run/user/<uid>/bus). While root is
+      # still available, deny cron and at to the job user and stop that manager; the base-policy
+      # step asserts all three.
+      - name: Deny the job user cron, at and a user systemd manager
         shell: bash
         run: |
           set -euo pipefail
           user="$(id -un)"
+          uid="$(id -u)"
           for tool in cron at; do
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
+          done
+          sudo loginctl disable-linger "${user}" || true
+          if systemctl is-active --quiet "user@${uid}.service"; then
+            sudo systemctl stop "user@${uid}.service"
+          fi
+          for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
+            if [[ -S "${socket}" ]]; then
+              echo "::error::${socket} is still there after the user manager was stopped"
+              exit 1
+            fi
           done
 
       # Base tests may call node, and the step below runs them with PATH fixed to the system

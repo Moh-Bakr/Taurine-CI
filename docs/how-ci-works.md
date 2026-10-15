@@ -771,7 +771,7 @@ process behind to act later. The base pass is therefore isolated further:
   Zombies (exited, not yet reaped) are reaped quietly, unless other threads of one still run. A
   script that kills its own wrapper fails the step through the wrapper's status. An earlier version
   looked for a marker in each process's environment; an `exec` with a new environment drops it.
-- **Nothing started for later.** Before drop-root the job user is denied `cron` and `at`, and the
+- **Nothing started for later.** Before drop-root the job user is denied `cron` and `at`, the user systemd manager hosted ubuntu-24.04 runs for it is stopped, and the
   step asserts that neither accepts a job and that no user systemd manager socket exists, so
   nothing outside the job's process tree can start work for it later.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
