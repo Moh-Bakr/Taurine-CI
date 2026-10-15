@@ -599,4 +599,45 @@ runs:
             --package=taurine-db-engine --features=dbx-pg,engine-override,taurine-db-dbx/legacy-tls \
             --test=dbx_route_dial
         }
+
+        # dbx-core's `legacy-tls` test pass is conditional on what the source declares.
+        # Older source revisions (branches cut before the retirement of dbx-core's direct
+        # OpenSSL path) still declare a live feature, with OpenSSL dependencies and gated
+        # tests, and a full validation of one must keep running them. A revision whose dbx-core
+        # declares the feature empty (the retired no-op alias) or not at all has nothing extra
+        # to run, and says so in a visible row instead of silently dropping the pass.
+        #
+        # `dbx_core_legacy_tls_state` reads `cargo metadata --no-deps --format-version 1` on
+        # stdin (cargo parses the manifest, so no text matching on Cargo.toml) and prints
+        # live (the feature has dependencies), empty, or absent. It returns non-zero, printing
+        # nothing, when the metadata is unreadable, has no single dbx-core package, or has an
+        # unexpected feature shape, so the caller fails closed.
+        dbx_core_legacy_tls_state() {
+          jq -er '[.packages[] | select(.name == "dbx-core")] as $p
+            | if ($p | length) != 1 then error("expected exactly one dbx-core package")
+              else ($p[0].features["legacy-tls"]) as $f
+                | if $f == null then "absent"
+                  elif ($f | type) != "array" then error("unexpected legacy-tls shape")
+                  elif ($f | length) == 0 then "empty"
+                  else "live" end
+              end'
+        }
+        # Argument: the same metadata JSON. Records exactly one row for the pass.
+        dbx_core_legacy_tls_pass() {
+          local metadata="$1" state
+          if ! state="$(dbx_core_legacy_tls_state <<<"${metadata}")" || [[ -z "${state}" ]]; then
+            deferred_results+=('rust-dbx-core-legacy-tls-tests|failed: not run (the dbx-core manifest could not be read)')
+            deferred_failed=1
+            return 0
+          fi
+          case "${state}" in
+            live)
+              run_deferred rust-dbx-core-legacy-tls-tests \
+                env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core --features legacy-tls
+              ;;
+            *)
+              deferred_results+=('rust-dbx-core-legacy-tls-tests|skipped: dbx-core declares no legacy-tls feature (retired)')
+              ;;
+          esac
+        }
         TCI_REPORT_LIBRARY

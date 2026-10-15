@@ -280,12 +280,15 @@ runs:
             # dbx-core's engine tests recurse deeply enough that the default
             # main-thread stack is not enough — the retired `npm run
             # test:dbx-core` script carried the same value, and the workspace
-            # run keeps it. dbx-core is tested once, with its default
-            # features: it carries no OpenSSL and no `legacy-tls` feature
-            # (the OpenSSL door is `taurine-tls-openssl`, tested by
-            # `rust-tls-openssl`, and is opened only by `taurine-db-dbx`'s
-            # own `legacy-tls`, which the rust-db concern's registered feature
-            # cases cover). dbx-core's
+            # run keeps it. The `legacy-tls` pass runs dbx-core again with
+            # `--features legacy-tls` only for a source whose dbx-core still
+            # declares a live (non-empty) feature of that name: older branches
+            # carry the OpenSSL-gated tests that pass exists for. A source whose
+            # dbx-core declares it empty or not at all (the OpenSSL path was
+            # retired; the door is `taurine-tls-openssl`, tested by
+            # `rust-tls-openssl`) records a visible skipped row instead, and an
+            # unreadable manifest fails the concern
+            # (`dbx_core_legacy_tls_pass`). dbx-core's
             # Postgres-backed tests start a disposable container when Docker
             # answers, which it does on this runner. `vendor/boringtun`'s
             # standalone run stays outside every concern (its lock is
@@ -310,6 +313,12 @@ runs:
               if grep -qx 'dbx-core' <<<"${dbx_members}"; then
                 run_deferred rust-dbx-core-tests \
                   env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core
+                if dbx_meta="$(cargo metadata --no-deps --format-version 1)"; then
+                  dbx_core_legacy_tls_pass "${dbx_meta}"
+                else
+                  deferred_results+=('rust-dbx-core-legacy-tls-tests|failed: not run (the workspace manifest could not be read)')
+                  deferred_failed=1
+                fi
                 # The Linux Secret Service half of dbx-core's `os-keyring` feature
                 # (`all(feature = "os-keyring", target_os = "linux", not(test))`) is
                 # compiled by no other job: the tests above run without the feature and
@@ -321,6 +330,7 @@ runs:
               else
                 echo 'rust-dbx: skipped: dbx-core is not a workspace member on this branch'
                 deferred_results+=('rust-dbx-core-tests|skipped: dbx-core is not a workspace member on this branch')
+                deferred_results+=('rust-dbx-core-legacy-tls-tests|skipped: dbx-core is not a workspace member on this branch')
                 deferred_results+=('rust-dbx-core-keyring-check|skipped: dbx-core is not a workspace member on this branch')
               fi
               if grep -qx 'dbx-sqlite-worker' <<<"${dbx_members}"; then
