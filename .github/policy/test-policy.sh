@@ -621,6 +621,9 @@ printf 'lone.yml\n' > "${mode_root}/enforced-lone.txt"
 ENFORCED=enforced-lone.txt
 many_expect_fail 'untrusted restore in an enforced workflow without cache-mode' 'must declare its own cache-mode' .github/workflows/lone.yml
 unset ENFORCED
+# L: two-deep reusable nesting is unsupported and fails closed.
+printf 'name: nested\non:\n  workflow_call:\npermissions: {}\njobs:\n  inner:\n    uses: ./.github/workflows/split-concern.yml\n' > "${mode_root}/.github/workflows/nested.yml"
+many_expect_fail 'a called workflow that calls another' 'nested reusable workflows are unsupported' .github/workflows/nested.yml
 # Duplicate and disguised keys, a plain actions/cache and a cache step hidden in a composite.
 dup_wf() { printf 'name: d\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-24.04\n%s\n    steps:\n      - run: true\n' "$1" > "${mode_root}/.github/workflows/dup.yml"; }
 dup_wf $'    cache-mode: write\n    cache-mode: read'

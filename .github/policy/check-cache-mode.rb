@@ -11,6 +11,9 @@
 #  B. a workflow-level `cache-mode` is only `none`;
 #  C. a called workflow (`on: workflow_call`) has no `cache-mode` at all, so it inherits its
 #     caller's grant and can never widen it;
+#  L. a called workflow does not itself call a local reusable workflow: two-deep nesting (A calls
+#     B calls C) is unsupported, because the saves and restores of C would escape the callee
+#     classification below, so it fails closed;
 #  D. `cache-mode: write` only on a job whose `if:` has the exact top-level term
 #     github.ref == 'refs/heads/main' (no unparenthesised ||).
 # Staged, for the basenames in ENFORCED_WORKFLOWS (rules F to J):
@@ -168,6 +171,13 @@ docs.each do |path, doc|
     check_value.call('workflow-level', wf_mode)
     failures << "#{path}: a workflow-level cache-mode is only none (got #{wf_mode.inspect})" unless wf_mode == 'none'
     failures << "#{path}: a called workflow must not set cache-mode; it inherits its caller's grant" if called
+  end
+
+  if called
+    jobs.each do |name, job|
+      next unless job.is_a?(Hash) && job['uses'].to_s.start_with?('./.github/workflows/')
+      failures << "#{path}: job #{name} calls #{job['uses']} from a called workflow; nested reusable workflows are unsupported (their cache uses would escape the caller rules)"
+    end
   end
 
   jobs.each do |name, job|

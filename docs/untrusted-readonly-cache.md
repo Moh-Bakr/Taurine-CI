@@ -355,8 +355,9 @@ relies on them (the base-commit pass would otherwise reject the workflow change)
   `write` or `read`, and any expression other than a reviewed one are rejected. (d) **A called
   workflow (`on: workflow_call`, e.g. `linux-validation-concern.yml`) must not contain
   `cache-mode` anywhere**, so it inherits the caller's grant. (e) Every job that calls a reusable
-  workflow carries an explicit `cache-mode`. `check-actions.sh` needs no new Action pin (the
-  restore pin is already allowed).
+  workflow carries an explicit `cache-mode`. (f) Two-deep reusable nesting (a called workflow that itself calls a local reusable workflow, A
+  to B to C) is unsupported and fails closed, because the cache uses of C would escape the caller
+  classification. `check-actions.sh` needs no new Action pin (the restore pin is already allowed).
 - **P3 ordering (`drop-root-order.rb` or a new `cache-order.rb`).** Remove `cache/restore` from
   `PRE_DROP_USES`; require every `actions/cache/restore` step to follow the `drop-root` step in
   its job; require no `actions/cache/*` step between revoke and drop-root.
