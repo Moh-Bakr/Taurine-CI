@@ -61,6 +61,8 @@ done < <(git ls-files -z)
 # rather than from the filesystem.
 while IFS= read -r -d '' record; do
   mode="${record%% *}"
+  oid="${record#* }"
+  oid="${oid%% *}"
   asset="${record#*$'\t'}"
   if [[ "$mode" != '100644' ]]; then
     echo "Case-evidence assets must be plain regular files: $asset has git mode $mode" >&2
@@ -70,7 +72,21 @@ while IFS= read -r -d '' record; do
   # git call a file binary. Refusing it here keeps these files inside the text
   # world every other check assumes, rather than leaving the credential scan to
   # decide how to treat them.
-  if [[ "$(LC_ALL=C tr -d '\000' < "$asset" | wc -c | tr -d ' ')" != "$(wc -c < "$asset" | tr -d ' ')" ]]; then
+  #
+  # The bytes come from the index, by object id, not from the working tree. In
+  # the base-policy pass .github/policy on disk is the base commit's copy while
+  # the index still lists the pull request's assets, so a path read from disk
+  # is a different file or no file at all.
+  #
+  # A read that fails is reported as that, not as a NUL byte: the two need
+  # different fixes, and a missing object is not something the author put in
+  # the file.
+  if ! size="$(git cat-file -s "$oid" 2>/dev/null)" ||
+     ! stripped="$(git cat-file blob "$oid" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d ' ')"; then
+    echo "Case-evidence asset could not be read from the index: $asset" >&2
+    exit 1
+  fi
+  if [[ "$stripped" != "$size" ]]; then
     echo "Case-evidence assets must not contain NUL bytes: $asset" >&2
     exit 1
   fi
@@ -101,7 +117,32 @@ fi
 # qualifiers is now allowed in front of PRIVATE KEY, which also covers
 # "BEGIN PGP PRIVATE KEY BLOCK" and anything added later. It only widens what
 # is caught, and it matches nothing already in this repository.
-if git grep -na -E 'GH_APP_PRIVATE_KEY|TAURINE_(PAT|TOKEN|PRIVATE_KEY)|GITHUB_TOKEN[[:space:]]*[:=]|TAURI_SIGNING_PRIVATE_KEY|DEPLOY_KEY|BEGIN ([A-Z0-9]+ )*PRIVATE KEY|secrets\.(TAURINE|GH_APP|PAT|DEPLOY|SIGNING)' -- . ':!*.lock' ':!.github/workflows/validate-public-changes.yml' ':!.github/policy/*.sh' ':!.github/policy/*.rb' ':!.github/policy/*.py'; then
+# Every object the index names must be readable before the scan runs. git grep
+# --cached reports an object it cannot read as an error but exits 1 -- the same
+# status as "no match" -- so the scan below would pass a tree whose blobs it
+# never saw. Fail closed instead, and name the paths.
+unreadable="$(git ls-files -s -z | while IFS= read -r -d '' entry; do
+  entry_oid="${entry#* }"
+  entry_oid="${entry_oid%% *}"
+  printf '%s %s\n' "${entry_oid}" "${entry#*$'\t'}"
+done | while read -r entry_oid entry_path; do
+  # A missing object prints "<oid> missing" whatever --batch-check format is
+  # asked for, so test the last word rather than compare the whole line.
+  object_state="$(git cat-file --batch-check <<<"${entry_oid}")"
+  if [[ "${object_state##* }" == missing ]]; then
+    printf '%s\n' "${entry_path}"
+  fi
+done)"
+if [[ -n "${unreadable}" ]]; then
+  echo "The index names objects that cannot be read, so the credential scan could not see them:" >&2
+  printf '  %s\n' ${unreadable} >&2
+  exit 1
+fi
+
+# --cached: the scan reads what the index holds, which is what this tree
+# commits. Reading the working tree instead missed every pull-request file the
+# base-policy pass had replaced on disk -- the case-evidence assets among them.
+if git grep --cached -na -E 'GH_APP_PRIVATE_KEY|TAURINE_(PAT|TOKEN|PRIVATE_KEY)|GITHUB_TOKEN[[:space:]]*[:=]|TAURI_SIGNING_PRIVATE_KEY|DEPLOY_KEY|BEGIN ([A-Z0-9]+ )*PRIVATE KEY|secrets\.(TAURINE|GH_APP|PAT|DEPLOY|SIGNING)' -- . ':!*.lock' ':!.github/workflows/validate-public-changes.yml' ':!.github/policy/*.sh' ':!.github/policy/*.rb' ':!.github/policy/*.py'; then
   echo "A reusable source, signing, or deployment credential pattern was found." >&2
   exit 1
 fi
