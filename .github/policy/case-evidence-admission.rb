@@ -320,14 +320,28 @@ def canonical_digest(value)
   Digest::SHA256.hexdigest(JSON.generate(sort_json(value), ascii_only: true))
 end
 
-# Parse bytes as UTF-8 JSON, refusing text that is not valid UTF-8 before anything else touches it.
-# JSON.generate raises on such text and puts the offending string in the exception message, which
-# an uncaught raise would print to the stderr the public log receives; a title must never get that
-# far. Every read of report or source bytes goes through here.
+# Parse bytes as UTF-8 JSON, refusing anything that is not valid UTF-8 -- in the bytes, and in the
+# strings they parse to. The second matters: a lone-surrogate escape such as "alpha\udcff" (what
+# Node's JSON.stringify writes for one) is pure ASCII, so the bytes pass, but it parses to invalid
+# UTF-8. JSON.generate raises on such a string and quotes it in the exception message, which an
+# uncaught raise would print to the stderr the public log receives; the rescues at the bottom of
+# this file are the second line of defence if anything still gets through. Every read of report or
+# source bytes goes through here.
+def utf8_clean?(node)
+  case node
+  when String then node.valid_encoding?
+  when Array then node.all? { |item| utf8_clean?(item) }
+  when Hash then node.all? { |key, value| utf8_clean?(key) && utf8_clean?(value) }
+  else true
+  end
+end
+
 def utf8_json!(bytes, code)
   text = bytes.dup.force_encoding(Encoding::UTF_8)
   block!(code) unless text.valid_encoding?
-  JSON.parse(text)
+  value = JSON.parse(text)
+  block!(code) unless utf8_clean?(value)
+  value
 end
 
 def private_json!(path, root, limit)

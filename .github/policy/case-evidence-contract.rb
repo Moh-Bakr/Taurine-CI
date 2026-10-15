@@ -379,11 +379,22 @@ begin
   # Read as UTF-8 whatever the locale: the producer starts this validator with an empty
   # environment, where the default external encoding is US-ASCII and the first non-ASCII byte in a
   # real test title would make JSON.parse raise.
+  clean = lambda do |node|
+    case node
+    when String then node.valid_encoding?
+    when Array then node.all? { |item| clean.call(item) }
+    when Hash then node.all? { |key, value| clean.call(key) && clean.call(value) }
+    else true
+    end
+  end
   utf8_json = lambda do |path|
     text = File.read(path, encoding: Encoding::UTF_8)
-    # JSON.generate raises on invalid UTF-8 and quotes the string in its message, so refuse it here.
+    # JSON.generate raises on invalid UTF-8 and quotes the string in its message, so refuse it
+    # here: in the bytes, and in the strings a lone-surrogate escape such as "\udcff" parses to.
     reject!('input_encoding_invalid') unless text.valid_encoding?
-    JSON.parse(text)
+    value = JSON.parse(text)
+    reject!('input_encoding_invalid') unless clean.call(value)
+    value
   end
   expected = utf8_json.call(expected_path)
   validate_expected(expected)

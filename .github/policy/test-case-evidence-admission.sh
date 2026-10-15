@@ -111,6 +111,8 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
     json = JSON.generate(report).b
     # Not valid UTF-8, which JSON.generate itself refuses to write: spliced in as raw bytes.
     json = json.sub("alpha".b, "\\xFF\\xFE".b) if mode == "discovery-invalid-title"
+    # A lone-surrogate escape is pure ASCII -- what Node writes for one -- yet parses to invalid UTF-8.
+    json = json.sub("alpha".b, "alpha\\\\udcff".b) if mode == "discovery-lone-surrogate"
     File.binwrite(ENV.fetch("TAURINE_CASE_EVIDENCE_REPORT_PATH"), json)
     unless mode == "marker-failed"
       File.write(ENV.fetch("TAURINE_CASE_EVIDENCE_COMPLETION_PATH"),
@@ -204,6 +206,7 @@ execution_fixture() {
     end
     json = JSON.generate(report).b
     json = json.sub("alpha".b, "\xFF\xFE".b) if mode == "execution-invalid-title"
+    json = json.sub("alpha".b, "alpha\\udcff".b) if mode == "execution-lone-surrogate"
     File.binwrite(target, json)
   ' "$tmp/execution.json" "$1" "${2:-}"
 }
@@ -242,7 +245,7 @@ expect_blocked() {
   # Whatever the reason, neither stream may carry a case title: the producer's stderr goes to the
   # public job log, and its stdout to the step summary.
   for leaked in "$out" "$(cat "$tmp/producer.stderr")"; do
-    if LC_ALL=C grep -Fq -e 'alpha' -e "$(printf '\377\376')" <<<"$leaked"; then
+    if LC_ALL=C grep -Fq -e 'alpha' -e "$(printf '\377\376')" -e "$(printf '\355\263\277')" -e 'udcff' <<<"$leaked"; then
       echo "a case title escaped the admission output (${label})" >&2
       exit 1
     fi
@@ -285,12 +288,28 @@ grep -Fq '"error_class":"input_encoding_invalid"' <<<"$contract_out" || {
 if [[ -s "$tmp/contract.stderr" ]] || LC_ALL=C grep -Fq 'alpha' <<<"$contract_out"; then
   echo 'the validator printed a case title for an envelope that is not valid UTF-8' >&2; exit 1
 fi
+# The same through a lone-surrogate escape, which is ASCII.
+cp "$tmp/work/discovery-envelope-smoke.json" "$tmp/contract-discovery-envelope.json"
+ruby -e 'path = ARGV[0]; File.binwrite(path, File.binread(path).sub("alpha".b, "alpha\\udcff".b))' "$tmp/contract-discovery-envelope.json"
+contract_status=0
+contract_out="$(env -i PATH="$(dirname "$(command -v ruby)"):/usr/bin:/bin" ruby "$contract" "$tmp/contract-expected.json" \
+  "$tmp/contract-discovery-envelope.json" "$tmp/contract-execution-envelope.json" 2> "$tmp/contract.stderr")" || contract_status=$?
+[[ "$contract_status" -eq 1 ]] && grep -Fq '"error_class":"input_encoding_invalid"' <<<"$contract_out" || {
+  echo "the validator did not refuse a lone-surrogate envelope with the encoding class: ${contract_out}" >&2; exit 1;
+}
+if [[ -s "$tmp/contract.stderr" ]] || LC_ALL=C grep -Fq 'alpha' <<<"$contract_out"; then
+  echo 'the validator printed a case title for a lone-surrogate envelope' >&2; exit 1
+fi
 # The workflow step must keep the producer's stderr out of the public job log.
 ruby "$root/.github/policy/extract-step.rb" "$root/.github/workflows/linux-validation-concern.yml" \
   'Reconcile case evidence for the browser concern' run > "$tmp/reconcile-step.sh"
 grep -Eq 'case-evidence-admission\.rb.*\\$' "$tmp/reconcile-step.sh" &&
   grep -Fq '"${work}" 2>/dev/null)" || status=$?' "$tmp/reconcile-step.sh" || {
   echo 'the reconcile step does not discard the producer stderr' >&2; exit 1;
+}
+# A producer that dies before printing anything is a fixed class in the log, not "unknown".
+grep -Fq '[[ -n "${result}" ]] || error_class=producer_crashed' "$tmp/reconcile-step.sh" || {
+  echo 'the reconcile step does not name a producer that printed nothing' >&2; exit 1;
 }
 for leaked in 'parameterized value' 'inner.spec.ts' 'tests/e2e' 'outer group'; do
   if grep -Fq "$leaked" <<<"$positive"; then
@@ -354,12 +373,43 @@ if [[ -s "$tmp/producer.stderr" ]]; then
   echo 'the producer wrote to stderr on a blocked run' >&2
   exit 1
 fi
+# The realistic vector: a lone-surrogate escape. The bytes are ASCII and valid, so only a check of the
+# parsed strings sees it.
+execution_fixture "$assets/real-execution-feedback.json"
+echo discovery-lone-surrogate > "$tmp/mode"
+expect_blocked 'a discovery report with a lone-surrogate title' report_encoding_invalid
+[[ ! -s "$tmp/producer.stderr" ]] || { echo 'the producer wrote to stderr for a lone surrogate (discovery)' >&2; exit 1; }
+: > "$tmp/mode"
+execution_fixture "$assets/real-execution-feedback.json" execution-lone-surrogate
+expect_blocked 'an execution report with a lone-surrogate title' report_encoding_invalid
+[[ ! -s "$tmp/producer.stderr" ]] || { echo 'the producer wrote to stderr for a lone surrogate (execution)' >&2; exit 1; }
 execution_fixture "$assets/real-execution-feedback.json"
 
 : > "$tmp/mode"
 # The source repository must not be able to switch this gate off by removing
 # the ownership manifest it owns.
 MANIFEST_DIGEST_OVERRIDE='' expect_blocked 'a missing ownership manifest' manifest_absent
+
+# A lone-surrogate escape in a tracked source file, as a value, a key and an array element. The walk
+# of parsed strings blocks each with the file's own binding class; without it the manifest parses, and
+# canonical_digest raises in JSON.generate, which only the last-resort rescue turns into
+# report_encoding_invalid -- a different class, which is what tells the two layers apart.
+for placement in value key array; do
+  case "${placement}" in
+    value) manifest='{"version":1,"suites":[],"note":"alpha\udcff"}' ;;
+    key) manifest='{"version":1,"suites":[],"alpha\udcff":"x"}' ;;
+    array) manifest='{"version":1,"suites":["alpha\udcff"]}' ;;
+  esac
+  printf '%s' "${manifest}" > "$tmp/source/scripts/ci/suite-ownership.json"
+  git -C "$tmp/source" add scripts/ci/suite-ownership.json
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME='Synthetic admission' GIT_AUTHOR_EMAIL='admission@example.invalid' \
+  GIT_COMMITTER_NAME='Synthetic admission' GIT_COMMITTER_EMAIL='admission@example.invalid' \
+    git -C "$tmp/source" commit -qm "synthetic manifest with a lone surrogate (${placement})"
+  source_sha="$(git -C "$tmp/source" rev-parse HEAD)"
+  expect_blocked "a manifest with a lone-surrogate ${placement}" manifest_binding_invalid
+  git -C "$tmp/source" revert --no-edit HEAD >/dev/null
+  source_sha="$(git -C "$tmp/source" rev-parse HEAD)"
+done
 
 # The runner is pinned, not merely read: a lockfile bump blocks.
 ruby -rjson -e '
