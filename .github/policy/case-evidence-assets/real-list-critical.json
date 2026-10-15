@@ -1,0 +1,21 @@
+{
+  "suites": [
+    {
+      "file": "__APP_ROOT__/tests/e2e/flows.spec.ts",
+      "specs": [
+        {
+          "title": "outer group > inner group > shared title across projects @critical",
+          "file": "__APP_ROOT__/tests/e2e/flows.spec.ts",
+          "tests": [
+            {
+              "projectName": "critical",
+              "status": "discovered",
+              "results": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

@@ -638,6 +638,33 @@ It is split three ways:
 - **The `live-*` composites** hold the per-engine server start-up (image digest pins, ports, readiness),
   the cargo build, the run and the summary.
 
+The policy pins both halves of the fan-out. `test-live-roster.sh` runs the real plan step and checks
+which arms it selects; `check-live-proof-fanout.rb` checks that selection is what runs. The plan job's
+`arms` and `roster` outputs must come from that step, whose name, inputs and shell are fixed, and its
+`if` is exactly the protected-ref condition, because `prove` needs `plan` and a skipped plan skips
+every arm. The `prove` job must be exactly one arm-workflow call per selected arm, with no `include`,
+`exclude`, extra axis or condition. In the arm workflow, the job and its workflow-level environment
+are pinned, and the input validation, build and run steps are pinned in full and in that order: the
+action or script, `if`, `continue-on-error`, `env`, `with`, shell and directory of each, so replacing
+a body, swapping an action or overriding `RUNNER_TEMP` fails the check. The validation script is
+pinned by SHA-256 (the recompute command is in the check). Workflow files are read as text and YAML
+and refused, with the cause named, when they are missing, symlinks, too large, not UTF-8, not YAML,
+ambiguous (a repeated key, an anchor or an alias) or not a mapping. Changing any of these is a
+reviewed policy change that lands in two steps (see "Changing the policy").
+
+Two residuals are known and not closed by this check. Neither makes a bypass possible that a pull
+request could not already make, since a pull request controls the workflow YAML itself; each makes it
+quieter, and the likely fix is the environment isolation described under "Changing the policy".
+
+- **The select step's environment is not closed.** A plan step before `select` that writes
+  `GITHUB_PATH`, or a workflow-level `BASH_ENV`, can change what `select` executes; `test-live-roster.sh`
+  runs the extracted select script alone and cannot see either. The steps before `select` are
+  composites whose contents this check does not read.
+- **An arm can be narrowed between validation and run.** A new step between the pinned validation and
+  run steps can rewrite `${RUNNER_TEMP}/live-arm.json`, for example to one suite of a multi-suite arm,
+  and the arm still passes with less proved. The pinned order does not forbid a step in between, and
+  the contents of the `live-build` and `live-run` composites are not read here either.
+
 Each selection has its own concurrency group, runs are never cancelled, and only check titles and counts
 are published.
 
@@ -694,6 +721,128 @@ the old one, merge, then land the change that relies on it. The pull request's o
 `validate-public-changes.yml` is what runs, so a pull request that edits that file to drop the
 base pass is caught only by review: treat any change to `validate-public-changes.yml` or
 `.github/policy/` as a policy change and review it as one.
+
+Earlier steps of that job run the pull request's own policy scripts, and any of them can append
+to `GITHUB_ENV` or `GITHUB_PATH`. The base pass therefore runs each base script, Ruby and shell
+alike, with an allow-listed environment (`env -i`, a fixed `PATH`, a clean `HOME`, only the
+`GITHUB_*`/`RUNNER_*` variables it needs, and the token for `lint.sh` alone) and names `ruby` and
+`bash` by absolute path, so a planted `RUBYOPT`, `RUBYLIB`, `BASH_ENV` or `PATH` shim cannot turn a
+rejection into a pass.
+
+The step's own shell is closed the same way. It declares `shell: /usr/bin/env -u BASH_ENV -u ENV
+/bin/bash --noprofile --norc -p -eo pipefail {0}`: the absolute paths cannot be intercepted by a
+`PATH` shim, no startup file is read, and privileged mode (`-p`) stops bash importing exported
+functions (`BASH_FUNC_*`) and `SHELLOPTS`/`PS4`, which would otherwise run planted code in the step
+shell. The script then fixes its own `PATH` before it does anything, so `rm`, `mv`, `cp`, `mkdir` and
+`diff` cannot be shimmed, and it fails unless the copied base policy is identical to the base
+checkout and it ran exactly as many base scripts as that checkout holds, so a pass cannot mean that
+nothing ran. `test-base-policy-env.sh` runs the step as declared, over rejecting fixtures, with each
+of those planted, and fails on a step that does not hold.
+
+What the environment scrub alone could not stop is code the pull request contributes that the
+base pass itself executes. Several base tests -- `test-base-policy-env.sh` and
+`test-base-policy-isolation.sh` among them -- extract steps from the pull request's own copy of
+`validate-public-changes.yml` and run them, as the same user, inside the base pass. So
+pull-request code does run there, and it could rewrite a later base script on disk or leave a
+process behind to act later. The base pass is therefore isolated further:
+
+- **Its own job.** It runs as `base-policy`, separate from the checks in `policy`, so nothing the
+  pull request's own policy scripts export there reaches it. `policy` declares
+  `needs: [base-policy]` and fails unless that job succeeded.
+- **No root.** Hosted runners give the job user passwordless sudo. The job runs the same
+  `drop-root` composite the source-validation jobs run before project code, then the step
+  asserts `sudo -n true` is refused. Without that, pull-request code run by a base test could
+  write `/etc/ld.so.preload` or replace ruby.
+- **Only root-owned tools.** The base scripts run with `PATH` fixed to `/usr/bin:/bin:/usr/sbin:/sbin`.
+  Base tests that need node get a copy installed into `/usr/bin` before `drop-root`, because the
+  runner's own node lives in `/usr/local/bin`, which hosted images leave world-writable: on the
+  base `PATH`, pull-request code run by one base test could replace it for the next.
+- **Pinned to the base commit.** The base checkout's `HEAD` must equal the pull request's base SHA.
+  A SHA-256 manifest is built from that commit's git objects -- not from the files on disk -- held
+  only in the step's memory, and re-verified before every base script and once after the last.
+  A rewritten, added, removed or hidden base file fails the step. The manifest is never written to
+  disk, where a base script could rewrite it to match its own edit.
+- **Nothing outlives a script.** Each base script runs under a wrapper -- the pinned ruby, calling
+  `prctl(PR_SET_CHILD_SUBREAPER)` through Fiddle -- that every orphaned descendant is re-parented
+  to instead of init. Double-forking, `setsid` and an `exec` with a cleared environment do not take
+  a process out of its reach, and a process cannot leave a subreaper's subtree on its own. When the
+  script returns, the wrapper finds every remaining descendant through the `/proc` ppid chains,
+  kills it, and repeats until two passes in a row find none (a pass that meets a parent missing
+  from the listing rescans); any that was still running fails the script by name. The wrapper
+  marks itself not dumpable, and `kernel.yama.ptrace_scope` is raised to at least 1 before
+  drop-root and asserted, so nothing a script starts can attach to the wrapper or the step.
+  Zombies (exited, not yet reaped) are reaped quietly, unless other threads of one still run. A
+  script that kills its own wrapper fails the step through the wrapper's status. An earlier version
+  looked for a marker in each process's environment; an `exec` with a new environment drops it.
+- **Nothing started for later.** Before drop-root the job user is denied `cron` and `at`, the user systemd manager hosted ubuntu-24.04 runs for it is stopped, and the
+  step asserts that neither accepts a job and that nothing accepts connections on the user manager's bus or private socket, so
+  nothing outside the job's process tree can start work for it later.
+- **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
+  test runs could leave a gem in `~/.gem` or a module in `~/.node_modules` for the next to load:
+  a later check's `require "json"` would run it. `HOME` is deleted and recreated empty before
+  every base script, and the step's own pin builder and verifier run ruby with `--disable-gems`.
+- **The pull request's tree is pinned too.** Pull-request code an earlier base test runs could
+  rewrite what a later one reads -- a workflow file a test extracts steps from, say. Every path
+  outside `.github/policy`, with its type, mode and SHA-256, plus `.git/config`, `.git/hooks`,
+  `.git/info` (which decide what git runs) and `HEAD`, `refs`, `packed-refs` and the index (what
+  git reads), is recorded before the first base script, held in
+  memory, and checked before every script. It is read with ruby alone, never by running git, which
+  would run whatever an edited `.git/config` told it to.
+- **No loader variables.** The step shell unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`,
+  the allow-list never forwards them, and the step asserts none reaches a base script.
+
+`test-base-policy-isolation.sh` runs the step over fixtures for each: a mismatched checkout; a
+rewritten, added, removed and hidden base file; a rewrite by the last script, which only the
+final check can see; a base checkout tampered on disk; the same rewrite under poisoned ruby; a
+forged manifest on disk; a forged digest function; a base script that leaves a child in its
+session, the same while planting a bogus group id, one that daemonises out of it, one that leaves
+its session with a cleared environment and keeps writing into the next script's `HOME`, one that
+kills its own wrapper, and one that only leaves a zombie; a tracked file changed, a file added and
+`.git/config` edited in the pull request's tree; planted loader variables; a json gem and a node module planted in `HOME` for a later script; and an
+existing `/usr/bin/node` that is a link or not root's alone.
+
+What this does **not** do, plainly:
+
+- **It hardens the base pass as an honest workflow runs it. It does not defend against a pull
+  request that edits the workflow.** Under `pull_request`, the pull request's own copy of this
+  file defines every job here -- `policy`, `base-policy` and `base-policy-fixtures` alike. It can
+  delete the pin, change `BASE_SHA` or the checkout `ref:`, add `if: false`, drop `needs`,
+  replace the step outright, or empty `base-policy-fixtures` so that the tests of the step stop
+  testing it, and no check that this workflow runs can stop that, because the pull request also
+  controls which checks run. Until the owner
+  decides on a ruleset-required workflow run from the default branch, review of every change to
+  this workflow and to `.github/policy/` is the only control for it.
+- **Pull-request code runs inside the base pass.** The two test scripts named above execute steps
+  taken from the pull request's workflow. Everything listed here limits what that code can do; it
+  does not stop it running.
+- **The tree is pinned between scripts, not during one.** A script can change the tree while it
+  runs and change it back before it returns; only the scripts that come after it are protected.
+  The same holds for the base files.
+- **Work handed to something outside the job's process tree.** `cron`, `at` and a user systemd
+  manager are shut out, but any other service that starts processes on the job user's behalf
+  would not be seen by the subreaper. None is known on the hosted image.
+- **A thread-group leader that exits while its other threads run** shows as a zombie; the wrapper
+  counts it as running when more than one task remains, but no fixture can construct one without a
+  compiler, so that case is reasoned, not tested. Every descendant, zombie or not, is sent SIGKILL.
+- **Shared scratch space.** `/tmp` and `/dev/shm` are shared by every base script, and so are
+  the ancestors of the workspace (`/home/runner` among them), where node's bare `require` looks
+  for `node_modules`. Nothing in the base pass loads code from `/tmp` or `/dev/shm`; a
+  `node_modules` planted above the workspace would be loaded by a later base script's `node`.
+  Real `node` use in the base pass is small, and none of it requires a bare module name.
+- **Reasoned, not tested.** The second quiet pass: with the unknown-parent rescan, one quiet pass
+  cannot miss a live descendant, so a mutant with one pass survives the fixtures. The ptrace
+  assertion and the non-dumpable wrapper are shown on the runner and, for the wrapper, by a fixture
+  that only falsifies on a kernel without Yama.
+- **Linux only.** The wrapper needs `prctl` and `/proc`. The fixtures that run the step say so and
+  pass on macOS without exercising anything, and fail under `GITHUB_ACTIONS` if they ever land
+  anywhere but Linux.
+- **An existing `/usr/bin/node` is trusted if root alone can change it.** A root-owned wrapper
+  script that execs a path the job user can write would pass that check. No hosted image ships
+  one; the step installs its own copy where none exists.
+- **`DYLD_*` forwarding cannot be observed on macOS**, which strips those names under System
+  Integrity Protection; on Linux the dynamic loader ignores them.
+- **The sudo assertion cannot be exercised off a runner.** It needs passwordless sudo to be present
+  to prove it is gone, which a developer machine does not have.
 
 ## Accepted residual risks
 
