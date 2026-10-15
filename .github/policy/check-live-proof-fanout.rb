@@ -170,8 +170,13 @@ if dispatcher
                   'REQUESTED_SOURCE_SHA from the dispatch inputs'
     end
   end
-  if jobs['prove'] != PROVE_JOB
-    actual = jobs['prove'].is_a?(Hash) ? jobs['prove'] : {}
+  # The one reviewed addition is an explicit `cache-mode: none`: the arm workflow only proves against
+  # live engines and never caches, so its caller states the least grant (docs/untrusted-readonly-cache.md,
+  # section 4.1). Any other value, or any other extra key, still differs.
+  prove = jobs['prove']
+  prove = prove.reject { |key, _| key == 'cache-mode' } if prove.is_a?(Hash) && prove['cache-mode'] == 'none'
+  if prove != PROVE_JOB
+    actual = prove.is_a?(Hash) ? prove : {}
     differing = (PROVE_JOB.keys | actual.keys).reject { |key| PROVE_JOB[key] == actual[key] }
     failures << "#{DISPATCHER}: jobs.prove differs from the reviewed fan-out in #{differing.sort.join(', ')}; " \
                 'the matrix must be exactly the plan arms, with no include, exclude or filter'
