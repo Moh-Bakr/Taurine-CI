@@ -330,7 +330,8 @@ expect_pass loader "${loader}" \
 # Files a base script leaves in HOME. Pull-request code that one base test runs could plant a gem
 # or a node module there, and a later base check that requires json, or a module node finds
 # through ~/.node_modules, would load it and could exit 0 from inside. HOME must be empty again
-# for every script. The planter runs first (check-a-*.rb sorts first); the judge always rejects,
+# for every script. The planter is script N (check-a-*.rb sorts first) and the judge is script
+# N+1 (check-b-*.rb), which next_after checks in the step's own log; the judge always rejects,
 # unless planted code it loads makes it pass.
 planter() {
   cat > "$1/base-policy/.github/policy/check-a-plant.rb" <<'RB'
@@ -351,13 +352,25 @@ File.write(File.join(home, ".node_modules/taurine-planted/index.js"), "process.e
 RB
 }
 
+# The step's log must show the judge as the very next script after the planter.
+next_after() {
+  local label="$1" first="$2" second="$3"
+  ruby -e '
+    groups = File.readlines(ARGV[0]).filter_map { |l| l[/::group::base policy: (\S+)/, 1] }
+    i = groups.index(ARGV[1])
+    abort "#{ARGV[1]} did not run" unless i
+    abort "#{ARGV[2]} was not the next script after #{ARGV[1]}: #{groups.inspect}" unless groups[i + 1] == ARGV[2]
+  ' "${work}/${label}.out" "${first}" "${second}" || { echo "base-policy isolation: ${label}: wrong order" >&2; exit 1; }
+}
+
 home_gem="$(fixture "${work}/home-gem")"
 passing_scripts "${home_gem}"
 planter "${home_gem}"
 printf '%s\n' 'require "json"' 'warn "the judge loaded the system json and rejects"' 'exit 1' \
-  > "${home_gem}/base-policy/.github/policy/check-z-judge.rb"
+  > "${home_gem}/base-policy/.github/policy/check-b-judge.rb"
 commit_base "${home_gem}"
-expect_reject home-gem "${home_gem}" "The base commit's check-z-judge.rb rejects this pull request"
+expect_reject home-gem "${home_gem}" "The base commit's check-b-judge.rb rejects this pull request"
+next_after home-gem check-a-plant.rb check-b-judge.rb
 
 # A planted digest gem aimed at the verifier rather than at a base check. The verifier runs while
 # the planting script's HOME is still there, so if it loaded gems, a digest that matched every file
@@ -384,6 +397,29 @@ RB
 commit_base "${home_digest}"
 expect_reject home-digest "${home_digest}" 'no longer matches the base commit it was pinned to'
 
+# Script N replaces HOME with a symbolic link to a directory of its choosing. Emptying HOME must
+# remove the link, not what it points at, and script N+1 must get a real, empty directory.
+home_link="$(fixture "${work}/home-link")"
+passing_scripts "${home_link}"
+victim="$(cd "${work}" && pwd -P)/victim"
+mkdir -p "${victim}"
+printf 'keep\n' > "${victim}/sentinel"
+{
+  echo 'require "fileutils"'
+  echo 'home = ENV.fetch("HOME")'
+  echo 'FileUtils.rm_rf(home)'
+  echo "File.symlink($(ruby -e 'print ARGV[0].dump' "${victim}"), home)"
+} > "${home_link}/base-policy/.github/policy/check-a-plant.rb"
+cat > "${home_link}/base-policy/.github/policy/check-b-judge.rb" <<'RB'
+home = ENV.fetch("HOME")
+abort "HOME is still a link" if File.symlink?(home)
+abort "HOME is not an empty directory" unless File.directory?(home) && Dir.empty?(home)
+RB
+commit_base "${home_link}"
+expect_pass home-link "${home_link}"
+next_after home-link check-a-plant.rb check-b-judge.rb
+[[ -f "${victim}/sentinel" ]] || { echo 'base-policy isolation: home-link: emptying HOME followed the link and removed what it pointed at' >&2; exit 1; }
+
 # The same through node. The judge names node by the absolute path found here, because the base
 # PATH holds only the system directories, where a developer machine and the fixtures job have none.
 node_for_fixture="$(command -v node || true)"
@@ -392,11 +428,12 @@ if [[ -n "${node_for_fixture}" ]]; then
   home_node="$(fixture "${work}/home-node")"
   passing_scripts "${home_node}"
   planter "${home_node}"
-  printf '%s\n' "if $(printf '%q' "${node_for_fixture}") -e 'require(\"taurine-planted\"); process.exit(3)' 2>/dev/null; then exit 0; fi" \
-    'echo "the judge found no planted module and rejects" >&2' 'exit 1' \
-    > "${home_node}/base-policy/.github/policy/test-z-judge.sh"
+  printf '%s\n' "exit 0 if system($(ruby -e 'print ARGV[0].dump' "${node_for_fixture}"), '-e', 'require(\"taurine-planted\"); process.exit(3)', err: File::NULL)" \
+    'warn "the judge found no planted module and rejects"' 'exit 1' \
+    > "${home_node}/base-policy/.github/policy/check-b-judge.rb"
   commit_base "${home_node}"
-  expect_reject home-node "${home_node}" "The base commit's test-z-judge.sh rejects this pull request"
+  expect_reject home-node "${home_node}" "The base commit's check-b-judge.rb rejects this pull request"
+  next_after home-node check-a-plant.rb check-b-judge.rb
 else
   home_node_skipped=yes
 fi
@@ -445,7 +482,7 @@ if [[ "$(run_install kept /usr/bin/env)" -ne 0 ]] ||
   exit 1
 fi
 
-echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind, in its session or escaped from it by Process.daemon, fails the step and is killed, even when the script plants a bogus group id; a rewrite by the last script, a tampered base checkout and a hidden file are caught; planted loader variables never reach a base script; a gem or node module planted in HOME by one base script is gone before the next; and an existing node is kept only when root alone can change it'
+echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind, in its session or escaped from it by Process.daemon, fails the step and is killed, even when the script plants a bogus group id; a rewrite by the last script, a tampered base checkout and a hidden file are caught; planted loader variables never reach a base script; a gem or node module planted in HOME by one base script is gone before the next, and a HOME replaced by a link is removed without following it; and an existing node is kept only when root alone can change it'
 [[ "${daemon_skipped}" == no ]] || echo 'base-policy isolation: the daemon-escape case above was NOT exercised on this host'
 if [[ "${home_node_skipped}" == yes ]]; then
   echo 'base-policy isolation: the node HOME case above was NOT exercised on this host: no node'
