@@ -229,7 +229,11 @@ def git_env(tool)
 end
 
 def git_capture(tool, root, arguments, code, timeout: 30)
-  stdout, _stderr, status = Open3.capture3(git_env(tool), tool, '-C', root, *arguments, unsetenv_others: true)
+  # Binary, like the File.binread it is compared with: git's output would otherwise be tagged with
+  # the default external encoding, and String#== is false between a binary and a UTF-8 string once
+  # either holds a non-ASCII byte, even when every byte is the same.
+  stdout, _stderr, status = Open3.capture3(git_env(tool), tool, '-C', root, *arguments, unsetenv_others: true,
+    binmode: true)
   block!(code) unless status.exitstatus.zero?
   stdout
 rescue SystemCallError
