@@ -129,8 +129,15 @@ done
 # `cargo metadata --no-deps` shape; nothing here compiles anything.
 row_count() { printf '%s\n' "${deferred_results[@]}" | grep -c "^rust-dbx-core-legacy-tls-tests|" || true; }
 live_meta='{"packages":[{"name":"other","features":{}},{"name":"dbx-core","features":{"default":[],"legacy-tls":["dep:openssl","dep:postgres-openssl","dep:openssl-src"]}}]}'
-empty_meta='{"packages":[{"name":"dbx-core","features":{"default":[],"legacy-tls":[]}}]}'
-absent_meta='{"packages":[{"name":"dbx-core","features":{"default":[]}}]}'
+# Source trees the search runs over: one clean, one that still gates code on the feature.
+mkdir -p "${fixture}/clean/src" "${fixture}/gated/src"
+printf 'pub fn nothing_here() {}\n' > "${fixture}/clean/src/lib.rs"
+printf '#[cfg(feature = "legacy-tls")]\npub fn gated() {}\n' > "${fixture}/gated/src/lib.rs"
+meta_for() { # features-json source-dir
+  printf '{"packages":[{"name":"dbx-core","manifest_path":"%s/Cargo.toml","features":%s}]}' "$2" "$1"
+}
+empty_meta="$(meta_for '{"default":[],"legacy-tls":[]}' "${fixture}/clean")"
+absent_meta="$(meta_for '{"default":[]}' "${fixture}/clean")"
 
 # A live (non-empty) feature, as older branches declare: the pass runs, exactly as before.
 reset_case
@@ -160,6 +167,27 @@ for meta in 'not json at all' '' '{"packages":[]}' \
   if (finish_deferred) >/dev/null 2>&1; then
     echo 'an unreadable dbx-core manifest unexpectedly passed aggregation' >&2; exit 1
   fi
+done
+
+# An empty feature that still gates code is enabled by the flag, so the pass runs; an absent
+# feature with gated code is a manifest/source disagreement and fails closed; a live feature
+# never needs the search; an unsearchable tree fails closed.
+reset_case
+dbx_core_legacy_tls_pass "$(meta_for '{"legacy-tls":[]}' "${fixture}/gated")"
+[[ "${deferred_failed}" -eq 0 && "$(row_count)" -eq 1 ]]
+grep -qE '^rust-dbx-core-legacy-tls-tests\|env RUST_MIN_STACK=33554432 cargo test .*--features legacy-tls ' "${calls}"
+reset_case
+dbx_core_legacy_tls_pass "$(meta_for '{"default":[]}' "${fixture}/gated")"
+[[ "${deferred_failed}" -eq 1 && ! -s "${calls}" && "$(row_count)" -eq 1 ]]
+printf '%s\n' "${deferred_results[@]}" | grep -qF 'sources gate code on a legacy-tls feature it does not declare'
+reset_case
+dbx_core_legacy_tls_pass '{"packages":[{"name":"dbx-core","manifest_path":"/nonexistent-dir/Cargo.toml","features":{"legacy-tls":["dep:openssl"]}}]}'
+[[ "${deferred_failed}" -eq 0 && -s "${calls}" ]]   # live: the source tree is never consulted
+for dir in "${fixture}/does-not-exist"; do
+  reset_case
+  dbx_core_legacy_tls_pass "$(meta_for '{"legacy-tls":[]}' "${dir}")"
+  [[ "${deferred_failed}" -eq 1 && ! -s "${calls}" && "$(row_count)" -eq 1 ]]
+  printf '%s\n' "${deferred_results[@]}" | grep -qF 'sources could not be searched for legacy-tls gates'
 done
 
 # The Linux rust-dbx case still calls the conditional pass with the workspace metadata, and still
