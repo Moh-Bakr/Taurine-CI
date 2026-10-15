@@ -594,6 +594,40 @@ grep -qF 'built_graph_check ios-arm64-sim-built-graph' .github/workflows/ios-val
 grep -qF 'built_graph_check "${os}-desktop-built-graph"' .github/actions/shell-artefact/action.yml || fail 'the desktop check does not judge the built graph'
 expect_fail 'a non-door crate building openssl-src (S1 gate)' 'FAKE_SRC_BAD=1 openssl_door_gate g taurine-mobile -' 'evil-sys depends on openssl-src outside the OpenSSL door'
 
+# ---- G2: a cross build reads the host profile for build-dependencies (real cargo) ------------
+# openssl-src is a registry crate here (a vendored directory source standing in for crates.io),
+# so the artefact dep-info never lists it, and with --target it compiles for the host, into
+# target/debug/ rather than target/<triple>/debug/. The host triple is passed explicitly, which
+# splits the two profiles without needing a second target installed.
+x="${work}/cross"; rm -rf "${x}"; mkdir -p "${x}/vendor/openssl-src/src" "${x}/.cargo"
+printf '[package]\nname = "openssl-src"\nversion = "300.5.5+3.5.5"\nedition = "2021"\n' >"${x}/vendor/openssl-src/Cargo.toml"
+printf 'pub fn f() {}\n' >"${x}/vendor/openssl-src/src/lib.rs"
+printf '{"files":{},"package":null}\n' >"${x}/vendor/openssl-src/.cargo-checksum.json"
+printf '[source.crates-io]\nreplace-with = "vendored"\n[source.vendored]\ndirectory = "%s"\n' "${x}/vendor" >"${x}/.cargo/config.toml"
+xcrate() { mkdir -p "${x}/$1/src"; printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[dependencies]\n%s\n' "$2" "${4:-}" "$3" >"${x}/$1/Cargo.toml"; printf 'pub fn f() {}\n' >"${x}/$1/src/lib.rs"; }
+xcrate openssl-sys openssl-sys '' '[build-dependencies]
+openssl-src = "300.5"'
+printf 'fn main() {}\n' >"${x}/openssl-sys/build.rs"
+xcrate openssl openssl 'openssl-sys = { path = "../openssl-sys" }'
+xcrate tls taurine-tls-openssl 'openssl = { path = "../openssl" }
+openssl-sys = { path = "../openssl-sys" }'
+xcrate dbx taurine-db-dbx 'openssl = { path = "../openssl" }
+taurine-tls-openssl = { path = "../tls" }'
+xcrate shell taurine-mobile 'taurine-db-dbx = { path = "../dbx" }'
+printf '[workspace]\nmembers = ["shell", "dbx", "tls", "openssl", "openssl-sys"]\nresolver = "2"\n' >"${x}/Cargo.toml"
+host="$("${real_cargo}" -vV 2>/dev/null | sed -n 's/^host: //p')"
+[[ -n "${host}" ]] || host="$(rustc -vV | sed -n 's/^host: //p')"
+( cd "${x}" && CARGO_TARGET_DIR="${x}/target" "${real_cargo}" build --offline -q -p taurine-mobile --target "${host}" ) >"${work}/cross.log" 2>&1 ||
+  { cat "${work}/cross.log" >&2; fail 'the cross toy workspace did not build'; }
+[[ -z "$(find "${x}/target/${host}/debug/.fingerprint" -maxdepth 1 -name 'openssl-src-*')" ]] ||
+  fail 'the cross fixture does not reproduce a host-only openssl-src'
+expect_pass 'a cross build with a host-only registry openssl-src (real cargo)' \
+  "cd '${x}' && TCI_REAL_CARGO='${real_cargo}' built_graph_check cross '${x}/target/${host}/debug/libtaurine_mobile.d' taurine-mobile present"
+grep -qF 'OpenSSL consumers: openssl, openssl-sys, taurine-db-dbx, taurine-tls-openssl (door only)' "${work}/out" || { cat "${work}/out" >&2; fail 'the cross build did not judge the door consumers'; }
+rm -rf "${x}/target/debug/.fingerprint/openssl-src-"* "${x}/target/debug/deps/openssl_src-"*.d
+expect_fail 'a cross build whose host profile lost openssl-src (real cargo)' \
+  "cd '${x}' && TCI_REAL_CARGO='${real_cargo}' built_graph_check cross '${x}/target/${host}/debug/libtaurine_mobile.d' taurine-mobile present" 'lacks openssl-src'
+
 # ---- B3: the shipped artefact is the judged build ---------------------------------------------
 crate bin taurine-desktop ''
 printf 'fn main() {}\n' >"${toy}/bin/src/main.rs"
@@ -620,6 +654,57 @@ expect_fail 'a forged equal build-id with different code (E2)' "${android_bind}"
 grep -qF 'bind_android_library "android-${abi}-binding"' .github/workflows/android-validation.yml || fail 'android-native does not bind the APK library to the judged build'
 grep -qF 'bind_same_binary ios-arm64-sim-binding' .github/workflows/ios-validation.yml || fail 'ios-native does not bind libapp.a to the judged build'
 grep -qF 'bind_same_binary "${os}-desktop-binding"' .github/actions/shell-artefact/action.yml || fail 'the desktop check does not bind the bundled binary'
+
+# ---- G1: the base-policy toolchain copy cannot be steered by a rust-toolchain file ----------
+# The reviewed step runs with stand-ins: a HOME holding rustup's stable toolchain, a rustup that
+# honours an explicit toolchain, a `rustc` proxy on PATH that (like rustup's) obeys a
+# rust-toolchain.toml in the working directory or its parents, and a sudo that runs as the user.
+tc="${work}/tc"; rm -rf "${tc}"; mkdir -p "${tc}/home/.rustup/toolchains/stable-host/bin" "${tc}/home/.rustup/toolchains/stable-host/lib" \
+  "${tc}/home/.rustup/toolchains/stable-host/share/doc" "${tc}/home/.cargo/bin" "${tc}/bin" "${tc}/ws/evil/bin" "${tc}/tmp"
+for tool in cargo rustc; do printf '#!/bin/sh\necho "stable %s 1.0.0"\n' "${tool}" >"${tc}/home/.rustup/toolchains/stable-host/bin/${tool}"; done
+printf 'std\n' >"${tc}/home/.rustup/toolchains/stable-host/lib/libstd.rlib"
+chmod +x "${tc}/home/.rustup/toolchains/stable-host/bin/"*
+cat >"${tc}/home/.cargo/bin/rustup" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == run && "$2" == stable && "$3" == rustc && "$4" == --print && "$5" == sysroot ]] || exit 2
+echo "${FAKE_SYSROOT:-${HOME}/.rustup/toolchains/stable-host}"
+STUB
+cat >"${tc}/bin/rustc" <<'STUB'
+#!/usr/bin/env bash
+# rustup's proxy: a rust-toolchain.toml with `path` in the working directory or a parent wins.
+dir="${PWD}"
+while [[ "${dir}" != / ]]; do
+  if [[ -f "${dir}/rust-toolchain.toml" ]]; then
+    exec "$(sed -nE 's/^path = "(.*)"$/\1/p' "${dir}/rust-toolchain.toml")/bin/rustc" "$@"
+  fi
+  dir="$(dirname "${dir}")"
+done
+exec "${HOME}/.rustup/toolchains/stable-host/bin/rustc" "$@"
+STUB
+printf '#!/usr/bin/env bash\n[[ "$1" == chown ]] && exit 0\nexec "$@"\n' >"${tc}/bin/sudo"
+printf '[toolchain]\npath = "%s"\n' "${tc}/ws/evil" >"${tc}/ws/rust-toolchain.toml"
+printf '#!/bin/sh\n: > "%s/evil-ran"\necho "%s/evil"\n' "${tc}" "${tc}/ws" >"${tc}/ws/evil/bin/rustc"; cp "${tc}/ws/evil/bin/rustc" "${tc}/ws/evil/bin/cargo"
+chmod +x "${tc}/home/.cargo/bin/rustup" "${tc}/bin/"* "${tc}/ws/evil/bin/"*
+toolchain_step() { # toolchain_step <workflow> <dest>: the reviewed step, its destination redirected
+  ruby .github/policy/extract-step.rb "$1" 'Install a Rust toolchain where only root can change it' run |
+    sed "s#^dest=/opt/taurine-ci-rust\$#dest=$2#"
+}
+run_toolchain_step() { # run_toolchain_step <workflow> <dest> [env...]
+  local wf="$1" dest="$2"; shift 2
+  toolchain_step "${wf}" "${dest}" >"${tc}/step.sh"
+  ( cd "${tc}/ws" && env -i PATH="${tc}/bin:/usr/bin:/bin" HOME="${tc}/home" RUNNER_TEMP="${tc}/tmp" "$@" /bin/bash "${tc}/step.sh" ) >"${work}/out" 2>&1
+}
+rm -f "${tc}/evil-ran"
+run_toolchain_step .github/workflows/validate-public-changes.yml "${tc}/dest" || { cat "${work}/out" >&2; fail 'the toolchain copy: should pass'; }
+[[ ! -e "${tc}/evil-ran" ]] || fail 'a planted rust-toolchain.toml made the toolchain step run its rustc'
+[[ "$("${tc}/dest/bin/rustc")" == 'stable rustc 1.0.0' && -f "${tc}/dest/lib/libstd.rlib" && ! -e "${tc}/dest/share" ]] ||
+  fail 'the toolchain copy is not the stable toolchain bin/ and lib/ only'
+rm -rf "${tc}/dest"
+if run_toolchain_step .github/workflows/validate-public-changes.yml "${tc}/dest" FAKE_SYSROOT="${tc}/ws/evil"; then
+  fail 'a sysroot outside rustup toolchains was copied'
+fi
+grep -qF 'not an installed rustup toolchain' "${work}/out" || { cat "${work}/out" >&2; fail 'a sysroot outside rustup toolchains failed for the wrong reason'; }
+[[ ! -e "${tc}/dest/bin" ]] || fail 'a refused sysroot left a copy behind'
 
 # ---- N8: the weekly release-line cadence fails closed --------------------------------------
 cadence="$(ruby -ryaml -e '

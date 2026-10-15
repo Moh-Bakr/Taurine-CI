@@ -701,7 +701,9 @@ and the public OpenSSL version string only:
   and target names), plus the paths in the artefact's own dep-info (relative ones resolved
   against the workspace root). `build.dep-info-basedir` in any cargo config and
   `CARGO_BUILD_DEP_INFO_BASEDIR` are refused, and so is a path package whose target sources lie
-  outside its own manifest directory. Any `.fingerprint` or `deps/*.d` entry that is not a
+  outside its own manifest directory. A `--target` build compiles build-dependencies (`openssl-src`)
+  for the host, so the host profile `<target>/<profile>/` is read too. Any `.fingerprint` or
+  `deps/*.d` entry that is not a
   `<name>-<16 hex>` unit (or the unhashed `<target>.d` cargo writes) or maps to no package fails,
   and the door state sets a floor: with the door in the graph the built set must contain
   `taurine-tls-openssl`, `openssl`, `openssl-sys` and `openssl-src`, without it none of them.
@@ -724,9 +726,13 @@ and the public OpenSSL version string only:
   are stripped and unsigned. Windows bundles nothing, so the executable judged is the one built.
 - **The fixtures in the base-policy pass**: `test-shell-artefact.sh` builds a toy workspace with
   real cargo. The base pass runs every base test with `PATH` fixed to the system directories and
-  an empty `HOME`, where rustup's proxies cannot work, so the base-policy job copies the
-  default toolchain (its real `cargo` and `rustc`) to `/opt/taurine-ci-rust`, owned by root,
-  before root is removed, and the base step passes it as `TCI_REAL_CARGO`.
+  an empty `HOME`, where rustup's proxies cannot work, so the base-policy job copies the image's
+  stable toolchain (`bin/` and `lib/` of its real `cargo` and `rustc`) to `/opt/taurine-ci-rust`,
+  owned by root, before root is removed, and the base step passes it as `TCI_REAL_CARGO`. That
+  step runs from `RUNNER_TEMP`, outside both checkouts, resolves the sysroot with the image's own
+  `~/.cargo/bin/rustup run stable` (`RUSTUP_TOOLCHAIN=stable`, `RUSTUP_HOME`/`CARGO_HOME`
+  unset), and refuses a sysroot outside `~/.rustup/toolchains/`, so a `rust-toolchain.toml` in the
+  pull request or base tree cannot make rustup run its own `rustc` while sudo is still available.
 - **What CI judges, and what it does not**: CI builds and judges the iOS **simulator release**
   artefact and the **desktop debug** artefacts (and the Android debug APK). iOS device builds,
   App Store archives, desktop release installers and any signed or store artefact are built

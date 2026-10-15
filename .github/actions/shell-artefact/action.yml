@@ -234,7 +234,8 @@ runs:
         # directory and every `deps/<crate>-<hash>.d` file of the artefact's profile directory
         # (mapped through cargo metadata's package names and target names, `-` read as `_`),
         # plus the paths in the artefact's own dep-info (relative ones resolved against the
-        # workspace root). The edges come from the all-features resolve (a superset). Every built
+        # workspace root); for a --target build, the host profile's build-dependency units too.
+        # The edges come from the all-features resolve (a superset). Every built
         # crate that depends directly on openssl, openssl-sys, tokio-openssl or openssl-src must
         # be on the door path, with the S1 gate's parent rules, and native-tls must not be built.
         # A path package whose target sources lie outside its own manifest directory is refused
@@ -258,7 +259,7 @@ runs:
             print(label + ": FAILED - " + reason, file=sys.stderr)
             sys.exit(1)
         def norm(path):
-            return os.path.normcase(os.path.normpath(path))
+            return os.path.normcase(os.path.realpath(path))
         meta = json.load(open(meta_path))
         root = meta.get("workspace_root") or os.getcwd()
         names = {p["id"]: p["name"] for p in meta["packages"]}
@@ -302,18 +303,25 @@ runs:
         # Every entry must be a unit cargo names <name>-<16 hex> (a deps/ file may also be the
         # unhashed <target>.d cargo writes for an uplifted output) and must map to a package:
         # anything else fails, so naming drift or a planted entry cannot drop a unit silently.
-        for entry in glob.glob(os.path.join(profile, ".fingerprint", "*")) + glob.glob(os.path.join(profile, ".fingerprint", ".*")):
-            match = unit.match(os.path.basename(entry))
-            if not match or not by_name.get(match.group(1)):
-                fail("a fingerprint entry is not a unit of a known package")
-            built |= by_name[match.group(1)]
-        for entry in glob.glob(os.path.join(profile, "deps", "*.d")):
-            stem = os.path.basename(entry)[:-2]
-            match = unit.match(stem)
-            name = (match.group(1) if match else stem).replace("-", "_")
-            if not by_target.get(name):
-                fail("a deps dep-info file is not a unit of a known target")
-            built |= by_target[name]
+        # A --target build compiles build-dependencies (openssl-src among them) for the host,
+        # into <target-dir>/<profile>/, so that profile is read too, under the same rules.
+        profiles = [profile]
+        target_dir = norm(meta.get("target_directory") or "")
+        if target_dir and norm(os.path.dirname(os.path.dirname(profile))) == target_dir:
+            profiles.append(os.path.join(meta["target_directory"], os.path.basename(profile)))
+        for directory in profiles:
+            for entry in glob.glob(os.path.join(directory, ".fingerprint", "*")) + glob.glob(os.path.join(directory, ".fingerprint", ".*")):
+                match = unit.match(os.path.basename(entry))
+                if not match or not by_name.get(match.group(1)):
+                    fail("a fingerprint entry is not a unit of a known package")
+                built |= by_name[match.group(1)]
+            for entry in glob.glob(os.path.join(directory, "deps", "*.d")):
+                stem = os.path.basename(entry)[:-2]
+                match = unit.match(stem)
+                name = (match.group(1) if match else stem).replace("-", "_")
+                if not by_target.get(name):
+                    fail("a deps dep-info file is not a unit of a known target")
+                built |= by_target[name]
         built_names = {names[pkg] for pkg in built}
         if shell not in built_names:
             fail("the dep-info does not contain the shell crate")
