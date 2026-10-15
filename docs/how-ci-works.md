@@ -775,8 +775,12 @@ process behind to act later. The base pass is therefore isolated further:
   script that kills its own wrapper fails the step through the wrapper's status. An earlier version
   looked for a marker in each process's environment; an `exec` with a new environment drops it.
 - **Nothing started for later.** Before drop-root the job user is denied `cron` and `at`, the user systemd manager hosted ubuntu-24.04 runs for it is stopped, and the
-  step asserts that neither accepts a job and that nothing accepts connections on the user manager's bus or private socket, so
-  nothing outside the job's process tree can start work for it later.
+  step asserts that neither accepts a job, that nothing accepts connections on the user manager's bus or private socket, and
+  that no systemd user manager or message bus process (`systemd`, `(sd-pam)`, `dbus-daemon`, `dbus-broker`,
+  `dbus-broker-launch`) of the job user is running outside the step's own ancestry, so nothing outside the job's process
+  tree can start work for it later. The same assertions run again before every base script, because a script that
+  changed any of them would otherwise be believed by the next; the step logs the unix listeners of the job user and the
+  `kernel.yama.ptrace_scope` it found, here and in the root step.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
   test runs could leave a gem in `~/.gem` or a module in `~/.node_modules` for the next to load:
   a later check's `require "json"` would run it. `HOME` is deleted and recreated empty before
@@ -819,8 +823,12 @@ What this does **not** do, plainly:
   runs and change it back before it returns; only the scripts that come after it are protected.
   The same holds for the base files.
 - **Work handed to something outside the job's process tree.** `cron`, `at` and a user systemd
-  manager are shut out, but any other service that starts processes on the job user's behalf
-  would not be seen by the subreaper. None is known on the hosted image.
+  manager are shut out and re-checked before every script, but any other service that starts
+  processes on the job user's behalf would not be seen by the subreaper. None is known on the
+  hosted image. The process check is by name from `/proc`, so a manager started under another
+  name is missed; the bus and socket checks still catch one that listens where the user manager's
+  does. The uid filter of the process check has no container fixture, because it needs a
+  root-owned `systemd`; the hosted runner has one (PID 1), so a green run there is its test.
 - **A thread-group leader that exits while its other threads run** shows as a zombie; the wrapper
   counts it as running when more than one task remains, but no fixture can construct one without a
   compiler, so that case is reasoned, not tested. Every descendant, zombie or not, is sent SIGKILL.

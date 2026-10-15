@@ -322,11 +322,9 @@ jobs:
         shell: bash
         run: bash .github/policy/test-base-policy-sudo.sh --require
 
-      # cron, at and a user systemd manager start what the job user hands them later, outside this
-      # job's process tree, where the per-script containment cannot see it. Hosted ubuntu-24.04
-      # runs a user manager for the job user (its bus is at /run/user/<uid>/bus). While root is
-      # still available, deny cron and at to the job user and stop that manager; the base-policy
-      # step asserts all three.
+      # cron, at and a user systemd manager (hosted ubuntu-24.04 runs one) start work for the job
+      # user outside this job's process tree. Deny the first two and stop the third while root is
+      # still available; the base-policy step asserts all three before every script.
       - name: Deny the job user cron, at and a user systemd manager
         shell: bash
         run: |
@@ -338,12 +336,10 @@ jobs:
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
           sudo loginctl disable-linger "${user}" || true
-          echo "user@${uid}.service before: $(systemctl is-active "user@${uid}.service" || true)"
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
-          # Stopping the manager can leave its socket files behind. A socket file nobody listens on
-          # can start nothing; what matters is whether anything still accepts a connection there.
-          # Log the listeners either way, then fail if a connection is accepted.
+          # Stopping the manager can leave socket files behind; only a listener that accepts a
+          # connection matters. Log the listeners, then fail if one does.
           for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
             echo "listeners on ${socket}: $(sudo ss -xlpn | grep -F -- "${socket}" || echo none)"
             if /usr/bin/ruby --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
@@ -351,11 +347,11 @@ jobs:
               exit 1
             fi
           done
-          # A process may only ptrace its own descendants, so nothing a base script starts can attach
-          # to the step's shell or to the wrapper containing it.
+          # Nothing a base script starts may attach to the step or its wrapper.
           if [[ "$(cat /proc/sys/kernel/yama/ptrace_scope)" -lt 1 ]]; then
             sudo sysctl -q -w kernel.yama.ptrace_scope=1
           fi
+          echo "kernel.yama.ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope)"
 
       - name: Remove root before the remaining fixtures
         # Kept as ./ : the policy matches this exact form for local actions.
@@ -395,11 +391,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # cron, at and a user systemd manager start what the job user hands them later, outside this
-      # job's process tree, where the per-script containment cannot see it. Hosted ubuntu-24.04
-      # runs a user manager for the job user (its bus is at /run/user/<uid>/bus). While root is
-      # still available, deny cron and at to the job user and stop that manager; the base-policy
-      # step asserts all three.
+      # cron, at and a user systemd manager (hosted ubuntu-24.04 runs one) start work for the job
+      # user outside this job's process tree. Deny the first two and stop the third while root is
+      # still available; the base-policy step asserts all three before every script.
       - name: Deny the job user cron, at and a user systemd manager
         shell: bash
         run: |
@@ -411,12 +405,10 @@ jobs:
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
           sudo loginctl disable-linger "${user}" || true
-          echo "user@${uid}.service before: $(systemctl is-active "user@${uid}.service" || true)"
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
-          # Stopping the manager can leave its socket files behind. A socket file nobody listens on
-          # can start nothing; what matters is whether anything still accepts a connection there.
-          # Log the listeners either way, then fail if a connection is accepted.
+          # Stopping the manager can leave socket files behind; only a listener that accepts a
+          # connection matters. Log the listeners, then fail if one does.
           for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
             echo "listeners on ${socket}: $(sudo ss -xlpn | grep -F -- "${socket}" || echo none)"
             if /usr/bin/ruby --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
@@ -424,18 +416,15 @@ jobs:
               exit 1
             fi
           done
-          # A process may only ptrace its own descendants, so nothing a base script starts can attach
-          # to the step's shell or to the wrapper containing it.
+          # Nothing a base script starts may attach to the step or its wrapper.
           if [[ "$(cat /proc/sys/kernel/yama/ptrace_scope)" -lt 1 ]]; then
             sudo sysctl -q -w kernel.yama.ptrace_scope=1
           fi
+          echo "kernel.yama.ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope)"
 
-      # Base tests may call node, and the step below runs them with PATH fixed to the system
-      # directories. The runner's node is in /usr/local/bin, which hosted images leave
-      # world-writable, so that directory cannot join that PATH: pull-request code run by one base
-      # test could replace node for the next. Install a copy, while root is still available, into
-      # /usr/bin, which is already on that PATH and which only root can change. The base PATH
-      # itself stays exactly as the base commit's own fixtures expect it.
+      # Base tests call node, but the step runs them with PATH fixed to the system directories and
+      # the runner's node is in /usr/local/bin, which hosted images leave world-writable. So while
+      # root is still available, install a copy into /usr/bin, which only root can change.
       - name: Install node where only root can change it
         shell: bash
         run: |
@@ -504,10 +493,9 @@ jobs:
           for tool in "${ruby_bin}" "${bash_bin}" /usr/bin/env /usr/bin/git; do
             [[ -x "${tool}" ]] || { echo "::error::${tool} is missing, so the base policy cannot run in a clean environment"; exit 1; }
           done
-          # HOME is where ruby looks for user gems (~/.gem), node for modules (~/.node_modules), git
-          # for its config: files planted there by pull-request code that one base test runs would
-          # be loaded by the next. So it is emptied and recreated before every base script. The path
-          # stays the same because the base commit's own fixtures expect it; mkdir without -p fails
+          # Ruby looks in HOME for gems, node for modules, git for config: files planted there by
+          # one base test would be loaded by the next. So it is emptied and recreated before every
+          # script, at the same path the base commit's own fixtures expect; mkdir without -p fails
           # if anything got there first.
           clean_home="${RUNNER_TEMP}/base-policy-home"
           fresh_home() {
@@ -526,26 +514,68 @@ jobs:
             echo "::error::passwordless sudo is still available, so a base script could act as root"
             exit 1
           fi
-          # Nothing outside this job may start processes for the job user later: no cron, no at, no
-          # user systemd manager. An allowed crontab or at job is removed again before failing.
-          if [[ -x /usr/bin/crontab ]] && printf '' | /usr/bin/crontab - 2>/dev/null; then
-            /usr/bin/crontab -r 2>/dev/null || true
-            echo "::error::the job user can still install a crontab, so a base script could leave work for later"
-            exit 1
-          fi
-          if [[ -x /usr/bin/at ]] && printf 'true\n' | /usr/bin/at now + 1 hour 2>/dev/null; then
-            /usr/bin/atq 2>/dev/null | while read -r job _; do /usr/bin/atrm "${job}" 2>/dev/null || true; done
-            echo "::error::the job user can still queue an at job, so a base script could leave work for later"
-            exit 1
-          fi
+          # Nothing outside this job may start work for the job user later: no cron, at, user manager
+          # or bus. Asserted now and before every script, so a script that changed any of it is not
+          # believed by the next. The tools and runtime directory sit on lines of their own so a
+          # fixture can point them at stand-ins.
+          crontab_bin=/usr/bin/crontab
+          at_bin=/usr/bin/at
+          runtime_dir="/run/user/$(id -u)"
           ptrace_scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo missing)"
+          echo "kernel.yama.ptrace_scope=${ptrace_scope}"
           [[ "${ptrace_scope}" =~ ^[1-3]$ ]] || { echo "::error::kernel.yama.ptrace_scope is ${ptrace_scope}, so a base script could attach to the step"; exit 1; }
-          for socket in "/run/user/$(id -u)/bus" "/run/user/$(id -u)/systemd/private"; do
-            if "${scrub[@]}" "${ruby_bin}" --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
-              echo "::error::something accepts connections at ${socket}, so a base script could start a unit outside this job"
-              exit 1
+          # Job-user systemd manager or bus processes outside this step's ancestry; names from /proc.
+          deferred_processes='
+            ancestry = []
+            pid = Process.pid
+            while pid > 1
+              ancestry << pid
+              stat = File.read("/proc/#{pid}/stat") rescue break
+              pid = stat[(stat.rindex(")") + 2)..].split(" ")[1].to_i
+            end
+            names = ["systemd", "(sd-pam)", "dbus-daemon", "dbus-broker", "dbus-broker-launch"]
+            found = Dir.glob("/proc/[0-9]*").filter_map do |dir|
+              pid = dir[/\d+/].to_i
+              next if ancestry.include?(pid)
+              next unless (File.stat(dir).uid == Process.uid rescue false)
+              stat = File.read("#{dir}/stat") rescue next
+              next if stat[(stat.rindex(")") + 2)..].split(" ")[0] == "Z"
+              comm = File.read("#{dir}/comm").chomp rescue next
+              "#{comm}(#{pid})" if names.include?(comm)
+            end
+            puts found.join(" ")
+          '
+          log_listeners() {
+            [[ ! -x /usr/bin/ss ]] || echo "unix listeners of uid $(id -u): $("${scrub[@]}" /usr/bin/ss -xlne 2>/dev/null | grep -F "uid:$(id -u) " || echo none)"
+          }
+          assert_nothing_deferred() {
+            local left socket
+            if [[ -x "${crontab_bin}" ]] && printf '' | "${crontab_bin}" - 2>/dev/null; then
+              "${crontab_bin}" -r 2>/dev/null || true
+              echo "::error::the job user can still install a crontab, so a base script could leave work for later"
+              return 1
             fi
-          done
+            if [[ -x "${at_bin}" ]] && printf 'true\n' | "${at_bin}" now + 1 hour 2>/dev/null; then
+              /usr/bin/atq 2>/dev/null | while read -r job _; do /usr/bin/atrm "${job}" 2>/dev/null || true; done
+              echo "::error::the job user can still queue an at job, so a base script could leave work for later"
+              return 1
+            fi
+            for socket in "${runtime_dir}/bus" "${runtime_dir}/systemd/private"; do
+              if "${scrub[@]}" "${ruby_bin}" --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
+                log_listeners
+                echo "::error::something accepts connections at ${socket}, so a base script could start a unit outside this job"
+                return 1
+              fi
+            done
+            left="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")"
+            if [[ -n "${left}" ]]; then
+              log_listeners
+              echo "::error::a systemd user manager or message bus is running for the job user (${left}), so a base script could start work outside this job"
+              return 1
+            fi
+          }
+          log_listeners
+          assert_nothing_deferred || exit 1
           # Defence in depth: `env -i` above already starts every base script with nothing but the
           # allow-listed names, so no loader variable can reach one. This asserts it rather than
           # relying on it.
@@ -613,14 +643,11 @@ jobs:
           }
           verify_manifest || exit 1
 
-          # The pull request's own tree is input to every base script, and pull-request code that an
-          # earlier base test runs could rewrite what a later one reads -- a workflow file a test
-          # extracts steps from, say. So the tree is pinned as well: every path outside
-          # .github/policy (pinned above) with its type, mode and SHA-256, plus .git/config,
-          # .git/hooks and .git/info, which decide what git runs. It is taken here, before any base
-          # script, held in memory, and checked again before every script; any change fails the
-          # step. It is read with ruby alone and never by running git, which would run whatever an
-          # edited .git/config told it to.
+          # Pull-request code an earlier base test runs could rewrite what a later one reads (a
+          # workflow file a test extracts steps from), so the tree is pinned too: every path outside
+          # .github/policy with type, mode and SHA-256, plus the git state that decides what git reads
+          # or runs. Held in memory, checked before every script, read with ruby alone and never by
+          # running git, which an edited .git/config would steer.
           tree_state='
             require "digest"
             require "find"
@@ -666,23 +693,16 @@ jobs:
             printf '%s' "${tree_pin}" | "${scrub[@]}" "${ruby_bin}" --disable-gems -e "${tree_state}" verify
           }
 
-          # Nothing a base script starts may outlive it: a process left running can act on the next
-          # script -- re-plant its freshly emptied HOME, rewrite a base script after it was verified,
-          # or change the tree a later test reads.
-          #
-          # Each script runs under a wrapper that makes itself the child subreaper for everything
-          # below it (prctl PR_SET_CHILD_SUBREAPER, through ruby's Fiddle): a descendant whose
-          # parent exits is re-parented to the wrapper rather than to init, so double-forking,
-          # setsid, or exec with a cleared environment do not take a process out of its reach. A
-          # process cannot leave a subreaper's subtree on its own. When the script returns, the
-          # wrapper finds every remaining descendant through the /proc ppid chains, kills it, and
-          # repeats until none is left; finding any fails the script by name. Nothing here depends
-          # on anything the escaping process controls -- an earlier version looked for a marker in
-          # each process's environment, which an exec with a new environment simply drops.
-          #
-          # If a script kills the wrapper itself, the wrapper's own status is non-zero and the step
-          # fails; a descendant re-parented away by that cannot change the verdict. Linux only: the
-          # policy jobs run on ubuntu-24.04, and the wrapper fails closed where prctl is missing.
+          # Nothing a base script starts may outlive it: a leftover process could re-plant the next
+          # script's emptied HOME, rewrite a verified base script, or change a later test's tree.
+          # Each script runs under a wrapper that is the child subreaper for everything below it
+          # (prctl PR_SET_CHILD_SUBREAPER via Fiddle): orphans are re-parented to it whatever they
+          # did -- double fork, setsid, exec with a cleared environment -- and cannot leave its
+          # subtree. When the script returns it kills every remaining descendant (found through
+          # /proc ppid chains) until two passes find none; any it had to kill fails the script by
+          # name, and a script that kills the wrapper fails the step through its status. Linux
+          # only, and closed where prctl is missing. A marker in each environment, tried before,
+          # is dropped by any exec with a new environment.
           subreaper='
             require "fiddle"
             label = ARGV.shift
@@ -766,6 +786,7 @@ jobs:
             [[ -f "${check}" ]] || continue
             verify_manifest || { status=1; break; }
             verify_tree || { status=1; break; }
+            assert_nothing_deferred || { status=1; break; }
             executed=$((executed + 1))
             token=()
             if [[ "${check##*/}" == lint.sh && -n "${GH_TOKEN+x}" ]]; then token=("GH_TOKEN=${GH_TOKEN}"); fi
