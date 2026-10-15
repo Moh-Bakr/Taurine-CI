@@ -227,7 +227,7 @@ runs:
           echo "${label}: passed - door-only (OpenSSL enters ${package} only through taurine-tls-openssl)"
         }
 
-        # built_graph_check <label> <artefact dep-info> <shell package>
+        # built_graph_check <label> <artefact dep-info> <shell package> <door: present|absent>
         # Judges the graph cargo actually BUILT, whatever features the build was given (Gradle
         # code or a build phase can run cargo with extra --features). Units are identified by
         # identity, never by where their sources live: every `.fingerprint/<package>-<hash>`
@@ -241,7 +241,7 @@ runs:
         # (it could hide inside another crate). A missing or unparseable dep-info file, or one
         # that does not contain the shell, fails. dep-info-basedir is refused as a cargo override.
         built_graph_check() {
-          local label="$1" depinfo="$2" package="$3" python meta
+          local label="$1" depinfo="$2" package="$3" door="${4:-}" python meta
           [[ -s "${depinfo}" ]] || { echo "${label}: FAILED - the artefact's dep-info is missing" >&2; return 1; }
           if command -v cygpath >/dev/null 2>&1; then depinfo="$(cygpath -w "${depinfo}")"; fi
           python="$(tci_python)" || { echo "${label}: FAILED - no Python 3.11+ to read the dep-info" >&2; return 1; }
@@ -249,7 +249,7 @@ runs:
           cargo metadata --locked --all-features --format-version 1 >"${meta}" 2>/dev/null || { echo "${label}: FAILED - cargo metadata --all-features did not resolve" >&2; return 1; }
           "${python}" -c '
         import glob, json, os, re, sys
-        label, depinfo, meta_path, shell = sys.argv[1:5]
+        label, depinfo, meta_path, shell, door = sys.argv[1:6]
         allowed = {"openssl-sys": {"openssl", "tokio-openssl", "taurine-tls-openssl"},
                    "openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},
                    "tokio-openssl": {"taurine-db-dbx"},
@@ -299,17 +299,32 @@ runs:
                     break
         profile = os.path.dirname(depinfo)
         unit = re.compile(r"^(.+)-[0-9a-f]{16}$")
-        for entry in glob.glob(os.path.join(profile, ".fingerprint", "*")):
+        # Every entry must be a unit cargo names <name>-<16 hex> (a deps/ file may also be the
+        # unhashed <target>.d cargo writes for an uplifted output) and must map to a package:
+        # anything else fails, so naming drift or a planted entry cannot drop a unit silently.
+        for entry in glob.glob(os.path.join(profile, ".fingerprint", "*")) + glob.glob(os.path.join(profile, ".fingerprint", ".*")):
             match = unit.match(os.path.basename(entry))
-            if match:
-                built |= by_name.get(match.group(1), set())
+            if not match or not by_name.get(match.group(1)):
+                fail("a fingerprint entry is not a unit of a known package")
+            built |= by_name[match.group(1)]
         for entry in glob.glob(os.path.join(profile, "deps", "*.d")):
-            match = unit.match(os.path.basename(entry)[:-2])
-            if match:
-                built |= by_target.get(match.group(1).replace("-", "_"), set())
+            stem = os.path.basename(entry)[:-2]
+            match = unit.match(stem)
+            name = (match.group(1) if match else stem).replace("-", "_")
+            if not by_target.get(name):
+                fail("a deps dep-info file is not a unit of a known target")
+            built |= by_target[name]
         built_names = {names[pkg] for pkg in built}
         if shell not in built_names:
             fail("the dep-info does not contain the shell crate")
+        # Completeness floor: the door state says which of the door crates must be built.
+        door_crates = {"taurine-tls-openssl", "openssl", "openssl-sys", "openssl-src"}
+        if door == "present" and not door_crates <= built_names:
+            fail("the door is in the graph but the built set lacks " + ", ".join(sorted(door_crates - built_names)))
+        if door == "absent" and door_crates & built_names:
+            fail("the door is not in the graph but the built set contains " + ", ".join(sorted(door_crates & built_names)))
+        if door not in ("present", "absent"):
+            fail("no door state was given")
         bad = []
         if "native-tls" in built_names:
             bad.append("native-tls is built")
@@ -328,14 +343,14 @@ runs:
         if bad:
             sys.exit(1)
         print(label + ": built graph of " + str(len(built)) + " crates; OpenSSL consumers: " + (", ".join(sorted(consumers)) or "none") + " (door only)")
-        ' "${label}" "${depinfo}" "${meta}" "${package}"
+        ' "${label}" "${depinfo}" "${meta}" "${package}" "${door}"
         }
 
         # Binding the shipped artefact to the build that was judged. bind_same_binary compares
         # sha256, then (when the bundler stripped or re-signed the copy) the sha256 of stripped,
-        # signature-free copies of both; bind_android_library requires equal GNU build-ids (from
-        # the NDK's llvm-readelf) when the built library has one, else equal sha256 after the
-        # NDK's llvm-strip --strip-all of both. A mismatch, or a missing tool or file, fails.
+        # signature-free copies of both; bind_android_library always requires equal sha256 after
+        # the NDK's llvm-strip --strip-all of both, and, when the built library has a GNU build-id
+        # (NDK llvm-readelf), an equal build-id too. A mismatch, or a missing tool or file, fails.
         tci_stripped_sha256() {
           local file="$1" tool="$2" out
           out="${RUNNER_TEMP}/bind-${RANDOM}-$(basename "$1")"
@@ -367,13 +382,15 @@ runs:
           readelf="${TCI_READELF:-${bin}/llvm-readelf}" strip="${TCI_STRIP:-${bin}/llvm-strip}"
           [[ -x "${readelf}" && -x "${strip}" ]] || { echo "${label}: FAILED - the NDK's llvm-readelf/llvm-strip are unavailable" >&2; return 1; }
           [[ -f "${shipped}" && -f "${built}" ]] || { echo "${label}: FAILED - the shipped or the built library is missing" >&2; return 1; }
+          # A build-id alone can be chosen by whoever links (`--build-id=0x...`), so it is only an
+          # extra check: the stripped contents must always be equal.
           b="$(tci_build_id "${readelf}" "${built}")"
-          if [[ -n "${b}" ]]; then
-            a="$(tci_build_id "${readelf}" "${shipped}")"
-            [[ "${a}" == "${b}" ]] || { echo "${label}: FAILED - the shipped library's build-id is not the judged build's" >&2; return 1; }
-            echo "${label}: the shipped library is the judged build (GNU build-id)"; return 0
+          if [[ -n "${b}" && "$(tci_build_id "${readelf}" "${shipped}")" != "${b}" ]]; then
+            echo "${label}: FAILED - the shipped library's build-id is not the judged build's" >&2; return 1
           fi
-          bind_same_binary "${label}" "${shipped}" "${built}" "${strip}"
+          a="$(tci_stripped_sha256 "${shipped}" "${strip}")" && b="$(tci_stripped_sha256 "${built}" "${strip}")" && [[ -n "${a}" && "${a}" == "${b}" ]] ||
+            { echo "${label}: FAILED - the shipped library is not the build that was judged (stripped contents differ)" >&2; return 1; }
+          echo "${label}: the shipped library is the judged build (equal once stripped)"
         }
 
         # The dep-info of an artefact: <target-dir>[/<triple>]/<profile>/<file>.d
@@ -591,7 +608,7 @@ runs:
           door="$(door_in_graph taurine-desktop -)" || { echo "${os}-desktop-artefact: FAILED - the door query did not resolve" >&2; return 1; }
           file="$(desktop_executable)" || { echo "${os}-desktop-artefact: FAILED - the desktop binary could not be located" >&2; return 1; }
           artefact_check "${os}-desktop-executable" "${file}" debug "${door}" || return 1
-          built_graph_check "${os}-desktop-built-graph" "${file%.exe}.d" taurine-desktop || return 1
+          built_graph_check "${os}-desktop-built-graph" "${file%.exe}.d" taurine-desktop "${door}" || return 1
           # Everything the bundle ships (Linux: the .deb's contents; macOS: the .app). Windows
           # builds no bundle; sidecars are refused and resources must be data (config checks).
           case "${os}" in

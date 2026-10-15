@@ -51,7 +51,14 @@ write_lock
 # cargo: `metadata` lists the two shells; `tree` answers from FAKE_TREE_<crate> per target
 # (FAKE_ARMV7_BAD adds a non-door parent on armv7 only). `none` = cargo's "nothing to print".
 # The real cargo (for the toy-workspace fixtures) is found before the stand-in shadows it.
-real_cargo="$(command -v cargo || true)"
+# The base-policy job runs this with PATH fixed to the system directories and an empty HOME, and
+# hands in a root-owned toolchain cargo as TCI_REAL_CARGO (rustup's proxy is unreachable there);
+# that cargo finds its rustc beside it. Anywhere else, the cargo on PATH is used.
+real_cargo="${TCI_REAL_CARGO:-$(command -v cargo || true)}"
+if [[ -n "${TCI_REAL_CARGO:-}" && -z "${RUSTC:-}" && -x "$(dirname "${TCI_REAL_CARGO}")/rustc" ]]; then
+  export RUSTC="$(dirname "${TCI_REAL_CARGO}")/rustc"
+fi
+unset TCI_REAL_CARGO
 # The fixtures run with their own HOME, so rustup's toolchain home is fixed here first.
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
 [[ -n "${real_cargo}" ]] || { echo 'shell-artefact fixtures: cargo is required for the real-cargo built-graph fixtures' >&2; exit 1; }
@@ -238,8 +245,15 @@ write_npm_lock() {
       "node_modules/@tauri-apps/cli-linux-x64-gnu": {resolved: "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-gnu/-/x.tgz", integrity: "sha512-BBBB"}}}' >"${tdir}/package-lock.json"
 }
 write_npm_lock
+# npm is a stand-in that reports what it was given (the base-policy job has no npm on its fixed
+# PATH); what reaches npm is what reaches the CLI.
+cat >"${work}/bin/npm" <<'STUB'
+#!/usr/bin/env bash
+echo "npm-argv: $* | cwd=$(basename "${PWD}") | config=${TAURI_CONFIG:-unset} | other=${TAURI_EXTRA:-unset} | user=$(basename "${npm_config_userconfig:-unset}") | global=$(basename "${npm_config_globalconfig:-unset}")"
+STUB
+chmod +x "${work}/bin/npm"
 expect_pass 'tauri_cli' 'TAURI_CONFIG={} TAURI_EXTRA=1 tauri_cli taurine-desktop build --debug'
-grep -qxF 'tauri-argv: build --debug | cwd=taurine-desktop | config=unset | other=unset | user=empty-npmrc-user | global=empty-npmrc-global' "${work}/out" || fail 'tauri_cli did not run the CLI with only CI arguments, no TAURI_* environment and CI-owned npm config'
+grep -qxF 'npm-argv: run --ignore-scripts tauri -- build --debug | cwd=taurine-desktop | config=unset | other=unset | user=empty-npmrc-user | global=empty-npmrc-global' "${work}/out" || fail 'tauri_cli did not run the CLI with only CI arguments, no TAURI_* environment and CI-owned npm config'
 printf 'script-shell=/bin/evil\n' >"${work}/home/.npmrc"
 expect_fail 'a ~/.npmrc for the job user' 'tauri_cli taurine-desktop build' 'has a ~/.npmrc'
 rm "${work}/home/.npmrc"
@@ -520,7 +534,10 @@ crate openssl-sys openssl-sys '' '[build-dependencies]
 openssl-src = { path = "../openssl-src" }'
 printf 'fn main() {}\n' >"${toy}/openssl-sys/build.rs"
 crate openssl openssl 'openssl-sys = { path = "../openssl-sys" }'
-crate dbx taurine-db-dbx 'openssl = { path = "../openssl" }'
+crate tls taurine-tls-openssl 'openssl = { path = "../openssl" }
+openssl-sys = { path = "../openssl-sys" }'
+crate dbx taurine-db-dbx 'openssl = { path = "../openssl" }
+taurine-tls-openssl = { path = "../tls" }'
 crate consumer consumer 'openssl = { path = "../openssl" }'
 crate evil evil '' '[build-dependencies]
 openssl-src = { path = "../openssl-src" }'
@@ -530,16 +547,27 @@ consumer = { path = "../consumer", optional = true }
 evil = { path = "../evil", optional = true }' '[features]
 extra = ["dep:consumer"]
 evilsrc = ["dep:evil"]'
-printf '[workspace]\nmembers = ["shell", "dbx", "openssl", "openssl-sys", "openssl-src", "consumer", "evil"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
+printf '[workspace]\nmembers = ["shell", "dbx", "tls", "openssl", "openssl-sys", "openssl-src", "consumer", "evil"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
 toy_build() { # toy_build <target-dir> [cargo args]
   local dir="$1"; shift
   ( cd "${toy}" && CARGO_TARGET_DIR="${dir}" "${real_cargo}" build --offline -q -p taurine-mobile "$@" ) >/dev/null 2>&1 ||
     fail "the toy workspace did not build with: $*"
 }
-toy_check() { echo "cd '${toy}' && TCI_REAL_CARGO='${real_cargo}' built_graph_check toy '$1/debug/libtaurine_mobile.d' taurine-mobile"; }
+toy_check() { echo "cd '${toy}' && TCI_REAL_CARGO='${real_cargo}' built_graph_check toy '$1/debug/libtaurine_mobile.d' taurine-mobile ${2:-present}"; }
 toy_build "${work}/t-door"
 run_lib "$(toy_check "${work}/t-door")" || { cat "${work}/out" >&2; fail 'the door-only toy graph: should pass'; }
-grep -qF 'OpenSSL consumers: openssl, openssl-sys, taurine-db-dbx (door only)' "${work}/out" || { cat "${work}/out" >&2; fail 'the door-only toy graph did not list its door consumers'; }
+grep -qF 'OpenSSL consumers: openssl, openssl-sys, taurine-db-dbx, taurine-tls-openssl (door only)' "${work}/out" || { cat "${work}/out" >&2; fail 'the door-only toy graph did not list its door consumers'; }
+# E3: every unit entry must map, and the door state sets a floor on the built set.
+cp -R "${work}/t-door" "${work}/t-renamed"
+mv "$(ls -d "${work}/t-renamed/debug/.fingerprint/consumer-"* 2>/dev/null | head -n 1 || ls -d "${work}/t-renamed/debug/.fingerprint/openssl-"* | head -n 1)" "${work}/t-renamed/debug/.fingerprint/renamed-unit"
+expect_fail 'a renamed fingerprint directory (real cargo)' "$(toy_check "${work}/t-renamed")" 'not a unit of a known package'
+cp -R "${work}/t-door" "${work}/t-nosrc"
+rm -rf "${work}/t-nosrc/debug/.fingerprint/openssl-src-"* "${work}/t-nosrc/debug/deps/openssl_src-"*.d
+# In the toy, openssl-src is a path crate the artefact dep-info also lists; the real one is a
+# registry crate it does not, so drop those lines to reproduce a unit that left no trace.
+ruby -e 'f = ARGV[0]; File.write(f, File.read(f).split(/(?<!\\) /).reject { |p| p.include?("/openssl-src/") }.join(" ").gsub(/^[^\n]*\/openssl-src\/[^\n]*:\n/, ""))' "${work}/t-nosrc/debug/libtaurine_mobile.d"
+expect_fail 'a door-present build missing openssl-src (real cargo)' "$(toy_check "${work}/t-nosrc")" 'lacks openssl-src'
+expect_fail 'a door-absent build that contains openssl (real cargo)' "$(toy_check "${work}/t-door" absent)" 'the built set contains'
 toy_build "${work}/t-extra" --features extra
 expect_fail 'an extra feature that builds a non-door OpenSSL consumer (real cargo)' "$(toy_check "${work}/t-extra")" 'consumer depends on openssl outside the door'
 toy_build "${work}/t-evil" --features evilsrc
@@ -568,7 +596,7 @@ expect_fail 'a non-door crate building openssl-src (S1 gate)' 'FAKE_SRC_BAD=1 op
 # ---- B3: the shipped artefact is the judged build ---------------------------------------------
 crate bin taurine-desktop ''
 printf 'fn main() {}\n' >"${toy}/bin/src/main.rs"
-printf '[workspace]\nmembers = ["shell", "dbx", "openssl", "openssl-sys", "openssl-src", "consumer", "evil", "bin"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
+printf '[workspace]\nmembers = ["shell", "dbx", "tls", "openssl", "openssl-sys", "openssl-src", "consumer", "evil", "bin"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
 ( cd "${toy}" && CARGO_TARGET_DIR="${work}/t-bin" "${real_cargo}" build --offline -q -p taurine-desktop ) >/dev/null 2>&1 || fail 'the toy binary did not build'
 cp "${work}/t-bin/debug/taurine-desktop" "${work}/shipped-bin"
 expect_pass 'a bundled copy of the judged binary (real cargo)' "bind_same_binary b '${work}/shipped-bin' '${work}/t-bin/debug/taurine-desktop'"
@@ -579,10 +607,15 @@ expect_fail 'a binary swapped in after the build (real cargo)' "bind_same_binary
 # Android: the NDK's llvm-readelf/llvm-strip are not in the policy environment, so stand-ins
 # report a build-id read from the file (the comparison logic is what is under test).
 printf '#!/usr/bin/env bash\nprintf "  Build ID: %%s\\n" "$(head -n 1 "$2")"\n' >"${work}/bin/fake-readelf"; chmod +x "${work}/bin/fake-readelf"
-printf 'abc123\nlib\n' >"${work}/built.so"; printf 'abc123\nstripped\n' >"${work}/shipped.so"
-expect_pass 'an APK library with the judged build-id' "TCI_READELF='${work}/bin/fake-readelf' TCI_STRIP=/bin/cat bind_android_library a '${work}/shipped.so' '${work}/built.so'"
-printf 'def456\nother\n' >"${work}/shipped.so"
-expect_fail 'a .so swapped into the APK after the build' "TCI_READELF='${work}/bin/fake-readelf' TCI_STRIP=/bin/cat bind_android_library a '${work}/shipped.so' '${work}/built.so'" "build-id is not the judged build"
+# The stand-in strip drops line 2 (the "debug" line); line 1 is the build-id, line 3 the code.
+printf '#!/usr/bin/env bash\nsed -i.bak 2d "$2" && rm -f "$2.bak"\n' >"${work}/bin/fake-strip"; chmod +x "${work}/bin/fake-strip"
+android_bind="TCI_READELF='${work}/bin/fake-readelf' TCI_STRIP='${work}/bin/fake-strip' bind_android_library a '${work}/shipped.so' '${work}/built.so'"
+printf 'abc123\ndebug\ncode-a\n' >"${work}/built.so"; printf 'abc123\npackaged\ncode-a\n' >"${work}/shipped.so"
+expect_pass 'an APK library equal to the judged build once stripped' "${android_bind}"
+printf 'def456\ndebug\ncode-b\n' >"${work}/shipped.so"
+expect_fail 'a .so swapped into the APK after the build' "${android_bind}" "build-id is not the judged build"
+printf 'abc123\ndebug\ncode-b\n' >"${work}/shipped.so"
+expect_fail 'a forged equal build-id with different code (E2)' "${android_bind}" 'stripped contents differ'
 grep -qF 'bind_android_library "android-${abi}-binding"' .github/workflows/android-validation.yml || fail 'android-native does not bind the APK library to the judged build'
 grep -qF 'bind_same_binary ios-arm64-sim-binding' .github/workflows/ios-validation.yml || fail 'ios-native does not bind libapp.a to the judged build'
 grep -qF 'bind_same_binary "${os}-desktop-binding"' .github/actions/shell-artefact/action.yml || fail 'the desktop check does not bind the bundled binary'

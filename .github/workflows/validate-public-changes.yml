@@ -446,6 +446,20 @@ jobs:
             sudo install -o root -g root -m 0755 "${node_bin}" "${node_dest}"
           fi
 
+      # Base fixtures that build with cargo run with the system PATH and an empty HOME, where rustup's
+      # proxies cannot work: copy the default toolchain (its real cargo and rustc) to a directory
+      # only root can change, while root is still available. The base step passes TCI_REAL_CARGO.
+      - name: Install a Rust toolchain where only root can change it
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest=/opt/taurine-ci-rust
+          [[ ! -e "${dest}" && ! -L "${dest}" ]] || { echo "::error::${dest} already exists"; exit 1; }
+          sysroot="$(rustc --print sysroot)"
+          [[ -x "${sysroot}/bin/cargo" && -x "${sysroot}/bin/rustc" ]] || { echo '::error::the toolchain has no cargo or rustc'; exit 1; }
+          sudo cp -a "${sysroot}" "${dest}" && sudo chown -R root:root "${dest}" && sudo chmod -R go-w "${dest}"
+          echo "toolchain: $("${dest}/bin/cargo" --version)"
+
       # Base tests extract and execute steps from this pull request's copy of the workflow, so
       # pull-request code runs inside this job. Take away the runner's passwordless sudo and
       # Docker before any of it does, with the same composite the source-validation jobs use
@@ -507,6 +521,7 @@ jobs:
           for name in CI GITHUB_ACTIONS GITHUB_API_URL GITHUB_EVENT_NAME GITHUB_REF GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_SHA GITHUB_WORKSPACE RUNNER_ARCH RUNNER_OS RUNNER_TEMP; do
             [[ -z "${!name+x}" ]] || scrub+=("${name}=${!name}")
           done
+          if [[ -x /opt/taurine-ci-rust/bin/cargo ]]; then scrub+=(TCI_REAL_CARGO=/opt/taurine-ci-rust/bin/cargo); fi
           # Root was removed by the drop-root step before this one. Hosted runners give the job
           # user passwordless sudo, and PR code that a base test executes could otherwise use it to
           # write /etc/ld.so.preload or replace ruby. Fail closed if it is still there.

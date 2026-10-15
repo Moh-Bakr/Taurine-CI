@@ -318,7 +318,7 @@ jobs:
                 # The graph cargo actually built for this ABI (Gradle may pass its own features).
                 if [[ "${main}" != - ]]; then
                   depinfo="$(artefact_depinfo "${triple}" debug libtaurine_mobile_lib)"
-                  built_graph_check "android-${abi}-built-graph" "${depinfo}" taurine-mobile || exit 1
+                  built_graph_check "android-${abi}-built-graph" "${depinfo}" taurine-mobile "${door}" || exit 1
                   # The shipped library must be the one that was judged (Gradle may ship another).
                   bind_android_library "android-${abi}-binding" "${main}" "${depinfo%.d}.so" || exit 1
                 fi
