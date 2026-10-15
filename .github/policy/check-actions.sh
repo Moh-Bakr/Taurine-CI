@@ -24,6 +24,8 @@ check_action_references() {
       # here deliberately and held to the composite rules below.
       ./.github/actions/source-checkout) ;;
       ./.github/actions/environment-preflight) ;;
+      # Run in a job with no source, environment or secret: refuses a non-empty untrusted cache scope.
+      ./.github/actions/cache-scope-audit) ;;
       ./.github/actions/sanitize) ;;
       ./.github/actions/concern-report) ;;
       ./.github/actions/timings) ;;

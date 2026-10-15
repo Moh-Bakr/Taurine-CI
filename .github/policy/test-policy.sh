@@ -682,6 +682,18 @@ p7_expect_fail 'write-all on the scorecard job' 'held to cache-prune.yml' \
   's/    permissions:\n      contents: read\n      actions: read\n      checks: read\n      issues: read\n      pull-requests: read\n/    permissions: write-all\n/' scorecard.yml
 echo 'cache-mode fixtures: literal read, write or none only; write only on main-gated jobs; none inside called workflows is refused; the caller split is required where a workflow saves; actions: write is held to the two reviewed places'
 
+# The composite cache rule matches `actions/cache` as a whole path segment: this repository's own
+# cache listing endpoint (`/actions/caches`) is allowed, the cache actions are not.
+composite_probe="${base}/composite-probe.yml"
+for text in 'uses: actions/cache/restore@x' 'uses: actions/cache/save@x' 'uses: actions/cache@x' 'uses: actions/cache' 'run: echo actions/cache'; do
+  printf 'name: p\nruns:\n  using: composite\n  steps:\n    - %s\n' "${text}" > "${composite_probe}"
+  if (source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action "${composite_probe}") >/dev/null 2>&1; then
+    echo "a composite containing '${text}' should be refused" >&2; exit 1
+  fi
+done
+printf 'name: p\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted"\n' > "${composite_probe}"
+(source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action "${composite_probe}") >/dev/null 2>&1 || { echo 'a composite that only reads the cache listing endpoint should pass the composite rules' >&2; exit 1; }
+
 # P8: actionlint lacks the cache-mode key, so lint.sh ignores exactly that message and nothing else.
 lint_ignores() { grep -oE "\-ignore '[^']*'" "$1"; }
 expected_ignores="$(printf '%s\n' "-ignore 'SC2016:'" "-ignore 'SC2129:'" "-ignore '^unexpected key \"cache-mode\" for \"(job|workflow)\" section\\. '")"

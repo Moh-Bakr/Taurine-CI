@@ -67,6 +67,12 @@ mutate "${arm}" ''
 ruby .github/policy/check-live-proof-fanout.rb "${work}/tree" >/dev/null
 
 prove='d["jobs"]["prove"]'
+# The reviewed explicit cache-mode none is accepted; any other grant is not.
+reset_fixture
+mutate "${dispatcher}" "${prove}[\"cache-mode\"] = \"none\""
+ruby .github/policy/check-live-proof-fanout.rb "${work}/tree" >/dev/null
+reject 'prove job granted cache-mode write' "${dispatcher}" 'jobs.prove differs from the reviewed fan-out in cache-mode' "${prove}[\"cache-mode\"] = \"write\""
+reject 'prove job granted cache-mode read' "${dispatcher}" 'jobs.prove differs from the reviewed fan-out in cache-mode' "${prove}[\"cache-mode\"] = \"read\""
 matrix="${prove}[\"strategy\"][\"matrix\"]"
 reject 'prove matrix excludes pg-dbx' "${dispatcher}" 'jobs.prove differs' "${matrix}[\"exclude\"] = [{\"arm\" => \"pg-dbx\"}]"
 reject 'prove matrix includes an extra arm' "${dispatcher}" 'jobs.prove differs' "${matrix}[\"include\"] = [{\"arm\" => \"extra\"}]"
