@@ -69,4 +69,31 @@ expect_guard "${entry_guard}" BASE_PASS_RESULT 'the entrypoint guard'
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy"]["if"]')" == "github.event_name == 'pull_request'" ]] \
   || fail 'the base-policy job is not restricted to a pull request'
 
+# The step text being in a file proves nothing about it RUNNING. The base pass must not be skippable
+# and its failure must count: no job on the chain may be conditional, tolerate failure or wait on an
+# environment, and no step of the two jobs that do the work may be conditional or tolerate failure.
+# The guards' own `if` lines are compared above.
+# unsafe_keys FILE JOB JOB-KEYS STEP-KEYS: the listed keys present on the job, or on any of its steps.
+unsafe_keys() {
+  ruby -ryaml -e '
+    doc = YAML.safe_load(File.read(ARGV[0]), aliases: false)
+    job = doc.fetch("jobs").fetch(ARGV[1]) { abort "#{ARGV[0]}: no job #{ARGV[1]}" }
+    found = ARGV[2].split(",").select { |k| job.key?(k) }.map { |k| "job #{k}" }
+    (job["steps"] || []).each { |st| ARGV[3].split(",").each { |k| found << "step #{st["name"].inspect} #{k}" if st.key?(k) } }
+    print found.join("; ")
+  ' "$@"
+}
+no_unsafe() {
+  local got
+  got="$(unsafe_keys "$@")"
+  [[ -z "${got}" ]] || fail "the base pass could be skipped or its failure ignored (${2}: ${got})"
+}
+no_unsafe "${entry}" base-pass 'if,continue-on-error,environment,secrets' ''
+no_unsafe "${entry}" policy 'continue-on-error,environment' 'continue-on-error'
+no_unsafe "${reusable}" base-policy 'continue-on-error,environment' 'if,continue-on-error'
+no_unsafe "${reusable}" base-policy-fixtures 'if,continue-on-error,environment' 'if,continue-on-error'
+no_unsafe "${reusable}" base-policy-result 'continue-on-error,environment' 'continue-on-error'
+[[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy"]["steps"].count { |s| s["name"] == "Run the base commit'"'"'s policy against this pull request" }')" == 1 ]] \
+  || fail 'the base-policy job does not hold exactly one base-pass step'
+
 echo 'base-policy result: the guards pass only on success, and the policy job needs the call that needs both jobs'

@@ -784,6 +784,13 @@ process behind to act later. The base pass is therefore isolated further:
   tree can start work for it later. The same assertions run again before every base script, because a script that
   changed any of them would otherwise be believed by the next; the step logs the unix listeners of the job user and the
   `kernel.yama.ptrace_scope` it found, here and in the root step.
+- **No sshd.** Pull-request code that wrote the job user's `authorized_keys` could `ssh localhost`
+  and start a process the subreaper never sees. The root step logs the state of `ssh.service` and
+  `ssh.socket`, masks them (so socket activation cannot revive them), and logs it again; the step, before every script, refuses any process
+  named `sshd`, `sshd-session` or `sshd-auth`, of any uid, and anything accepting connections on
+  loopback port 22. Locking `~/.ssh` was not used instead, because the job user owns its home and
+  can replace the directory. A script that starts an sshd of its own is a descendant, so the
+  subreaper kills it with the script.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
   test runs could leave a gem in `~/.gem` or a module in `~/.node_modules` for the next to load:
   a later check's `require "json"` would run it. `HOME` is deleted and recreated empty before
@@ -831,8 +838,13 @@ What this does **not** do, plainly:
   processes on the job user's behalf would not be seen by the subreaper. None is known on the
   hosted image. The process check is by name from `/proc`, so a manager started under another
   name is missed; the bus and socket checks still catch one that listens where the user manager's
-  does. The uid filter of the process check has no container fixture, because it needs a
-  root-owned `systemd`; the hosted runner has one (PID 1), so a green run there is its test.
+  does. The uid test of the process check reads the real and effective uid from
+  `/proc/<pid>/status`; I could not build an input where that differs from the owner of
+  `/proc/<pid>` (the directory stays owned by the process's user even when it marks itself
+  non-dumpable), so it is not falsifiable by a fixture. Its filter has no container fixture either,
+  because that needs a root-owned `systemd`; the hosted runner has one (PID 1), so a green run there
+  is its test. The ssh port check is by connection on `127.0.0.1` and `::1`; only the first has a
+  fixture, because an IPv6 loopback is not a given in a container.
 - **A thread-group leader that exits while its other threads run** shows as a zombie; the wrapper
   counts it as running when more than one task remains, but no fixture can construct one without a
   compiler, so that case is reasoned, not tested. Every descendant, zombie or not, is sent SIGKILL.
