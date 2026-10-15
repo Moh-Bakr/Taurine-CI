@@ -201,4 +201,48 @@ printf -- '\000-----BEGIN RSA PRIVATE KEY-----\nTEST_FIXTURE_NOT_A_REAL_KEY\n' >
 git -C "${nul_docs}" add docs/nul-fixture.md
 expect_reject "${nul_docs}" 'credential material behind a NUL byte outside the asset directory' 'A reusable source, signing, or deployment credential pattern was found'
 
-echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; NUL bytes, leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, another directory, private source and starter documents rejected'
+# The base-policy pass replaces .github/policy on disk with the base commit's
+# copy, while the index still lists the pull request's files. Both the NUL
+# check and the credential scan must judge what the index holds.
+#
+# A clean asset that is in the index but not on disk must pass: reading the
+# disk used to report a missing file as a NUL byte, which rejected every pull
+# request that added an asset.
+index_only="$(new_fixture)"
+mkdir -p "${index_only}/.github/policy/case-evidence-assets"
+printf '{}\n' > "${index_only}/.github/policy/case-evidence-assets/report.json"
+git -C "${index_only}" add .github/policy/case-evidence-assets/report.json
+rm -f "${index_only}/.github/policy/case-evidence-assets/report.json"
+expect_pass "${index_only}" 'a clean asset present in the index but not on disk'
+
+# A NUL byte in the index copy is refused even when the file on disk is clean.
+index_nul="$(new_fixture)"
+mkdir -p "${index_nul}/.github/policy/case-evidence-assets"
+printf '{"a":\000"b"}\n' > "${index_nul}/.github/policy/case-evidence-assets/report.json"
+git -C "${index_nul}" add .github/policy/case-evidence-assets/report.json
+printf '{}\n' > "${index_nul}/.github/policy/case-evidence-assets/report.json"
+expect_reject "${index_nul}" 'a NUL byte in the index copy behind a clean file on disk' 'must not contain NUL bytes'
+
+# A key in the index copy is found even when the file on disk is clean.
+index_key="$(new_fixture)"
+mkdir -p "${index_key}/.github/policy/case-evidence-assets"
+printf -- '-----BEGIN RSA PRIVATE KEY-----\nTEST_FIXTURE_NOT_A_REAL_KEY\n' > "${index_key}/.github/policy/case-evidence-assets/leak.json"
+git -C "${index_key}" add .github/policy/case-evidence-assets/leak.json
+printf '{}\n' > "${index_key}/.github/policy/case-evidence-assets/leak.json"
+expect_reject "${index_key}" 'a key in the index copy behind a clean file on disk' 'A reusable source, signing, or deployment credential pattern was found'
+
+# An index entry whose object does not exist. git grep --cached reports that as
+# an error yet exits 1, the "no match" status, so the scan used to pass a tree
+# it never read. It must fail closed, naming the unreadable path.
+unreadable="$(new_fixture)"
+mkdir -p "${unreadable}/docs"
+git -C "${unreadable}" update-index --add --cacheinfo 100644,1234567890abcdef1234567890abcdef12345678,docs/unreadable.md
+expect_reject "${unreadable}" 'an index entry naming an object that does not exist' 'names objects that cannot be read'
+
+# The same for an asset, where the NUL check reads it first: a read failure is
+# reported as one, not as a NUL byte.
+unreadable_asset="$(new_fixture)"
+git -C "${unreadable_asset}" update-index --add --cacheinfo 100644,1234567890abcdef1234567890abcdef12345678,.github/policy/case-evidence-assets/report.json
+expect_reject "${unreadable_asset}" 'an asset whose object does not exist' 'could not be read from the index'
+
+echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; NUL bytes, leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, index content that differs from the working tree, unreadable index objects, another directory, private source and starter documents rejected'
