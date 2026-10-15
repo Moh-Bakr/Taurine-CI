@@ -253,7 +253,9 @@ jobs:
           rm -f src-tauri/gen/android/tauri.settings.gradle
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
-          mobile_run android-init npm run android:init -- --ci --skip-targets-install
+          source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
+          # The Tauri CLI with CI's own arguments, as for the build (never a source npm script).
+          mobile_run android-init tauri_cli . android init --ci --skip-targets-install
           if grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle; then
             echo 'Android metadata contains a developer-local path' >&2
             exit 1
@@ -272,53 +274,49 @@ jobs:
           case "${CONCERN}" in
             android-native)
               # Before the build: no Tauri config may add features or a runner the door gate
-              # cannot see, and no OpenSSL override may bypass the vendored build.
+              # cannot see, no OpenSSL override may bypass the vendored build, and the door-only
+              # gate runs on the built ABI's graph. The build runs the Tauri CLI directly with
+              # CI's own arguments and bindgen environment (never the source's npm scripts).
               refuse_build_feature_overrides || exit 1
               refuse_openssl_overrides || exit 1
-              mobile_run android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
-              # Per built ABI, judged on that ABI's own target graph: the door-only gate, then
-              # the library's size, no dynamic libssl/libcrypto, exactly the locked OpenSSL (or
-              # none when the door is not in that graph), and any native budget the source's
-              # bundle-budget.json sets (`taurine-mobile.native.<abi>`, advisory).
-              # Tauri places the library in the Gradle project's jniLibs/<abi>/; when it is
-              # not there, the cargo target directory's aarch64 output is the arm64-v8a one.
-              android_libraries() {
-                local found target_dir
-                found="$(find -L taurine-mobile/src-tauri/gen/android/app/src/main/jniLibs -name 'libtaurine_mobile_lib.so' -type f 2>/dev/null | sort || true)"
-                if [[ -z "${found}" ]]; then
-                  target_dir="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory' || true)"
-                  if [[ -n "${target_dir}" && -f "${target_dir}/aarch64-linux-android/debug/libtaurine_mobile_lib.so" ]]; then
-                    found="${target_dir}/aarch64-linux-android/debug/libtaurine_mobile_lib.so"
-                  fi
-                fi
-                [[ -z "${found}" ]] || printf '%s\n' "${found}"
-              }
-              android_abi() {
-                case "$1" in
-                  */jniLibs/*) basename "$(dirname "$1")" ;;
-                  *) echo arm64-v8a ;;
-                esac
-              }
-              android_arm64_library() {
-                local library
-                while IFS= read -r library; do
-                  if [[ -n "${library}" && "$(android_abi "${library}")" == arm64-v8a ]]; then echo "${library}"; return 0; fi
-                done < <(android_libraries)
-              }
-              libraries="$(android_libraries)"
-              [[ -n "${libraries}" ]] || { echo 'android-artefact: FAILED - no libtaurine_mobile_lib.so was built' >&2; exit 1; }
-              while IFS= read -r library; do
-                abi="$(android_abi "${library}")"
+              openssl_door_gate android-arm64-v8a-openssl-door-only-prebuild taurine-mobile aarch64-linux-android || exit 1
+              android_bindgen_env
+              mobile_run android-debug-build tauri_cli taurine-mobile android build --apk --debug --target aarch64
+              # What ships: every ABI directory of the APK's lib/ (else the Gradle jniLibs). Per
+              # ABI, on that ABI's own target graph: the door-only gate, then the main library
+              # (size, no dynamic libssl/libcrypto, exactly the locked OpenSSL or none when the
+              # door is not in that graph, the advisory `taurine-mobile.native.<abi>` budget) and
+              # every other .so in that ABI, which must carry no OpenSSL at all.
+              apk="$(find taurine-mobile/src-tauri/gen/android -path '*/outputs/apk/*' -name '*.apk' -type f 2>/dev/null | sort | head -n 1 || true)"
+              libs_root="${RUNNER_TEMP}/android-apk"; rm -rf "${libs_root}"
+              if [[ -n "${apk}" ]] && unzip -q "${apk}" 'lib/*' -d "${libs_root}" 2>/dev/null; then
+                libs_root="${libs_root}/lib"
+              else
+                echo 'android-artefact: no APK lib/ to read; judging the Gradle jniLibs'
+                libs_root=taurine-mobile/src-tauri/gen/android/app/src/main/jniLibs
+              fi
+              abi_dirs="$(find -L "${libs_root}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)"
+              [[ -n "${abi_dirs}" ]] || { echo 'android-artefact: FAILED - no built ABI library directory was found' >&2; exit 1; }
+              while IFS= read -r abi_dir; do
+                abi="$(basename "${abi_dir}")"
                 triple="$(android_abi_triple "${abi}")" || { echo "android-artefact: FAILED - unknown Android ABI ${abi}" >&2; exit 1; }
                 openssl_door_gate "android-${abi}-openssl-door-only" taurine-mobile "${triple}" || exit 1
                 door="$(door_in_graph taurine-mobile "${triple}")" || { echo 'android-artefact: the door graph query did not resolve' >&2; exit 1; }
-                artefact_check "android-${abi}-library" "${library}" debug "${door}" taurine-mobile "${abi}" || exit 1
-              done <<<"${libraries}"
+                main="${abi_dir}/libtaurine_mobile_lib.so"
+                [[ -f "${main}" ]] || main=-
+                artefact_tree_check "android-${abi}" "${abi_dir}" "${main}" debug "${door}" taurine-mobile "${abi}" || exit 1
+              done <<<"${abi_dirs}"
               if [[ "${SIZE_PROBE}" == true ]]; then
+                android_arm64_library() {
+                  local target_dir
+                  find -L taurine-mobile/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a -name 'libtaurine_mobile_lib.so' -type f 2>/dev/null | head -n 1 | grep . && return 0
+                  target_dir="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory' || true)"
+                  [[ -f "${target_dir}/aarch64-linux-android/debug/libtaurine_mobile_lib.so" ]] && echo "${target_dir}/aarch64-linux-android/debug/libtaurine_mobile_lib.so"
+                }
                 arm64="$(android_arm64_library || true)"
                 [[ -n "${arm64}" ]] || { echo 'android-artefact: FAILED - no arm64-v8a library for the size probe' >&2; exit 1; }
                 artefact_size_probe android-arm64-v8a-library "$(artefact_bytes "${arm64}")" android_arm64_library \
-                  npm --prefix taurine-mobile run android:build:debug -- --target aarch64 || exit 1
+                  tauri_cli taurine-mobile android build --apk --debug --target aarch64 || exit 1
               fi
               ;;
             android-rust)

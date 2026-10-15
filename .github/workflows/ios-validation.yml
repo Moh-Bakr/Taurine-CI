@@ -330,11 +330,13 @@ jobs:
           case "${CONCERN}" in
             ios-native)
               # Before the build: no Tauri config may add features or a runner the door gate
-              # cannot see, and no OpenSSL override may bypass the vendored build.
+              # cannot see, no OpenSSL override may bypass the vendored build, and the door-only
+              # gate runs on the built target's graph. The build runs the Tauri CLI directly with
+              # CI's own arguments (never the source's npm scripts).
               refuse_build_feature_overrides || exit 1
               refuse_openssl_overrides || exit 1
               openssl_door_gate ios-sim-build-openssl-door-only taurine-mobile aarch64-apple-ios-sim || exit 1
-              mobile_run ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
+              mobile_run ios-build tauri_cli taurine-mobile ios build --ci --no-sign --target aarch64-sim
               # The built app's executable (`tauri ios build` is a release build): size, no
               # dynamic libssl/libcrypto, the linked OpenSSL 3.5 string when the door is in the
               # graph, and any native budget in bundle-budget.json (`taurine-mobile.native.
@@ -356,10 +358,17 @@ jobs:
               }
               artefact="$(ios_artefact || true)"
               [[ -n "${artefact}" ]] || { echo 'ios-artefact: FAILED - neither the app binary nor the Rust static library was found' >&2; exit 1; }
-              artefact_check ios-arm64-sim-app "${artefact}" release "${door}" taurine-mobile arm64-sim || exit 1
+              # The whole .app (Frameworks, plug-ins, any other Mach-O): the main executable by the
+              # door rule, every other binary must carry no OpenSSL. The static-library fallback
+              # is judged alone.
+              if [[ "${artefact}" == *.a ]]; then
+                artefact_check ios-arm64-sim-app "${artefact}" release "${door}" taurine-mobile arm64-sim || exit 1
+              else
+                artefact_tree_check ios-arm64-sim-app "$(dirname "${artefact}")" "${artefact}" release "${door}" taurine-mobile arm64-sim || exit 1
+              fi
               if [[ "${SIZE_PROBE}" == true ]]; then
                 artefact_size_probe ios-arm64-sim-app "$(artefact_bytes "${artefact}")" ios_artefact \
-                  npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim || exit 1
+                  tauri_cli taurine-mobile ios build --ci --no-sign --target aarch64-sim || exit 1
               fi
               ;;
             ios-rust)

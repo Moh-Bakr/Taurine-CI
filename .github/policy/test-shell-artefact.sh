@@ -22,7 +22,7 @@ extract_library() {
     doc = YAML.safe_load(File.read(ARGV[0]), aliases: false)
     run = doc.fetch("runs").fetch("steps").map { |s| s["run"].to_s }.join("\n")
     body = run[/<<.TCI_[A-Z_]+.\n(.*?)\nTCI_[A-Z_]+\s*$/m, 1] or abort "no library in #{ARGV[0]}"
-    puts body.gsub(/^        /, "")
+    puts body
   ' "$1"
 }
 extract_library .github/actions/sanitize/action.yml >"${work}/sanitize.sh"
@@ -34,14 +34,32 @@ src="${work}/src"
 mkdir -p "${src}/taurine-desktop/src-tauri" "${src}/taurine-mobile/src-tauri" "${work}/bin" "${work}/cargo-home"
 printf '{"build":{"beforeBuildCommand":"x"}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.json"
 printf '{"build":{}}\n' >"${src}/taurine-mobile/src-tauri/tauri.conf.json"
-printf '[[package]]\nname = "openssl-src"\nversion = "300.5.5+3.5.5"\n' >"${src}/Cargo.lock"
+crates_io='registry+https://github.com/rust-lang/crates.io-index'
+# The root lock: the four door crates as crates.io packages (source and checksum).
+write_lock() {
+  local crate version
+  : >"${src}/Cargo.lock"
+  for crate in openssl:0.10.81 openssl-src:300.5.5+3.5.5 openssl-sys:0.9.117 tokio-openssl:0.6.5; do
+    version="${crate#*:}"; crate="${crate%%:*}"
+    printf '[[package]]\nname = "%s"\nversion = "%s"\nsource = "%s"\nchecksum = "%064d"\n\n' "${crate}" "${version}" "${crates_io}" 0 >>"${src}/Cargo.lock"
+  done
+}
+write_lock
 
 # cargo: `metadata` lists the two shells; `tree` answers from FAKE_TREE_<crate> per target
 # (FAKE_ARMV7_BAD adds a non-door parent on armv7 only). `none` = cargo's "nothing to print".
 cat >"${work}/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
 if [[ "$1" == metadata ]]; then
-  echo '{"packages":[{"name":"taurine-mobile"},{"name":"taurine-desktop"}],"target_directory":"/nonexistent"}'
+  if [[ " $* " == *" --no-deps "* ]]; then
+    echo '{"packages":[{"name":"taurine-mobile"},{"name":"taurine-desktop"}],"target_directory":"/nonexistent"}'
+    exit 0
+  fi
+  # The resolved door crates: from the registry, or (FAKE_META=vendor) a vendored directory.
+  root="${CARGO_HOME}/registry/src/index.crates.io-0000/"
+  [[ "${FAKE_META:-}" == vendor ]] && root="${PWD}/vendor/"
+  jq -cn --arg src 'registry+https://github.com/rust-lang/crates.io-index' --arg root "${root}" \
+    '{packages: [("openssl-src","openssl-sys","openssl","tokio-openssl") | {name: ., source: $src, manifest_path: ($root + . + "/Cargo.toml")}]}'
   exit 0
 fi
 crate='' target=''
@@ -115,10 +133,10 @@ expect_fail 'unknown package' 'openssl_door_gate g no-such-package -' 'did not r
 
 # ---- N3: the gate must see the built feature set -------------------------------------------
 printf '{"build":{"features":["door-extra"]}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.uat.json"
-expect_fail 'absent while linked (build.features)' 'FAKE_TREE=absent openssl_door_gate g taurine-desktop -' 'build.features or build.runner'
+expect_fail 'absent while linked (build.features)' 'FAKE_TREE=absent openssl_door_gate g taurine-desktop -' 'build.features, build.runner'
 expect_fail 'door_in_graph under build.features' 'FAKE_TREE=absent door_in_graph taurine-desktop -'
 printf '{"build":{"runner":"other-cargo"}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.uat.json"
-expect_fail 'build.runner' 'openssl_door_gate g taurine-desktop -' 'build.features or build.runner'
+expect_fail 'build.runner' 'openssl_door_gate g taurine-desktop -' 'build.features, build.runner'
 rm "${src}/taurine-desktop/src-tauri/tauri.conf.uat.json"
 printf '{ build: {} }\n' >"${src}/taurine-mobile/src-tauri/tauri.ios.conf.json5"
 expect_fail 'unchecked json5 config' 'openssl_door_gate g taurine-mobile -' 'json5/toml'
@@ -145,7 +163,8 @@ printf '%s\n' 'door-public-peer: roots Os, 140 anchors trailing' 'SecretHostName
 expect_pass 'door lines' 'mobile_door_lines lbl'
 grep -qxF 'lbl: door-roots: MozillaFallback, 146 anchors' "${work}/out" || fail 'a valid door-roots line was not surfaced'
 [[ "$(grep -c 'door-roots:' "${work}/out")" -eq 1 ]] || fail 'more than one door-roots line was published'
-grep -qF 'unrecognised door line dropped (3)' "${work}/out" || fail 'the dropped-line counter is wrong'
+grep -qxF 'lbl: door lines dropped: yes' "${work}/out" || fail 'the dropped-line report is not the fixed yes/no'
+if grep -qE 'dropped.*[0-9]' "${work}/out" "${work}/summary.md"; then fail 'a source-chosen count was published'; fi
 if grep -qE 'PrivateTextLeakAbc123|SecretHostNameXyz789|trailing' "${work}/out" "${work}/summary.md"; then
   fail 'free text from a device log reached the log or summary'
 fi
@@ -165,6 +184,82 @@ rm "${src}/taurine-mobile/.cargo/config"
 printf '[env]\nOPENSSL_DIR = "/x"\n' >"${work}/cargo-home/config.toml"
 expect_fail 'CARGO_HOME config' 'refuse_openssl_overrides' 'cargo config file'
 rm "${work}/cargo-home/config.toml"
+
+# ---- C1: the door crates must be the crates.io packages -----------------------------------
+expect_pass 'crates.io provenance' 'door_provenance p'
+sed_lock() { ruby -e 'path = ARGV[0]; File.write(path, File.read(path).sub(ARGV[1]) { ARGV[2] })' "${src}/Cargo.lock" "$1" "$2"; }
+sed_lock "source = \"${crates_io}\"
+checksum = \"$(printf '%064d' 0)\"
+
+[[package]]
+name = \"openssl-sys\"" '[[package]]
+name = "openssl-sys"'
+expect_fail '[patch] path fork (no source, no checksum)' 'openssl_door_gate g taurine-mobile -' 'is not the crates.io package'
+write_lock
+sed_lock "source = \"${crates_io}\"" 'source = "git+https://example.invalid/openssl-src?rev=1#1"'
+expect_fail 'git source' 'door_provenance p' 'is not the crates.io package'
+write_lock
+printf '[[package]]\nname = "openssl"\nversion = "0.10.81"\nreplace = "openssl 0.10.81 (path)"\n' >>"${src}/Cargo.lock"
+expect_fail '[replace]' 'door_provenance p' 'is not the crates.io package'
+write_lock
+expect_fail 'directory source replacement' 'FAKE_META=vendor door_provenance p' 'does not resolve to the crates.io registry copy'
+
+# ---- C2: CI owns the build's argv ----------------------------------------------------------
+mkdir -p "${src}/taurine-desktop/node_modules/.bin"
+cat >"${src}/taurine-desktop/node_modules/.bin/tauri" <<'STUB'
+#!/usr/bin/env bash
+echo "tauri-argv: $* | cwd=$(basename "${PWD}") | config=${TAURI_CONFIG:-unset} | other=${TAURI_EXTRA:-unset}"
+STUB
+chmod +x "${src}/taurine-desktop/node_modules/.bin/tauri"
+expect_pass 'tauri_cli' 'TAURI_CONFIG={} TAURI_EXTRA=1 tauri_cli taurine-desktop build --debug'
+grep -qxF 'tauri-argv: build --debug | cwd=taurine-desktop | config=unset | other=unset' "${work}/out" || fail 'tauri_cli did not run the CLI with only CI arguments and no TAURI_* environment'
+mkdir -p "${src}/elsewhere"; printf '{"build":{"features":["x"]}}\n' >"${src}/elsewhere/tauri.conf.json"
+expect_fail 'a Tauri config outside src-tauri' 'refuse_build_feature_overrides' 'outside the shells'
+rm -r "${src}/elsewhere"
+mkdir -p "${src}/taurine-mobile/src-tauri/sub"; printf '{}\n' >"${src}/taurine-mobile/src-tauri/sub/tauri.conf.json"
+expect_fail 'a nested Tauri config' 'refuse_build_feature_overrides' 'outside the shells'
+rm -r "${src}/taurine-mobile/src-tauri/sub"
+printf '{"bundle":{"externalBin":["bin/sidecar"]}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
+expect_fail 'a sidecar' 'refuse_build_feature_overrides' 'bundle.externalBin'
+rm "${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
+mv "${src}/taurine-mobile/src-tauri" "${src}/taurine-mobile/tauri-moved"
+expect_fail 'a moved src-tauri' 'refuse_build_feature_overrides' 'src-tauri is missing'
+mv "${src}/taurine-mobile/tauri-moved" "${src}/taurine-mobile/src-tauri"
+for file in .github/workflows/android-validation.yml .github/workflows/ios-validation.yml .github/actions/ios-project-init/action.yml \
+  .github/actions/linux-concern-rust/action.yml .github/actions/macos-concern-rust/action.yml .github/actions/windows-concern-rust/action.yml; do
+  if grep -qE 'npm (--prefix taurine-(desktop|mobile) )?run (tauri|android:|ios:)' "${file}"; then fail "${file} builds a shell through a source npm script"; fi
+done
+
+# ---- H1: override keys decoded, case-insensitive, parents walked ---------------------------
+mkdir -p "${src}/.cargo"
+printf '[env]\n"OPENSSL\\u005FNO_VENDOR" = "1"\n' >"${src}/.cargo/config.toml"
+expect_fail 'escaped quoted key' 'refuse_openssl_overrides' 'cargo config file'
+printf '[env]\nopenssl_dir = "/x"\n' >"${src}/.cargo/config.toml"
+expect_fail 'lower-case key' 'refuse_openssl_overrides' 'cargo config file'
+rm "${src}/.cargo/config.toml"
+expect_fail 'lower-case environment name' 'export openssl_no_vendor=1; refuse_openssl_overrides' 'job environment'
+mkdir -p "${work}/.cargo"; printf '[env]\nOPENSSL_STATIC = "1"\n' >"${work}/.cargo/config.toml"
+expect_fail 'a parent directory config' 'refuse_openssl_overrides' 'cargo config file'
+rm -r "${work}/.cargo"
+
+# ---- H2: every shipped binary is judged ----------------------------------------------------
+mkdir -p "${work}/bundle/Frameworks"
+cp "$(artefact m1 3.5.5)" "${work}/bundle/app"; cp "$(artefact e1)" "${work}/bundle/Frameworks/clean"
+expect_pass 'bundle with clean extras' "artefact_tree_check b '${work}/bundle' '${work}/bundle/app' release present"
+cp "$(artefact e2 1.1.1w)" "${work}/bundle/Frameworks/libbundled"
+expect_fail 'an extra with its own OpenSSL' "artefact_tree_check b '${work}/bundle' '${work}/bundle/app' release present" 'the door is not in the graph'
+mkdir -p "${work}/abi"; cp "$(artefact e3 3.5.5)" "${work}/abi/libssl.so"
+expect_fail 'an ABI with only a prebuilt libssl' "artefact_tree_check b '${work}/abi' - debug present" 'the door is not in the graph'
+grep -qF 'artefact_tree_check "android-${abi}"' .github/workflows/android-validation.yml || fail 'android-native does not judge every library of each ABI'
+grep -qF 'artefact_tree_check ios-arm64-sim-app' .github/workflows/ios-validation.yml || fail 'ios-native does not judge the whole .app'
+
+# ---- H4: the gate also runs before every shell build ---------------------------------------
+pre="$(sed -n '/android-native)/,/mobile_run android-debug-build/p' .github/workflows/android-validation.yml)"
+grep -qF 'openssl_door_gate android-arm64-v8a-openssl-door-only-prebuild' <<<"${pre}" || fail 'android-native does not gate before the build'
+for file in .github/actions/linux-concern-rust/action.yml .github/actions/macos-concern-rust/action.yml .github/actions/windows-concern-rust/action.yml; do
+  pre="$(sed -n '/rust-packaging)/,/run_deferred rust-packaging-smoke/p' "${file}")"
+  grep -qF 'run_deferred rust-packaging-door-gate openssl_door_gate' <<<"${pre}" || fail "${file} does not gate before the desktop build"
+done
 
 # ---- N8: the weekly release-line cadence fails closed --------------------------------------
 cadence="$(ruby -ryaml -e '

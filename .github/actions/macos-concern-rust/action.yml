@@ -252,13 +252,17 @@ runs:
               *) echo "Unsupported packaging flavor: ${FLAVOR}" >&2; exit 2 ;;
             esac
             # Before the build: no Tauri config may add cargo features or a runner the door
-            # gate cannot see, and no OpenSSL override may bypass the vendored build.
+            # gate cannot see, no OpenSSL override may bypass the vendored build, and the
+            # door-only gate (which needs no build) runs on the desktop graph. The build itself
+            # runs the Tauri CLI directly with CI's own arguments (tauri_cli), never a source
+            # npm script; the gate repeats on the same graph after the build.
             source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
             run_deferred rust-packaging-build-overrides refuse_build_feature_overrides
             run_deferred rust-packaging-openssl-overrides refuse_openssl_overrides
+            run_deferred rust-packaging-door-gate openssl_door_gate macOS-desktop-openssl-door-only-prebuild taurine-desktop -
+            export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"
             run_deferred rust-packaging-smoke \
-              env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" \
-              npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
+              tauri_cli taurine-desktop build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
             packaging_identifier_check() {
               local plist found=''
               # The bundle is written to the build's cargo target directory: the
@@ -289,7 +293,7 @@ runs:
             # without the door (on the runner only) for the size delta. Fixed lines only.
             if [[ "${deferred_failed}" -eq 0 ]]; then
               if desktop_artefact_check macOS "${SIZE_PROBE}" \
-                env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}; then
+                tauri_cli taurine-desktop build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}; then
                 deferred_results+=('rust-packaging-artefact|passed')
               else
                 deferred_results+=('rust-packaging-artefact|failed: see the fixed artefact lines in the log')

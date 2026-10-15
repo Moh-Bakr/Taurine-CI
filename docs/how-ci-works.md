@@ -493,7 +493,7 @@ then `scripts/vendor-openvpn3.sh fetch`, which verifies the vendored sources aga
 ## How the files are split
 
 The policy warns on any workflow or composite above 400 lines and fails above 800. Every file is under
-400 except the `concern-report` composite, which is one cohesive reporting library and is kept whole. Files are
+400 except the `concern-report` and `shell-artefact` composites, each one cohesive library kept whole. Files are
 split by responsibility: a workflow keeps everything that must run before project code (input
 validation, the token mint, the exact-SHA checkout and the revoke) plus the job wiring, and the work
 that runs after the revoke lives in composites under `.github/actions/`.
@@ -622,14 +622,29 @@ Both shells ship the OpenSSL door (`taurine-tls-openssl`, vendored OpenSSL 3.5 L
 `shell-artefact` composite holds the checks, which publish crate names, versions, byte counts
 and the public OpenSSL version string only:
 
-- **Gate S1, door-only** (`android-rust`, `ios-rust` for the mobile graph per target, and every
-  desktop `rust-packaging` for the desktop graph): an older source without `openssl-sys` passes
+- **CI owns the build's argv.** Every shell build (desktop `rust-packaging`, `android-native`,
+  `ios-native`, and the Android/iOS project `init`) runs the Tauri CLI the shell installed
+  directly, from the shell directory, with CI's own arguments and every `TAURI_*` variable
+  removed: never a source npm script, never a source-chosen `--features` or `--config` (the
+  macOS flavour `--config` is CI's closed set). The Android bindgen environment the source's
+  scripts used to set is set by CI. Tauri's own `beforeBuildCommand` (the frontend build) still
+  runs from the checked config.
+- **Gate S1, door-only** (`android-rust`, `ios-rust` for the mobile graph per target, every
+  built Android ABI and the iOS simulator build before and after the build, and every desktop
+  `rust-packaging` before and after the build): an older source without `openssl-sys` passes
   as "absent"; otherwise every direct dependent of `openssl-sys`, `openssl`, `tokio-openssl` and
   the door must be inside the door path (`openssl`, `tokio-openssl`, `taurine-tls-openssl`,
   `taurine-db-dbx`), the door must be present and the single resolved `openssl-src` must be
-  300.5.x. A resolve error fails. The graph is the shell crate's default features, which is what
-  `tauri build` compiles only while no Tauri config sets `build.features` or `build.runner`, so a
-  source config that sets either (or a json5/toml Tauri config) is refused.
+  300.5.x. A resolve error fails. The gate queries the shell crate's manifest default features,
+  which is exactly the built set because CI owns the argv and refuses any Tauri config that could
+  change it: a shell without `src-tauri`, a Tauri config anywhere outside the two `src-tauri`
+  directories (or nested, or json5/toml), and a config that sets `build.features`,
+  `build.runner`, `bundle.externalBin` or `bundle.resources`.
+- **Door crates from crates.io**: `openssl-src`, `openssl-sys`, `openssl` and `tokio-openssl`
+  must each have the crates.io registry `source` and a `checksum` (and no `replace`) in the root
+  `Cargo.lock`, and resolve in `cargo metadata` to that source with the manifest under
+  `CARGO_HOME/registry/src`. A `[patch]` path or git fork, `[replace]`, or a directory/vendored
+  source replacement fails.
 - **What the gate cannot see.** It is name- and graph-based: it knows `openssl-sys`, `openssl`,
   `tokio-openssl`, `taurine-tls-openssl` and `openssl-src` by name. A renamed or forked crate, a
   `build.rs` that links a library itself, or a libcrypto compiled inside another `-sys` crate is
@@ -640,24 +655,38 @@ and the public OpenSSL version string only:
 - **No OpenSSL override**: `OPENSSL_NO_VENDOR`, `OPENSSL_DIR`, `OPENSSL_STATIC`,
   `OPENSSL_LIB_DIR` and `OPENSSL_INCLUDE_DIR` (bare or with a `<TARGET>_` prefix) make
   `openssl-sys` skip the vendored build. They are refused in the job environment and in every
-  `.cargo/config.toml`/`.cargo/config` of the checkout and of `CARGO_HOME`, before each build
-  and in every gate.
+  `.cargo/config.toml`/`.cargo/config` cargo can read (nested in the checkout, every parent of
+  the shells up to `/`, and `CARGO_HOME`), before each build and in every gate. Names compare
+  case-insensitively and config keys after TOML decoding (Python `tomllib`; an unparseable
+  config or a missing `tomllib` fails). This is hygiene: the control is the artefact's
+  lock-bound version proof below.
 - **Door tests on the device**: the emulator (x86_64) and simulator run the door crate's library
   and integration tests through the same runner as the mobile tests, surfacing the fixed
   `door-roots:` line and, when the source has it, the ignored `public_peer` verify-full
   handshake (`door-public-peer:` line; a resolve/connect failure is classified as "public peer
   unreachable from device" and still fails). Only whole lines of the fixed shapes
   `door-roots: (Os|MozillaFallback), N anchors` and `door-public-peer: roots
-  (Os|MozillaFallback), N anchors` are published, one per key; any other door line is dropped
-  and counted. `lockfile_policy` is excluded on the device (it
+  (Os|MozillaFallback), N anchors` are published, one per key; any other door line is dropped,
+  reported only as `door lines dropped: yes|no`. `lockfile_policy` is excluded on the device (it
   reads the host `Cargo.lock`); the host `rust-tls-openssl` concern covers it. The aarch64
   Android door tests are built and linked compile-only.
-- **Artefact linkage** (desktop executable, Android library per ABI, iOS app binary): no
+- **Artefact linkage** (the desktop executable, plus everything in the Linux `.deb` and the macOS
+  `.app`; every library of every ABI in the Android APK's `lib/`; the whole iOS `.app`, its
+  `Frameworks` included): the shell's main binary must carry no
   dynamic `libssl`/`libcrypto` dependency (`readelf -d`, `otool -L`, `dumpbin /dependents`),
   and the distinct set of `OpenSSL X.Y.Z` strings in the binary must be empty when the door is
   not in that target's graph, and exactly `OpenSSL 3.5.M` when it is, where `3.5.M` is the
   build metadata of the single locked `openssl-src` 300.5.x. A second copy, another version
-  or another patch fails. Android judges each built ABI on its own target graph.
+  or another patch fails. Every other shipped binary must carry no OpenSSL string and no dynamic
+  `libssl`/`libcrypto`. Android judges each built ABI on its own target graph. **Residual:** the
+  proof sees only copies whose version text survived linking. A library deliberately built with
+  the version string stripped (and with `no-filenames`) evades it: the proof catches accidental
+  OpenSSL consumers, not a deliberately disguised one.
+- **Same-user tampering (residual)**: the checks call `grep`, `jq`, `cargo` and the binary
+  readers through `PATH` after project code has run as the same user, and build scripts can
+  write `GITHUB_ENV`/`GITHUB_PATH`, so a hostile build could shadow them. The gate therefore
+  also runs before each build, where no build script has run yet; the post-build artefact
+  proof shares the job's trust in its own tools.
 - **Native size budget (advisory)**: a ceiling in the source's `bundle-budget.json`
   (`<app>.native.<abi>` or `<app>.nativeBytes`) is compared when the source sets one. The
   source sets the number it is judged against, so this is evidence, not a security control.

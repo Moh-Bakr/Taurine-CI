@@ -74,24 +74,35 @@ runs:
           sed -nE 's/^1([A-Za-z0-9_-]+) v.*/\1/p' "$1" | sort -u
         }
 
-        # The graph queries below use the shell crate's default features, which is exactly what
-        # `tauri build` / `tauri android|ios build` compile while no Tauri config the build can
-        # load sets `build.features` (extra cargo features) or `build.runner` (another build
-        # command). A source that sets either, or carries a config format this check cannot read
-        # (json5/toml), is refused: the gate's graph would no longer be the built graph.
+        # CI owns the build's argv (tauri_cli below): the Tauri CLI is run directly, never a
+        # source npm script, with no TAURI_* environment and no source-chosen --features or
+        # --config. So the built feature set is the shell crate's manifest defaults, exactly what
+        # the gate's `cargo tree` queries, as long as no Tauri config the CLI can load changes it.
+        # Refused: a shell without src-tauri; any Tauri config outside the two src-tauri
+        # directories; a json5/toml Tauri config (not checked); a json config that sets
+        # build.features or build.runner, or ships bundle.externalBin / bundle.resources (sidecars
+        # and resources would be shipped binaries this CI does not judge on Windows).
+        TCI_SHELLS='taurine-desktop taurine-mobile'
         refuse_build_feature_overrides() {
-          local dir file bad=0
-          for dir in taurine-desktop/src-tauri taurine-mobile/src-tauri; do
-            [[ -d "${dir}" ]] || continue
-            for file in "${dir}"/tauri*.json5 "${dir}"/Tauri*.toml "${dir}"/tauri*.toml; do
+          local shell file bad=0
+          for shell in ${TCI_SHELLS}; do
+            [[ -d "${shell}" && ! -d "${shell}/src-tauri" ]] && { echo "build-features: FAILED - ${shell}/src-tauri is missing" >&2; bad=1; }
+          done
+          while IFS= read -r file; do
+            case "${file}" in
+              ./taurine-desktop/src-tauri/* | ./taurine-mobile/src-tauri/*)
+                [[ "${file}" == */src-tauri/*/* ]] || [[ "${file}" != *.json ]] || continue ;;
+            esac
+            echo 'build-features: FAILED - a Tauri config outside the shells'\'' src-tauri, nested, or in json5/toml form' >&2
+            bad=1
+          done < <(find . \( -name node_modules -o -name target -o -name .git \) -prune -o -type f \
+                     \( -iname 'tauri.conf.*' -o -iname 'tauri.*.conf.*' -o -iname 'tauri.toml' \) -print 2>/dev/null)
+          for shell in ${TCI_SHELLS}; do
+            for file in "${shell}"/src-tauri/tauri*.json; do
               [[ -e "${file}" ]] || continue
-              echo "build-features: FAILED - a Tauri config in json5/toml form is not checked; refusing (${dir##*/}/..)" >&2
-              bad=1
-            done
-            for file in "${dir}"/tauri*.json; do
-              [[ -e "${file}" ]] || continue
-              if ! jq -e '(.build // {}) | (has("features") or has("runner")) | not' "${file}" >/dev/null 2>&1; then
-                echo "build-features: FAILED - a Tauri config sets build.features or build.runner (or does not parse); the door gate would not see the built graph" >&2
+              if ! jq -e '((.build // {}) | (has("features") or has("runner")) | not) and
+                          ((.bundle // {}) | ((.externalBin // []) == [] and (.resources // null) == null))' "${file}" >/dev/null 2>&1; then
+                echo "build-features: FAILED - a Tauri config sets build.features, build.runner, bundle.externalBin or bundle.resources (or does not parse)" >&2
                 bad=1
               fi
             done
@@ -99,26 +110,130 @@ runs:
           [[ "${bad}" -eq 0 ]]
         }
 
+        # tauri_cli <shell> <tauri arguments...>: the CLI the shell installed, run from the shell
+        # directory with CI's own arguments and every TAURI_* variable removed.
+        tauri_cli() {
+          local shell="$1" name; shift
+          [[ -d "${shell}/src-tauri" && -e "${shell}/node_modules/.bin/tauri" ]] || { echo "tauri-cli: FAILED - ${shell} has no src-tauri or no installed Tauri CLI" >&2; return 1; }
+          local unset_args=()
+          for name in $(compgen -e | grep -E '^TAURI_' || true); do unset_args+=(-u "${name}"); done
+          ( cd "${shell}" && exec env ${unset_args[@]+"${unset_args[@]}"} ./node_modules/.bin/tauri "$@" )
+        }
+
+        # The bindgen target/sysroot per Android triple that the source's android scripts set,
+        # owned here so the build needs no source script.
+        android_bindgen_env() {
+          local sysroot="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-android24 --sysroot=${sysroot}"
+          export BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi="--target=armv7a-linux-androideabi24 --sysroot=${sysroot}"
+          export BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android="--target=x86_64-linux-android24 --sysroot=${sysroot}"
+          export BINDGEN_EXTRA_CLANG_ARGS_i686_linux_android="--target=i686-linux-android24 --sysroot=${sysroot}"
+        }
+
         # openssl-sys skips the vendored openssl-src when any of these is set (bare, or prefixed
-        # with the upper-cased target triple). They are refused in the job environment and in
-        # every cargo config file of the checkout and of CARGO_HOME, whatever the section.
+        # with the target triple), matched case-insensitively (Windows environment lookups are).
+        # Refused in the job environment and in every cargo config cargo can read for these
+        # builds: each nested one in the checkout, every parent of the shells up to `/`, and
+        # CARGO_HOME. Config keys are compared after TOML decoding (quoted keys, escapes), with
+        # Python's tomllib; an unparseable config, or no tomllib, fails closed.
         TCI_OPENSSL_OVERRIDE='([A-Za-z0-9_-]+_)?OPENSSL_(NO_VENDOR|DIR|STATIC|LIB_DIR|INCLUDE_DIR)'
+        tci_python() {
+          local candidate
+          for candidate in python3 python; do
+            if command -v "${candidate}" >/dev/null 2>&1 && "${candidate}" -c 'import tomllib' >/dev/null 2>&1; then echo "${candidate}"; return 0; fi
+          done
+          return 1
+        }
+        tci_cargo_configs() {
+          local dir file start
+          find . \( -name node_modules -o -name target -o -name .git \) -prune -o \( -path '*/.cargo/config.toml' -o -path '*/.cargo/config' \) -type f -print 2>/dev/null
+          for start in . ./taurine-desktop ./taurine-mobile ./taurine-desktop/src-tauri ./taurine-mobile/src-tauri; do
+            [[ -d "${start}" ]] || continue
+            dir="$(cd "${start}" && pwd -P)"
+            while :; do
+              for file in "${dir}/.cargo/config.toml" "${dir}/.cargo/config"; do [[ -f "${file}" ]] && echo "${file}"; done
+              [[ "${dir}" == / || -z "${dir}" ]] && break
+              dir="$(dirname "${dir}")"
+            done
+          done
+          for file in "${CARGO_HOME:-${HOME}/.cargo}/config.toml" "${CARGO_HOME:-${HOME}/.cargo}/config"; do [[ -f "${file}" ]] && echo "${file}"; done
+        }
         refuse_openssl_overrides() {
-          local file bad=0 names
-          names="$(compgen -e | grep -xE "${TCI_OPENSSL_OVERRIDE}" || true)"
+          local bad=0 names python configs
+          names="$(compgen -e | grep -ixE "${TCI_OPENSSL_OVERRIDE}" || true)"
           if [[ -n "${names}" ]]; then
             echo "openssl-overrides: FAILED - the job environment sets an OpenSSL override that bypasses the vendored build: $(printf '%s' "${names}" | tr '\n' ' ')" >&2
             bad=1
           fi
-          while IFS= read -r file; do
-            [[ -n "${file}" ]] || continue
-            if LC_ALL=C grep -qE "(^|[^A-Za-z0-9_-])${TCI_OPENSSL_OVERRIDE}([^A-Za-z0-9_]|\$)" "${file}"; then
-              echo 'openssl-overrides: FAILED - a cargo config file sets an OpenSSL override that bypasses the vendored build' >&2
+          configs="$(tci_cargo_configs | sort -u)"
+          if [[ -n "${configs}" ]]; then
+            if ! python="$(tci_python)"; then
+              echo 'openssl-overrides: FAILED - no Python with tomllib to read the cargo configs' >&2
+              bad=1
+            elif ! printf '%s\n' "${configs}" | "${python}" -c '
+        import re, sys, tomllib
+        pattern = re.compile(sys.argv[1], re.IGNORECASE)
+        def keys(value):
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    yield key
+                    yield from keys(inner)
+            elif isinstance(value, list):
+                for inner in value:
+                    yield from keys(inner)
+        bad = False
+        for path in filter(None, sys.stdin.read().splitlines()):
+            try:
+                with open(path, "rb") as handle:
+                    data = tomllib.load(handle)
+            except Exception:
+                print("openssl-overrides: FAILED - a cargo config file does not parse", file=sys.stderr)
+                bad = True
+                continue
+            if any(pattern.fullmatch(key) for key in keys(data)):
+                print("openssl-overrides: FAILED - a cargo config file sets an OpenSSL override that bypasses the vendored build", file=sys.stderr)
+                bad = True
+        sys.exit(1 if bad else 0)' "${TCI_OPENSSL_OVERRIDE}"; then
               bad=1
             fi
-          done < <( { find . \( -name node_modules -o -name target \) -prune -o \( -path '*/.cargo/config.toml' -o -path '*/.cargo/config' \) -type f -print 2>/dev/null
-                      for file in "${CARGO_HOME:-${HOME}/.cargo}/config.toml" "${CARGO_HOME:-${HOME}/.cargo}/config"; do [[ -f "${file}" ]] && echo "${file}"; done; } )
+          fi
           [[ "${bad}" -eq 0 ]] && echo 'openssl-overrides: none (the vendored OpenSSL build is not bypassed)'
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        # The door's crates must come from crates.io, as published: in the root Cargo.lock every
+        # entry of openssl-src, openssl-sys, openssl and tokio-openssl has the crates.io registry
+        # source and a checksum, and no `replace`; in cargo metadata each resolved package has
+        # that source and its manifest under CARGO_HOME's registry/src (a [patch] path or git
+        # fork, [replace], or a directory/vendored source replacement all fail here).
+        TCI_CRATES_IO='registry+https://github.com/rust-lang/crates.io-index'
+        door_provenance() {
+          local label="$1" crate bad=0 meta home
+          for crate in openssl-src openssl-sys openssl tokio-openssl; do
+            if ! awk -v name="${crate}" -v want="${TCI_CRATES_IO}" '
+                 /^\[\[package\]\]/ { if (n == name) { if (src != want || sum == "" || rep) bad = 1 } n = ""; src = ""; sum = ""; rep = 0; next }
+                 /^name = /     { n = $3; gsub(/"/, "", n) }
+                 /^source = /   { src = $3; gsub(/"/, "", src) }
+                 /^checksum = / { sum = $3 }
+                 /^replace = /  { rep = 1 }
+                 END { if (n == name) { if (src != want || sum == "" || rep) bad = 1 } exit bad }' Cargo.lock; then
+              echo "${label}: FAILED - Cargo.lock's ${crate} is not the crates.io package (source, checksum or replace)" >&2
+              bad=1
+            fi
+          done
+          home="${CARGO_HOME:-${HOME}/.cargo}"
+          if command -v cygpath >/dev/null 2>&1; then home="$(cygpath -m "${home}")"; fi
+          if ! meta="$(cargo metadata --locked --format-version 1 2>/dev/null | tr -d '\r')"; then
+            echo "${label}: FAILED - cargo metadata did not resolve (detail withheld)" >&2
+            return 1
+          fi
+          if ! jq -e --arg src "${TCI_CRATES_IO}" --arg home "$(printf '%s' "${home%/}" | tr 'A-Z\\' 'a-z/')/registry/src/" '
+               [.packages[] | select(.name | IN("openssl-src", "openssl-sys", "openssl", "tokio-openssl"))]
+               | all(.source == $src and (.manifest_path | ascii_downcase | gsub("\\\\"; "/") | startswith($home)))' <<<"${meta}" >/dev/null; then
+            echo "${label}: FAILED - a door crate does not resolve to the crates.io registry copy (patched, git, replaced or vendored source)" >&2
+            bad=1
+          fi
+          [[ "${bad}" -eq 0 ]] && echo "${label}: door crates come from crates.io (lock source and checksum, registry manifests)"
           [[ "${bad}" -eq 0 ]]
         }
 
@@ -204,6 +319,7 @@ runs:
             echo "${label}: FAILED - openssl-sys is in the graph but the taurine-tls-openssl door is not" >&2
             bad=1
           fi
+          door_provenance "${label}" || bad=1
           state="$(tci_inverted "${log}" "${package}" "${target}" normal,build openssl-src 0)"
           src_line="$(grep -E '^0openssl-src v' "${log}" | head -n 2 || true)"
           # The root lock only: both shells build from the root workspace. dbx-core and
@@ -335,6 +451,40 @@ runs:
           [[ "${bad}" -eq 0 ]]
         }
 
+        # elf, macho, pe or none, from the file's magic.
+        tci_binary_kind() {
+          case "$(LC_ALL=C head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" in
+            7f454c46) echo elf ;;
+            cffaedfe | cefaedfe | feedfacf | feedface | cafebabe | bebafeca) echo macho ;;
+            4d5a*) echo pe ;;
+            *) echo none ;;
+          esac
+        }
+
+        # artefact_tree_check <label> <root> <main> <profile> <door> [<budget-app> <budget-key>]
+        # Judges <main> with the door state (artefact_check) and every other ELF/Mach-O/PE file
+        # under <root> (frameworks, other jniLibs, sidecars) as a shipped extra that must carry no
+        # OpenSSL version string and no dynamic libssl/libcrypto. Extras are numbered, never named.
+        artefact_tree_check() {
+          local label="$1" root="$2" main="$3" profile="$4" door="$5" app="${6:-}" key="${7:-}" file n=0 bad=0
+          # A main of `-` (an Android ABI directory without the shell library) judges extras only.
+          if [[ "${main}" != - ]]; then
+            [[ -f "${main}" ]] || { echo "${label}: FAILED - the bundle's main binary was not found" >&2; return 1; }
+            artefact_check "${label}-main" "${main}" "${profile}" "${door}" "${app}" "${key}" || bad=1
+          fi
+          while IFS= read -r -d '' file; do
+            [[ ( "${main}" != - && "${file}" -ef "${main}" ) || "$(tci_binary_kind "${file}")" == none ]] && continue
+            n=$((n + 1))
+            if ! GITHUB_STEP_SUMMARY=/dev/null artefact_check "${label}-extra-${n}" "${file}" "${profile}" absent >"${RUNNER_TEMP}/${label}-extra.log" 2>&1; then
+              grep 'FAILED' "${RUNNER_TEMP}/${label}-extra.log" >&2 || true
+              bad=1
+            fi
+          done < <(find -L "${root}" -type f -print0 2>/dev/null)
+          echo "${label}: ${n} other shipped binaries scanned (each must carry no OpenSSL)"
+          echo "- ${label}: ${n} other shipped binaries scanned" >> "${GITHUB_STEP_SUMMARY}"
+          [[ "${bad}" -eq 0 ]]
+        }
+
         # artefact_size_probe <label> <with-door-bytes> <locate-function> <build command...>
         # Opt-in (size_probe=true). On the runner only: remove the shells' `legacy-tls` line from
         # taurine-app's manifest (exactly one match, or no delta), rebuild with the caller's own
@@ -387,11 +537,28 @@ runs:
         # The packaging concern's artefact proof: the door-only gate on the desktop graph, then
         # the executable's size and linkage, then (opt-in) the size probe with the same build.
         desktop_artefact_check() {
-          local os="$1" probe="$2" door file bytes; shift 2
+          local os="$1" probe="$2" door file bytes bundle root main; shift 2
           openssl_door_gate "${os}-desktop-openssl-door-only" taurine-desktop - || return 1
           door="$(door_in_graph taurine-desktop -)" || { echo "${os}-desktop-artefact: FAILED - the door query did not resolve" >&2; return 1; }
           file="$(desktop_executable)" || { echo "${os}-desktop-artefact: FAILED - the desktop binary could not be located" >&2; return 1; }
           artefact_check "${os}-desktop-executable" "${file}" debug "${door}" || return 1
+          # Everything the bundle ships (Linux: the .deb's contents; macOS: the .app). Windows
+          # builds no bundle; sidecars and resources are refused in its config instead.
+          case "${os}" in
+            Linux)
+              bundle="$(find "$(dirname "${file}")/bundle/deb" -name '*.deb' -type f 2>/dev/null | head -n 1 || true)"
+              root="${RUNNER_TEMP}/desktop-deb"; rm -rf "${root}"
+              [[ -n "${bundle}" ]] && dpkg-deb -x "${bundle}" "${root}" || { echo 'Linux-desktop-bundle: FAILED - the .deb was not found or did not unpack' >&2; return 1; }
+              main="${root}/usr/bin/$(basename "${file}")"
+              ;;
+            macOS)
+              root="$(find "$(dirname "${file}")/bundle/macos" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -n 1 || true)"
+              [[ -n "${root}" ]] || { echo 'macOS-desktop-bundle: FAILED - the .app was not found' >&2; return 1; }
+              main="${root}/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${root}/Contents/Info.plist" 2>/dev/null || true)"
+              ;;
+            *) root='' ;;
+          esac
+          if [[ -n "${root}" ]]; then artefact_tree_check "${os}-desktop-bundle" "${root}" "${main}" debug "${door}" || return 1; fi
           if [[ "${probe}" == true ]]; then
             bytes="$(artefact_bytes "${file}")"
             artefact_size_probe "${os}-desktop-executable" "${bytes}" desktop_executable "$@" || return 1

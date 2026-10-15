@@ -153,7 +153,7 @@ runs:
         # are built from the private source: only `door-roots: (Os|MozillaFallback), N anchors`
         # and `door-public-peer: roots (Os|MozillaFallback), N anchors` (the exact formats the
         # door's tests print), whole lines, at most one per key. Anything else that names a door
-        # key is dropped and only counted; no other text from the logs is published.
+        # key is dropped, reported only as `door lines dropped: yes|no`; nothing else is published.
         mobile_door_lines() {
           local label="$1" roots peer dropped line
           cat "${RUNNER_TEMP}/${label}"-[0-9]*.log 2>/dev/null | tr -d '\r' >"${RUNNER_TEMP}/${label}-door-lines.txt" || true
@@ -166,10 +166,11 @@ runs:
             echo "${label}: ${line}"
             echo "- ${label}: ${line}" >> "${GITHUB_STEP_SUMMARY}"
           done
-          if [[ "${dropped}" -gt 0 ]]; then
-            echo "${label}: unrecognised door line dropped (${dropped})"
-            echo "- ${label}: unrecognised door line dropped (${dropped})" >> "${GITHUB_STEP_SUMMARY}"
-          fi
+          # One bit, never a source-chosen count.
+          line=no
+          [[ "${dropped}" -gt 0 ]] && line=yes
+          echo "${label}: door lines dropped: ${line}"
+          echo "- ${label}: door lines dropped: ${line}" >> "${GITHUB_STEP_SUMMARY}"
           return 0
         }
 
