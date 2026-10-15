@@ -838,6 +838,16 @@ if (cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/work
   echo 'a macOS dispatcher calling another workflow should be refused' >&2; exit 1
 fi
 grep -qF 'must call the reviewed concern workflow' "${base}/err" || { echo 'the macOS dispatcher refusal has the wrong message' >&2; cat "${base}/err" >&2; exit 1; }
+# The SHA requirement: the regexp itself, or the reviewed identity proof; neither is refused.
+write_mac macos-validation-concern.yml
+perl -0pi -e 's/      - run: "\[\[[^\n]*\n/      - run: ruby .github\/policy\/dispatch-identity.rb\n/' "${mac_dispatcher}"
+grep -qF 'dispatch-identity.rb' "${mac_dispatcher}" || { echo 'the identity-proof fixture was not built' >&2; exit 1; }
+(cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/workflow-lists.sh" && source "${policy}/check-cache-policy.sh" && source "${policy}/check-dispatchers.sh" && check_dispatcher .github/workflows/macos-validation.yml) >/dev/null 2>"${base}/err" || { echo 'a dispatcher that relies on the identity proof for the SHA should pass' >&2; cat "${base}/err" >&2; exit 1; }
+perl -0pi -e 's/      - run: ruby [^\n]*\n/      - run: true\n/' "${mac_dispatcher}"
+if (cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/workflow-lists.sh" && source "${policy}/check-cache-policy.sh" && source "${policy}/check-dispatchers.sh" && check_dispatcher .github/workflows/macos-validation.yml) >/dev/null 2>"${base}/err"; then
+  echo 'a dispatcher with neither the SHA regexp nor the identity proof should be refused' >&2; exit 1
+fi
+grep -qF 'must require a full source SHA' "${base}/err" || { echo 'the missing-SHA refusal has the wrong message' >&2; cat "${base}/err" >&2; exit 1; }
 echo 'macOS classification fixtures: an inline job is a source workflow, an environment-less macOS workflow is a dispatcher that must call its reviewed concern workflow'
 
 # P8: actionlint lacks the cache-mode key, so lint.sh ignores exactly that message and nothing else.

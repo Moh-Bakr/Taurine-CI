@@ -36,7 +36,10 @@ check_dispatcher() {
     echo "The protected dispatcher has an unapproved trigger: $workflow" >&2
     exit 1
   fi
-  if ! grep -qE '^[[:space:]]+source_sha:' "$workflow" || ! grep -qE '\^\[0-9a-fA-F\]\{40\}' "$workflow"; then
+  # A dispatcher validates the SHA itself, or through the reviewed dispatch identity proof, which
+  # accepts only a lower-case 40-hex source_sha (check-dispatch-contracts.rb pins the proof step).
+  if ! grep -qE '^[[:space:]]+source_sha:' "$workflow" \
+    || { ! grep -qE '\^\[0-9a-fA-F\]\{40\}' "$workflow" && ! grep -qE 'ruby \.github/policy/dispatch-identity\.rb' "$workflow"; }; then
     echo "The protected dispatcher must require a full source SHA: $workflow" >&2
     exit 1
   fi
