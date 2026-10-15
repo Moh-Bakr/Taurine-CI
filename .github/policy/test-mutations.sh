@@ -175,6 +175,7 @@ reject_file '11. the reusable public policy workflow that is not called' "${reus
 # A trigger on none of the refused lists: only the rule that it be workflow_call refuses this one.
 reject_file '11. the reusable public policy workflow triggered by something other than workflow_call' "${reusable}" "$(reusable_body | sed 's/  workflow_call:/  issues:/')"
 reject_file '11. the reusable public policy workflow declaring a secret' "${reusable}" "$(reusable_body '    secrets:' '      TOKEN:' '        required: false')"
+reject_file '11. the reusable public policy workflow with a deployment environment' "${reusable}" "$(reusable_body | ruby -e 'print STDIN.read.sub("    name: noop\n", "    name: noop\n    environment: prod\n")')"
 reject_file '11. the reusable public policy workflow reading a secret' "${reusable}" "$(reusable_body | sed "s/'true'/'echo \${{ secrets.TOKEN }}'/")"
 # A workflow calling it is accepted: the call is a reviewed local reusable workflow. The caller is a
 # small workflow of its own, so this tests the allow-list and not the size of the entrypoint.
