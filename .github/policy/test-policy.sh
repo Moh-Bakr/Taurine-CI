@@ -406,7 +406,7 @@ untrusted_expect_fail() {
   fi
   grep -qF -- "${needle}" "${base}/err" || { echo "untrusted fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
 }
-(source "${policy}/check-cache-policy.sh"; check_cache_policy "${untrusted_base}") || { echo 'a read-only untrusted restore with its own gate and no restore-keys should pass' >&2; exit 1; }
+(source "${policy}/check-cache-policy.sh"; check_cache_policy "${untrusted_base}") || { echo 'an untrusted restore with its own gate and no restore-keys should pass check-cache-policy.sh (check-cache-mode.rb decides whether its workflow is enforced)' >&2; exit 1; }
 untrusted_gate='if: \$\{\{ github\.ref == .refs\/heads\/untrusted. && (\(startsWith\(inputs\.concern, .rust-app-.\)[^\n]*) \}\}\n        uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0\n        with:\n          path: \|\n            \$\{\{ steps\.cargo-target'
 untrusted_expect_fail 'untrusted restore with no gate term' 'runs only on main for a protected source SHA' \
   "s/if: \\\$\\{\\{ github\\.ref == .refs\\/heads\\/untrusted. && (\\(startsWith\\(inputs\\.concern, .rust-app-.\\))/if: \\\$\\{\\{ \$1/"
@@ -586,6 +586,69 @@ YAML
 mode_expect_fail split.yml 'an inline save job that is only read' 'must be cache-mode write'
 mode_expect_fail split.yml 'an inline restore job with no cache-mode' 'must declare its own cache-mode'
 unset ENFORCED
+# F1: an untrusted-ref cache step fails closed: its workflow, and every caller of it, must already
+# be an enforced workflow, because without a cache-mode key a job keeps the default write grant.
+many_run() { (cd "${mode_root}" && ruby "${policy}/check-cache-mode.rb" --enforced-file "${mode_root}/${ENFORCED:-enforced.txt}" "$@"); }
+many_expect_fail() {
+  local label="$1" needle="$2"; shift 2
+  if many_run "$@" >/dev/null 2>"${base}/err"; then echo "cache-mode fixture '${label}' should fail but passed" >&2; exit 1; fi
+  grep -qF -- "${needle}" "${base}/err" || { echo "cache-mode fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+cat > "${mode_root}/.github/workflows/split-concern.yml" <<'YAML'
+name: concern
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  v:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: ${{ github.ref == 'refs/heads/untrusted' }}
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: ${{ github.ref == 'refs/heads/main' }}
+YAML
+read_if="if: \${{ github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}"
+ENFORCED=enforced-split.txt
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}"
+many_run .github/workflows/split.yml .github/workflows/split-concern.yml >/dev/null 2>"${base}/err" || { echo 'an untrusted restore behind an enforced caller split should pass' >&2; cat "${base}/err" >&2; exit 1; }
+ENFORCED=enforced.txt
+many_expect_fail 'untrusted restore, caller not enforced' 'is not in ENFORCED_WORKFLOWS' .github/workflows/split.yml .github/workflows/split-concern.yml
+many_expect_fail 'untrusted restore, no caller given' 'none was found' .github/workflows/split-concern.yml
+printf 'name: lone\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n        if: ${{ github.ref == '"'"'refs/heads/untrusted'"'"' }}\n' > "${mode_root}/.github/workflows/lone.yml"
+many_expect_fail 'untrusted restore in a workflow nobody enforces' 'but is not in ENFORCED_WORKFLOWS' .github/workflows/lone.yml
+printf 'lone.yml\n' > "${mode_root}/enforced-lone.txt"
+ENFORCED=enforced-lone.txt
+many_expect_fail 'untrusted restore in an enforced workflow without cache-mode' 'must declare its own cache-mode' .github/workflows/lone.yml
+unset ENFORCED
+# Duplicate and disguised keys, a plain actions/cache and a cache step hidden in a composite.
+dup_wf() { printf 'name: d\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-24.04\n%s\n    steps:\n      - run: true\n' "$1" > "${mode_root}/.github/workflows/dup.yml"; }
+dup_wf $'    cache-mode: write\n    cache-mode: read'
+many_expect_fail 'duplicate cache-mode keys' 'duplicate key "cache-mode"' .github/workflows/dup.yml
+dup_wf $'    if: ${{ github.ref == \'refs/heads/main\' }}\n    if: ${{ github.ref == \'refs/heads/untrusted\' }}\n    cache-mode: read'
+many_expect_fail 'duplicate if keys' 'duplicate key "if"' .github/workflows/dup.yml
+for variant in 'Cache-Mode: read' 'cache_mode: read' 'CACHE-MODE: read' '"cache mode": read'; do
+  dup_wf "    ${variant}"
+  many_expect_fail "disguised key ${variant}" 'in disguise' .github/workflows/dup.yml
+done
+printf 'name: c\non:\n  workflow_dispatch:\npermissions: {}\ncache-mode: none\njobs:\n  a:\n    cache-mode: read\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n' > "${mode_root}/.github/workflows/combined.yml"
+printf 'combined.yml\n' > "${mode_root}/enforced-combined.txt"
+ENFORCED=enforced-combined.txt
+many_expect_fail 'a plain actions/cache job that is only read' 'must be cache-mode write' .github/workflows/combined.yml
+unset ENFORCED
+mkdir -p "${mode_root}/.github/actions/hidden"
+printf 'name: hidden\nruns:\n  using: composite\n  steps:\n    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n' > "${mode_root}/.github/actions/hidden/action.yml"
+printf 'name: h\non:\n  workflow_dispatch:\npermissions: {}\ncache-mode: none\njobs:\n  a:\n    cache-mode: read\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ./.github/actions/hidden\n' > "${mode_root}/.github/workflows/hidden.yml"
+printf 'hidden.yml\n' > "${mode_root}/enforced-hidden.txt"
+ENFORCED=enforced-hidden.txt
+many_expect_fail 'a save hidden in a composite under a read job' 'must be cache-mode write' .github/workflows/hidden.yml
+unset ENFORCED
+# The plain actions/cache is refused by the cache policy as well.
+perl -0pe 's/uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0\n        with:\n          path: \|\n            \$\{\{ steps\.cargo-target/uses: actions\/cache\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: |\n            \${{ steps.cargo-target/' .github/workflows/linux-validation-concern.yml > "${cache_fixture}"
+if cmp -s .github/workflows/linux-validation-concern.yml "${cache_fixture}"; then echo 'the plain actions/cache fixture changed nothing' >&2; exit 1; fi
+if (source "${policy}/check-cache-policy.sh"; check_cache_policy "${cache_fixture}") >/dev/null 2>&1; then echo 'the plain actions/cache should be refused by the cache policy' >&2; exit 1; fi
+echo 'cache-mode F1 fixtures: an untrusted-ref cache step needs its workflow and callers enforced; duplicate, disguised, plain and composite-hidden cache uses are caught'
+
 # P7: actions: write.
 mkdir -p "${mode_root}/p7"
 cp .github/workflows/cache-prune.yml "${mode_root}/p7/cache-prune.yml"

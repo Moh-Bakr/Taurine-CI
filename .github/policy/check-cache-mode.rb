@@ -51,8 +51,63 @@ def requires?(value, term)
   !terms.nil? && terms.include?(term)
 end
 
+def read_text(path)
+  File.read(path, encoding: 'UTF-8')
+end
+
 def load(path)
-  YAML.safe_load(File.read(path), aliases: false) || {}
+  YAML.safe_load(read_text(path), aliases: false) || {}
+end
+
+# Psych keeps the last of two equal keys and cache-mode is a case-sensitive key, so a job with
+# `cache-mode: write` followed by `cache-mode: read` would be checked as read while GitHub may take
+# either, and `Cache-Mode:` would be invisible to every rule. Refuse a duplicate key in any mapping
+# and any key that is cache-mode in disguise (another case, an underscore, a space).
+def key_hygiene(path, failures)
+  walk = lambda do |node|
+    if node.is_a?(Psych::Nodes::Mapping)
+      seen = {}
+      node.children.each_slice(2) do |key, value|
+        if key.is_a?(Psych::Nodes::Scalar)
+          name = key.value
+          failures << "#{path}: duplicate key #{name.inspect} in one mapping" if seen[name]
+          seen[name] = true
+          failures << "#{path}: #{name.inspect} is cache-mode in disguise; the key is exactly cache-mode" if name.match?(/\Acache[\s_-]*mode\z/i) && name != 'cache-mode'
+        end
+        walk.call(value)
+      end
+    elsif node.respond_to?(:children) && node.children
+      node.children.each { |child| walk.call(child) }
+    end
+  end
+  walk.call(Psych.parse_stream(read_text(path)))
+end
+
+# The cache kinds a list of steps can reach: :save, :restore or :combined (the plain actions/cache,
+# whose post step saves), looking through local composite actions transitively. A composite may not
+# use a cache at all (check_composite_action), so the walk is defence in depth for a rule that
+# would otherwise rest on a text match.
+def cache_kinds(steps, seen = [])
+  kinds = []
+  steps.each do |st|
+    uses = st['uses'].to_s
+    case uses
+    when %r{\Aactions/cache/save(@|\z)} then kinds << :save
+    when %r{\Aactions/cache/restore(@|\z)} then kinds << :restore
+    when %r{\Aactions/cache(@|\z)} then kinds << :combined
+    when %r{\A\./\.github/actions/[A-Za-z0-9_-]+\z}
+      next if seen.include?(uses)
+      file = File.join(uses.sub(%r{\A\./}, ''), 'action.yml')
+      next unless File.exist?(file)
+      inner = load(file).dig('runs', 'steps')
+      kinds.concat(cache_kinds(Array(inner).select { |x| x.is_a?(Hash) }, seen + [uses]))
+    end
+  end
+  kinds.uniq
+end
+
+def workflow_cache_kinds(doc)
+  (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).values.flat_map { |job| job.is_a?(Hash) ? cache_kinds(steps_of(job)) : [] }.uniq
 end
 
 def triggers(doc)
@@ -95,6 +150,8 @@ failures = []
 docs = {}
 args.each { |path| docs[path] = load(path) }
 
+docs.each_key { |path| key_hygiene(path, failures) }
+
 docs.each do |path, doc|
   base = File.basename(path)
   composite = path.include?('/actions/')
@@ -117,8 +174,9 @@ docs.each do |path, doc|
     next unless job.is_a?(Hash)
     mode = job['cache-mode']
     steps = steps_of(job)
-    saves = uses_of(steps, %r{\Aactions/cache/save@})
-    restores = uses_of(steps, %r{\Aactions/cache/restore@})
+    kinds = cache_kinds(steps)
+    saves = kinds.include?(:save) || kinds.include?(:combined)
+    restores = kinds.include?(:restore) || kinds.include?(:combined)
     unless mode.nil?
       check_value.call("job #{name}", mode)
       failures << "#{path}: job #{name}: a called workflow must not set cache-mode; it inherits its caller's grant" if called
@@ -129,8 +187,8 @@ docs.each do |path, doc|
     next unless enforced.include?(base)
 
     callee = job['uses'].to_s.start_with?('./.github/workflows/') ? job['uses'].to_s.sub(%r{\A\./}, '') : nil
-    callee_text = callee && File.exist?(callee) ? File.read(callee) : ''
-    callee_saves = callee_text.match?(%r{uses:\s*actions/cache/save@})
+    callee_kinds = callee && File.exist?(callee) ? workflow_cache_kinds(load(callee)) : []
+    callee_saves = callee_kinds.include?(:save) || callee_kinds.include?(:combined)
     caches = saves || restores || !callee.nil?
     if mode.nil? && caches
       failures << "#{path}: job #{name} restores, saves or calls a reusable workflow and must declare its own cache-mode"
@@ -163,6 +221,35 @@ docs.each do |path, doc|
   failures << "#{path}: an enforced workflow needs a workflow-level cache-mode: none" unless wf_mode == 'none'
 end
 
+# F1 (review of the policy half): the untrusted-ref cache gate relaxes check-cache-policy.sh's
+# restore rule, and what makes that safe (cache-mode read on the job, the validate-main /
+# validate-untrusted split, the audit) is enforced only for the workflows named in
+# ENFORCED_WORKFLOWS. So the relaxation fails closed: a workflow with a cache step gated to the
+# untrusted ref, and every workflow that calls it, must already be an enforced workflow. Without a
+# cache-mode key a job gets the default write grant, and an untrusted restore under write could be
+# shadowed by a planted entry.
+docs.each do |path, doc|
+  next if path.include?('/actions/')
+  base = File.basename(path)
+  untrusted_cache = (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).values.any? do |job|
+    job.is_a?(Hash) && steps_of(job).any? { |st| st['uses'].to_s.start_with?('actions/cache') && st['if'].to_s.include?('refs/heads/untrusted') }
+  end
+  next unless untrusted_cache
+
+  if triggers(doc).include?('workflow_call')
+    callers = docs.select do |_other_path, other|
+      (other['jobs'].is_a?(Hash) ? other['jobs'] : {}).values.any? { |job| job.is_a?(Hash) && job['uses'].to_s == "./.github/workflows/#{base}" }
+    end
+    failures << "#{path}: a cache step gated to the untrusted ref needs a caller in the enforced set, and none was found" if callers.empty?
+    callers.each_key do |caller|
+      next if enforced.include?(File.basename(caller))
+      failures << "#{path}: has a cache step gated to the untrusted ref, but its caller #{File.basename(caller)} is not in ENFORCED_WORKFLOWS, so its jobs would keep the default write grant"
+    end
+  else
+    failures << "#{path}: has a cache step gated to the untrusted ref but is not in ENFORCED_WORKFLOWS, so its jobs would keep the default write grant" unless enforced.include?(base)
+  end
+end
+
 # P7: actions: write (or write-all) only where reviewed.
 docs.each do |path, doc|
   base = File.basename(path)
@@ -184,7 +271,7 @@ docs.each do |path, doc|
       failures << "#{path}: job #{name}: actions: write needs the exact top-level terms #{REPOSITORY} and #{MAIN}" unless terms && terms.include?(MAIN) && terms.include?(REPOSITORY)
       failures << "#{path}: job #{name}: the cache-deleting job must have no environment" if job.key?('environment')
       failures << "#{path}: job #{name}: the cache-deleting job must use no local composite action" if steps_of(job).any? { |s| s['uses'].to_s.start_with?('./.github/actions/') }
-      failures << "#{path}: the cache-deleting workflow must read no secret" if File.read(path).match?(/secrets\./)
+      failures << "#{path}: the cache-deleting workflow must read no secret" if read_text(path).match?(/secrets\./)
     when 'weekly-validation.yml'
       if job.nil? || !requires?(job['if'], MAIN)
         failures << "#{path}: #{where}: actions: write (dispatch) needs a job gated by the exact top-level term #{MAIN}"

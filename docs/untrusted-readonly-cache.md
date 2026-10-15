@@ -340,6 +340,13 @@ relies on them (the base-commit pass would otherwise reject the workflow change)
   must satisfy exactly one of the two gates (not both, not neither, no `||`). Reject any cache
   step with no `if:` (existing fixture `cargo source restore with no condition` extends to the
   compiled cache).
+- **P1b, fail closed (review of the policy half).** The untrusted restore gate relaxes the cache
+  policy, and what makes it safe is enforced only for the workflows in `ENFORCED_WORKFLOWS`, so a
+  cache step gated to the untrusted ref is accepted only when its workflow, and every workflow that
+  calls it, is already enforced (always-on rule in `check-cache-mode.rb`); otherwise a job with no
+  `cache-mode` keeps the default write grant and its untrusted restore could be shadowed. Cache uses
+  are classified structurally (save, restore, and the plain `actions/cache`, looking through local
+  composites), and duplicate or disguised `cache-mode` keys are refused.
 - **P2 `cache-mode` rules, over EVERY workflow file with a `workflow_dispatch` trigger** (not only
   the source-bearing ones; `cache-prune`, `scorecard` and `weekly-validation` included).
   (a) Workflow-level `cache-mode: none` is required. (b) Every job declares an explicit
