@@ -56,7 +56,8 @@ write_lock
 # that cargo finds its rustc beside it. Anywhere else, the cargo on PATH is used.
 real_cargo="${TCI_REAL_CARGO:-$(command -v cargo || true)}"
 if [[ -n "${TCI_REAL_CARGO:-}" && -z "${RUSTC:-}" && -x "$(dirname "${TCI_REAL_CARGO}")/rustc" ]]; then
-  export RUSTC="$(dirname "${TCI_REAL_CARGO}")/rustc"
+  RUSTC="$(dirname "${TCI_REAL_CARGO}")/rustc"
+  export RUSTC
 fi
 unset TCI_REAL_CARGO
 # The fixtures run with their own HOME, so rustup's toolchain home is fixed here first.
@@ -559,7 +560,7 @@ run_lib "$(toy_check "${work}/t-door")" || { cat "${work}/out" >&2; fail 'the do
 grep -qF 'OpenSSL consumers: openssl, openssl-sys, taurine-db-dbx, taurine-tls-openssl (door only)' "${work}/out" || { cat "${work}/out" >&2; fail 'the door-only toy graph did not list its door consumers'; }
 # E3: every unit entry must map, and the door state sets a floor on the built set.
 cp -R "${work}/t-door" "${work}/t-renamed"
-mv "$(ls -d "${work}/t-renamed/debug/.fingerprint/consumer-"* 2>/dev/null | head -n 1 || ls -d "${work}/t-renamed/debug/.fingerprint/openssl-"* | head -n 1)" "${work}/t-renamed/debug/.fingerprint/renamed-unit"
+mv "$(find "${work}/t-renamed/debug/.fingerprint" -maxdepth 1 -name 'openssl-sys-*' | head -n 1)" "${work}/t-renamed/debug/.fingerprint/renamed-unit"
 expect_fail 'a renamed fingerprint directory (real cargo)' "$(toy_check "${work}/t-renamed")" 'not a unit of a known package'
 cp -R "${work}/t-door" "${work}/t-nosrc"
 rm -rf "${work}/t-nosrc/debug/.fingerprint/openssl-src-"* "${work}/t-nosrc/debug/deps/openssl_src-"*.d
