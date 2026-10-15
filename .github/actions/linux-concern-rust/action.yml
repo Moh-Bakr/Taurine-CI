@@ -272,8 +272,12 @@ runs:
             run_deferred rust-packaging-build-overrides refuse_build_feature_overrides
             run_deferred rust-packaging-openssl-overrides refuse_openssl_overrides
             run_deferred rust-packaging-door-gate openssl_door_gate Linux-desktop-openssl-door-only-prebuild taurine-desktop -
+            run_deferred rust-packaging-door-crate-sources verify_door_crate_sources
             run_deferred rust-packaging-smoke \
               tauri_cli taurine-desktop build --debug --bundles deb --ci
+            # beforeBuildCommand ran in between: the refusals run again on what the build left.
+            run_deferred rust-packaging-build-overrides-post refuse_build_feature_overrides
+            run_deferred rust-packaging-openssl-overrides-post refuse_openssl_overrides
             # The artefact proof (shell-artefact): the door-only gate on the desktop graph, the
             # executable's size and build profile, no dynamic libssl/libcrypto, the linked OpenSSL 3.5
             # string when the door is in the graph and, with size_probe=true, the same build again

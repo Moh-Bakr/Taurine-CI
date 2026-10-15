@@ -493,7 +493,8 @@ then `scripts/vendor-openvpn3.sh fetch`, which verifies the vendored sources aga
 ## How the files are split
 
 The policy warns on any workflow or composite above 400 lines and fails above 800. Every file is under
-400 except the `concern-report` and `shell-artefact` composites, each one cohesive library kept whole. Files are
+400 except the `concern-report` and `shell-artefact` composites, each one cohesive library kept whole
+(`shell-artefact` installs its build-input half, `shell-config`, as its first step). Files are
 split by responsibility: a workflow keeps everything that must run before project code (input
 validation, the token mint, the exact-SHA checkout and the revoke) plus the job wiring, and the work
 that runs after the revoke lives in composites under `.github/actions/`.
@@ -623,12 +624,24 @@ Both shells ship the OpenSSL door (`taurine-tls-openssl`, vendored OpenSSL 3.5 L
 and the public OpenSSL version string only:
 
 - **CI owns the build's argv.** Every shell build (desktop `rust-packaging`, `android-native`,
-  `ios-native`, and the Android/iOS project `init`) runs the Tauri CLI the shell installed
-  directly, from the shell directory, with CI's own arguments and every `TAURI_*` variable
+  `ios-native`, and the Android/iOS project `init`) runs `node <shell>/node_modules/@tauri-apps/
+  cli/tauri.js` from the shell directory with CI's own arguments and every `TAURI_*` variable
   removed: never a source npm script, never a source-chosen `--features` or `--config` (the
-  macOS flavour `--config` is CI's closed set). The Android bindgen environment the source's
-  scripts used to set is set by CI. Tauri's own `beforeBuildCommand` (the frontend build) still
-  runs from the checked config.
+  macOS flavour `--config` is CI's closed set). The CLI's provenance is proven first:
+  `node_modules/.bin/tauri` must resolve to that `tauri.js`, and the shell's `package-lock.json`
+  entries for `@tauri-apps/cli` and every installed `@tauri-apps/cli-<platform>` must be
+  resolved from `https://registry.npmjs.org/` with an `integrity`. The Android bindgen
+  environment the source's scripts used to set is set by CI. Tauri's own `beforeBuildCommand`
+  (the frontend build) still runs from the checked config, so every refusal below runs again
+  after the build.
+- **Generated mobile build phases.** The Gradle Rust plugin (`gen/android/buildSrc`) and the
+  Xcode "Build Rust Code" phase (`gen/apple`) call back into the CLI with a command recorded at
+  `init`. A source-committed copy would hand the Rust build to source-chosen arguments, so CI
+  regenerates them: it removes `gen/android/buildSrc` (and the generated `tauri.settings.gradle`)
+  and all of `gen/apple` (refused if committed) before its own `init`, and after `init` the
+  regenerated callback must exist and call the CLI's `tauri.js` with node, never a package
+  manager script. The rest of a committed `gen/android` (app sources, manifest, Gradle files) is
+  source build logic like a `build.rs`: a same-user residual, backstopped by the artefact proof.
 - **Gate S1, door-only** (`android-rust`, `ios-rust` for the mobile graph per target, every
   built Android ABI and the iOS simulator build before and after the build, and every desktop
   `rust-packaging` before and after the build): an older source without `openssl-sys` passes
@@ -637,14 +650,23 @@ and the public OpenSSL version string only:
   `taurine-db-dbx`), the door must be present and the single resolved `openssl-src` must be
   300.5.x. A resolve error fails. The gate queries the shell crate's manifest default features,
   which is exactly the built set because CI owns the argv and refuses any Tauri config that could
-  change it: a shell without `src-tauri`, a Tauri config anywhere outside the two `src-tauri`
-  directories (or nested, or json5/toml), and a config that sets `build.features`,
-  `build.runner` or `bundle.externalBin`. `bundle.resources` (array or object form) must be
-  data: every source, relative to `src-tauri`, must exist and resolve (symlinks included) inside
-  the checkout, globs and directories are expanded and every file checked, a pattern that
-  matches nothing fails, and no resource may be an ELF, Mach-O or PE binary by magic bytes (so
-  `../../THIRD-PARTY-NOTICES` passes). `pg8-measurement` still builds through `npm run tauri`;
+  change it: a shell without `src-tauri`; any Tauri config other than a lower-case `tauri*.json`
+  directly in a shell's `src-tauri` (every `tauri*.toml` and `tauri*.json5`, the CLI's platform
+  overlays such as `Tauri.linux.toml` included); and a config that sets `build.features`,
+  `build.runner`, `bundle.externalBin`, `bundle.linux.deb.files`, `bundle.macOS.files`, or a
+  `bundle.macOS`/`iOS.frameworks` entry that is a path rather than a system framework name.
+  `bundle.resources` (array or object form) must be data, by a content allow-list: every
+  source, relative to `src-tauri`, must exist and resolve (symlinks included) inside the
+  checkout; globs (`*`, `**`, dotfiles included, as Tauri expands them) and directories are
+  expanded and every file checked; a pattern that matches nothing fails; and each file must be
+  a PNG, JPEG, ICO or ICNS image by magic, or UTF-8 text with no control byte other than tab,
+  newline, form feed and carriage return (so `../../THIRD-PARTY-NOTICES` and SVG pass, and
+  archives, jar/dex, WASM and any executable fail). `pg8-measurement` still builds through `npm run tauri`;
   no door or artefact verdict reads its output.
+- **Door crates re-extracted from verified archives**: before each shell build, the extracted
+  `registry/src` copies of the four door crates are deleted and each `registry/cache` `.crate`
+  must hash to its `Cargo.lock` checksum (fetched once if missing), so cargo re-extracts from a
+  verified archive rather than a pre-seeded tree.
 - **Door crates from crates.io**: `openssl-src`, `openssl-sys`, `openssl` and `tokio-openssl`
   must each have the crates.io registry `source` and a `checksum` (and no `replace`) in the root
   `Cargo.lock`, and resolve in `cargo metadata` to that source with the manifest under
@@ -676,8 +698,10 @@ and the public OpenSSL version string only:
   reads the host `Cargo.lock`); the host `rust-tls-openssl` concern covers it. The aarch64
   Android door tests are built and linked compile-only.
 - **Artefact linkage** (the desktop executable, plus everything in the Linux `.deb` and the macOS
-  `.app`; every library of every ABI in the Android APK's `lib/`; the whole iOS `.app`, its
-  `Frameworks` included): the shell's main binary must carry no
+  `.app`; the whole Android APK, every ABI in `lib/` and every other binary such as `assets/`;
+  the whole iOS `.app`, its `Frameworks` included; on Windows, which builds no installer, every
+  PE beside the executable in the target directory, the shell's own library judged like the
+  executable): the shell's main binary must carry no
   dynamic `libssl`/`libcrypto` dependency (`readelf -d`, `otool -L`, `dumpbin /dependents`),
   and the distinct set of `OpenSSL X.Y.Z` strings in the binary must be empty when the door is
   not in that target's graph, and exactly `OpenSSL 3.5.M` when it is, where `3.5.M` is the
@@ -689,9 +713,15 @@ and the public OpenSSL version string only:
   OpenSSL consumers, not a deliberately disguised one.
 - **Same-user tampering (residual)**: the checks call `grep`, `jq`, `cargo` and the binary
   readers through `PATH` after project code has run as the same user, and build scripts can
-  write `GITHUB_ENV`/`GITHUB_PATH`, so a hostile build could shadow them. The gate therefore
-  also runs before each build, where no build script has run yet; the post-build artefact
-  proof shares the job's trust in its own tools.
+  write `GITHUB_ENV`/`GITHUB_PATH`, so a hostile build could shadow them. Likewise
+  `CARGO_*`, `RUSTFLAGS`, a cargo `rustc-wrapper`, `linker` or link arguments cannot change the
+  resolved graph but can link extra code; a `beforeBuildCommand` can edit and restore inputs.
+  These are same-user residuals, backstopped by the artefact proof. The gate therefore also runs
+  before each build, where no build script has run yet; the post-build artefact proof shares
+  the job's trust in its own tools.
+- **Scope**: the rule covers native OpenSSL. An OpenSSL compiled to WASM in the frontend, or a
+  JVM/JS TLS stack, is outside it; a native BoringSSL in an Android `.so` is caught as an extra
+  through its `OpenSSL 1.1.1 (compatible; BoringSSL)` text.
 - **Native size budget (advisory)**: a ceiling in the source's `bundle-budget.json`
   (`<app>.native.<abi>` or `<app>.nativeBytes`) is compared when the source sets one. The
   source sets the number it is judged against, so this is evidence, not a security control.

@@ -1,0 +1,326 @@
+name: Install the shell build-input checks
+description: >
+  Writes the shell build-input library to the runner temp directory: the CI-owned Tauri CLI
+  invocation and its provenance, the Tauri config and bundle-resource refusals, the OpenSSL
+  override refusals, the door crates' registry-source verification and the generated mobile
+  build-phase checks. Installed by the shell-artefact composite, which sources it. Reads nothing
+  from the private source itself and publishes nothing; the functions publish fixed lines only.
+
+runs:
+  using: composite
+  steps:
+    - name: Write the shell build-input library
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${RUNNER_TEMP}/taurine-ci"
+        cat > "${RUNNER_TEMP}/taurine-ci/shell-config.sh" <<'TCI_SHELL_CONFIG_LIBRARY'
+        # shellcheck shell=bash
+        # Shell build-input checks, sourced (through shell-artefact.sh) from the private checkout's
+        # root after the source token is revoked. Every function returns non-zero on failure;
+        # only fixed lines are printed. bash 3.2 compatible.
+
+        # CI owns the build's argv (tauri_cli below): the Tauri CLI is run directly, never a
+        # source npm script, with no TAURI_* environment and no source-chosen --features or
+        # --config. So the built feature set is the shell crate's manifest defaults, exactly what
+        # the gate's `cargo tree` queries, as long as no Tauri config the CLI can load changes it.
+        # Refused: a shell without src-tauri; any Tauri config (tauri.conf.*, tauri.*.conf.*, and
+        # every tauri*.toml / tauri*.json5, the CLI's platform overlays included) other than a
+        # lower-case `tauri*.json` directly in a shell's src-tauri; in those, build.features,
+        # build.runner, bundle.externalBin (a sidecar), and file-shipping bundle keys
+        # (linux.deb.files, macOS.files, and framework entries that are paths rather than system
+        # framework names). bundle.resources must be data: see refuse_binary_resources.
+        TCI_SHELLS='taurine-desktop taurine-mobile'
+        refuse_build_feature_overrides() {
+          local shell file bad=0
+          for shell in ${TCI_SHELLS}; do
+            [[ -d "${shell}" && ! -d "${shell}/src-tauri" ]] && { echo "build-features: FAILED - ${shell}/src-tauri is missing" >&2; bad=1; }
+          done
+          while IFS= read -r file; do
+            case "${file}" in
+              ./taurine-desktop/src-tauri/tauri*.json | ./taurine-mobile/src-tauri/tauri*.json)
+                [[ "${file}" == */src-tauri/*/* ]] || continue ;;
+            esac
+            echo 'build-features: FAILED - a Tauri config outside the shells'\'' src-tauri, nested, upper-case, or in json5/toml form' >&2
+            bad=1
+          done < <(find . \( -name node_modules -o -name target -o -name .git \) -prune -o -type f \
+                     \( -iname 'tauri.conf.*' -o -iname 'tauri.*.conf.*' -o -iname 'tauri*.toml' -o -iname 'tauri*.json5' \) -print 2>/dev/null)
+          for shell in ${TCI_SHELLS}; do
+            for file in "${shell}"/src-tauri/tauri*.json; do
+              [[ -e "${file}" ]] || continue
+              if ! jq -e '((.build // {}) | (has("features") or has("runner")) | not) and
+                          ((.bundle // {}) | (.externalBin // []) == [] and (.linux.deb.files // {}) == {} and (.macOS.files // {}) == {}
+                           and ([(.macOS.frameworks // [])[], (.iOS.frameworks // [])[]] | all(test("^[A-Za-z0-9_]+$"))))' "${file}" >/dev/null 2>&1; then
+                echo "build-features: FAILED - a Tauri config sets build.features, build.runner, bundle.externalBin, deb/macOS files or a framework path (or does not parse)" >&2
+                bad=1
+              fi
+              refuse_binary_resources "${shell}/src-tauri" "${file}" || bad=1
+            done
+          done
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        # refuse_binary_resources <src-tauri dir> <config>: bundle.resources (array of sources, or
+        # object of source -> destination) must be data, by a content allow-list. Every source,
+        # relative to src-tauri, must be relative, exist, and resolve (symlinks included) inside
+        # the checkout; a directory or a glob is expanded as Tauri does (`*`/`**`, dotfiles
+        # included) and every file in it is held to the same rules; a pattern matching nothing
+        # fails. A resource file must be a PNG, JPEG, ICO or ICNS image by magic, or valid UTF-8
+        # text with no control byte other than tab, newline, form feed and carriage return (SVG
+        # included). Everything else fails: archives, jar/dex, WASM,
+        # and any executable, whatever its prefix.
+        refuse_binary_resources() {
+          local python
+          jq -e '(.bundle.resources // null) == null' "$2" >/dev/null 2>&1 && return 0
+          python="$(tci_python)" || { echo 'bundle-resources: FAILED - no Python 3.11+ to check the resources' >&2; return 1; }
+          "${python}" -c '
+        import glob, json, os, sys
+        base, config = sys.argv[1], sys.argv[2]
+        root = os.path.realpath(".")
+        images = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"\x00\x00\x01\x00", b"icns")
+        def refuse(reason):
+            print("bundle-resources: FAILED - " + reason, file=sys.stderr)
+            sys.exit(1)
+        def inside(path):
+            return os.path.realpath(path).startswith(root + os.sep)
+        def check_file(path):
+            if not inside(path):
+                refuse("a resource resolves outside the checkout")
+            with open(path, "rb") as handle:
+                data = handle.read()
+            if any(data.startswith(magic) for magic in images):
+                return
+            if data.translate(None, bytes(range(9, 11)) + b"\x0c\x0d" + bytes(range(32, 127)) + bytes(range(128, 256))):
+                refuse("a resource is not text or a known image")
+            try:
+                data.decode("utf-8")
+            except UnicodeDecodeError:
+                refuse("a resource is not text or a known image")
+        def check_tree(path, seen):
+            real = os.path.realpath(path)
+            if not inside(path):
+                refuse("a resource resolves outside the checkout")
+            if os.path.isdir(path):
+                if real in seen:
+                    return
+                seen.add(real)
+                for entry in sorted(os.listdir(path)):
+                    check_tree(os.path.join(path, entry), seen)
+            elif os.path.isfile(path):
+                check_file(path)
+            else:
+                refuse("a resource is neither a file nor a directory")
+        resources = json.load(open(config)).get("bundle", {}).get("resources")
+        if isinstance(resources, dict):
+            sources = list(resources.keys())
+        elif isinstance(resources, list):
+            sources = resources
+        else:
+            refuse("bundle.resources is neither an array nor an object")
+        for source in sources:
+            if not isinstance(source, str) or not source or os.path.isabs(source) or source.startswith(("/", "\\")) or ":" in source:
+                refuse("a resource source is absolute or not a path")
+            pattern = os.path.join(base, source)
+            if "*" in source or "?" in source or "[" in source:
+                matches = glob.glob(pattern, recursive=True, include_hidden=True)
+                if not matches:
+                    refuse("a resource pattern matches nothing")
+            else:
+                if not os.path.exists(pattern):
+                    refuse("a resource source does not exist")
+                matches = [pattern]
+            for match in matches:
+                check_tree(match, set())
+        ' "$1" "$2"
+        }
+
+        # tauri_cli <shell> <tauri arguments...>: the Tauri CLI, proven to be the registry package,
+        # run by CI's own node from the shell directory with CI's arguments and every TAURI_*
+        # variable removed. The shell's node_modules/.bin/tauri must resolve (symlink, or the
+        # npm shim on Windows) to @tauri-apps/cli/tauri.js, which is what is executed; the shell's
+        # package-lock entries for @tauri-apps/cli and every installed @tauri-apps/cli-<platform>
+        # must be resolved from https://registry.npmjs.org/ with an integrity.
+        tauri_cli_provenance() {
+          local shell="$1" bin cli lock name link bad=0
+          bin="${shell}/node_modules/.bin/tauri" cli="${shell}/node_modules/@tauri-apps/cli/tauri.js" lock="${shell}/package-lock.json"
+          [[ -d "${shell}/src-tauri" && -f "${cli}" && -f "${lock}" && ! -L "${shell}/node_modules/@tauri-apps/cli" ]] || { echo "tauri-cli: FAILED - ${shell} has no src-tauri, no installed @tauri-apps/cli or no package-lock" >&2; return 1; }
+          if [[ -L "${bin}" ]]; then
+            link="$(readlink "${bin}")"
+            [[ "$(cd "$(dirname "${bin}")" && cd "$(dirname "${link}")" 2>/dev/null && pwd -P)/$(basename "${link}")" == "$(cd "$(dirname "${cli}")" && pwd -P)/tauri.js" ]] || bad=1
+          elif [[ -f "${bin}" ]]; then
+            grep -qF '/../@tauri-apps/cli/tauri.js"' "${bin}" && ! grep -vF '/../@tauri-apps/cli/tauri.js"' "${bin}" | grep -qE '\.js"|\.cjs"|\.mjs"' || bad=1
+          else
+            bad=1
+          fi
+          [[ "${bad}" -eq 0 ]] || { echo 'tauri-cli: FAILED - node_modules/.bin/tauri is not @tauri-apps/cli/tauri.js' >&2; return 1; }
+          for name in cli $(cd "${shell}/node_modules/@tauri-apps" && ls -d cli-* 2>/dev/null); do
+            if ! jq -e --arg key "node_modules/@tauri-apps/${name}" '.packages[$key] | (.resolved // "" | startswith("https://registry.npmjs.org/")) and ((.integrity // "") != "") and ((.link // false) | not)' "${lock}" >/dev/null 2>&1; then
+              echo 'tauri-cli: FAILED - a Tauri CLI package in the shell lock is not a registry package with an integrity' >&2
+              bad=1
+            fi
+          done
+          [[ -n "$(cd "${shell}/node_modules/@tauri-apps" && ls -d cli-* 2>/dev/null)" ]] || { echo 'tauri-cli: FAILED - no platform package of the Tauri CLI is installed' >&2; bad=1; }
+          [[ "${bad}" -eq 0 ]]
+        }
+        tauri_cli() {
+          local shell="$1" name; shift
+          tauri_cli_provenance "${shell}" || return 1
+          local unset_args=()
+          for name in $(compgen -e | grep -E '^TAURI_' || true); do unset_args+=(-u "${name}"); done
+          ( cd "${shell}" && exec env ${unset_args[@]+"${unset_args[@]}"} node node_modules/@tauri-apps/cli/tauri.js "$@" )
+        }
+
+        # The bindgen target/sysroot per Android triple that the source's android scripts set,
+        # owned here so the build needs no source script.
+        android_bindgen_env() {
+          local sysroot="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-android24 --sysroot=${sysroot}"
+          export BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi="--target=armv7a-linux-androideabi24 --sysroot=${sysroot}"
+          export BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android="--target=x86_64-linux-android24 --sysroot=${sysroot}"
+          export BINDGEN_EXTRA_CLANG_ARGS_i686_linux_android="--target=i686-linux-android24 --sysroot=${sysroot}"
+        }
+
+        # verify_door_crate_sources: before each shell build, the four door crates are re-extracted
+        # from verified archives. Each locked crate's extracted registry/src directory is deleted,
+        # and its registry/cache .crate must hash (sha256) to the Cargo.lock checksum; a missing
+        # archive is fetched once (cargo fetch --locked), and a mismatch or a still-missing archive
+        # fails. Cargo then re-extracts from the verified archive, never a pre-seeded tree.
+        verify_door_crate_sources() {
+          local home entries crate version sum file actual bad=0 fetched=0
+          home="${CARGO_HOME:-${HOME}/.cargo}"
+          if command -v cygpath >/dev/null 2>&1; then home="$(cygpath -u "${home}")"; fi
+          entries="$(awk '/^\[\[package\]\]/ { n = ""; v = "" } /^name = / { n = $3 } /^version = / { v = $3 }
+            /^checksum = / { c = $3; gsub(/"/, "", n); gsub(/"/, "", v); gsub(/"/, "", c)
+              if (n == "openssl-src" || n == "openssl-sys" || n == "openssl" || n == "tokio-openssl") print n, v, c }' Cargo.lock 2>/dev/null || true)"
+          if [[ -z "${entries}" ]]; then echo 'door-crate-sources: no door crate in the lock'; return 0; fi
+          while read -r crate version sum; do
+            rm -rf "${home}"/registry/src/*/"${crate}-${version}"
+            file="$(ls "${home}"/registry/cache/*/"${crate}-${version}.crate" 2>/dev/null | head -n 1 || true)"
+            if [[ -z "${file}" && "${fetched}" -eq 0 ]]; then
+              fetched=1
+              cargo fetch --locked >/dev/null 2>&1 || true
+              file="$(ls "${home}"/registry/cache/*/"${crate}-${version}.crate" 2>/dev/null | head -n 1 || true)"
+            fi
+            if [[ -z "${file}" ]]; then
+              echo "door-crate-sources: FAILED - no ${crate} ${version} archive to verify" >&2; bad=1; continue
+            fi
+            if command -v sha256sum >/dev/null 2>&1; then actual="$(sha256sum "${file}" | cut -d' ' -f1)"; else actual="$(shasum -a 256 "${file}" | cut -d' ' -f1)"; fi
+            if [[ "${actual}" != "${sum}" ]]; then
+              echo "door-crate-sources: FAILED - the ${crate} ${version} archive does not match the Cargo.lock checksum" >&2; bad=1
+            fi
+          done <<<"${entries}"
+          [[ "${bad}" -eq 0 ]] && echo 'door-crate-sources: verified against Cargo.lock; extracted copies removed for re-extraction'
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        # The generated mobile build phases call back into the Tauri CLI to build the Rust code: the
+        # Gradle Rust plugin (gen/android/buildSrc) and the Xcode "Build Rust Code" phase
+        # (gen/apple). Their callback command is recorded when `init` runs, so a source-committed
+        # copy would hand the Rust build to source-chosen arguments. CI regenerates them: before
+        # its own `init`, the Tauri-owned build machinery is removed (gen/android/buildSrc and the
+        # generated tauri.settings.gradle; all of gen/apple, which must not be committed), and after
+        # `init` the regenerated callback must exist and run CI's node with the CLI's tauri.js,
+        # never a package-manager script.
+        mobile_build_phase_reset() {
+          local platform="$1" gen=taurine-mobile/src-tauri/gen
+          case "${platform}" in
+            android)
+              rm -rf "${gen}/android/buildSrc" "${gen}/android/tauri.settings.gradle" ;;
+            ios)
+              if [[ -n "$(git ls-files -- "${gen}/apple" 2>/dev/null)" ]]; then
+                echo 'build-phase: FAILED - gen/apple is committed in the source; CI generates it' >&2; return 1
+              fi
+              rm -rf "${gen}/apple" ;;
+            *) return 1 ;;
+          esac
+        }
+        mobile_build_phase_check() {
+          local platform="$1" gen=taurine-mobile/src-tauri/gen files
+          case "${platform}" in
+            android) files="$(grep -rl 'android-studio-script' "${gen}/android/buildSrc" 2>/dev/null || true)" ;;
+            ios) files="$(grep -rl 'xcode-script' "${gen}/apple/project.yml" 2>/dev/null || true)" ;;
+            *) return 1 ;;
+          esac
+          if [[ -z "${files}" ]]; then
+            echo "build-phase: FAILED - init did not regenerate the ${platform} Rust build phase" >&2; return 1
+          fi
+          # shellcheck disable=SC2086
+          if ! grep -qF '@tauri-apps/cli/tauri.js' ${files} ||
+             grep -qE '(^|[^A-Za-z0-9_.-])(npm|pnpm|yarn|bun|deno)(\.cmd|\.exe)?("|[[:space:]]|$)' ${files}; then
+            echo "build-phase: FAILED - the ${platform} Rust build phase does not call the CLI's tauri.js directly" >&2; return 1
+          fi
+          echo "build-phase: ${platform} Rust build phase regenerated by CI's init (calls the CLI's tauri.js directly)"
+        }
+
+        # openssl-sys skips the vendored openssl-src when any of these is set (bare, or prefixed
+        # with the target triple), matched case-insensitively (Windows environment lookups are).
+        # Refused in the job environment and in every cargo config cargo can read for these
+        # builds: each nested one in the checkout, every parent of the shells up to `/`, and
+        # CARGO_HOME. Config keys are compared after TOML decoding (quoted keys, escapes), with
+        # Python's tomllib; an unparseable config, or no tomllib, fails closed.
+        TCI_OPENSSL_OVERRIDE='([A-Za-z0-9_-]+_)?OPENSSL_(NO_VENDOR|DIR|STATIC|LIB_DIR|INCLUDE_DIR)'
+        tci_python() {
+          local candidate
+          for candidate in python3 python; do
+            if command -v "${candidate}" >/dev/null 2>&1 && "${candidate}" -c 'import tomllib' >/dev/null 2>&1; then echo "${candidate}"; return 0; fi
+          done
+          return 1
+        }
+        tci_cargo_configs() {
+          local dir file start
+          find . \( -name node_modules -o -name target -o -name .git \) -prune -o \( -path '*/.cargo/config.toml' -o -path '*/.cargo/config' \) -type f -print 2>/dev/null
+          for start in . ./taurine-desktop ./taurine-mobile ./taurine-desktop/src-tauri ./taurine-mobile/src-tauri; do
+            [[ -d "${start}" ]] || continue
+            dir="$(cd "${start}" && pwd -P)"
+            while :; do
+              for file in "${dir}/.cargo/config.toml" "${dir}/.cargo/config"; do [[ -f "${file}" ]] && echo "${file}"; done
+              [[ "${dir}" == / || -z "${dir}" ]] && break
+              dir="$(dirname "${dir}")"
+            done
+          done
+          for file in "${CARGO_HOME:-${HOME}/.cargo}/config.toml" "${CARGO_HOME:-${HOME}/.cargo}/config"; do [[ -f "${file}" ]] && echo "${file}"; done
+        }
+        refuse_openssl_overrides() {
+          local bad=0 names python configs
+          names="$(compgen -e | grep -ixE "${TCI_OPENSSL_OVERRIDE}" || true)"
+          if [[ -n "${names}" ]]; then
+            echo "openssl-overrides: FAILED - the job environment sets an OpenSSL override that bypasses the vendored build: $(printf '%s' "${names}" | tr '\n' ' ')" >&2
+            bad=1
+          fi
+          configs="$(tci_cargo_configs | sort -u)"
+          if [[ -n "${configs}" ]]; then
+            if ! python="$(tci_python)"; then
+              echo 'openssl-overrides: FAILED - no Python with tomllib to read the cargo configs' >&2
+              bad=1
+            elif ! printf '%s\n' "${configs}" | "${python}" -c '
+        import re, sys, tomllib
+        pattern = re.compile(sys.argv[1], re.IGNORECASE)
+        def keys(value):
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    yield key
+                    yield from keys(inner)
+            elif isinstance(value, list):
+                for inner in value:
+                    yield from keys(inner)
+        bad = False
+        for path in filter(None, sys.stdin.read().splitlines()):
+            try:
+                with open(path, "rb") as handle:
+                    data = tomllib.load(handle)
+            except Exception:
+                print("openssl-overrides: FAILED - a cargo config file does not parse", file=sys.stderr)
+                bad = True
+                continue
+            if any(pattern.fullmatch(key) for key in keys(data)):
+                print("openssl-overrides: FAILED - a cargo config file sets an OpenSSL override that bypasses the vendored build", file=sys.stderr)
+                bad = True
+        sys.exit(1 if bad else 0)' "${TCI_OPENSSL_OVERRIDE}"; then
+              bad=1
+            fi
+          fi
+          [[ "${bad}" -eq 0 ]] && echo 'openssl-overrides: none (the vendored OpenSSL build is not bypassed)'
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        TCI_SHELL_CONFIG_LIBRARY

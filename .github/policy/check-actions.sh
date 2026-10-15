@@ -49,6 +49,7 @@ check_action_references() {
       ./.github/workflows/pg8-measurement-arm.yml) ;;
       ./.github/actions/mobile-report) ;;
       ./.github/actions/shell-artefact) ;;
+      ./.github/actions/shell-config) ;;
       ./.github/actions/android-sdk-setup) ;;
       ./.github/actions/ios-project-init) ;;
       ./.github/actions/android-emulator-tests) ;;

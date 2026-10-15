@@ -260,9 +260,13 @@ runs:
             run_deferred rust-packaging-build-overrides refuse_build_feature_overrides
             run_deferred rust-packaging-openssl-overrides refuse_openssl_overrides
             run_deferred rust-packaging-door-gate openssl_door_gate macOS-desktop-openssl-door-only-prebuild taurine-desktop -
+            run_deferred rust-packaging-door-crate-sources verify_door_crate_sources
             export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"
             run_deferred rust-packaging-smoke \
               tauri_cli taurine-desktop build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
+            # beforeBuildCommand ran in between: the refusals run again on what the build left.
+            run_deferred rust-packaging-build-overrides-post refuse_build_feature_overrides
+            run_deferred rust-packaging-openssl-overrides-post refuse_openssl_overrides
             packaging_identifier_check() {
               local plist found=''
               # The bundle is written to the build's cargo target directory: the
