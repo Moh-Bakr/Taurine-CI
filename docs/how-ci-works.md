@@ -717,6 +717,20 @@ would silently drop the required check), or adding a trigger fails until the con
 in the same pull request, where review sees it. `pull_request_target` and `workflow_run` are
 refused outright, whatever the manifest says. A tier must also agree with `workflow-lists.sh`.
 
+Because the base's copy of the policy also judges every pull request, an exact manifest would
+deadlock a structural change (tree plus manifest fails the base's copy; manifest alone fails the
+PR's own). A manifest entry may therefore be an array of exact alternatives, the first being the
+final shape: step A adds the new shape first and keeps the old one second (tree unchanged); step
+B changes the tree and deletes the old alternative, which the base's copy (step A's) accepts
+through its alternative. Alternatives are exact (tier, triggers, jobs, or `absent`/`present`), the
+forbidden-trigger denial and the required-check job pin apply to every one, and wildcards or extra
+keys are refused when the manifest is validated. A tree matching only the final shape while
+alternatives remain prints a warning annotation, not a failure, because the base's copy sees step
+B's tree in exactly that state. The check also unions the `on` and `true` keys (YAML 1.1 reads a
+bare `on` as true), refuses a file with both, and refuses any duplicate mapping key. It does not
+catch `if: ${{ false }}` or `continue-on-error` on the required job, which drops the check like a
+rename; review, or an Enterprise-only ruleset-required workflow, is the control for that.
+
 After a reviewed structural change, run `ruby .github/policy/check-structure.rb --print`, paste
 the literal over the constant and read the diff. `test-structure.sh` holds the falsifying
 fixtures and `test-mutations.sh` the mutations. This guards against accidental or unreviewed
