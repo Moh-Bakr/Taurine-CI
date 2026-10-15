@@ -149,6 +149,44 @@ jobs:
         shell: bash
         run: bash .github/policy/test-suite-dispatch-review.sh
 
+      # The case-evidence contract and its producers. These ran nowhere before:
+      # the scripts were in the tree but no policy step invoked them.
+      - name: Test the case-evidence structural contract
+        shell: bash
+        run: bash .github/policy/test-case-evidence-contract.sh
+
+      - name: Test the case-evidence trust boundary against forged claims
+        shell: bash
+        run: bash .github/policy/test-case-evidence-trust-boundary.sh
+
+      - name: Test the Playwright case-evidence producer against a fake runner
+        shell: bash
+        run: bash .github/policy/test-playwright-case-evidence-producer.sh
+
+      # No committed asset may carry an absolute path: the recorded reports are
+      # real runner output, and a real report is full of them.
+      - name: Check the case-evidence assets for absolute paths
+        shell: bash
+        run: ruby .github/policy/check-case-evidence-assets.rb
+
+      - name: Test the case-evidence asset path guard
+        shell: bash
+        run: bash .github/policy/test-case-evidence-assets.sh
+
+      - name: Test the pinned Playwright parity fixtures
+        shell: bash
+        run: ruby .github/policy/test-playwright-case-parity-fixtures.rb
+
+      - name: Test the pinned Playwright parity producer against a fake runner
+        shell: bash
+        run: bash .github/policy/test-playwright-pinned-parity-producer.sh
+
+      # The admission-path producer: an exact discovery/execution match passes,
+      # and every way the two can disagree blocks.
+      - name: Test the case-evidence admission reconciliation
+        shell: bash
+        run: bash .github/policy/test-case-evidence-admission.sh
+
       - name: Test canonical dispatch identity and input defaults
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh

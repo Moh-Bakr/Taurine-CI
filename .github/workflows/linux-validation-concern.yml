@@ -590,6 +590,75 @@ jobs:
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      # The activated case-evidence contract. The browser concern above already
+      # wrote its JSON execution report; this step adds the discovery half --
+      # one `playwright test --list` per project, which starts no browser and no
+      # web server -- and fails the concern when the two disagree. It runs no
+      # second execution of the suite, enables no selection, and the full
+      # concern matrix stays mandatory.
+      #
+      # Only e2e-critical, e2e-a11y and e2e-visual are reconciled. 1.62.0 does
+      # apply --shard to --list, so a shard job could compare its own quarter
+      # against its own listing -- but no shard job can see the other three, so
+      # that would be a weaker claim wearing the same green badge. The four
+      # e2e-regression-* concerns are refused rather than given that rule.
+      #
+      # The ownership manifest is source-owned, so its absence must not be a way
+      # to switch this gate off: a reconciled concern without one fails with
+      # manifest_absent rather than skipping quietly.
+      #
+      # Written out here rather than as a composite action because a new local
+      # action is only reviewable in two merges: the base commit's
+      # check-actions.sh allow-list runs against this pull request's tree.
+      - name: Reconcile case evidence for the browser concern
+        if: ${{ steps.verified-source.outcome == 'success' && steps.suite-contract.outcome == 'success' && steps.concern-e2e.outcome == 'success' }}
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          CONCERN: ${{ inputs.concern }}
+          CI_EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_EXPECTED_CONTROL_SHA: ${{ github.sha }}
+          CI_EXPECTED_MANIFEST_DIGEST: ${{ steps.suite-contract.outputs.manifest_digest }}
+          CI_EXPECTED_CATALOG_DIGEST: ${{ steps.suite-contract.outputs.catalog_digest }}
+          CI_EXPECTED_SELECTION_MODE: ${{ steps.suite-contract.outputs.selection_mode }}
+          CI_EXPECTED_SELECTED_SUITE_IDS: ${{ steps.suite-contract.outputs.selected_suite_ids }}
+          CI_PLATFORM: linux
+        run: |
+          set -euo pipefail
+          case "${CONCERN}" in
+            e2e-critical|e2e-a11y|e2e-visual) ;;
+            *)
+              echo "case evidence: not reconciled (${CONCERN} is not a reconciled concern)"
+              exit 0
+              ;;
+          esac
+          report="${RUNNER_TEMP}/test-ids/${CONCERN}.json"
+          if [[ ! -s "${report}" ]]; then
+            echo 'case evidence: the reviewed concern command wrote no execution report' >&2
+            exit 1
+          fi
+          work="${RUNNER_TEMP}/case-evidence/${CONCERN}"
+          rm -rf "${work}"
+          mkdir -p "${work}"
+          chmod 700 "${work}"
+          status=0
+          result="$(ruby .github/policy/case-evidence-admission.rb \
+            "${CONCERN}" "${GITHUB_WORKSPACE}/src" "${report}" "${work}")" || status=$?
+          # Raw reports, titles and case identities stay in that directory; only
+          # the aggregate the producer printed is published.
+          rm -rf "${work}"
+          {
+            echo "### Case evidence — ${CONCERN}"
+            echo
+            echo '```json'
+            echo "${result}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${status}" -ne 0 ]]; then
+            echo 'case evidence: discovery and execution did not reconcile' >&2
+            exit "${status}"
+          fi
+
       # The job's own wall-clock time, shown next to its result; the timings job
       # tabulates it against a committed baseline.
       - name: Report concern duration
