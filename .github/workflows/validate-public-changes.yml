@@ -262,6 +262,26 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # Interim: gives no isolation guarantee, because main has no drop-root in this job yet. Base
+      # tests may call node (test-playwright-pinned-parity-producer.sh does), and the step below
+      # runs them with PATH fixed to the system directories, where the runner's node
+      # (/usr/local/bin) is not found. Put a copy in /usr/bin, which is on that PATH. Pull-request
+      # code run by a base test still has passwordless sudo and could replace this copy, exactly as
+      # it can replace ruby today (the known gap in docs/how-ci-works.md, "Changing the policy").
+      # Real isolation lands with the base-pass isolation change (#313, R1).
+      - name: Install node on the base pass PATH (interim)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_dest=/usr/bin/node
+          if [[ -e "${node_dest}" ]]; then
+            echo "${node_dest} is already installed; leaving it as it is"
+          else
+            node_bin="$(readlink -f /usr/local/bin/node)"
+            sudo install -o root -g root -m 0755 "${node_bin}" "${node_dest}"
+          fi
+
       # The shell is named by absolute path and started in privileged mode with the startup files
       # skipped, so an earlier step cannot steer it through BASH_ENV, ENV, SHELLOPTS, an exported
       # function (BASH_FUNC_*) or a bash on a GITHUB_PATH directory before this script runs. The
