@@ -355,6 +355,17 @@ if (check_action_references "${work}/pg8-references.yml") >"${work}/action.stdou
 fi
 grep -qF 'Unreviewed or mutable Action reference' "${work}/action.stderr"
 
+# A step written as `- uses:` (no name first) is held to the same allow-list.
+printf '%s\n' 'jobs:' '  validate:' '    steps:' '      - uses: ./.github/actions/shorthand-unreviewed' >"${work}/shorthand-references.yml"
+if (check_action_references "${work}/shorthand-references.yml") >"${work}/action.stdout" 2>"${work}/action.stderr"; then
+  echo 'an unreviewed `- uses:` shorthand reference unexpectedly passed' >&2; exit 1
+fi
+grep -qF 'Unreviewed or mutable Action reference' "${work}/action.stderr"
+printf '%s\n' 'jobs:' '  validate:' '    steps:' '      - uses: actions/checkout@v7' >"${work}/shorthand-mutable.yml"
+if (check_action_references "${work}/shorthand-mutable.yml") >"${work}/action.stdout" 2>"${work}/action.stderr"; then
+  echo 'a mutable `- uses:` shorthand reference unexpectedly passed' >&2; exit 1
+fi
+
 # Removing the reusable-arm preflight map entry must not disable universal checking.
 cp .github/policy/check-universal.rb "${work}/check-universal-mutated.rb"
 ruby -e 'path=ARGV.fetch(0); text=File.read(path); entry="  '\''.github/workflows/pg8-measurement-arm.yml'\'' => '\''preflight'\'',\n"; abort "required PG8 arm mapping missing from fixture" unless text.include?(entry); File.write(path,text.sub(entry,""))' \
