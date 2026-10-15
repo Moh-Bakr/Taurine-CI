@@ -80,8 +80,9 @@ runs:
         # the gate's `cargo tree` queries, as long as no Tauri config the CLI can load changes it.
         # Refused: a shell without src-tauri; any Tauri config outside the two src-tauri
         # directories; a json5/toml Tauri config (not checked); a json config that sets
-        # build.features or build.runner, or ships bundle.externalBin / bundle.resources (sidecars
-        # and resources would be shipped binaries this CI does not judge on Windows).
+        # build.features or build.runner, or ships bundle.externalBin (a sidecar is a shipped
+        # binary this CI does not judge on Windows). bundle.resources must be data: see
+        # refuse_binary_resources.
         TCI_SHELLS='taurine-desktop taurine-mobile'
         refuse_build_feature_overrides() {
           local shell file bad=0
@@ -101,13 +102,79 @@ runs:
             for file in "${shell}"/src-tauri/tauri*.json; do
               [[ -e "${file}" ]] || continue
               if ! jq -e '((.build // {}) | (has("features") or has("runner")) | not) and
-                          ((.bundle // {}) | ((.externalBin // []) == [] and (.resources // null) == null))' "${file}" >/dev/null 2>&1; then
-                echo "build-features: FAILED - a Tauri config sets build.features, build.runner, bundle.externalBin or bundle.resources (or does not parse)" >&2
+                          ((.bundle // {}) | (.externalBin // []) == [])' "${file}" >/dev/null 2>&1; then
+                echo "build-features: FAILED - a Tauri config sets build.features, build.runner or bundle.externalBin (or does not parse)" >&2
                 bad=1
               fi
+              refuse_binary_resources "${shell}/src-tauri" "${file}" || bad=1
             done
           done
           [[ "${bad}" -eq 0 ]]
+        }
+
+        # refuse_binary_resources <src-tauri dir> <config>: bundle.resources (array of sources, or
+        # object of source -> destination) must be data. Every source, relative to src-tauri, must
+        # be relative, exist, and resolve (symlinks included) inside the checkout; a directory or a
+        # `*`/`**` glob is expanded as Tauri does and every file in it is held to the same rules; a
+        # pattern that matches nothing fails. No resource file may be ELF, Mach-O or PE by magic.
+        refuse_binary_resources() {
+          local python
+          jq -e '(.bundle.resources // null) == null' "$2" >/dev/null 2>&1 && return 0
+          python="$(tci_python)" || { echo 'bundle-resources: FAILED - no Python to check the resources' >&2; return 1; }
+          "${python}" -c '
+        import glob, json, os, sys
+        base, config = sys.argv[1], sys.argv[2]
+        root = os.path.realpath(".")
+        magics = (b"\x7fELF", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"MZ")
+        def refuse(reason):
+            print("bundle-resources: FAILED - " + reason, file=sys.stderr)
+            sys.exit(1)
+        def inside(path):
+            real = os.path.realpath(path)
+            return real.startswith(root + os.sep)
+        def check_file(path):
+            if not inside(path):
+                refuse("a resource resolves outside the checkout")
+            with open(path, "rb") as handle:
+                head = handle.read(4)
+            if any(head.startswith(magic) for magic in magics):
+                refuse("a resource is an executable binary (ELF, Mach-O or PE)")
+        def check_tree(path, seen):
+            real = os.path.realpath(path)
+            if not inside(path):
+                refuse("a resource resolves outside the checkout")
+            if os.path.isdir(path):
+                if real in seen:
+                    return
+                seen.add(real)
+                for entry in sorted(os.listdir(path)):
+                    check_tree(os.path.join(path, entry), seen)
+            elif os.path.isfile(path):
+                check_file(path)
+            else:
+                refuse("a resource is neither a file nor a directory")
+        resources = json.load(open(config)).get("bundle", {}).get("resources")
+        if isinstance(resources, dict):
+            sources = list(resources.keys())
+        elif isinstance(resources, list):
+            sources = resources
+        else:
+            refuse("bundle.resources is neither an array nor an object")
+        for source in sources:
+            if not isinstance(source, str) or not source or os.path.isabs(source) or source.startswith(("/", "\\")) or ":" in source:
+                refuse("a resource source is absolute or not a path")
+            pattern = os.path.join(base, source)
+            if "*" in source or "?" in source or "[" in source:
+                matches = glob.glob(pattern, recursive=True)
+                if not matches:
+                    refuse("a resource pattern matches nothing")
+            else:
+                if not os.path.exists(pattern):
+                    refuse("a resource source does not exist")
+                matches = [pattern]
+            for match in matches:
+                check_tree(match, set())
+        ' "$1" "$2"
         }
 
         # tauri_cli <shell> <tauri arguments...>: the CLI the shell installed, run from the shell
@@ -543,7 +610,7 @@ runs:
           file="$(desktop_executable)" || { echo "${os}-desktop-artefact: FAILED - the desktop binary could not be located" >&2; return 1; }
           artefact_check "${os}-desktop-executable" "${file}" debug "${door}" || return 1
           # Everything the bundle ships (Linux: the .deb's contents; macOS: the .app). Windows
-          # builds no bundle; sidecars and resources are refused in its config instead.
+          # builds no bundle; sidecars are refused and resources must be data (config checks).
           case "${os}" in
             Linux)
               bundle="$(find "$(dirname "${file}")/bundle/deb" -name '*.deb' -type f 2>/dev/null | head -n 1 || true)"

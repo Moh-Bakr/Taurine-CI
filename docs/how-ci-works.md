@@ -639,7 +639,12 @@ and the public OpenSSL version string only:
   which is exactly the built set because CI owns the argv and refuses any Tauri config that could
   change it: a shell without `src-tauri`, a Tauri config anywhere outside the two `src-tauri`
   directories (or nested, or json5/toml), and a config that sets `build.features`,
-  `build.runner`, `bundle.externalBin` or `bundle.resources`.
+  `build.runner` or `bundle.externalBin`. `bundle.resources` (array or object form) must be
+  data: every source, relative to `src-tauri`, must exist and resolve (symlinks included) inside
+  the checkout, globs and directories are expanded and every file checked, a pattern that
+  matches nothing fails, and no resource may be an ELF, Mach-O or PE binary by magic bytes (so
+  `../../THIRD-PARTY-NOTICES` passes). `pg8-measurement` still builds through `npm run tauri`;
+  no door or artefact verdict reads its output.
 - **Door crates from crates.io**: `openssl-src`, `openssl-sys`, `openssl` and `tokio-openssl`
   must each have the crates.io registry `source` and a `checksum` (and no `replace`) in the root
   `Cargo.lock`, and resolve in `cargo metadata` to that source with the manifest under

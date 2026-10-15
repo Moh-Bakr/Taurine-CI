@@ -222,6 +222,34 @@ rm -r "${src}/taurine-mobile/src-tauri/sub"
 printf '{"bundle":{"externalBin":["bin/sidecar"]}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
 expect_fail 'a sidecar' 'refuse_build_feature_overrides' 'bundle.externalBin'
 rm "${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
+# Resources must be data: inside the checkout (symlinks resolved), existing, not ELF/Mach-O/PE.
+conf="${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
+printf 'Third-party notices\n' >"${src}/THIRD-PARTY-NOTICES"
+printf '{"bundle":{"resources":{"../../THIRD-PARTY-NOTICES":"THIRD-PARTY-NOTICES"}}}\n' >"${conf}"
+expect_pass 'notices resource (object form)' 'refuse_build_feature_overrides'
+mkdir -p "${src}/res/sub"; printf 'data\n' >"${src}/res/sub/a.txt"
+printf '{"bundle":{"resources":["../../res/**/*"]}}\n' >"${conf}"
+expect_pass 'data glob (array form)' 'refuse_build_feature_overrides'
+printf '\177ELF....' >"${src}/res/sub/tool"
+expect_fail 'a glob containing an ELF' 'refuse_build_feature_overrides' 'executable binary'
+rm "${src}/res/sub/tool"
+printf '\177ELF....' >"${src}/res/fake.dat"
+printf '{"bundle":{"resources":["../../res/fake.dat"]}}\n' >"${conf}"
+expect_fail 'an ELF disguised as a resource' 'refuse_build_feature_overrides' 'executable binary'
+printf 'MZ\220\000' >"${src}/res/fake.dat"
+expect_fail 'a PE disguised as a resource' 'refuse_build_feature_overrides' 'executable binary'
+rm "${src}/res/fake.dat"
+printf 'outside\n' >"${work}/outside.txt"
+printf '{"bundle":{"resources":{"../../../outside.txt":"x"}}}\n' >"${conf}"
+expect_fail 'a ../ escape outside the checkout' 'refuse_build_feature_overrides' 'outside the checkout'
+ln -s "${work}/outside.txt" "${src}/res/link.txt"
+printf '{"bundle":{"resources":["../../res/link.txt"]}}\n' >"${conf}"
+expect_fail 'a symlink out of the checkout' 'refuse_build_feature_overrides' 'outside the checkout'
+printf '{"bundle":{"resources":["../../res/*.none"]}}\n' >"${conf}"
+expect_fail 'a pattern that matches nothing' 'refuse_build_feature_overrides' 'matches nothing'
+printf '{"bundle":{"resources":["/etc/hosts"]}}\n' >"${conf}"
+expect_fail 'an absolute resource' 'refuse_build_feature_overrides' 'absolute'
+rm -r "${src}/res" "${conf}" "${src}/THIRD-PARTY-NOTICES"
 mv "${src}/taurine-mobile/src-tauri" "${src}/taurine-mobile/tauri-moved"
 expect_fail 'a moved src-tauri' 'refuse_build_feature_overrides' 'src-tauri is missing'
 mv "${src}/taurine-mobile/tauri-moved" "${src}/taurine-mobile/src-tauri"
