@@ -334,12 +334,15 @@ jobs:
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
           sudo loginctl disable-linger "${user}" || true
-          if systemctl is-active --quiet "user@${uid}.service"; then
-            sudo systemctl stop "user@${uid}.service"
-          fi
+          echo "user@${uid}.service before: $(systemctl is-active "user@${uid}.service" || true)"
+          sudo systemctl stop "user@${uid}.service" || true
+          echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
+          # A socket file nobody listens on can start nothing; what matters is whether anything still
+          # accepts a connection there. Name whatever does, then fail.
           for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
-            if [[ -S "${socket}" ]]; then
-              echo "::error::${socket} is still there after the user manager was stopped"
+            if /usr/bin/ruby --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
+              sudo ss -xlpn | grep -F -- "${socket}" || true
+              echo "::error::something still accepts connections at ${socket} after the user manager was stopped"
               exit 1
             fi
           done
@@ -398,12 +401,15 @@ jobs:
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
           sudo loginctl disable-linger "${user}" || true
-          if systemctl is-active --quiet "user@${uid}.service"; then
-            sudo systemctl stop "user@${uid}.service"
-          fi
+          echo "user@${uid}.service before: $(systemctl is-active "user@${uid}.service" || true)"
+          sudo systemctl stop "user@${uid}.service" || true
+          echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
+          # A socket file nobody listens on can start nothing; what matters is whether anything still
+          # accepts a connection there. Name whatever does, then fail.
           for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
-            if [[ -S "${socket}" ]]; then
-              echo "::error::${socket} is still there after the user manager was stopped"
+            if /usr/bin/ruby --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
+              sudo ss -xlpn | grep -F -- "${socket}" || true
+              echo "::error::something still accepts connections at ${socket} after the user manager was stopped"
               exit 1
             fi
           done
@@ -517,8 +523,8 @@ jobs:
             exit 1
           fi
           for socket in "/run/user/$(id -u)/bus" "/run/user/$(id -u)/systemd/private"; do
-            if [[ -S "${socket}" ]]; then
-              echo "::error::a user systemd manager is reachable at ${socket}, so a base script could start a unit outside this job"
+            if "${scrub[@]}" "${ruby_bin}" --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
+              echo "::error::something accepts connections at ${socket}, so a base script could start a unit outside this job"
               exit 1
             fi
           done
