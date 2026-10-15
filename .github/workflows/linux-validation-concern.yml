@@ -18,6 +18,11 @@ on:
         required: false
         default: 60
         type: number
+      size_probe:
+        description: For rust-packaging, also rebuild without the OpenSSL door (on the runner only) and report the size delta
+        required: false
+        default: false
+        type: boolean
       suite_selection:
         description: Optional reviewed suite selection JSON ({selection_mode, selected_suite_ids, selection_digest}); empty means the full set
         required: false
@@ -210,6 +215,11 @@ jobs:
       - name: Install the shared concern reporting
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
+
+      - name: Install the shell artefact checks
+        if: ${{ inputs.concern == 'rust-packaging' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
 
       # Trusted suite-contract snapshot, taken after the exact-SHA checkout and
       # token revocation but BEFORE any dependency installation or project
@@ -450,6 +460,7 @@ jobs:
         uses: ./.github/actions/linux-concern-rust  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
+          size-probe: ${{ inputs.size_probe }}
 
       # A concern no family above handles must fail loudly, never pass by omission.
       - name: Reject an unsupported concern

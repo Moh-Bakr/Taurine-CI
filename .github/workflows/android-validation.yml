@@ -20,6 +20,11 @@ on:
         required: false
         default: false
         type: boolean
+      size_probe:
+        description: Also rebuild the Android library without the OpenSSL door (on the runner only) and report the size delta
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -76,7 +81,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/android-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"rust":{0},"source_sha":{1}}}', toJSON(inputs.rust), toJSON(inputs.source_sha)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"rust":{0},"size_probe":{1},"source_sha":{2}}}', toJSON(inputs.rust), toJSON(inputs.size_probe), toJSON(inputs.source_sha)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -211,6 +216,10 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/mobile-report  # zizmor: ignore[self-repository]
 
+      - name: Install the shell artefact checks
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
+
       - name: Prepare Android SDK, JDK, and Rust targets
         if: matrix.concern == 'android-native' || matrix.concern == 'android-rust'
         # Kept as ./ : the policy matches this exact form for local actions.
@@ -254,37 +263,79 @@ jobs:
         shell: bash
         env:
           CONCERN: ${{ matrix.concern }}
+          SIZE_PROBE: ${{ inputs.size_probe }}
         run: |
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+          source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
           case "${CONCERN}" in
             android-native)
               mobile_run android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
+              # The built library per ABI: size, no dynamic libssl/libcrypto, the linked
+              # OpenSSL 3.5 string when the door is in the graph, and any native budget the
+              # source's bundle-budget.json sets (`taurine-mobile.native.<abi>`).
+              door="$(door_in_graph taurine-mobile aarch64-linux-android)" || { echo 'android-artefact: the door graph query did not resolve' >&2; exit 1; }
+              # Tauri places the library in the Gradle project's jniLibs/<abi>/; when it is
+              # not there, the cargo target directory's aarch64 output is the arm64-v8a one.
+              android_libraries() {
+                local found target_dir
+                found="$(find -L taurine-mobile/src-tauri/gen/android/app/src/main/jniLibs -name 'libtaurine_mobile_lib.so' -type f 2>/dev/null | sort || true)"
+                if [[ -z "${found}" ]]; then
+                  target_dir="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory' || true)"
+                  if [[ -n "${target_dir}" && -f "${target_dir}/aarch64-linux-android/debug/libtaurine_mobile_lib.so" ]]; then
+                    found="${target_dir}/aarch64-linux-android/debug/libtaurine_mobile_lib.so"
+                  fi
+                fi
+                [[ -z "${found}" ]] || printf '%s\n' "${found}"
+              }
+              android_abi() {
+                case "$1" in
+                  */jniLibs/*) basename "$(dirname "$1")" ;;
+                  *) echo arm64-v8a ;;
+                esac
+              }
+              android_arm64_library() {
+                local library
+                while IFS= read -r library; do
+                  if [[ -n "${library}" && "$(android_abi "${library}")" == arm64-v8a ]]; then echo "${library}"; return 0; fi
+                done < <(android_libraries)
+              }
+              libraries="$(android_libraries)"
+              [[ -n "${libraries}" ]] || { echo 'android-artefact: FAILED - no libtaurine_mobile_lib.so was built' >&2; exit 1; }
+              while IFS= read -r library; do
+                abi="$(android_abi "${library}")"
+                artefact_check "android-${abi}-library" "${library}" debug "${door}" taurine-mobile "${abi}" || exit 1
+              done <<<"${libraries}"
+              if [[ "${SIZE_PROBE}" == true ]]; then
+                arm64="$(android_arm64_library || true)"
+                [[ -n "${arm64}" ]] || { echo 'android-artefact: FAILED - no arm64-v8a library for the size probe' >&2; exit 1; }
+                artefact_size_probe android-arm64-v8a-library "$(artefact_bytes "${arm64}")" android_arm64_library \
+                  npm --prefix taurine-mobile run android:build:debug -- --target aarch64 || exit 1
+              fi
               ;;
             android-rust)
-              # Gate S1's mobile arm (plan 25): the phone links no OpenSSL.
-              # `cargo tree --invert openssl-sys` exits non-zero exactly when
-              # nothing in the graph depends on it, so the check inverts the
-              # exit: a clean run of the invert query IS the failure. The
-              # error text is pinned so a broken resolve cannot masquerade as
-              # a pass. Cheap, so it runs before the expensive test-target
-              # build and fails the concern first.
-              gate_log="${RUNNER_TEMP}/android-openssl-absent.log"
-              if cargo tree --locked --package taurine-mobile --invert openssl-sys >"${gate_log}" 2>&1; then
-                echo "android-openssl-absent: FAILED — openssl-sys is reachable from taurine-mobile (Gate S1, plan 25)" >&2
-                exit 1
-              fi
-              if ! grep -q "did not match any packages" "${gate_log}"; then
-                echo "android-openssl-absent: the invert query failed for a reason other than absence (detail withheld)" >&2
-                exit 1
-              fi
-              echo "android-openssl-absent: passed — openssl-sys is not resolvable from taurine-mobile"
+              # Gate S1's mobile arm, door-only form (plan 25; the shells ship the OpenSSL
+              # door since the owner's decision of 2026-10-15). An older source with no
+              # openssl-sys in the mobile graph passes as "absent"; a source with it passes only
+              # when OpenSSL enters through taurine-tls-openssl alone and the single openssl-src
+              # is on 300.5.x. A resolve error fails. Cheap, so it runs before the expensive
+              # test-target build and fails the concern first.
+              openssl_door_gate android-openssl-door-only taurine-mobile aarch64-linux-android || exit 1
+              openssl_door_gate android-x86_64-openssl-door-only taurine-mobile x86_64-linux-android || exit 1
               # Compile-only: build and link every test target of the mobile crate for
               # the Android triple, so the `cfg(target_os = "android")` code and its
               # tests are type-checked and linked on a hosted runner. They are executed
               # on the emulator in the next step, for x86_64.
               mobile_run android-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-linux-android
+              # The door's tests built and linked for the device architecture (they run on the
+              # x86_64 emulator in the next step); an older source records the absence.
+              door="$(door_in_graph taurine-mobile aarch64-linux-android)" || { echo 'android-door-test-targets: the door graph query did not resolve' >&2; exit 1; }
+              if [[ "${door}" == present ]]; then
+                mobile_run android-door-test-targets cargo test --locked --no-run --package taurine-tls-openssl --target aarch64-linux-android
+              else
+                echo 'android-door-test-targets: taurine-tls-openssl is not in the mobile graph; nothing to build'
+              fi
               ;;
             *)
               echo "Unknown Android validation concern: ${CONCERN}" >&2

@@ -22,6 +22,11 @@ on:
         required: false
         default: windows-2022
         type: string
+      size_probe:
+        description: For rust-packaging, also rebuild without the OpenSSL door (on the runner only) and report the size delta
+        required: false
+        default: false
+        type: boolean
     secrets:
       SOURCE_READER_PRIVATE_KEY:
         description: The source-reader App private key, passed explicitly by the dispatcher (never inherited)
@@ -116,6 +121,37 @@ jobs:
       - name: Install the shared concern reporting
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
+
+      - name: Install the shell artefact checks
+        if: ${{ inputs.concern == 'rust-packaging' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
+
+      # The shells carry the OpenSSL door, so every Rust concern that compiles taurine-app
+      # (rust-app-1/2, rust-packaging) and the door's own concerns build the vendored OpenSSL
+      # 3.5 from source. openssl-src runs `perl Configure` with OPENSSL_SRC_PERL first: Git's
+      # msys perl (first on the bash PATH) lacks the Win32 modules OpenSSL's MSVC build needs,
+      # so the image's Strawberry Perl is named explicitly, job-wide, before any project code.
+      # NASM enables the assembly; openssl-src finds it with `where nasm`, so its directory
+      # goes on the job PATH (without it openssl-src builds `no-asm`, slower but correct). Both
+      # ship on the hosted image but are not on PATH. Nothing here reads the private source.
+      - name: Put the vendored OpenSSL build tools in reach
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f /c/Strawberry/perl/bin/perl.exe ]]; then
+            echo 'openssl-build-tools: Strawberry Perl is not on this runner image; the vendored OpenSSL cannot be configured' >&2
+            exit 1
+          fi
+          printf '%s\n' 'OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe' >> "${GITHUB_ENV}"
+          echo 'openssl-build-tools: perl: Strawberry Perl (OPENSSL_SRC_PERL)'
+          if [[ -f '/c/Program Files/NASM/nasm.exe' ]]; then
+            printf '%s\n' 'C:\Program Files\NASM' >> "${GITHUB_PATH}"
+            echo 'openssl-build-tools: nasm: on the job PATH'
+          else
+            echo 'openssl-build-tools: nasm: not on this runner image; OpenSSL builds without assembly (no-asm)'
+          fi
 
       # Known gap, recorded on purpose: every Windows concern tests LF source. Git for
       # Windows checks the tree out with core.autocrlf=true by default, which is what a
@@ -376,6 +412,7 @@ jobs:
         uses: ./.github/actions/windows-concern-rust  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
+          size-probe: ${{ inputs.size_probe }}
 
       # Disabled with the restore above (finding H1). When re-enabled: only the build that
       # runs everything the key covers saves it, only on a miss, only for a protected source

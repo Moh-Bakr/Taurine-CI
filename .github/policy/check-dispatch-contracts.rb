@@ -41,20 +41,25 @@ EXPECTED_INPUTS = {
     'visual' => BOOLEAN_FALSE, 'gitleaks_history' => BOOLEAN_FALSE,
     'base_sha' => { 'type' => 'string', 'required' => false, 'default' => '', 'format' => 'optional-sha40', 'digest_include' => true },
     'only' => STRING_DEFAULT_EMPTY,
-    'suite_selection' => STRING_DEFAULT_EMPTY
+    'suite_selection' => STRING_DEFAULT_EMPTY,
+    'size_probe' => BOOLEAN_FALSE
   },
   '.github/workflows/macos-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE,
     'only' => STRING_DEFAULT_EMPTY,
-    'flavor' => { 'type' => 'choice', 'required' => false, 'default' => 'prod', 'options' => %w[prod dev uat], 'digest_include' => true }
+    'flavor' => { 'type' => 'choice', 'required' => false, 'default' => 'prod', 'options' => %w[prod dev uat], 'digest_include' => true },
+    'size_probe' => BOOLEAN_FALSE
   },
   '.github/workflows/windows-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE,
     'only' => STRING_DEFAULT_EMPTY,
-    'windows_image' => { 'type' => 'choice', 'required' => false, 'default' => 'windows-2022', 'options' => %w[windows-2022 windows-2025], 'digest_include' => true }
+    'windows_image' => { 'type' => 'choice', 'required' => false, 'default' => 'windows-2022', 'options' => %w[windows-2022 windows-2025], 'digest_include' => true },
+    'size_probe' => BOOLEAN_FALSE
   },
-  '.github/workflows/android-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE },
-  '.github/workflows/ios-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE },
+  '.github/workflows/android-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE,
+                                                  'size_probe' => BOOLEAN_FALSE },
+  '.github/workflows/ios-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE,
+                                              'size_probe' => BOOLEAN_FALSE },
   '.github/workflows/orchestrate-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY },
   '.github/workflows/live-proofs.yml' => {
     'engine' => { 'type' => 'string', 'required' => true, 'format' => 'engine-selection',

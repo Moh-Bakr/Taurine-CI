@@ -48,6 +48,7 @@ check_action_references() {
       ./.github/workflows/live-proof-arm.yml) ;;
       ./.github/workflows/pg8-measurement-arm.yml) ;;
       ./.github/actions/mobile-report) ;;
+      ./.github/actions/shell-artefact) ;;
       ./.github/actions/android-sdk-setup) ;;
       ./.github/actions/ios-project-init) ;;
       ./.github/actions/android-emulator-tests) ;;

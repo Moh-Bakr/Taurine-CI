@@ -9,6 +9,10 @@ inputs:
   concern:
     description: The Linux validation concern being run
     required: true
+  size-probe:
+    description: true to rebuild the packaging smoke without the OpenSSL door and report the size delta
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -18,6 +22,7 @@ runs:
       working-directory: ${{ github.workspace }}/src
       env:
         CONCERN: ${{ inputs.concern }}
+        SIZE_PROBE: ${{ inputs.size-probe }}
         OS_LABEL: Linux
       run: |
         set -euo pipefail
@@ -260,6 +265,22 @@ runs:
             # or uploaded; the output stays on the runner.
             run_deferred rust-packaging-smoke \
               npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci
+            # The artefact proof (shell-artefact): the door-only gate on the desktop graph, the
+            # executable's size and build profile, no dynamic libssl/libcrypto, the linked OpenSSL 3.5
+            # string when the door is in the graph and, with size_probe=true, the same build again
+            # without the door (on the runner only) for the size delta. Fixed lines only.
+            if [[ "${deferred_failed}" -eq 0 ]]; then
+              source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
+              if desktop_artefact_check Linux "${SIZE_PROBE}" \
+                npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci; then
+                deferred_results+=('rust-packaging-artefact|passed')
+              else
+                deferred_results+=('rust-packaging-artefact|failed: see the fixed artefact lines in the log')
+                deferred_failed=1
+              fi
+            else
+              deferred_results+=('rust-packaging-artefact|not run (the packaging build failed)')
+            fi
             ;;
           rust-tls-openssl)
             # The OpenSSL door crate — a workspace member since Stage 1 task 1.5,

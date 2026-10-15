@@ -501,11 +501,11 @@ that runs after the revoke lives in composites under `.github/actions/`.
 | Area | Workflow (entry point) | Composites it calls |
 | --- | --- | --- |
 | Shared | every protected workflow | `source-checkout` (mint, exact checkout, verify, revoke), `sanitize`, `timings`, `node-setup`, `rust-toolchain`, `vendor-fetch`, `verify-cargo-cache`, `concern-report`, `run-result` |
-| Linux | `linux-validation.yml` calls `linux-validation-concern.yml`; `select-concerns.yml` plans | `linux-concern-js`, `linux-concern-e2e`, `linux-concern-rust`, `scan-concern`, `select-concerns`, `linux-test-identities` |
-| macOS | `macos-validation.yml` | `macos-concern-js`, `macos-concern-rust` |
-| Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust` |
-| Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report` |
-| iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report` |
+| Linux | `linux-validation.yml` calls `linux-validation-concern.yml`; `select-concerns.yml` plans | `linux-concern-js`, `linux-concern-e2e`, `linux-concern-rust`, `scan-concern`, `select-concerns`, `linux-test-identities`, `shell-artefact` |
+| macOS | `macos-validation.yml` | `macos-concern-js`, `macos-concern-rust`, `shell-artefact` |
+| Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust`, `shell-artefact` |
+| Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report`, `shell-artefact`, `android-emulator-tests` |
+| iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report`, `shell-artefact`, `ios-simulator-tests` |
 | Live proofs | `live-proofs.yml` calls `live-proof-arm.yml` once per arm | `live-build`, `live-run`, `live-summary`, `live-start-mpp`, `live-start-ibm`, `live-start-rocketmq`, `live-start-iris`, `live-start-pg`, `live-start-sql` |
 | Policy | `validate-public-changes.yml` | the scripts under `.github/policy/` |
 
@@ -574,6 +574,7 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
 | `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
+| `size_probe` | Linux, macOS, Windows, Android, iOS | Off by default. The concern that builds the shell (desktop `rust-packaging`, `android-native`, `ios-native`) always prints the artefact's byte size and build profile; with `size_probe=true` it also removes taurine-app's `legacy-tls` line on the runner only, rebuilds with the same command, restores the manifest with `git checkout` and prints `with-door`, `without-door` and `delta` bytes (numbers only; the lock must not change). Part of the dispatch identity like every other input |
 
 ## The Result verdict
 
@@ -609,7 +610,38 @@ days earlier, and `macos-validation` and `windows-validation` with `rust=true` (
 are not part of the weekly run; dispatch them by hand. The base_sha run is the drift check:
 a concern that fails in the full run but is "not selected" in the selective run reveals a gap
 in the `ci-matrix.json` rules. The summary also reports how far the locked `openssl-src` is
-behind the newest 300.5.x release.
+behind the newest 300.5.x release, for the develop, uat and main tips. That patch cadence is a
+warning for develop and **fails the run** for a uat or main tip that is behind, off the 300.5
+line, or still on 3.5 after OpenSSL 3.5 LTS ends (2030-04-08): the release line ships the
+OpenSSL it locks.
+
+## The OpenSSL door in the shells
+
+Both shells ship the OpenSSL door (`taurine-tls-openssl`, vendored OpenSSL 3.5 LTS). The
+`shell-artefact` composite holds the checks, which publish crate names, versions, byte counts
+and the public OpenSSL version string only:
+
+- **Gate S1, door-only** (`android-rust`, `ios-rust` for the mobile graph per target, and every
+  desktop `rust-packaging` for the desktop graph): an older source without `openssl-sys` passes
+  as "absent"; otherwise every direct dependent of `openssl-sys`, `openssl`, `tokio-openssl` and
+  the door must be inside the door path (`openssl`, `tokio-openssl`, `taurine-tls-openssl`,
+  `taurine-db-dbx`), the door must be present and the single resolved `openssl-src` must be
+  300.5.x. A resolve error fails.
+- **Door tests on the device**: the emulator (x86_64) and simulator run the door crate's library
+  and integration tests through the same runner as the mobile tests, surfacing the fixed
+  `door-roots:` line and, when the source has it, the ignored `public_peer` verify-full
+  handshake (`door-public-peer:` line; a resolve/connect failure is classified as "public peer
+  unreachable from device" and still fails). `lockfile_policy` is excluded on the device (it
+  reads the host `Cargo.lock`); the host `rust-tls-openssl` concern covers it. The aarch64
+  Android door tests are built and linked compile-only.
+- **Artefact linkage** (desktop executable, Android library per ABI, iOS app binary): no
+  dynamic `libssl`/`libcrypto` dependency (`readelf -d`, `otool -L`, `dumpbin /dependents`),
+  and the `OpenSSL 3.5.` version string present when the door is in the shell's graph
+  (otherwise "door absent"). A native ceiling in the source's `bundle-budget.json`
+  (`<app>.native.<abi>` or `<app>.nativeBytes`) is enforced when the source sets one.
+- **Windows toolchain**: every Windows Rust concern sets `OPENSSL_SRC_PERL` to the image's
+  Strawberry Perl (fails closed when it is missing) and puts NASM on the job PATH before any
+  project code, because the vendored OpenSSL builds wherever taurine-app compiles.
 
 ## The live proofs
 
