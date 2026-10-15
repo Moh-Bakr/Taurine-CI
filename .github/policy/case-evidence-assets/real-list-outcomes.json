@@ -1,0 +1,43 @@
+{
+  "suites": [
+    {
+      "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+      "specs": [
+        {
+          "title": "outcome group > flaky retry @smoke",
+          "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+          "tests": [
+            {
+              "projectName": "a11y",
+              "status": "discovered",
+              "results": []
+            }
+          ]
+        },
+        {
+          "title": "outcome group > intentional skip @smoke",
+          "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+          "tests": [
+            {
+              "projectName": "a11y",
+              "status": "discovered",
+              "results": []
+            }
+          ]
+        },
+        {
+          "title": "outcome group > plain pass @smoke",
+          "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+          "tests": [
+            {
+              "projectName": "a11y",
+              "status": "discovered",
+              "results": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

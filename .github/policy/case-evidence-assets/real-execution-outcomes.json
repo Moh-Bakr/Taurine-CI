@@ -1,0 +1,309 @@
+{
+  "config": {
+    "argv": [
+      "node",
+      "__APP_ROOT__/node_modules/playwright/cli.js",
+      "test",
+      "--config",
+      "playwright.config.ts",
+      "--project",
+      "a11y",
+      "--reporter=json"
+    ],
+    "configFile": "__APP_ROOT__/playwright.config.ts",
+    "rootDir": "__APP_ROOT__/tests/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "__APP_ROOT__/test-results",
+        "repeatEach": 1,
+        "retries": 1,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "smoke",
+        "name": "smoke",
+        "testDir": "__APP_ROOT__/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      },
+      {
+        "outputDir": "__APP_ROOT__/test-results",
+        "repeatEach": 1,
+        "retries": 1,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "a11y",
+        "name": "a11y",
+        "testDir": "__APP_ROOT__/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      },
+      {
+        "outputDir": "__APP_ROOT__/test-results",
+        "repeatEach": 1,
+        "retries": 1,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "critical",
+        "name": "critical",
+        "testDir": "__APP_ROOT__/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      },
+      {
+        "outputDir": "__APP_ROOT__/test-results",
+        "repeatEach": 1,
+        "retries": 1,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "shell-browser",
+        "name": "shell-browser",
+        "testDir": "__APP_ROOT__/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.62.0",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "outcomes.spec.ts",
+      "file": "outcomes.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "outcome group",
+          "file": "outcomes.spec.ts",
+          "line": 3,
+          "column": 6,
+          "specs": [
+            {
+              "title": "flaky retry @smoke",
+              "ok": true,
+              "tags": [
+                "smoke"
+              ],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "a11y",
+                  "projectName": "a11y",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 2,
+                      "error": {
+                        "message": "Error: SYNTHETIC_RETRY_FAILURE",
+                        "stack": "Error: SYNTHETIC_RETRY_FAILURE\n    at __APP_ROOT__/tests/e2e/outcomes.spec.ts:5:37",
+                        "location": {
+                          "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+                          "column": 37,
+                          "line": 5
+                        },
+                        "snippet": "\u001b[0m \u001b[90m 3 |\u001b[39m test\u001b[33m.\u001b[39mdescribe(\u001b[32m\"outcome group\"\u001b[39m\u001b[33m,\u001b[39m () \u001b[33m=>\u001b[39m {\n \u001b[90m 4 |\u001b[39m   test(\u001b[32m\"flaky retry @smoke\"\u001b[39m\u001b[33m,\u001b[39m \u001b[36masync\u001b[39m ({}\u001b[33m,\u001b[39m testInfo) \u001b[33m=>\u001b[39m {\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 5 |\u001b[39m     \u001b[36mif\u001b[39m (testInfo\u001b[33m.\u001b[39mretry \u001b[33m===\u001b[39m \u001b[35m0\u001b[39m) \u001b[36mthrow\u001b[39m \u001b[36mnew\u001b[39m \u001b[33mError\u001b[39m(\u001b[32m\"SYNTHETIC_RETRY_FAILURE\"\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m   |\u001b[39m                                     \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 6 |\u001b[39m     expect(testInfo\u001b[33m.\u001b[39mretry)\u001b[33m.\u001b[39mtoBe(\u001b[35m1\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m 7 |\u001b[39m   })\u001b[33m;\u001b[39m\n \u001b[90m 8 |\u001b[39m   test\u001b[33m.\u001b[39mskip(\u001b[32m\"intentional skip @smoke\"\u001b[39m\u001b[33m,\u001b[39m \u001b[36masync\u001b[39m () \u001b[33m=>\u001b[39m {\u001b[0m"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+                            "column": 37,
+                            "line": 5
+                          },
+                          "message": "Error: SYNTHETIC_RETRY_FAILURE\n\n  3 | test.describe(\"outcome group\", () => {\n  4 |   test(\"flaky retry @smoke\", async ({}, testInfo) => {\n> 5 |     if (testInfo.retry === 0) throw new Error(\"SYNTHETIC_RETRY_FAILURE\");\n    |                                     ^\n  6 |     expect(testInfo.retry).toBe(1);\n  7 |   });\n  8 |   test.skip(\"intentional skip @smoke\", async () => {\n    at __APP_ROOT__/tests/e2e/outcomes.spec.ts:5:37"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-14T18:28:47.306Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "__APP_ROOT__/test-results/outcomes-outcome-group-flaky-retry-smoke-a11y/error-context.md"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+                        "column": 37,
+                        "line": 5
+                      }
+                    },
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 6,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 1,
+                      "startTime": "2026-10-14T18:28:47.766Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "flaky"
+                }
+              ],
+              "id": "bac7195f1102b9e735ec-e11d869be03485f899ae",
+              "file": "outcomes.spec.ts",
+              "line": 4,
+              "column": 7
+            },
+            {
+              "title": "intentional skip @smoke",
+              "ok": true,
+              "tags": [
+                "smoke"
+              ],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+                        "line": 8,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "a11y",
+                  "projectName": "a11y",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-14T18:28:47.796Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "__APP_ROOT__/tests/e2e/outcomes.spec.ts",
+                            "line": 8,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "bac7195f1102b9e735ec-76b3317d590089f9a24d",
+              "file": "outcomes.spec.ts",
+              "line": 8,
+              "column": 8
+            },
+            {
+              "title": "plain pass @smoke",
+              "ok": true,
+              "tags": [
+                "smoke"
+              ],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "a11y",
+                  "projectName": "a11y",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-14T18:28:47.796Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "bac7195f1102b9e735ec-63a1c6edf5b201d8b755",
+              "file": "outcomes.spec.ts",
+              "line": 11,
+              "column": 7
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-14T18:28:46.855Z",
+    "duration": 962.167,
+    "expected": 1,
+    "skipped": 1,
+    "unexpected": 0,
+    "flaky": 1
+  }
+}
