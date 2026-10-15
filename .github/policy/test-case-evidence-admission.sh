@@ -49,7 +49,12 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
     File.write(File.join(app, name, "package.json"), JSON.generate({"version" => "1.62.0"}))
   end
   File.write(File.join(app, "package-lock.json"), JSON.generate({"packages" => packages}))
-  File.write(File.join(app, "playwright.config.ts"), %q{export default { testDir: "./tests/e2e" };} + "\n")
+  # The real config carries non-ASCII text (punctuation in its comments), and so do real test
+  # titles. The recorded reports below are pure ASCII, so without this the harness could not see a
+  # producer or validator that reads such bytes in the wrong encoding -- which is exactly how the
+  # first real run failed.
+  File.write(File.join(app, "playwright.config.ts"),
+    "// reviewed config \u2014 non-ASCII on purpose\n" + %q{export default { testDir: "./tests/e2e" };} + "\n")
   File.write(File.join(app, "node_modules/playwright/cli.js"), "// synthetic CLI placeholder\n")
   File.write(File.join(app, "tests/e2e/flows.spec.ts"), "// synthetic spec placeholder\n")
   File.write(File.join(app, "tests/e2e/deep/inner.spec.ts"), "// synthetic spec placeholder\n")
@@ -62,7 +67,8 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
   app_real = File.realpath(app)
   %w[real-list-smoke.json real-list-critical.json real-list-shell-browser.json
      real-list-outcomes.json real-execution-feedback.json real-execution-outcomes.json].each do |name|
-    text = File.read(File.join(assets, name)).gsub("__APP_ROOT__", app_real)
+    text = File.read(File.join(assets, name), encoding: Encoding::UTF_8).gsub("__APP_ROOT__", app_real)
+      .gsub("shared title across projects", "shared title \u2014 across projects")
     File.write(File.join(replay, name), JSON.generate(JSON.parse(text)))
   end
 
@@ -82,7 +88,9 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
     mode_file = File.join(File.dirname(File.dirname(app)), "mode")
     mode = File.exist?(mode_file) ? File.read(mode_file).strip : ""
     source_name = mode.start_with?("outcomes") ? "real-list-outcomes.json" : "real-list-\#{project}.json"
-    report = JSON.parse(File.read(File.join(replay, source_name)))
+    # UTF-8 whatever the locale, as node itself reads it: the producer gives this runner an empty
+    # environment, and the replayed titles are no longer pure ASCII.
+    report = JSON.parse(File.read(File.join(replay, source_name), encoding: Encoding::UTF_8))
     specs = report.fetch("suites").flat_map { |suite| suite.fetch("specs") }
     case mode
     when "discovery-extra"
@@ -143,7 +151,8 @@ set -a; . "$tmp/identity.env"; set +a
 execution_fixture() {
   ruby -rjson -e '
     target, source, mode = ARGV
-    report = JSON.parse(File.read(source))
+    # The same non-ASCII title as the replayed discovery reports, so the two still agree.
+    report = JSON.parse(File.read(source, encoding: Encoding::UTF_8).gsub("shared title across projects", "shared title \u2014 across projects"))
     w = lambda do |suites, &block|
       suites.each do |suite|
         (suite["specs"] || []).each { |spec| block.call(suite, spec) }

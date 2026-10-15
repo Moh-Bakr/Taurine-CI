@@ -376,10 +376,13 @@ begin
   [expected_path, discovery_path, execution_path].each do |path|
     reject!('input_size_limit') unless File.file?(path) && File.size(path) <= MAX_EVIDENCE_BYTES
   end
-  expected = JSON.parse(File.read(expected_path))
+  # Read as UTF-8 whatever the locale: the producer starts this validator with an empty
+  # environment, where the default external encoding is US-ASCII and the first non-ASCII byte in a
+  # real test title would make JSON.parse raise.
+  expected = JSON.parse(File.read(expected_path, encoding: Encoding::UTF_8))
   validate_expected(expected)
-  discovery_envelope = JSON.parse(File.read(discovery_path))
-  execution_envelope = JSON.parse(File.read(execution_path))
+  discovery_envelope = JSON.parse(File.read(discovery_path, encoding: Encoding::UTF_8))
+  execution_envelope = JSON.parse(File.read(execution_path, encoding: Encoding::UTF_8))
   discovery = validate_envelope(discovery_envelope, expected, 'discovery')
   execution = validate_envelope(execution_envelope, expected, 'execution')
   discovery_ids = discovery.map { |item| item.fetch('case_id') }.sort
