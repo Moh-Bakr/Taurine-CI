@@ -598,6 +598,16 @@ step_with() {
     "${work}/step.sh" "${from}" "${to}" > "${work}/step-${label}.sh"
   step_script="${work}/step-${label}.sh"
 }
+# step_swap LABEL TEXT REPLACEMENT: the step with one piece of text, inside a line, replaced; it must
+# occur exactly once. For text that sits within a script the step embeds, where a whole line is not
+# its own.
+step_swap() {
+  local label="$1" from="$2" to="$3" count
+  count="$(FROM="${from}" ruby -e 'print File.read(ARGV[0]).scan(ENV["FROM"]).length' "${work}/step.sh")"
+  [[ "${count}" -eq 1 ]] || { echo "base-policy isolation: the step does not hold '${from}' exactly once (${count})" >&2; exit 1; }
+  FROM="${from}" TO="${to}" ruby -e 'print File.read(ARGV[0]).sub(ENV["FROM"]) { ENV["TO"] }' "${work}/step.sh" > "${work}/step-${label}.sh"
+  step_script="${work}/step-${label}.sh"
+}
 # A stand-in that accepts a job only once a base script has asked it to.
 open_when_flagged() {
   printf '#!/bin/sh\n[ -e "%s" ] && exit 0\nexit 1\n' "$1" > "$2"
@@ -666,7 +676,7 @@ wait "${fake_manager}" 2>/dev/null || true
 # sshd, of any uid: ssh to localhost with a key a script wrote would start a process outside the
 # subreaper's reach, so a process named sshd or sshd-session -- as the real ones are named -- is refused.
 # Started as the job user here, which is the harder case for the check: it matches by name alone.
-for ssh_name in sshd sshd-session; do
+for ssh_name in sshd sshd-session sshd-auth; do
   sshd_fix="$(fixture "${work}/${ssh_name}")"
   passing_scripts "${sshd_fix}"
   commit_base "${sshd_fix}"
@@ -696,6 +706,23 @@ passing_scripts "${ssh_stale}"
 commit_base "${ssh_stale}"
 step_with ssh-stale 'ssh_ports="22"' "ssh_ports=\"${ssh_port}\""
 expect_pass ssh-stale "${ssh_stale}"
+step_script="${work}/step.sh"
+
+# A process scan that dies must fail the step, not read as "found nothing". errexit is off in the
+# function that runs it, so a scan that crashes prints nothing; the step must notice that it never
+# printed its separator. The fixture makes the scan raise.
+scan_crash="$(fixture "${work}/scan-crash")"
+passing_scripts "${scan_crash}"
+commit_base "${scan_crash}"
+step_swap scan-crash 'sshd = ["sshd", "sshd-session", "sshd-auth"]' 'raise "the process scan crashed"'
+expect_reject scan-crash "${scan_crash}" 'the process scan did not complete'
+# The other half: a scan that prints its result and then exits non-zero is not a scan that
+# completed, even though what it printed looks like "found nothing".
+scan_exit="$(fixture "${work}/scan-exit")"
+passing_scripts "${scan_exit}"
+commit_base "${scan_exit}"
+step_swap scan-exit 'delete_prefix("ssh:") }.join(" ")}"' 'delete_prefix("ssh:") }.join(" ")}"; exit 3'
+expect_reject scan-exit "${scan_exit}" 'the process scan did not complete'
 step_script="${work}/step.sh"
 
 # The same name in the step's own ancestry is not a finding: the step runs beneath a process that
