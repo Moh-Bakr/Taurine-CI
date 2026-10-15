@@ -26,6 +26,7 @@ module YamlGuard
       node.children.each_slice(2) do |k, v|
         if k.is_a?(Psych::Nodes::Scalar)
           key = key_of(k)
+        found << "#{path.join('.')}: a YAML merge key (<<) is not accepted: Psych and GitHub may resolve it differently" if k.value == '<<'
           found << "#{path.join('.')}: the key #{k.value.inspect} appears twice" if seen.key?(key)
           seen[key] = true
         end

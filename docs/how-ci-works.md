@@ -755,6 +755,15 @@ by `@sha256:<64 hex>`; and an expression is accepted only as the exact reviewed 
 `action-allowlist.rb` or exactly `${{ fromJSON('<one JSON literal>') }}`, where the literal obeys
 the same rules and may not repeat a key (even by escape), use a case variant or add a key. Any other
 expression can fall back to an unpinned image through `vars`, `env`, `inputs`, `matrix` or `needs`.
+A leading `-`, an uppercase letter or a second token in an image is refused (it could read as a docker
+flag or another image), `fromJSON` is accepted only as the container value itself and never as a
+mapping's `image`, JSON nesting beyond 64 levels is refused, and a YAML merge key (`<<`) is refused
+wherever `yaml-guard.rb` walks, because Psych and GitHub may resolve it differently.
+
+Residual: this check sees only the references a workflow or composite itself writes. What a reviewed
+remote action, a remote reusable workflow or a docker action does inside (its own nested `uses`,
+images and options) is not visible to it; pinning the exact SHA, and the review that put it on the
+allow-list, are the controls for that.
 Run with
 no arguments it walks the tree itself (the same `.yml` and `.yaml` files `check-workflows.sh`
 checks) and exits non-zero when it checked no file, so a direct run never passes having checked

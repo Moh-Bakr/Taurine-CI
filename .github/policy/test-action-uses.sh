@@ -180,13 +180,13 @@ jobs:
   j:
     container: ${{ fromJSON('{image:mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}') }}
 FXEND
-fixture_file container-map-expression reject:'not exactly' <<'FXEND'
+fixture_file container-map-expression reject:'only accepted as the container value itself' <<'FXEND'
 jobs:
   j:
     container:
       image: ${{ matrix.image }}
 FXEND
-fixture_file service-expression-fallback reject:'not exactly' <<'FXEND'
+fixture_file service-expression-fallback reject:'only accepted as the container value itself' <<'FXEND'
 jobs:
   j:
     services:
@@ -285,6 +285,42 @@ jobs:
     container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","options":"--ipc=host","options":"--ipc=host"}') }}
 FXEND
 
+# A leading dash, uppercase or a second token must never reach docker as a flag or another image.
+fixture_file image-leading-dash reject:'single token' <<'FXEND'
+jobs:
+  j:
+    container: -v/x@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+FXEND
+fixture_file image-leading-dash-mapping reject:'single token' <<'FXEND'
+jobs:
+  j:
+    container:
+      image: -v/x@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+FXEND
+fixture_file image-uppercase reject:'single token' <<'FXEND'
+jobs:
+  j:
+    container: Alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+FXEND
+# fromJSON is not accepted as a mapping's image value, only as the container value itself.
+fixture_file mapping-image-fromjson reject:'only accepted as the container value itself' <<FXEND
+jobs:
+  j:
+    container:
+      image: \${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}') }}
+FXEND
+# 20,000 levels of JSON nesting are refused cleanly, not left to the interpreter's stack.
+ruby -e 'puts "jobs:\n  j:\n    container: ${{ fromJSON(\x27" + "{\"a\":" * 20000 + "1" + "}" * 20000 + "\x27) }}"' > "${dir}/fx/literal-deep-nesting.yml"
+printf '%s\t%s\n' literal-deep-nesting 'reject:nesting deeper than 64' >> "${dir}/fx/index.tsv"
+# A YAML merge key is read differently by Psych and GitHub: refused wherever the walk looks.
+fixture_file merge-key reject:'merge key' <<'FXEND'
+jobs:
+  j:
+    steps:
+      - name: n
+        <<: {run: echo}
+FXEND
+
 # run_suite DIR: run every fixture against DIR/check-action-uses.rb; prints the first failure.
 run_suite() {
   local checker="$1/check-action-uses.rb" name expect out rc=0 failed=0
@@ -304,10 +340,10 @@ run_suite "${src}" || exit 1
 echo "accepted and refused as expected: $(wc -l < "${dir}/fx/index.tsv" | tr -d ' ') fixtures"
 
 # Each mutant weakens one guard in a copy of the script; the suite must fail on it.
-mutant() { # LABEL OLD NEW
+mutant() { # LABEL OLD NEW [FILE]
   rm -rf "${dir}/m"; mkdir "${dir}/m"
   cp "${src}/check-action-uses.rb" "${src}/yaml-guard.rb" "${src}/action-allowlist.rb" "${dir}/m/"
-  OLD="$2" NEW="$3" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found: #{ENV["OLD"][0, 70]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/m/check-action-uses.rb"
+  OLD="$2" NEW="$3" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found: #{ENV["OLD"][0, 70]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/m/${4:-check-action-uses.rb}"
   if run_suite "${dir}/m" >/dev/null 2>&1; then echo "MUTANT SURVIVED: $1" >&2; exit 1; fi
   echo "bites     $1"
 }
@@ -322,7 +358,11 @@ mutant 'job steps not read' 'steps_of.call("jobs.#{id}", job['"'"'steps'"'"']) i
 mutant 'job-level uses not read' 'take.call("jobs.#{id}", job)' 'nil'
 mutant 'a non-mapping step accepted' 'unless mapping.is_a?(Hash)' 'unless true'
 mutant 'the image digest rule removed' 'unless value.match?(IMAGE_REF)' 'if false'
-mutant 'the single-token image rule loosened' '%r{\A[A-Za-z0-9._/:-]+@' '%r{\A.+@'
+mutant 'the single-token image rule loosened' '%r{\A[a-z0-9][a-z0-9._/:-]*@' '%r{\A.+@'
+mutant 'a leading-dash or uppercase image accepted' '%r{\A[a-z0-9][a-z0-9._/:-]*@' '%r{\A[A-Za-z0-9._/:-]+@'
+mutant 'the JSON nesting cap removed' 'if @depth > MAX_JSON_DEPTH' 'if false'
+mutant 'an expression accepted as a mapping image' 'if in_mapping' 'if false'
+mutant 'merge keys accepted' "if k.value == '<<'" 'if false' yaml-guard.rb
 mutant 'container options accepted as free text' 'return if options.is_a?(String) && CONTAINER_OPTIONS_ALLOWLIST.include?(options)' 'return'
 mutant 'extra container keys accepted' '(spec.keys - CONTAINER_KEYS).each' '[].each'
 mutant 'duplicate literal keys accepted' 'duplicates.each { |k|' '[].each { |k|'

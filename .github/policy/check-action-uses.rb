@@ -96,7 +96,9 @@ end
 #     options only, no duplicate or escaped-duplicate key, case-variant keys refused as unknown).
 FROM_JSON_ONLY = /\A\$\{\{\s*fromJSON\('([^']*)'\)\s*\}\}\z/
 CONTAINER_KEYS = %w[image options].freeze
-IMAGE_REF = %r{\A[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}\z}
+# One lowercase token that starts with a letter or digit, so it can never read as a docker flag.
+IMAGE_REF = %r{\A[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}\z}
+MAX_JSON_DEPTH = 64
 
 # A small strict JSON reader that reports every key an object repeats, after escape decoding (so
 # "image" and "\u0069mage" are the same key). Ruby's own JSON parser resolves a duplicate silently to
@@ -115,6 +117,7 @@ class StrictJson
   def initialize(text)
     @text = text
     @pos = 0
+    @depth = 0
     @duplicates = []
   end
 
@@ -139,11 +142,15 @@ class StrictJson
   end
 
   def object
+    @depth += 1
+    raise JSON::ParserError, "nesting deeper than #{MAX_JSON_DEPTH}" if @depth > MAX_JSON_DEPTH
+
     @pos += 1
     result = {}
     skip
     if @text[@pos] == '}'
       @pos += 1
+      @depth -= 1
       return result
     end
     loop do
@@ -161,6 +168,7 @@ class StrictJson
       case @text[@pos]
       when ',' then @pos += 1
       when '}' then @pos += 1
+                    @depth -= 1
                     return result
       else raise JSON::ParserError, 'comma or brace expected'
       end
@@ -204,25 +212,31 @@ def spec_findings(where, spec, findings)
   end
   (spec.keys - CONTAINER_KEYS).each { |k| findings << "#{where}: the key #{k.inspect} is not reviewed (only image and options are)" }
   options_findings("#{where}.options", spec['options'], findings) if spec.key?('options')
-  image_findings("#{where}.image", spec['image'], findings)
+  image_findings("#{where}.image", spec['image'], findings, in_mapping: true)
 end
 
-def image_findings(where, value, findings)
+def image_findings(where, value, findings, in_mapping: false)
   unless value.is_a?(String) && !value.strip.empty?
     findings << "#{where}: the image is not a non-empty string (#{value.inspect})"
     return
   end
   if value.include?('${{')
+    if in_mapping
+      findings << "#{where}: an expression is only accepted as the container value itself, not as a mapping's image: #{value[0, 200]}"
+      return
+    end
     return if CONTAINER_EXPRESSION_ALLOWLIST.include?(value)
 
     literal = value[FROM_JSON_ONLY, 1]
+    reason = nil
     parsed, duplicates = begin
       literal ? StrictJson.parse(literal) : [nil, []]
-    rescue JSON::ParserError
+    rescue JSON::ParserError, SystemStackError => e
+      reason = e.message[0, 80]
       [nil, []]
     end
     unless parsed.is_a?(Hash) && parsed['image'].is_a?(String)
-      findings << "#{where}: the image expression is not exactly ${{ fromJSON('<one JSON literal with an image>') }} and not on the reviewed list: #{value}"
+      findings << "#{where}: the image expression is not exactly ${{ fromJSON('<one JSON literal with an image>') }} and not on the reviewed list#{reason ? " (#{reason})" : ''}: #{value[0, 200]}"
       return
     end
     duplicates.each { |k| findings << "#{where}: the JSON literal repeats the key #{k.inspect}" }
