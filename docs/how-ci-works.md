@@ -785,8 +785,8 @@ process behind to act later. The base pass is therefore isolated further:
   changed any of them would otherwise be believed by the next; the step logs the unix listeners of the job user and the
   `kernel.yama.ptrace_scope` it found, here and in the root step.
 - **No sshd.** Pull-request code that wrote the job user's `authorized_keys` could `ssh localhost`
-  and start a process the subreaper never sees. The root step masks `ssh.service` and `ssh.socket`
-  (so socket activation cannot revive them) and the step, before every script, refuses any process
+  and start a process the subreaper never sees. The root step logs the state of `ssh.service` and
+  `ssh.socket`, masks them (so socket activation cannot revive them), and logs it again; the step, before every script, refuses any process
   named `sshd`, `sshd-session` or `sshd-auth`, of any uid, and anything accepting connections on
   loopback port 22. Locking `~/.ssh` was not used instead, because the job user owns its home and
   can replace the directory. A script that starts an sshd of its own is a descendant, so the

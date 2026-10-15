@@ -659,7 +659,7 @@ cp /bin/sleep "${work}/fake-bin/dbus-daemon"
 "${work}/fake-bin/dbus-daemon" 120 &
 fake_manager=$!
 step_script="${work}/step.sh"
-expect_reject manager "${manager}" "a process that could start work outside this job is running (dbus-daemon(${fake_manager}))"
+expect_reject manager "${manager}" "a systemd user manager or message bus is running for the job user (dbus-daemon(${fake_manager}))"
 kill "${fake_manager}" 2>/dev/null || true
 wait "${fake_manager}" 2>/dev/null || true
 
@@ -673,7 +673,7 @@ for ssh_name in sshd sshd-session; do
   cp /bin/sleep "${work}/fake-bin/${ssh_name}"
   "${work}/fake-bin/${ssh_name}" 120 &
   fake_ssh=$!
-  expect_reject "${ssh_name}" "${sshd_fix}" "a process that could start work outside this job is running (${ssh_name}(${fake_ssh}))"
+  expect_reject "${ssh_name}" "${sshd_fix}" "sshd is running (${ssh_name}(${fake_ssh}))"
   kill "${fake_ssh}" 2>/dev/null || true
   wait "${fake_ssh}" 2>/dev/null || true
 done

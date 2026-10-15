@@ -70,8 +70,9 @@ jobs:
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
+          echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
           sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
-          echo "sshd: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
+          echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
@@ -140,8 +141,9 @@ jobs:
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
+          echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
           sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
-          echo "sshd: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
+          echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
@@ -279,17 +281,18 @@ jobs:
               stat = File.read("#{dir}/stat") rescue next
               next if stat[(stat.rindex(")") + 2)..].split(" ")[0] == "Z"
               comm = File.read("#{dir}/comm").chomp rescue next
-              next "#{comm}(#{pid})" if sshd.include?(comm)
+              next "ssh:#{comm}(#{pid})" if sshd.include?(comm)
               uids = File.read("#{dir}/status")[/^Uid:\s+(\d+)\s+(\d+)/, 0].to_s.scan(/\d+/).map(&:to_i) rescue next
               "#{comm}(#{pid})" if uids.include?(Process.uid) && names.include?(comm)
             end
-            puts found.join(" ")
+            ssh, managers = found.partition { |entry| entry.start_with?("ssh:") }
+            puts "#{managers.join(" ")}\t#{ssh.map { |entry| entry.delete_prefix("ssh:") }.join(" ")}"
           '
           log_listeners() {
             [[ ! -x /usr/bin/ss ]] || echo "unix listeners of uid $(id -u): $("${scrub[@]}" /usr/bin/ss -xlne 2>/dev/null | grep -F "uid:$(id -u) " || echo none)"
           }
           assert_nothing_deferred() {
-            local left socket
+            local scan left ssh_left socket
             if [[ -x "${crontab_bin}" ]] && printf '' | "${crontab_bin}" - 2>/dev/null; then
               "${crontab_bin}" -r 2>/dev/null || true
               echo "::error::the job user can still install a crontab, so a base script could leave work for later"
@@ -307,10 +310,16 @@ jobs:
                 return 1
               fi
             done
-            left="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")"
+            scan="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")"
+            left="${scan%%$'\t'*}"
+            ssh_left="${scan#*$'\t'}"
             if [[ -n "${left}" ]]; then
               log_listeners
-              echo "::error::a process that could start work outside this job is running (${left}): a job-user systemd manager or bus, or sshd"
+              echo "::error::a systemd user manager or message bus is running for the job user (${left}), so a base script could start work outside this job"
+              return 1
+            fi
+            if [[ -n "${ssh_left}" ]]; then
+              echo "::error::sshd is running (${ssh_left}), so a base script could ssh to localhost and start work outside this job"
               return 1
             fi
             # shellcheck disable=SC2086
