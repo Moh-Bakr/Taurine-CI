@@ -748,7 +748,7 @@ mappings, a value on the next line, a space before the colon and a complex key a
 tripwire fails the file when more lines look like a `uses` key than the walk found.
 The same walk refuses a container image not pinned by an `@sha256:<64 hex>` digest
 (`jobs.<id>.container`, a string or a mapping with `image`, and `jobs.<id>.services.*.image`; an
-expression is read for the quoted `"image"` values inside it, and one with none is refused). Run with
+expression is accepted only as the exact reviewed text in `action-allowlist.rb` or exactly `${{ fromJSON('<one JSON literal>') }}` with a pinned image, because any other expression can fall back to an unpinned image through `vars`, `env`, `inputs`, `matrix` or `needs`). Run with
 no arguments it walks the tree itself (the same `.yml` and `.yaml` files `check-workflows.sh`
 checks) and exits non-zero when it checked no file, so a direct run never passes having checked
 nothing. The tripwire fails closed, so any non-comment line holding the text `uses:` (a trailing

@@ -97,9 +97,6 @@ fixture ok-service-digest pass 'jobs:
     services:
       db:
         image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-fixture ok-container-expression pass "jobs:
-  j:
-    container: \${{ inputs.x == 'y' && fromJSON('{\"image\":\"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"options\":\"--ipc=host\"}') || null }}"
 fixture container-tag reject:'container image must be pinned' 'jobs:
   j:
     container: alpine:3'
@@ -117,12 +114,6 @@ fixture service-short-digest reject:'container image must be pinned' 'jobs:
     services:
       db:
         image: postgres@sha256:abc123'
-fixture container-expression-unpinned reject:'container image must be pinned' "jobs:
-  j:
-    container: \${{ fromJSON('{\"image\":\"alpine:3\"}') }}"
-fixture container-expression-opaque reject:'cannot be verified' 'jobs:
-  j:
-    container: ${{ inputs.image }}'
 fixture container-non-string reject:'not a non-empty string' 'jobs:
   j:
     container: 5'
@@ -137,6 +128,71 @@ fixture service-not-mapping reject:'is not a mapping' 'jobs:
   j:
     services:
       db: postgres:16'
+
+# Expressions: exactly fromJSON of one pinned JSON literal, or the exact reviewed text; nothing else.
+fixture_file() { # NAME EXPECTATION: the body comes from stdin
+  cat > "${dir}/fx/$1.yml"; printf '%s\t%s\n' "$1" "$2" >> "${dir}/fx/index.tsv"
+}
+fixture_file ok-container-fromjson pass <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","options":"--ipc=host"}') }}
+FXEND
+fixture_file ok-container-reviewed-expression pass <<'FXEND'
+jobs:
+  j:
+    container: ${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}
+FXEND
+fixture_file container-expression-unpinned reject:'container image must be pinned' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"alpine:3"}') }}
+FXEND
+fixture_file container-expression-opaque reject:'not exactly' <<'FXEND'
+jobs:
+  j:
+    container: ${{ inputs.image }}
+FXEND
+for ctx in vars env inputs matrix needs; do
+  fixture_file "container-fallback-${ctx}" reject:'not exactly' <<FXEND
+jobs:
+  j:
+    container: \${{ inputs.go && fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}') || ${ctx}.CONTAINER }}
+FXEND
+done
+fixture_file container-fallback-concat reject:'not exactly' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}') }}${{ vars.EXTRA }}
+FXEND
+fixture_file container-fromjson-trailing-fallback reject:'not exactly' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}') || vars.C }}
+FXEND
+fixture_file container-fromjson-no-image reject:'not exactly' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"options":"--ipc=host"}') }}
+FXEND
+fixture_file container-fromjson-bad-json reject:'not exactly' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{image:mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}') }}
+FXEND
+fixture_file container-map-expression reject:'not exactly' <<'FXEND'
+jobs:
+  j:
+    container:
+      image: ${{ matrix.image }}
+FXEND
+fixture_file service-expression-fallback reject:'not exactly' <<'FXEND'
+jobs:
+  j:
+    services:
+      db:
+        image: ${{ vars.DB_IMAGE }}
+FXEND
 
 # run_suite DIR: run every fixture against DIR/check-action-uses.rb; prints the first failure.
 run_suite() {
@@ -175,7 +231,9 @@ mutant 'job steps not read' 'steps_of.call("jobs.#{id}", job['"'"'steps'"'"']) i
 mutant 'job-level uses not read' 'take.call("jobs.#{id}", job)' 'nil'
 mutant 'a non-mapping step accepted' 'unless mapping.is_a?(Hash)' 'unless true'
 mutant 'the image digest rule removed' 'unless image.match?(DIGEST)' 'if false'
-mutant 'an opaque image expression accepted' 'if images.empty?' 'if false'
+mutant 'the exact fromJSON-only shape loosened' 'literal = value[FROM_JSON_ONLY, 1]' "literal = value[/fromJSON\\('([^']*)'\\)/, 1]"
+mutant 'an unparsed expression accepted' 'if image.equal?(value)' 'if false'
+mutant 'the reviewed expression list ignored' 'return if CONTAINER_EXPRESSION_ALLOWLIST.include?(value)' 'nil'
 mutant 'container images not walked' '  container_findings(doc, findings)
 ' ''
 mutant 'services not walked' '    next unless job.key?('"'"'services'"'"')' '    next'
@@ -196,6 +254,10 @@ walk_assertions() {
   cp "${dir}/fx/esc-flow-map.yml" "${dir}/tree/.github/workflows/b.yaml"
   if out="$(walk "${dir}/tree" "$1")"; then echo 'passed a tree with a bad .yaml workflow' >&2; return 1; fi
   grep -qF 'b.yaml' <<<"${out}" || { echo "did not name b.yaml: ${out}" >&2; return 1; }
+  rm "${dir}/tree/.github/workflows/b.yaml"
+  cp "${dir}/fx/container-tag.yml" "${dir}/tree/.github/workflows/.hidden.yml"
+  if out="$(walk "${dir}/tree" "$1")"; then echo 'passed a tree with a bad hidden workflow' >&2; return 1; fi
+  grep -qF '.hidden.yml' <<<"${out}" || { echo "did not name .hidden.yml: ${out}" >&2; return 1; }
   mktree
   if out="$(walk "${dir}/tree" "$1")"; then echo 'passed having checked nothing' >&2; return 1; fi
   grep -qF 'no workflow or composite file to check' <<<"${out}" || { echo "empty tree refused for the wrong reason: ${out}" >&2; return 1; }
@@ -212,6 +274,7 @@ mutant_walk() { # LABEL OLD NEW: the assertions above must fail on the mutant
 mutant_walk 'the nothing-checked guard removed' "if files.empty?
   warn" 'if false
   warn'
+mutant_walk 'hidden files left out of the walk' ', File::FNM_DOTMATCH' ''
 mutant_walk '.yaml files left out of the walk' '{yml,yaml}' '{yml}'
 mutant_walk 'composites left out of the walk' '{workflows,actions}' '{workflows}'
 echo 'action-uses tests: every spelling is refused and every guard bites'

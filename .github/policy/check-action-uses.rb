@@ -21,8 +21,9 @@
 #
 # The same walk refuses a container image that is not pinned by an `@sha256:<64 hex>` digest:
 # `jobs.<id>.container` (a string or a mapping with `image`) and `jobs.<id>.services.<name>.image`.
-# An expression value is read for the quoted `"image":"..."` values inside it and each must be
-# pinned; an expression with no such value cannot be verified and is refused.
+# An expression is accepted only as exact reviewed text (action-allowlist.rb) or exactly
+# `${{ fromJSON('<one JSON literal>') }}` with the literal's image pinned; any other expression is
+# refused, since it can fall back to an unpinned image through vars, env, inputs, matrix or needs.
 #
 # The tripwire fails closed, so it has false positives by design: any non-comment line that holds
 # the text `uses:` (a trailing comment, a `run:` script, a description) counts as a line that looks
@@ -34,6 +35,7 @@
 #   .github/workflows and .github/actions, the set check-workflows.sh checks) from the repository
 #   root. It exits 1 on any finding, and also when it checked no file at all: it never exits 0
 #   having checked nothing.
+require 'json'
 require 'yaml'
 require_relative 'yaml-guard'
 require_relative 'action-allowlist'
@@ -81,18 +83,33 @@ def references(doc, findings)
   refs
 end
 
-# An image reference must carry a digest. An expression is read for the quoted image values inside
-# it; one with none cannot be verified.
+# An image reference must carry a digest. An expression is accepted only as exact reviewed text
+# (CONTAINER_EXPRESSION_ALLOWLIST) or exactly `${{ fromJSON('<one JSON literal>') }}` whose image is
+# pinned; any other expression can fall back to an unpinned image and is refused.
+FROM_JSON_ONLY = /\A\$\{\{\s*fromJSON\('([^']*)'\)\s*\}\}\z/
+
 def image_findings(where, value, findings)
   unless value.is_a?(String) && !value.strip.empty?
     findings << "#{where}: the image is not a non-empty string (#{value.inspect})"
     return
   end
-  images = value.include?('${{') ? value.scan(/"image"\s*:\s*"([^"]+)"/).flatten : [value]
-  findings << "#{where}: an image expression with no quoted image value cannot be verified: #{value}" if images.empty?
-  images.each do |image|
-    findings << "Every container image must be pinned by an @sha256:<64 hex> digest (#{where}): #{image}" unless image.match?(DIGEST)
+  image = value
+  if value.include?('${{')
+    return if CONTAINER_EXPRESSION_ALLOWLIST.include?(value)
+
+    literal = value[FROM_JSON_ONLY, 1]
+    parsed = begin
+      literal && JSON.parse(literal)
+    rescue JSON::ParserError
+      nil
+    end
+    image = parsed['image'] if parsed.is_a?(Hash) && parsed['image'].is_a?(String)
+    if image.equal?(value)
+      findings << "#{where}: the image expression is not exactly ${{ fromJSON('<one JSON literal with an image>') }} and not on the reviewed list: #{value}"
+      return
+    end
   end
+  findings << "Every container image must be pinned by an @sha256:<64 hex> digest (#{where}): #{image}" unless image.match?(DIGEST)
 end
 
 def container_findings(doc, findings)
@@ -147,7 +164,8 @@ def check_file(path)
 end
 
 files = ARGV.dup
-files = Dir.glob('.github/{workflows,actions}/**/*.{yml,yaml}').sort if files.empty?
+# The same set as check-workflows.sh's find: regular files only, hidden ones included.
+files = Dir.glob('.github/{workflows,actions}/**/*.{yml,yaml}', File::FNM_DOTMATCH).select { |f| File.file?(f) && !File.symlink?(f) }.sort if files.empty?
 if files.empty?
   warn 'no workflow or composite file to check: run from the repository root, or name the files'
   exit 1

@@ -64,3 +64,13 @@ ACTION_ALLOWLIST = [
   './.github/actions/root-setup',
   './.github/actions/drop-root',
 ].freeze
+
+# The reviewed container EXPRESSIONS, as exact text (the parsed YAML value). Any other expression for
+# a container image must be exactly `${{ fromJSON('<one JSON literal>') }}` with every image in the
+# literal pinned by digest; everything else is refused, because an expression can fall back to an
+# unpinned image through vars, env, inputs, matrix or needs.
+CONTAINER_EXPRESSION_ALLOWLIST = [
+  # The Playwright visual tier: the digest-pinned image only for the e2e-visual concern, none
+  # otherwise (`|| null`). The condition and the null fallback are why it is not the plain shape.
+  %q(${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}),
+].freeze
