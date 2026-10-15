@@ -52,6 +52,13 @@ write_lock
 # (FAKE_ARMV7_BAD adds a non-door parent on armv7 only). `none` = cargo's "nothing to print".
 cat >"${work}/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
+if [[ "$1" == fetch ]]; then
+  cache="${CARGO_HOME}/registry/cache/index.crates.io-0000"
+  [[ "${FAKE_FETCH:-}" == none ]] && exit 0
+  mkdir -p "${cache}"; cp "${FAKE_UPSTREAM}"/*.crate "${cache}/" 2>/dev/null || true
+  if [[ "${FAKE_FETCH:-}" == decoy ]]; then mkdir -p "${CARGO_HOME}/registry/cache/zzz-mirror"; printf 'bad\n' >"${CARGO_HOME}/registry/cache/zzz-mirror/openssl-src-300.5.5+3.5.5.crate"; fi
+  exit 0
+fi
 if [[ "$1" == metadata ]]; then
   if [[ " $* " == *" --no-deps "* ]]; then
     echo '{"packages":[{"name":"taurine-mobile"},{"name":"taurine-desktop"}],"target_directory":"/nonexistent"}'
@@ -105,7 +112,7 @@ artefact() {
 run_lib() {
   (
     cd "${src}"
-    export PATH="${work}/bin:${PATH}" RUNNER_TEMP="${work}/rt" GITHUB_STEP_SUMMARY="${work}/summary.md" CARGO_HOME="${work}/cargo-home"
+    export PATH="${work}/bin:${PATH}" RUNNER_TEMP="${work}/rt" GITHUB_STEP_SUMMARY="${work}/summary.md" CARGO_HOME="${work}/cargo-home" FAKE_UPSTREAM="${work}/upstream"
     mkdir -p "${RUNNER_TEMP}"
     unset OPENSSL_DIR OPENSSL_NO_VENDOR OPENSSL_STATIC OPENSSL_LIB_DIR OPENSSL_INCLUDE_DIR
     source "${work}/sanitize.sh"; source "${work}/mobile-report.sh"; source "${work}/shell-artefact.sh"
@@ -135,10 +142,10 @@ expect_fail 'unknown package' 'openssl_door_gate g no-such-package -' 'did not r
 
 # ---- N3: the gate must see the built feature set -------------------------------------------
 printf '{"build":{"features":["door-extra"]}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.uat.json"
-expect_fail 'absent while linked (build.features)' 'FAKE_TREE=absent openssl_door_gate g taurine-desktop -' 'build.features, build.runner'
+expect_fail 'absent while linked (build.features)' 'FAKE_TREE=absent openssl_door_gate g taurine-desktop -' 'build.features or build.runner'
 expect_fail 'door_in_graph under build.features' 'FAKE_TREE=absent door_in_graph taurine-desktop -'
 printf '{"build":{"runner":"other-cargo"}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.uat.json"
-expect_fail 'build.runner' 'openssl_door_gate g taurine-desktop -' 'build.features, build.runner'
+expect_fail 'build.runner' 'openssl_door_gate g taurine-desktop -' 'build.features or build.runner'
 rm "${src}/taurine-desktop/src-tauri/tauri.conf.uat.json"
 printf '{ build: {} }\n' >"${src}/taurine-mobile/src-tauri/tauri.ios.conf.json5"
 expect_fail 'unchecked json5 config' 'openssl_door_gate g taurine-mobile -' 'json5/toml'
@@ -210,10 +217,13 @@ expect_fail 'directory source replacement' 'FAKE_META=vendor door_provenance p' 
 # The CLI: @tauri-apps/cli/tauri.js run by CI's node, .bin/tauri resolving to it, registry lock.
 tdir="${src}/taurine-desktop"
 mkdir -p "${tdir}/node_modules/.bin" "${tdir}/node_modules/@tauri-apps/cli" "${tdir}/node_modules/@tauri-apps/cli-linux-x64-gnu"
+printf '{"name":"d","scripts":{"tauri":"tauri"}}\n' >"${tdir}/package.json"
 cat >"${tdir}/node_modules/@tauri-apps/cli/tauri.js" <<'STUB'
+#!/usr/bin/env node
 const env = process.env;
 console.log(`tauri-argv: ${process.argv.slice(2).join(" ")} | cwd=${require("path").basename(process.cwd())} | config=${env.TAURI_CONFIG || "unset"} | other=${env.TAURI_EXTRA || "unset"}`);
 STUB
+chmod +x "${tdir}/node_modules/@tauri-apps/cli/tauri.js"
 ln -s ../@tauri-apps/cli/tauri.js "${tdir}/node_modules/.bin/tauri"
 write_npm_lock() {
   jq -n --arg r1 "${1-https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.12.0.tgz}" --arg i1 "${2-sha512-AAAA}" \
@@ -231,6 +241,14 @@ write_npm_lock
 rm "${tdir}/node_modules/.bin/tauri"; printf 'console.log(1)\n' >"${work}/other.js"; ln -s "${work}/other.js" "${tdir}/node_modules/.bin/tauri"
 expect_fail '.bin/tauri pointing elsewhere' 'tauri_cli taurine-desktop build' 'is not @tauri-apps/cli/tauri.js'
 rm "${tdir}/node_modules/.bin/tauri"; ln -s ../@tauri-apps/cli/tauri.js "${tdir}/node_modules/.bin/tauri"
+printf '{"name":"d","scripts":{"tauri":"node evil.js"}}\n' >"${tdir}/package.json"
+expect_fail 'a tauri script that is not the CLI' 'tauri_cli taurine-desktop build' 'not exactly `tauri`'
+printf '{"name":"d","scripts":{"tauri":"tauri","pretauri":"node evil.js"}}\n' >"${tdir}/package.json"
+expect_fail 'a pretauri script' 'tauri_cli taurine-desktop build' 'pre/post script'
+printf '{"name":"d","scripts":{"tauri":"tauri"}}\n' >"${tdir}/package.json"
+printf 'script-shell=/bin/evil\n' >"${src}/.npmrc"
+expect_fail 'an .npmrc in the checkout' 'tauri_cli taurine-desktop build' 'carries an .npmrc'
+rm "${src}/.npmrc"
 printf 'Tauri.linux.toml overlay\n[build]\nfeatures = ["x"]\n' >"${src}/taurine-desktop/src-tauri/Tauri.linux.toml"
 expect_fail 'a Tauri.linux.toml overlay (G1)' 'refuse_build_feature_overrides' 'json5/toml'
 rm "${src}/taurine-desktop/src-tauri/Tauri.linux.toml"
@@ -239,10 +257,18 @@ expect_fail 'a json5 platform overlay (G1)' 'refuse_build_feature_overrides' 'js
 rm "${src}/taurine-mobile/src-tauri/tauri.android.conf.json5"
 for key in '{"linux":{"deb":{"files":{"/usr/lib/x":"x"}}}}' '{"macOS":{"files":{"x":"y"}}}' '{"macOS":{"frameworks":["./Vendor.framework"]}}' '{"iOS":{"frameworks":["lib/x.xcframework"]}}'; do
   printf '{"bundle":%s}\n' "${key}" >"${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
-  expect_fail "a file-shipping bundle key ${key%%:*}" 'refuse_build_feature_overrides' 'deb/macOS files or a framework path'
+  expect_fail "a file-shipping bundle key ${key%%:*}" 'refuse_build_feature_overrides' 'ships files, frameworks'
 done
 printf '{"bundle":{"iOS":{"frameworks":["SystemConfiguration"]}}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
 expect_pass 'a system framework name' 'refuse_build_feature_overrides'
+for key in '{"macOS":{"frameworks":["SystemConfiguration"]}}' '{"iOS":{"frameworks":["UIKit"]}}' '{"iOS":{"template":"tpl/project.yml"}}' \
+  '{"windows":{"wix":{"fragmentPaths":["f.wxs"]}}}' '{"windows":{"wix":{"template":"m.wxs"}}}' '{"windows":{"wix":{"componentGroupRefs":["x"]}}}' \
+  '{"windows":{"wix":{"mergeRefs":["x"]}}}' '{"windows":{"nsis":{"installerHooks":"h.nsh"}}}' '{"windows":{"nsis":{"template":"t.nsi"}}}' \
+  '{"windows":{"signCommand":"sign.sh"}}' '{"linux":{"rpm":{"files":{"/x":"y"}}}}' '{"linux":{"rpm":{"postInstallScript":"p.sh"}}}' \
+  '{"linux":{"deb":{"postInstallScript":"p.sh"}}}' '{"linux":{"deb":{"preRemoveScript":"p.sh"}}}' '{"linux":{"appimage":{"files":{"/x":"y"}}}}'; do
+  printf '{"bundle":%s}\n' "${key}" >"${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
+  expect_fail "a refused bundle key ${key}" 'refuse_build_feature_overrides' 'ships files, frameworks'
+done
 rm "${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
 mkdir -p "${src}/elsewhere"; printf '{"build":{"features":["x"]}}\n' >"${src}/elsewhere/tauri.conf.json"
 expect_fail 'a Tauri config outside src-tauri' 'refuse_build_feature_overrides' 'outside the shells'
@@ -251,7 +277,7 @@ mkdir -p "${src}/taurine-mobile/src-tauri/sub"; printf '{}\n' >"${src}/taurine-m
 expect_fail 'a nested Tauri config' 'refuse_build_feature_overrides' 'outside the shells'
 rm -r "${src}/taurine-mobile/src-tauri/sub"
 printf '{"bundle":{"externalBin":["bin/sidecar"]}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
-expect_fail 'a sidecar' 'refuse_build_feature_overrides' 'bundle.externalBin'
+expect_fail 'a sidecar' 'refuse_build_feature_overrides' 'a sidecar'
 rm "${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
 # Resources must be data: inside the checkout (symlinks resolved), existing, not ELF/Mach-O/PE.
 conf="${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
@@ -347,10 +373,13 @@ cp "$(artefact w4 3.0.13)" "${work}/tgt/bundled.dll"
 expect_fail 'Windows target: another DLL with OpenSSL' "TCI_TREE_MAXDEPTH=1 TCI_TREE_DOOR_NAMES=shell_lib.dll artefact_tree_check w '${work}/tgt' '${work}/tgt/app.exe' debug present" 'the door is not in the graph'
 grep -qF 'TCI_TREE_MAXDEPTH=1 TCI_TREE_DOOR_NAMES=' .github/actions/shell-artefact/action.yml || fail 'the Windows desktop check does not scan the target directory'
 
-# ---- G7: the door crates are re-extracted from verified archives ------------------------------
+# ---- D3/G7: door crates fetched afresh, every cached copy verified, built copy compared --------
 reg="${work}/cargo-home/registry"
-mkdir -p "${reg}/cache/index.crates.io-0000" "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5"
-for crate in openssl-0.10.81 openssl-src-300.5.5+3.5.5 openssl-sys-0.9.117 tokio-openssl-0.6.5; do printf 'archive %s\n' "${crate}" >"${reg}/cache/index.crates.io-0000/${crate}.crate"; done
+upstream="${work}/upstream"; mkdir -p "${upstream}"
+for crate in openssl-0.10.81 openssl-src-300.5.5+3.5.5 openssl-sys-0.9.117 tokio-openssl-0.6.5; do
+  mkdir -p "${work}/pkg/${crate}/src"; printf 'fn main() {}\n' >"${work}/pkg/${crate}/src/lib.rs"
+  tar -czf "${upstream}/${crate}.crate" -C "${work}/pkg" "${crate}"
+done
 lock_with_real_sums() {
   ruby -e '
     require "digest"
@@ -360,32 +389,85 @@ lock_with_real_sums() {
       sum = Digest::SHA256.file(File.join(cache, "#{name}-#{version}.crate")).hexdigest
       %(name = "#{name}"\nversion = "#{version}"\nsource = "#{source}"\nchecksum = "#{sum}")
     end
-    File.write(lock, text)' "${src}/Cargo.lock" "${reg}/cache/index.crates.io-0000"
+    File.write(lock, text)' "${src}/Cargo.lock" "${upstream}"
 }
 lock_with_real_sums
-expect_pass 'verified door crate archives' 'verify_door_crate_sources'
-[[ ! -e "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5" ]] || fail 'the extracted openssl-src was not removed for re-extraction'
+# A planted decoy with a good archive, and a tampered copy where cargo looks: both are deleted.
+mkdir -p "${reg}/cache/aaa-decoy" "${reg}/cache/index.crates.io-0000" "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5"
+cp "${upstream}/openssl-src-300.5.5+3.5.5.crate" "${reg}/cache/aaa-decoy/"
 printf 'tampered\n' >"${reg}/cache/index.crates.io-0000/openssl-src-300.5.5+3.5.5.crate"
-expect_fail 'a tampered openssl-src archive' 'verify_door_crate_sources' 'does not match the Cargo.lock checksum'
-rm "${reg}/cache/index.crates.io-0000/openssl-src-300.5.5+3.5.5.crate"
-expect_fail 'a missing openssl-src archive' 'verify_door_crate_sources' 'archive to verify'
+expect_pass 'decoy and tampered copies replaced by a fresh fetch' 'verify_door_crate_sources'
+[[ ! -e "${reg}/cache/aaa-decoy/openssl-src-300.5.5+3.5.5.crate" && ! -e "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5" ]] || fail 'the planted copies were not deleted before the fetch'
+expect_fail 'a fetch that leaves a tampered second copy' 'FAKE_FETCH=decoy verify_door_crate_sources' 'does not match the Cargo.lock checksum'
+expect_fail 'a fetch that leaves no archive' 'FAKE_FETCH=none verify_door_crate_sources' 'archive to verify'
+expect_pass 'verified again' 'verify_door_crate_sources'
+for crate in openssl-0.10.81 openssl-src-300.5.5+3.5.5 openssl-sys-0.9.117 tokio-openssl-0.6.5; do
+  tar -xzf "${reg}/cache/index.crates.io-0000/${crate}.crate" -C "${reg}/src/index.crates.io-0000"; : >"${reg}/src/index.crates.io-0000/${crate}/.cargo-ok"
+done
+expect_pass 'built copies equal their verified archives' 'verify_door_crate_build_inputs'
+printf '// planted\n' >>"${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/src/lib.rs"
+expect_fail 'a registry/src copy modified after verification' 'verify_door_crate_build_inputs' 'differs from its verified archive'
+rm -rf "${reg}"
 write_lock
+
+# ---- D4: the committed Gradle wrapper is Gradle's -----------------------------------------------
+wrap="${src}/taurine-mobile/src-tauri/gen/android/gradle/wrapper"; mkdir -p "${wrap}"
+printf 'wrapper jar\n' >"${wrap}/gradle-wrapper.jar"
+jar_sum="$( (sha256sum "${wrap}/gradle-wrapper.jar" 2>/dev/null || shasum -a 256 "${wrap}/gradle-wrapper.jar") | cut -d' ' -f1)"
+props() { printf 'distributionBase=GRADLE_USER_HOME\ndistributionUrl=%s\n%s' "$1" "${2:+distributionSha256Sum=$2
+}" >"${wrap}/gradle-wrapper.properties"; }
+props 'https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip' bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
+expect_pass 'a pinned Gradle wrapper' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check"
+expect_fail 'an unknown wrapper jar' 'gradle_wrapper_check' 'not a published Gradle wrapper'
+props 'https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip' ''
+expect_fail 'no distributionSha256Sum' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check" 'distributionSha256Sum is missing'
+props 'https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip' 0000000000000000000000000000000000000000000000000000000000000000
+expect_fail 'a wrong distributionSha256Sum' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check" 'distributionSha256Sum is missing'
+props 'https\://example.invalid/gradle-8.14.3-bin.zip' bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
+expect_fail 'a non-official distributionUrl' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check" 'not an official Gradle'
+props 'https\://services.gradle.org/distributions/gradle-7.6-bin.zip' x
+expect_fail 'an unpinned Gradle version' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check" 'no pinned distribution checksum'
+grep -qF 'gradle_wrapper_check || exit 1' .github/workflows/android-validation.yml || fail 'android-native does not check the Gradle wrapper'
+rm -rf "${src}/taurine-mobile/src-tauri/gen"
 
 # ---- gen/: CI regenerates the mobile Rust build phases ---------------------------------------
 gen="${src}/taurine-mobile/src-tauri/gen"
+bt="${gen}/android/buildSrc/k/BuildTask.kt"
 mkdir -p "${gen}/android/buildSrc/k" "${gen}/apple"
-printf 'val executable = """npm""";\nval args = listOf("run", "--", "tauri", "android", "android-studio-script");\n' >"${gen}/android/buildSrc/k/BuildTask.kt"
+build_task() { printf '        val executable = """%s""";\n        val args = listOf(%s);\n%s' "$1" "$2" "${3:-}" >"${bt}"; }
+build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
 expect_pass 'reset removes the source build phase' 'mobile_build_phase_reset android && [[ ! -e taurine-mobile/src-tauri/gen/android/buildSrc ]]'
-expect_fail 'init did not regenerate the phase' 'mobile_build_phase_check android' 'did not regenerate'
+expect_fail 'init did not regenerate the phase' 'mobile_build_phase_check android' 'callback'
 mkdir -p "${gen}/android/buildSrc/k"
-printf 'val executable = """npm""";\nval args = listOf("run", "--", "tauri", "android", "android-studio-script");\n' >"${gen}/android/buildSrc/k/BuildTask.kt"
-expect_fail 'a phase calling a package-manager script' 'mobile_build_phase_check android' 'does not call the CLI'
-printf 'val executable = """/opt/node/bin/node""";\nval args = listOf("/w/taurine-mobile/node_modules/@tauri-apps/cli/tauri.js", "android", "android-studio-script");\n' >"${gen}/android/buildSrc/k/BuildTask.kt"
-expect_pass 'a phase calling the CLI tauri.js with node' 'mobile_build_phase_check android'
-printf 'targets:\n  app:\n    preBuildScripts:\n      - script: /opt/node/bin/node /w/taurine-mobile/node_modules/@tauri-apps/cli/tauri.js ios xcode-script -v\n' >"${gen}/apple/project.yml"
-expect_pass 'an Xcode phase calling the CLI tauri.js' 'mobile_build_phase_check ios'
-printf 'targets:\n  app:\n    preBuildScripts:\n      - script: npm run -- tauri ios xcode-script -v\n' >"${gen}/apple/project.yml"
-expect_fail 'an Xcode phase calling npm run' 'mobile_build_phase_check ios' 'does not call the CLI'
+build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
+expect_pass 'the regenerated npm run -- tauri callback' 'mobile_build_phase_check android'
+build_task node '"tauri", "android", "android-studio-script"'
+expect_fail 'an unrunnable node tauri callback' 'mobile_build_phase_check android' 'callback'
+build_task npm '"run", "--", "tauri", "android", "android-studio-script"' '        val executable = """sh""";\n'
+expect_fail 'a second executable in the phase' 'mobile_build_phase_check android' 'callback'
+build_task npm '"run", "evil", "android", "android-studio-script"'
+expect_fail 'a callback to another npm script' 'mobile_build_phase_check android' 'callback'
+yml="${gen}/apple/project.yml"
+lsp='$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)'
+project_yml() {
+  printf 'name: x\ntargets:\n  app_iOS:\n    settings:\n      base:\n        LIBRARY_SEARCH_PATHS[arch=arm64]: "%s"\n%s    dependencies:\n      - framework: %s\n        embed: false\n      - sdk: SystemConfiguration.framework\n    preBuildScripts:\n      - name: Build Rust Code\n        script: %s\n%s' \
+    "${1:-${lsp}}" "${2:-}" "${3:-libapp.a}" "${4:-npm run -- tauri ios xcode-script -v --platform x}" "${5:-}" >"${yml}"
+}
+project_yml
+expect_pass 'the regenerated Xcode project' 'mobile_build_phase_check ios'
+project_yml '' '' '' 'node tauri ios xcode-script -v'
+expect_fail 'an Xcode phase not calling npm run -- tauri' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '' '' '' '' '    postBuildScripts:\n      - name: Extra\n        script: ./x.sh\n'
+expect_fail 'a second script phase' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '' '        OTHER_LDFLAGS: -lcrypto\n'
+expect_fail 'OTHER_LDFLAGS in the project' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '' '        FRAMEWORK_SEARCH_PATHS: /tmp/f\n'
+expect_fail 'FRAMEWORK_SEARCH_PATHS in the project' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '$(inherited) /tmp/libs'
+expect_fail 'a changed LIBRARY_SEARCH_PATHS' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '' '' 'Vendor/libssl.a'
+expect_fail 'another linked framework file' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml
 ( cd "${src}" && git init -q && git add taurine-mobile/src-tauri/gen/apple/project.yml )
 expect_fail 'a committed gen/apple' 'mobile_build_phase_reset ios' 'is committed'
 rm -rf "${src}/.git" "${gen}"

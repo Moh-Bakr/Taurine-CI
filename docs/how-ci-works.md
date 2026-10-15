@@ -624,10 +624,14 @@ Both shells ship the OpenSSL door (`taurine-tls-openssl`, vendored OpenSSL 3.5 L
 and the public OpenSSL version string only:
 
 - **CI owns the build's argv.** Every shell build (desktop `rust-packaging`, `android-native`,
-  `ios-native`, and the Android/iOS project `init`) runs `node <shell>/node_modules/@tauri-apps/
-  cli/tauri.js` from the shell directory with CI's own arguments and every `TAURI_*` variable
-  removed: never a source npm script, never a source-chosen `--features` or `--config` (the
-  macOS flavour `--config` is CI's closed set). The CLI's provenance is proven first:
+  `ios-native`, and the Android/iOS project `init`) runs `npm run --ignore-scripts tauri -- <CI
+  arguments>` from the shell directory with every `TAURI_*` and `npm_config_*` variable removed,
+  and never a source-chosen `--features` or `--config` (the macOS flavour `--config` is CI's
+  closed set). The npm form is needed because the CLI records how it was started as the
+  callback of the generated mobile build phases (started as `node <script>`, it records an
+  unrunnable `node tauri`); so the shell's `tauri` script must be exactly `tauri`, with no
+  `pretauri`/`posttauri` script and no `.npmrc` anywhere in the checkout. The CLI's provenance
+  is proven first:
   `node_modules/.bin/tauri` must resolve to that `tauri.js`, and the shell's `package-lock.json`
   entries for `@tauri-apps/cli` and every installed `@tauri-apps/cli-<platform>` must be
   resolved from `https://registry.npmjs.org/` with an `integrity`. The Android bindgen
@@ -640,8 +644,17 @@ and the public OpenSSL version string only:
   regenerates them: it removes `gen/android/buildSrc` (and the generated `tauri.settings.gradle`)
   and all of `gen/apple` (refused if committed) before its own `init`, and after `init` the
   regenerated callback must exist and call the CLI's `tauri.js` with node, never a package
-  manager script. The rest of a committed `gen/android` (app sources, manifest, Gradle files) is
-  source build logic like a `build.rs`: a same-user residual, backstopped by the artefact proof.
+  manager script beyond that exact `npm run -- tauri` callback. For iOS the regenerated
+  `project.yml` is also checked structurally: its only script phase is "Build Rust Code", it
+  sets no `OTHER_LDFLAGS`, `FRAMEWORK_SEARCH_PATHS` or `LD_RUNPATH_SEARCH_PATHS`, its
+  `LIBRARY_SEARCH_PATHS` are the template's, and it links no framework file but the Rust
+  `libapp.a`. The rest of a committed `gen/android` (app sources, manifest, the app and root
+  Gradle files, `gradle.properties`) is source build logic like a `build.rs`, and can reach the
+  Rust build: a documented same-user residual, backstopped by the artefact proof. Its Gradle
+  wrapper is checked: the wrapper jar must be one of Gradle's published wrapper jars,
+  `distributionUrl` an official `https://services.gradle.org/distributions/gradle-<v>-bin.zip`,
+  and `distributionSha256Sum` present and equal to Gradle's published checksum for that version
+  (both pinned in `shell-config`).
 - **Gate S1, door-only** (`android-rust`, `ios-rust` for the mobile graph per target, every
   built Android ABI and the iOS simulator build before and after the build, and every desktop
   `rust-packaging` before and after the build): an older source without `openssl-sys` passes
@@ -653,8 +666,13 @@ and the public OpenSSL version string only:
   change it: a shell without `src-tauri`; any Tauri config other than a lower-case `tauri*.json`
   directly in a shell's `src-tauri` (every `tauri*.toml` and `tauri*.json5`, the CLI's platform
   overlays such as `Tauri.linux.toml` included); and a config that sets `build.features`,
-  `build.runner`, `bundle.externalBin`, `bundle.linux.deb.files`, `bundle.macOS.files`, or a
-  `bundle.macOS`/`iOS.frameworks` entry that is a path rather than a system framework name.
+  `build.runner`, `bundle.externalBin`, any `files` of deb, rpm, AppImage or macOS, any
+  `bundle.macOS.frameworks` (the bundler resolves even a bare name from `~/Library`, `/Library`
+  or `/Network/Library/Frameworks`, never `/System`, so it always copies a framework),
+  `bundle.iOS.template`, a `bundle.iOS.frameworks` entry outside `{SystemConfiguration}`, the
+  installer hooks and templates (WiX `template`, `fragmentPaths` and component/feature/merge
+  refs; NSIS `template` and `installerHooks`; deb and rpm maintainer scripts) and
+  `bundle.windows.signCommand`.
   `bundle.resources` (array or object form) must be data, by a content allow-list: every
   source, relative to `src-tauri`, must exist and resolve (symlinks included) inside the
   checkout; globs (`*`, `**`, dotfiles included, as Tauri expands them) and directories are
@@ -663,10 +681,12 @@ and the public OpenSSL version string only:
   newline, form feed and carriage return (so `../../THIRD-PARTY-NOTICES` and SVG pass, and
   archives, jar/dex, WASM and any executable fail). `pg8-measurement` still builds through `npm run tauri`;
   no door or artefact verdict reads its output.
-- **Door crates re-extracted from verified archives**: before each shell build, the extracted
-  `registry/src` copies of the four door crates are deleted and each `registry/cache` `.crate`
-  must hash to its `Cargo.lock` checksum (fetched once if missing), so cargo re-extracts from a
-  verified archive rather than a pre-seeded tree.
+- **Door crates fetched afresh and compared after the build**: before each shell build, every
+  cached `.crate` and every extracted `registry/src` copy of the four door crates is deleted in
+  every registry directory, `cargo fetch --locked` downloads them again, and every resulting
+  cached copy must hash to its `Cargo.lock` checksum (at least one per crate). After the build,
+  before anything is deleted, each extracted copy cargo built from is compared file by file with
+  a fresh extraction of its verified archive (`.cargo-ok` aside); any difference fails.
 - **Door crates from crates.io**: `openssl-src`, `openssl-sys`, `openssl` and `tokio-openssl`
   must each have the crates.io registry `source` and a `checksum` (and no `replace`) in the root
   `Cargo.lock`, and resolve in `cargo metadata` to that source with the manifest under
@@ -701,7 +721,9 @@ and the public OpenSSL version string only:
   `.app`; the whole Android APK, every ABI in `lib/` and every other binary such as `assets/`;
   the whole iOS `.app`, its `Frameworks` included; on Windows, which builds no installer, every
   PE beside the executable in the target directory, the shell's own library judged like the
-  executable): the shell's main binary must carry no
+  executable; a PE in a subdirectory of the target directory is not scanned because nothing CI
+  builds ships it: there is no installer, `externalBin` is refused and resources must be text
+  or images): the shell's main binary must carry no
   dynamic `libssl`/`libcrypto` dependency (`readelf -d`, `otool -L`, `dumpbin /dependents`),
   and the distinct set of `OpenSSL X.Y.Z` strings in the binary must be empty when the door is
   not in that target's graph, and exactly `OpenSSL 3.5.M` when it is, where `3.5.M` is the

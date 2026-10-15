@@ -267,6 +267,7 @@ runs:
             # beforeBuildCommand ran in between: the refusals run again on what the build left.
             run_deferred rust-packaging-build-overrides-post refuse_build_feature_overrides
             run_deferred rust-packaging-openssl-overrides-post refuse_openssl_overrides
+            run_deferred rust-packaging-door-crate-inputs verify_door_crate_build_inputs
             packaging_identifier_check() {
               local plist found=''
               # The bundle is written to the build's cargo target directory: the

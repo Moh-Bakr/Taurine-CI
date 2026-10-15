@@ -279,6 +279,7 @@ runs:
             # beforeBuildCommand ran in between: the refusals run again on what the build left.
             run_deferred rust-packaging-build-overrides-post refuse_build_feature_overrides
             run_deferred rust-packaging-openssl-overrides-post refuse_openssl_overrides
+            run_deferred rust-packaging-door-crate-inputs verify_door_crate_build_inputs
             # The artefact proof (shell-artefact): the door-only gate on the desktop graph, the
             # executable's size and build profile, no dynamic libssl/libcrypto, the linked OpenSSL 3.5
             # string when the door is in the graph and, with size_probe=true, the same build again

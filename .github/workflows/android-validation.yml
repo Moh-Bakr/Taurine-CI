@@ -285,11 +285,14 @@ jobs:
               refuse_openssl_overrides || exit 1
               openssl_door_gate android-arm64-v8a-openssl-door-only-prebuild taurine-mobile aarch64-linux-android || exit 1
               verify_door_crate_sources || exit 1
+              gradle_wrapper_check || exit 1
               android_bindgen_env
               mobile_run android-debug-build tauri_cli taurine-mobile android build --apk --debug --target aarch64
-              # beforeBuildCommand ran in between: the refusals run again on what the build left.
+              # beforeBuildCommand ran in between: the refusals run again on what the build left,
+              # and the door crates cargo built from must still equal their verified archives.
               refuse_build_feature_overrides || exit 1
               refuse_openssl_overrides || exit 1
+              verify_door_crate_build_inputs || exit 1
               # What ships: every ABI directory of the APK's lib/ (else the Gradle jniLibs). Per
               # ABI, on that ABI's own target graph: the door-only gate, then the main library
               # (size, no dynamic libssl/libcrypto, exactly the locked OpenSSL or none when the
