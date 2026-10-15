@@ -28,8 +28,11 @@ if /usr/bin/sudo -n true 2>/dev/null; then
   exit 1
 fi
 
-workflow="${1:-.github/workflows/validate-public-changes.yml}"
+# shellcheck source=base-pass-workflow.sh
+source "$(dirname "${BASH_SOURCE[0]}")/base-pass-workflow.sh"
 step="Run the base commit's policy against this pull request"
+workflow="${1:-}"
+[[ -n "${workflow}" ]] || workflow="$(locate_base_pass_workflow "${step}")"
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/base-policy-env-test.XXXXXX")"
 trap 'rm -rf "${work}"' EXIT
 root="${PWD}"

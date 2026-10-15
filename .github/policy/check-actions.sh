@@ -49,6 +49,7 @@ check_action_references() {
       ./.github/actions/linux-test-identities) ;;
       ./.github/actions/rust-target-cache) ;;
       ./.github/workflows/live-proof-arm.yml) ;;
+      ./.github/workflows/base-policy.yml) ;;
       ./.github/workflows/pg8-measurement-arm.yml) ;;
       ./.github/actions/mobile-report) ;;
       ./.github/actions/android-sdk-setup) ;;
