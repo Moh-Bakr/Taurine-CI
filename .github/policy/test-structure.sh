@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fixture tests for the control-plane structure check (check-structure.rb): the reviewed tree
 # passes, and each structural change that must not slip through unreviewed is rejected with its
-# own message while the manifest stays as reviewed. Run from the repository root.
+# own message while the manifest constant stays as reviewed. Run from the repository root.
 set -euo pipefail
 
 src="${PWD}"
@@ -33,9 +33,9 @@ fresh
 ruby "${check}" "${dir}/t" >/dev/null || { echo 'the reviewed tree fails its own structure check' >&2; exit 1; }
 echo 'accepted  the reviewed tree'
 
-# --print output reproduces the committed manifest (the manifest is not stale or hand-drifted).
-ruby "${check}" --print "${dir}/t" | diff -q - "${dir}/t/.github/policy/control-plane.json" >/dev/null \
-  || { echo 'control-plane.json differs from `check-structure.rb --print`' >&2; exit 1; }
+# --print reproduces the constant in the script (the manifest is not stale or hand-drifted).
+ruby "${check}" --print "${dir}/t" | diff -q - <(sed -n '/^CONTROL_PLANE_MANIFEST/,/\.freeze$/p' "${check}") >/dev/null \
+  || { echo 'CONTROL_PLANE_MANIFEST differs from `check-structure.rb --print`' >&2; exit 1; }
 echo 'accepted  the manifest equals the printed structure'
 
 fresh; rm "${dir}/t/.github/workflows/cache-prune.yml"
@@ -77,17 +77,8 @@ fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_run
     workflows: [x]'
 expect_reject 'a trigger widened to workflow_run' 'workflow_run is never allowed'
 
-# Even a manifest edited to bless the forbidden trigger cannot admit it.
-fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'pull_request_target:'
-ruby "${check}" --print "${dir}/t" > "${dir}/t/.github/policy/control-plane.json.new"
-mv "${dir}/t/.github/policy/control-plane.json.new" "${dir}/t/.github/policy/control-plane.json"
-expect_reject 'pull_request_target even with the manifest regenerated' 'pull_request_target is never allowed'
-
 fresh; swap .github/policy/workflow-lists.sh '  ".github/workflows/ios-validation.yml"
 ' ''
 expect_reject 'a protected workflow dropped from its trust tier' 'tier changed'
-
-fresh; rm "${dir}/t/.github/policy/control-plane.json"
-expect_reject 'the manifest deleted' 'manifest is missing'
 
 echo 'structure tests: every unreviewed control-plane change is rejected'

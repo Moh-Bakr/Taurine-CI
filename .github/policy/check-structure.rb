@@ -6,7 +6,7 @@
 # GitHub's `workflows` ruleset rule is Enterprise-only, so the ruleset "Protect CI control plane"
 # can only require the status check "Validate workflow policy". That check proves each workflow
 # is well-formed; this one proves the SHAPE of the control plane did not change unreviewed. The
-# reviewed shape is the committed manifest .github/policy/control-plane.json:
+# reviewed shape is the committed manifest .github/policy/control-plane-manifest.rb:
 #
 #   - every workflow file, with its trust tier, its triggers and its job ids;
 #   - every local composite action;
@@ -22,17 +22,127 @@
 #     outright, whatever the manifest says);
 #   - a trust tier that disagrees with workflow-lists.sh.
 #
-# The manifest lives under .github/policy/ so the existing "only reviewed paths are tracked"
-# rule admits it. `ruby check-structure.rb --print` prints the current structure as manifest
-# JSON, to regenerate the file after a reviewed change. Run from the repository root; an
-# optional first argument names another root (fixtures).
+# The manifest is the frozen CONTROL_PLANE_MANIFEST constant below, ordinary reviewed Ruby in
+# this script (no data file, no read-back). `ruby check-structure.rb --print` prints the current
+# structure as a Ruby literal to paste over it after a reviewed change. Run from the repository
+# root; an optional first argument names another root (fixtures).
 require 'json'
 require 'yaml'
 
 print_mode = ARGV.delete('--print')
 root = ARGV.first || '.'
-manifest_path = File.join(root, '.github/policy/control-plane.json')
 FORBIDDEN_TRIGGERS = %w[pull_request_target workflow_run].freeze
+
+# The reviewed shape of the control plane. Change it only in a reviewed pull request.
+CONTROL_PLANE_MANIFEST = {"required_check" =>
+  {"workflow" => ".github/workflows/validate-public-changes.yml",
+   "job" => "policy",
+   "name" => "Validate workflow policy"},
+ "workflows" =>
+  {".github/workflows/android-validation.yml" =>
+    {"tier" => "protected-source",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["plan", "result", "timings", "validate"]},
+   ".github/workflows/cache-prune.yml" =>
+    {"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["prune"]},
+   ".github/workflows/ios-validation.yml" =>
+    {"tier" => "protected-source",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["plan", "result", "timings", "validate"]},
+   ".github/workflows/linux-validation-concern.yml" =>
+    {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
+   ".github/workflows/linux-validation.yml" =>
+    {"tier" => "protected-dispatch",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["plan", "result", "select", "timings", "validate", "validate-input"]},
+   ".github/workflows/live-proof-arm.yml" =>
+    {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["prove"]},
+   ".github/workflows/live-proofs.yml" =>
+    {"tier" => "protected-dispatch",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["plan", "prove", "timings"]},
+   ".github/workflows/macos-validation.yml" =>
+    {"tier" => "protected-source",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["plan", "result", "timings", "validate"]},
+   ".github/workflows/orchestrate-validation.yml" =>
+    {"tier" => "protected-source",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["result", "timings", "validate", "validate-input"]},
+   ".github/workflows/pg8-measurement-arm.yml" =>
+    {"tier" => "protected-reusable",
+     "triggers" => ["workflow_call"],
+     "jobs" => ["measure", "preflight"]},
+   ".github/workflows/pg8-measurement.yml" =>
+    {"tier" => "protected-dispatch",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["measure", "plan"]},
+   ".github/workflows/scorecard.yml" =>
+    {"tier" => "public",
+     "triggers" => ["schedule", "workflow_dispatch"],
+     "jobs" => ["scorecard"]},
+   ".github/workflows/select-concerns.yml" =>
+    {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["select"]},
+   ".github/workflows/source-read.yml" =>
+    {"tier" => "protected-source",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["source-read", "validate-input"]},
+   ".github/workflows/validate-public-changes.yml" =>
+    {"tier" => "policy",
+     "triggers" => ["pull_request", "push", "workflow_dispatch"],
+     "jobs" => ["base-policy", "base-policy-fixtures", "policy"]},
+   ".github/workflows/weekly-validation.yml" =>
+    {"tier" => "public",
+     "triggers" => ["schedule", "workflow_dispatch"],
+     "jobs" => ["dispatch", "resolve", "tool-freshness"]},
+   ".github/workflows/windows-validation-concern.yml" =>
+    {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
+   ".github/workflows/windows-validation.yml" =>
+    {"tier" => "protected-dispatch",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" => ["plan", "result", "timings", "validate", "validate-input", "validate-rust"]}},
+ "actions" =>
+  [".github/actions/android-emulator-tests/action.yml",
+   ".github/actions/android-sdk-setup/action.yml",
+   ".github/actions/concern-report/action.yml",
+   ".github/actions/drop-root/action.yml",
+   ".github/actions/egress-audit/action.yml",
+   ".github/actions/egress-block/action.yml",
+   ".github/actions/environment-preflight/action.yml",
+   ".github/actions/ios-project-init/action.yml",
+   ".github/actions/ios-simulator-tests/action.yml",
+   ".github/actions/linux-concern-e2e/action.yml",
+   ".github/actions/linux-concern-js/action.yml",
+   ".github/actions/linux-concern-rust/action.yml",
+   ".github/actions/linux-test-identities/action.yml",
+   ".github/actions/live-build/action.yml",
+   ".github/actions/live-run/action.yml",
+   ".github/actions/live-start-ibm/action.yml",
+   ".github/actions/live-start-iris/action.yml",
+   ".github/actions/live-start-mpp/action.yml",
+   ".github/actions/live-start-pg/action.yml",
+   ".github/actions/live-start-rocketmq/action.yml",
+   ".github/actions/live-start-sql/action.yml",
+   ".github/actions/live-summary/action.yml",
+   ".github/actions/macos-concern-js/action.yml",
+   ".github/actions/macos-concern-rust/action.yml",
+   ".github/actions/mobile-report/action.yml",
+   ".github/actions/node-setup/action.yml",
+   ".github/actions/pg8-measurement/action.yml",
+   ".github/actions/root-setup/action.yml",
+   ".github/actions/run-result/action.yml",
+   ".github/actions/rust-lint-enforce/action.yml",
+   ".github/actions/rust-target-cache/action.yml",
+   ".github/actions/rust-toolchain/action.yml",
+   ".github/actions/sanitize/action.yml",
+   ".github/actions/scan-concern/action.yml",
+   ".github/actions/select-concerns/action.yml",
+   ".github/actions/source-checkout/action.yml",
+   ".github/actions/timings/action.yml",
+   ".github/actions/vendor-fetch/action.yml",
+   ".github/actions/verify-cargo-cache/action.yml",
+   ".github/actions/windows-concern-rust/action.yml"]}.freeze
+
 problems = []
 
 def read_yaml(path)
@@ -82,16 +192,12 @@ end
 actual = actual_structure(root)
 
 if print_mode
-  required = { 'workflow' => '.github/workflows/validate-public-changes.yml', 'job' => 'policy', 'name' => 'Validate workflow policy' }
-  puts JSON.pretty_generate({ 'required_check' => required }.merge(actual))
+  require 'pp'
+  puts 'CONTROL_PLANE_MANIFEST = ' + PP.pp({ 'required_check' => CONTROL_PLANE_MANIFEST['required_check'] }.merge(actual), +'', 98).rstrip + '.freeze'
   exit 0
 end
 
-unless File.file?(manifest_path)
-  warn "the control-plane manifest is missing: #{manifest_path}"
-  exit 1
-end
-manifest = JSON.parse(File.read(manifest_path, encoding: 'UTF-8'))
+manifest = CONTROL_PLANE_MANIFEST
 
 # Hard denials, independent of the manifest.
 actual['workflows'].each do |rel, spec|
@@ -115,7 +221,7 @@ end
 
 # Workflows: the tree and the manifest must agree exactly.
 reviewed = manifest['workflows'] || {}
-(actual['workflows'].keys - reviewed.keys).each { |rel| problems << "#{rel}: a workflow with no manifest entry (new or renamed); add it to control-plane.json in a reviewed change" }
+(actual['workflows'].keys - reviewed.keys).each { |rel| problems << "#{rel}: a workflow with no manifest entry (new or renamed); add it to control-plane-manifest.rb in a reviewed change" }
 (reviewed.keys - actual['workflows'].keys).each { |rel| problems << "#{rel}: in the manifest but missing from the tree (deleted or renamed)" }
 (actual['workflows'].keys & reviewed.keys).each do |rel|
   a = actual['workflows'][rel]
