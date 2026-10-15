@@ -649,13 +649,17 @@ and the public OpenSSL version string only:
   manager script beyond that exact `npm run -- tauri` callback. For iOS the regenerated
   `project.yml` is also checked structurally: its only script phase is "Build Rust Code", it
   sets no `OTHER_LDFLAGS`, `FRAMEWORK_SEARCH_PATHS` or `LD_RUNPATH_SEARCH_PATHS`, its
-  `LIBRARY_SEARCH_PATHS` are the template's, and it links no framework file but the Rust
-  `libapp.a`. The rest of a committed `gen/android` (app sources, manifest, the app and root
+  `LIBRARY_SEARCH_PATHS` are the template's, and its only dependencies are the Rust `libapp.a`
+  and SDK frameworks from the template's set plus `SystemConfiguration` (no `carthage`,
+  `package`, `bundle` or `target` dependency). The rest of a committed `gen/android` (app sources, manifest, the app and root
   Gradle files, `gradle.properties`) is source build logic like a `build.rs`, and can reach the
   Rust build, for example running cargo with extra `--features`. It is accepted as source build
   logic, and what it builds is judged instead: see **Built graph** below. Its Gradle
   wrapper is checked: the wrapper jar must be Gradle's published wrapper jar for the version
-  `distributionUrl` names,
+  `distributionUrl` names, `gradlew` and `gradlew.bat` must equal the start scripts pinned for
+  that version (Gradle publishes no checksums for them, so the scripts the source committed for
+  8.14.3 were pinned by sha256; any other version fails until its scripts are reviewed and
+  pinned),
   `distributionUrl` an official `https://services.gradle.org/distributions/gradle-<v>-bin.zip`,
   and `distributionSha256Sum` present and equal to Gradle's published checksum for that version
   (both pinned in `shell-config`).
@@ -687,11 +691,14 @@ and the public OpenSSL version string only:
   archives, jar/dex, WASM and any executable fail). `pg8-measurement` still builds through `npm run tauri`;
   no door or artefact verdict reads its output.
 - **Built graph**: after each shell build, the graph cargo actually compiled is judged, whatever
-  features Gradle code or a build phase passed. Cargo's dep-info for the shipped artefact lists
-  the path crates, and each compiled unit's own dep-info in the same profile's `deps/` lists
-  that crate's sources, registry crates included. Every source path is mapped to the package
-  whose manifest directory contains it (`cargo metadata --locked --all-features`), giving the
-  built set; edges come from the all-features resolve. Every built crate that depends directly
+  features Gradle code or a build phase passed. Units are identified by identity, not by where
+  their sources live: every `.fingerprint/<package>-<hash>` and `deps/<crate>-<hash>.d` of the
+  artefact's profile directory (mapped through `cargo metadata --locked --all-features` package
+  and target names), plus the paths in the artefact's own dep-info (relative ones resolved
+  against the workspace root). `build.dep-info-basedir` in any cargo config and
+  `CARGO_BUILD_DEP_INFO_BASEDIR` are refused, and so is a path package whose target sources lie
+  outside its own manifest directory. Edges come from the all-features resolve; `openssl-src`
+  may be a (build) dependency of `openssl-sys` only, in the gate and here. Every built crate that depends directly
   on `openssl`, `openssl-sys` or `tokio-openssl` must be on the door path (the S1 parent rules)
   and `native-tls` must not be built. A missing or unparseable dep-info, or one without the
   shell crate, fails. Dep-info read: desktop `<target>/debug/taurine-desktop.d` (Linux, macOS,
@@ -699,6 +706,17 @@ and the public OpenSSL version string only:
   per built ABI; iOS `<target>/aarch64-apple-ios-sim/release/libtaurine_mobile_lib.d`; each
   with its own `deps/*.d`. A restored compiled-dependency cache (main, protected SHAs only)
   adds its units to the set, which can only make the check stricter.
+- **The shipped artefact is the judged build**: Android requires each APK `lib/<abi>/` library
+  to carry the GNU build-id of the judged `<target>/<triple>/debug/libtaurine_mobile_lib.so`
+  (NDK `llvm-readelf`), or to equal it after the NDK's `llvm-strip --strip-all` when the build
+  has no build-id; iOS requires every `libapp.a` in the project's `Externals` to equal the
+  judged `libtaurine_mobile_lib.a`; desktop requires the bundled main binary (the `.deb`'s
+  `usr/bin`, the `.app`'s executable) to equal `target/debug/<bin>`, or to equal it once both
+  are stripped and unsigned. Windows bundles nothing, so the executable judged is the one built.
+- **What CI judges, and what it does not**: CI builds and judges the iOS **simulator release**
+  artefact and the **desktop debug** artefacts (and the Android debug APK). iOS device builds,
+  App Store archives, desktop release installers and any signed or store artefact are built
+  outside CI and are not judged by these checks.
 - **Door crates fetched afresh and compared after the build**: before each shell build, every
   cached `.crate` and every extracted `registry/src` copy of the four door crates is deleted in
   every registry directory, `cargo fetch --locked` downloads them again, and every resulting

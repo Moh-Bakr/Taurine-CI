@@ -43,6 +43,9 @@ runs:
             openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;
             tokio-openssl) echo 'taurine-db-dbx' ;;
             taurine-tls-openssl) echo 'taurine-db-dbx' ;;
+            # The vendored OpenSSL source is a build-dependency of openssl-sys and nothing else:
+            # any other crate building it would link its own copy of the same 3.5.M.
+            openssl-src) echo 'openssl-sys' ;;
             *) return 1 ;;
           esac
         }
@@ -158,7 +161,7 @@ runs:
         # the 3.5 LTS line (300.5.x). A resolve error, a second openssl-src or any other parent
         # fails. Cheap (cargo tree only), so callers run it before an expensive build.
         openssl_door_gate() {
-          local label="$1" package="$2" target="$3" log state crate parents parent allowed bad=0 src_line locks
+          local label="$1" package="$2" target="$3" log state crate parents parent allowed bad=0 src_line locks edges
           log="${RUNNER_TEMP}/${label}.log"
           if ! refuse_build_feature_overrides || ! refuse_openssl_overrides >/dev/null; then
             echo "${label}: FAILED - the build's features or OpenSSL source are overridden (see above)" >&2
@@ -175,8 +178,10 @@ runs:
               return 1
               ;;
           esac
-          for crate in openssl-sys openssl tokio-openssl taurine-tls-openssl; do
-            state="$(tci_inverted "${log}" "${package}" "${target}" normal "${crate}" 1)"
+          for crate in openssl-sys openssl tokio-openssl taurine-tls-openssl openssl-src; do
+            edges=normal
+            [[ "${crate}" == openssl-src ]] && edges=normal,build
+            state="$(tci_inverted "${log}" "${package}" "${target}" "${edges}" "${crate}" 1)"
             case "${state}" in
               absent) continue ;;
               error)
@@ -224,15 +229,17 @@ runs:
 
         # built_graph_check <label> <artefact dep-info> <shell package>
         # Judges the graph cargo actually BUILT, whatever features the build was given (Gradle
-        # code or a build phase can run cargo with extra --features). Cargo's dep-info for the
-        # artefact (<target>/<triple>/<profile>/<artefact>.d) lists the path crates; each
-        # compiled unit's own dep-info in the same profile's deps/ lists that crate's sources,
-        # registry and git crates included. Every source path is mapped to the package whose
-        # manifest directory contains it (cargo metadata --all-features --locked), giving the
-        # built set; the edges are taken from the all-features resolve (a superset). Every built
-        # crate that depends directly on openssl, openssl-sys or tokio-openssl must be on the door
-        # path, with the S1 gate's parent rules, and native-tls must not be built at all. A missing
-        # or unparseable dep-info file, or one that does not contain the shell, fails.
+        # code or a build phase can run cargo with extra --features). Units are identified by
+        # identity, never by where their sources live: every `.fingerprint/<package>-<hash>`
+        # directory and every `deps/<crate>-<hash>.d` file of the artefact's profile directory
+        # (mapped through cargo metadata's package names and target names, `-` read as `_`),
+        # plus the paths in the artefact's own dep-info (relative ones resolved against the
+        # workspace root). The edges come from the all-features resolve (a superset). Every built
+        # crate that depends directly on openssl, openssl-sys, tokio-openssl or openssl-src must
+        # be on the door path, with the S1 gate's parent rules, and native-tls must not be built.
+        # A path package whose target sources lie outside its own manifest directory is refused
+        # (it could hide inside another crate). A missing or unparseable dep-info file, or one
+        # that does not contain the shell, fails. dep-info-basedir is refused as a cargo override.
         built_graph_check() {
           local label="$1" depinfo="$2" package="$3" python meta
           [[ -s "${depinfo}" ]] || { echo "${label}: FAILED - the artefact's dep-info is missing" >&2; return 1; }
@@ -245,50 +252,61 @@ runs:
         label, depinfo, meta_path, shell = sys.argv[1:5]
         allowed = {"openssl-sys": {"openssl", "tokio-openssl", "taurine-tls-openssl"},
                    "openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},
-                   "tokio-openssl": {"taurine-db-dbx"}}
+                   "tokio-openssl": {"taurine-db-dbx"},
+                   "openssl-src": {"openssl-sys"}}
         def fail(reason):
             print(label + ": FAILED - " + reason, file=sys.stderr)
             sys.exit(1)
         def norm(path):
-            return os.path.normcase(os.path.normpath(path.replace("\\", "/") if os.sep == "/" else path))
-        def paths_of(path, required):
-            try:
-                text = open(path, encoding="utf-8").read()
-            except Exception:
-                if required:
-                    fail("the artefact dep-info cannot be read")
-                return []
-            found = []
-            for line in text.splitlines():
-                if not line.strip() or line.startswith("#"):
-                    continue
-                head, sep, tail = line.partition(": ")
-                if not sep and line.endswith(":"):
-                    head, tail = line[:-1], ""
-                elif not sep:
-                    if required:
-                        fail("the artefact dep-info does not parse")
-                    return []
-                for item in [head] + re.split(r"(?<!\\) ", tail):
-                    item = item.replace("\\ ", " ").strip()
-                    if item:
-                        found.append(item)
-            if required and not found:
-                fail("the artefact dep-info does not parse")
-            return found
+            return os.path.normcase(os.path.normpath(path))
         meta = json.load(open(meta_path))
+        root = meta.get("workspace_root") or os.getcwd()
         names = {p["id"]: p["name"] for p in meta["packages"]}
-        roots = sorted(((norm(os.path.dirname(p["manifest_path"])) + os.sep, p["id"]) for p in meta["packages"]), key=lambda r: -len(r[0]))
-        paths = paths_of(depinfo, True)
-        for extra in glob.glob(os.path.join(os.path.dirname(depinfo), "deps", "*.d")):
-            paths += paths_of(extra, False)
+        by_name, by_target = {}, {}
+        for p in meta["packages"]:
+            by_name.setdefault(p["name"], set()).add(p["id"])
+            mdir = norm(os.path.dirname(p["manifest_path"])) + os.sep
+            for t in p["targets"]:
+                by_target.setdefault(t["name"].replace("-", "_"), set()).add(p["id"])
+                if p.get("source") is None and not norm(t["src_path"]).startswith(mdir):
+                    fail(p["name"] + " has a target whose sources lie outside its own directory")
+        try:
+            text = open(depinfo, encoding="utf-8").read()
+        except Exception:
+            fail("the artefact dep-info cannot be read")
+        paths = []
+        for line in text.splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            head, sep, tail = line.partition(": ")
+            if not sep and line.endswith(":"):
+                head, tail = line[:-1], ""
+            elif not sep:
+                fail("the artefact dep-info does not parse")
+            for item in [head] + re.split(r"(?<!\\) ", tail):
+                item = item.replace("\\ ", " ").strip()
+                if item:
+                    paths.append(item if os.path.isabs(item) else os.path.join(root, item))
+        if not paths:
+            fail("the artefact dep-info does not parse")
         built = set()
+        roots = sorted(((norm(os.path.dirname(p["manifest_path"])) + os.sep, p["id"]) for p in meta["packages"]), key=lambda r: -len(r[0]))
         for path in paths:
             candidate = norm(path)
-            for root, pkg in roots:
-                if candidate.startswith(root):
+            for prefix, pkg in roots:
+                if candidate.startswith(prefix):
                     built.add(pkg)
                     break
+        profile = os.path.dirname(depinfo)
+        unit = re.compile(r"^(.+)-[0-9a-f]{16}$")
+        for entry in glob.glob(os.path.join(profile, ".fingerprint", "*")):
+            match = unit.match(os.path.basename(entry))
+            if match:
+                built |= by_name.get(match.group(1), set())
+        for entry in glob.glob(os.path.join(profile, "deps", "*.d")):
+            match = unit.match(os.path.basename(entry)[:-2])
+            if match:
+                built |= by_target.get(match.group(1).replace("-", "_"), set())
         built_names = {names[pkg] for pkg in built}
         if shell not in built_names:
             fail("the dep-info does not contain the shell crate")
@@ -311,6 +329,51 @@ runs:
             sys.exit(1)
         print(label + ": built graph of " + str(len(built)) + " crates; OpenSSL consumers: " + (", ".join(sorted(consumers)) or "none") + " (door only)")
         ' "${label}" "${depinfo}" "${meta}" "${package}"
+        }
+
+        # Binding the shipped artefact to the build that was judged. bind_same_binary compares
+        # sha256, then (when the bundler stripped or re-signed the copy) the sha256 of stripped,
+        # signature-free copies of both; bind_android_library requires equal GNU build-ids (from
+        # the NDK's llvm-readelf) when the built library has one, else equal sha256 after the
+        # NDK's llvm-strip --strip-all of both. A mismatch, or a missing tool or file, fails.
+        tci_stripped_sha256() {
+          local file="$1" tool="$2" out
+          out="${RUNNER_TEMP}/bind-${RANDOM}-$(basename "$1")"
+          cp "${file}" "${out}" && chmod u+w "${out}"
+          if [[ "$(tci_binary_kind "${out}")" == macho ]]; then
+            codesign --remove-signature "${out}" >/dev/null 2>&1 || true
+            "${tool:-strip}" -S -x "${out}" >/dev/null 2>&1 || return 1
+          else
+            "${tool:-strip}" --strip-all "${out}" >/dev/null 2>&1 || return 1
+          fi
+          tci_sha256 "${out}"
+        }
+        bind_same_binary() {
+          local label="$1" shipped="$2" built="$3" a b
+          [[ -f "${shipped}" && -f "${built}" ]] || { echo "${label}: FAILED - the shipped or the built binary is missing" >&2; return 1; }
+          if [[ "$(tci_sha256 "${shipped}")" == "$(tci_sha256 "${built}")" ]]; then
+            echo "${label}: the shipped binary is the judged build (identical)"; return 0
+          fi
+          a="$(tci_stripped_sha256 "${shipped}" "${4:-}")" && b="$(tci_stripped_sha256 "${built}" "${4:-}")" && [[ -n "${a}" && "${a}" == "${b}" ]] ||
+            { echo "${label}: FAILED - the shipped binary is not the build that was judged" >&2; return 1; }
+          echo "${label}: the shipped binary is the judged build (equal once stripped)"
+        }
+        tci_build_id() {
+          "$1" -n "$2" 2>/dev/null | sed -nE 's/.*Build ID: *([0-9a-fA-F]+).*/\1/p' | head -n 1
+        }
+        bind_android_library() {
+          local label="$1" shipped="$2" built="$3" bin readelf strip a b
+          bin="$(find "${NDK_HOME:-/nonexistent}/toolchains/llvm/prebuilt" -maxdepth 2 -type d -name bin 2>/dev/null | head -n 1 || true)"
+          readelf="${TCI_READELF:-${bin}/llvm-readelf}" strip="${TCI_STRIP:-${bin}/llvm-strip}"
+          [[ -x "${readelf}" && -x "${strip}" ]] || { echo "${label}: FAILED - the NDK's llvm-readelf/llvm-strip are unavailable" >&2; return 1; }
+          [[ -f "${shipped}" && -f "${built}" ]] || { echo "${label}: FAILED - the shipped or the built library is missing" >&2; return 1; }
+          b="$(tci_build_id "${readelf}" "${built}")"
+          if [[ -n "${b}" ]]; then
+            a="$(tci_build_id "${readelf}" "${shipped}")"
+            [[ "${a}" == "${b}" ]] || { echo "${label}: FAILED - the shipped library's build-id is not the judged build's" >&2; return 1; }
+            echo "${label}: the shipped library is the judged build (GNU build-id)"; return 0
+          fi
+          bind_same_binary "${label}" "${shipped}" "${built}" "${strip}"
         }
 
         # The dep-info of an artefact: <target-dir>[/<triple>]/<profile>/<file>.d
@@ -553,7 +616,11 @@ runs:
               root=''
               ;;
           esac
-          if [[ -n "${root}" ]]; then artefact_tree_check "${os}-desktop-bundle" "${root}" "${main}" debug "${door}" || return 1; fi
+          if [[ -n "${root}" ]]; then
+            # The bundle's main binary must be the build that was judged.
+            bind_same_binary "${os}-desktop-binding" "${main}" "${file}" || return 1
+            artefact_tree_check "${os}-desktop-bundle" "${root}" "${main}" debug "${door}" || return 1
+          fi
           if [[ "${probe}" == true ]]; then
             bytes="$(artefact_bytes "${file}")"
             artefact_size_probe "${os}-desktop-executable" "${bytes}" desktop_executable "$@" || return 1

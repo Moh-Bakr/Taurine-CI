@@ -316,6 +316,15 @@ runs:
             *) return 1 ;;
           esac
         }
+        # gradlew and gradlew.bat: Gradle publishes no checksums for the start scripts, so the
+        # scripts the source commits for a version were reviewed once and their sha256 pinned
+        # here (8.14.3); any other script, or a version without pinned scripts, fails.
+        tci_gradle_scripts_sha256() {
+          case "$1" in
+            8.14.3) echo '63135287117a1e6d12c84580f1f49c61d1ba02218ecd28660605e97f976e7d65 c46a27c79007746de5922b17abb6230d64ad8b1ba3ad1585ee5c6543c2a9b129' ;;
+            *) return 1 ;;
+          esac
+        }
         tci_gradle_distribution_sha256() {
           case "$1" in
             8.14.3) echo bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531 ;;
@@ -341,7 +350,11 @@ runs:
           if [[ "${got}" != "${want}" ]]; then
             echo "gradle-wrapper: FAILED - distributionSha256Sum is missing or is not Gradle ${version}'s published checksum" >&2; return 1
           fi
-          echo "gradle-wrapper: published wrapper jar; Gradle ${version} distribution pinned by checksum"
+          want="$(tci_gradle_scripts_sha256 "${version}")" || { echo "gradle-wrapper: FAILED - Gradle ${version} has no pinned gradlew scripts" >&2; return 1; }
+          if [[ "$(tci_sha256 "${dir}/gradlew") $(tci_sha256 "${dir}/gradlew.bat")" != "${want}" ]]; then
+            echo "gradle-wrapper: FAILED - gradlew or gradlew.bat is not the pinned script for Gradle ${version}" >&2; return 1
+          fi
+          echo "gradle-wrapper: published wrapper jar, pinned gradlew scripts; Gradle ${version} distribution pinned by checksum"
         }
 
         # The generated mobile build phases call back into the Tauri CLI to build the Rust code: the
@@ -354,8 +367,9 @@ runs:
         # pinned `tauri` script, see tauri_cli). For iOS the generated project.yml is also checked
         # structurally: its only script phase anywhere is "Build Rust Code" (no other pre-build,
         # post-compile or post-build script), it sets no OTHER_LDFLAGS, FRAMEWORK_SEARCH_PATHS or
-        # LD_RUNPATH_SEARCH_PATHS, its LIBRARY_SEARCH_PATHS are the template's, and it links no
-        # framework file other than the Rust libapp.a.
+        # LD_RUNPATH_SEARCH_PATHS, its LIBRARY_SEARCH_PATHS are the template's, and its only
+        # dependencies are the Rust libapp.a and the template's SDK frameworks plus
+        # SystemConfiguration (no carthage, package, bundle or target dependency).
         mobile_build_phase_reset() {
           local platform="$1" gen=taurine-mobile/src-tauri/gen
           case "${platform}" in
@@ -399,6 +413,16 @@ runs:
                     bad = true unless node =~ %r{\A\$\(inherited\) \$\(PROJECT_DIR\)/Externals/[a-z0-9_]+/\$\(CONFIGURATION\) \$\(SDKROOT\)/usr/lib/swift \$\(DEVELOPER_DIR\)/Toolchains/XcodeDefault\.xctoolchain/usr/lib/swift/\$\(PLATFORM_NAME\) \$\(DEVELOPER_DIR\)/Toolchains/XcodeDefault\.xctoolchain/usr/lib/swift-5\.0/\$\(PLATFORM_NAME\)\z}
                   end
                   bad = true if key == "framework" && node.is_a?(String) && node != "libapp.a"
+                  # Dependencies: only the Rust libapp.a (framework:) and SDK frameworks from the
+                  # template set plus SystemConfiguration (sdk:); no carthage, package, bundle
+                  # or target dependency.
+                  if key == "dependencies" && node.is_a?(Array)
+                    sdks = %w[CoreGraphics Metal MetalKit QuartzCore Security UIKit WebKit SystemConfiguration].map { |n| n + ".framework" }
+                    node.each do |dep|
+                      kinds = dep.is_a?(Hash) ? dep.keys.map(&:to_s) & %w[framework sdk carthage package bundle target] : []
+                      bad = true unless kinds.length == 1 && (kinds[0] == "framework" ? dep["framework"] == "libapp.a" : kinds[0] == "sdk" && sdks.include?(dep["sdk"]))
+                    end
+                  end
                 end
                 walk.call(doc, "")
                 ok = scripts.length == 1 && scripts[0].is_a?(Hash) && scripts[0]["name"] == "Build Rust Code" &&
@@ -443,7 +467,7 @@ runs:
         }
         refuse_openssl_overrides() {
           local bad=0 names python configs
-          names="$(compgen -e | grep -ixE "${TCI_OPENSSL_OVERRIDE}" || true)"
+          names="$(compgen -e | grep -ixE "${TCI_OPENSSL_OVERRIDE}|CARGO_BUILD_DEP_INFO_BASEDIR" || true)"
           if [[ -n "${names}" ]]; then
             echo "openssl-overrides: FAILED - the job environment sets an OpenSSL override that bypasses the vendored build: $(printf '%s' "${names}" | tr '\n' ' ')" >&2
             bad=1
@@ -473,8 +497,8 @@ runs:
                 print("openssl-overrides: FAILED - a cargo config file does not parse", file=sys.stderr)
                 bad = True
                 continue
-            if any(pattern.fullmatch(key) for key in keys(data)):
-                print("openssl-overrides: FAILED - a cargo config file sets an OpenSSL override that bypasses the vendored build", file=sys.stderr)
+            if any(pattern.fullmatch(key) or key.lower() == "dep-info-basedir" for key in keys(data)):
+                print("openssl-overrides: FAILED - a cargo config file sets an OpenSSL override that bypasses the vendored build, or dep-info-basedir", file=sys.stderr)
                 bad = True
         sys.exit(1 if bad else 0)' "${TCI_OPENSSL_OVERRIDE}"; then
               bad=1

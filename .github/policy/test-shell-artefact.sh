@@ -50,8 +50,14 @@ write_lock
 
 # cargo: `metadata` lists the two shells; `tree` answers from FAKE_TREE_<crate> per target
 # (FAKE_ARMV7_BAD adds a non-door parent on armv7 only). `none` = cargo's "nothing to print".
+# The real cargo (for the toy-workspace fixtures) is found before the stand-in shadows it.
+real_cargo="$(command -v cargo || true)"
+# The fixtures run with their own HOME, so rustup's toolchain home is fixed here first.
+export RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+[[ -n "${real_cargo}" ]] || { echo 'shell-artefact fixtures: cargo is required for the real-cargo built-graph fixtures' >&2; exit 1; }
 cat >"${work}/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
+[[ -n "${TCI_REAL_CARGO:-}" ]] && exec "${TCI_REAL_CARGO}" "$@"
 if [[ "$1" == fetch ]]; then
   cache="${CARGO_HOME}/registry/cache/index.crates.io-0000"
   [[ "${FAKE_FETCH:-}" == none ]] && exit 0
@@ -88,7 +94,7 @@ case "${crate}" in
   openssl-sys) printf '0openssl-sys v0.9.117\n1openssl v0.10.81\n1taurine-tls-openssl v0.1.0 (path)\n1tokio-openssl v0.6.5\n' ;;
   openssl) printf '0openssl v0.10.81\n1taurine-db-dbx v0.1.0 (path)\n1taurine-tls-openssl v0.1.0 (path)\n1tokio-openssl v0.6.5\n' ;;
   tokio-openssl|taurine-tls-openssl) printf '0%s v0.1.0\n1taurine-db-dbx v0.1.0 (path)\n' "${crate}" ;;
-  openssl-src) printf '0openssl-src v300.5.5+3.5.5\n' ;;
+  openssl-src) printf '0openssl-src v300.5.5+3.5.5\n'; [[ -n "${FAKE_SRC_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'; true ;;
   *) echo "error: package ID specification \`${crate}\` did not match any packages" >&2; exit 101 ;;
 esac
 STUB
@@ -417,13 +423,15 @@ write_lock
 # ---- D4: the committed Gradle wrapper is Gradle's -----------------------------------------------
 wrap="${src}/taurine-mobile/src-tauri/gen/android/gradle/wrapper"; mkdir -p "${wrap}"
 printf 'wrapper jar\n' >"${wrap}/gradle-wrapper.jar"
+printf '#!/bin/sh\n' >"${wrap}/../../gradlew"; printf '@echo off\n' >"${wrap}/../../gradlew.bat"
 jar_sum="$( (sha256sum "${wrap}/gradle-wrapper.jar" 2>/dev/null || shasum -a 256 "${wrap}/gradle-wrapper.jar") | cut -d' ' -f1)"
 props() { printf 'distributionBase=GRADLE_USER_HOME\ndistributionUrl=%s\n%s' "$1" "${2:+distributionSha256Sum=$2
 }" >"${wrap}/gradle-wrapper.properties"; }
 props 'https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip' bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
 # The stand-in jar plays Gradle 8.14.3's published wrapper jar; a different jar plays 7.0's.
 pin="tci_gradle_wrapper_jar_sha256() { [[ \$1 == 8.14.3 ]] && echo ${jar_sum}; };"
-expect_pass 'the 8.14.3 jar with an 8.14.3 distributionUrl' "${pin} gradle_wrapper_check"
+scripts="tci_gradle_scripts_sha256() { [[ \$1 == 8.14.3 ]] && echo \"\$(tci_sha256 '${wrap}/../../gradlew') \$(tci_sha256 '${wrap}/../../gradlew.bat')\"; };"
+expect_pass 'the 8.14.3 jar with an 8.14.3 distributionUrl' "${pin} ${scripts} gradle_wrapper_check"
 expect_fail 'a jar that is no published wrapper' 'gradle_wrapper_check' "not Gradle 8.14.3's published wrapper jar"
 printf 'gradle 7.0 wrapper jar\n' >"${wrap}/gradle-wrapper.jar"
 expect_fail 'the 7.0 jar with an 8.14.3 distributionUrl' "${pin} gradle_wrapper_check" "not Gradle 8.14.3's published wrapper jar"
@@ -436,6 +444,12 @@ props 'https\://example.invalid/gradle-8.14.3-bin.zip' bd71102213493060956ec229d
 expect_fail 'a non-official distributionUrl' "${pin} gradle_wrapper_check" 'not an official Gradle'
 props 'https\://services.gradle.org/distributions/gradle-7.6-bin.zip' x
 expect_fail 'an unpinned Gradle version' "${pin} gradle_wrapper_check" 'no pinned wrapper jar checksum'
+props 'https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip' bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
+expect_pass 'the pinned gradlew scripts' "${pin} ${scripts} gradle_wrapper_check"
+expect_fail 'gradlew scripts that are not pinned' "${pin} gradle_wrapper_check" 'is not the pinned script'
+cp "${wrap}/../../gradlew" "${work}/gradlew.pinned"
+printf '#!/bin/sh\nexec ./evil\n' >"${work}/gradlew.changed"
+expect_fail 'a gradlew changed after pinning' "${pin} tci_gradle_scripts_sha256() { [[ \$1 == 8.14.3 ]] && echo \"\$(tci_sha256 '${work}/gradlew.pinned') \$(tci_sha256 '${wrap}/../../gradlew.bat')\"; }; cp '${work}/gradlew.changed' '${wrap}/../../gradlew'; gradle_wrapper_check" 'is not the pinned script'
 grep -qF 'gradle_wrapper_check || exit 1' .github/workflows/android-validation.yml || fail 'android-native does not check the Gradle wrapper'
 rm -rf "${src}/taurine-mobile/src-tauri/gen"
 
@@ -459,8 +473,8 @@ expect_fail 'a callback to another npm script' 'mobile_build_phase_check android
 yml="${gen}/apple/project.yml"
 lsp='$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)'
 project_yml() {
-  printf 'name: x\ntargets:\n  app_iOS:\n    settings:\n      base:\n        LIBRARY_SEARCH_PATHS[arch=arm64]: "%s"\n%s    dependencies:\n      - framework: %s\n        embed: false\n      - sdk: SystemConfiguration.framework\n    preBuildScripts:\n      - name: Build Rust Code\n        script: %s\n%s' \
-    "${1:-${lsp}}" "${2:-}" "${3:-libapp.a}" "${4:-npm run -- tauri ios xcode-script -v --platform x}" "${5:-}" >"${yml}"
+  printf 'name: x\ntargets:\n  app_iOS:\n    settings:\n      base:\n        LIBRARY_SEARCH_PATHS[arch=arm64]: "%s"\n%s    dependencies:\n      - framework: %s\n        embed: false\n      - sdk: SystemConfiguration.framework\n      - sdk: UIKit.framework\n%s    preBuildScripts:\n      - name: Build Rust Code\n        script: %s\n%s' \
+    "${1:-${lsp}}" "${2:-}" "${3:-libapp.a}" "${6:-}" "${4:-npm run -- tauri ios xcode-script -v --platform x}" "${5:-}" >"${yml}"
 }
 project_yml
 expect_pass 'the regenerated Xcode project' 'mobile_build_phase_check ios'
@@ -476,6 +490,14 @@ project_yml '$(inherited) /tmp/libs'
 expect_fail 'a changed LIBRARY_SEARCH_PATHS' 'mobile_build_phase_check ios' 'regenerated template'
 project_yml '' '' 'Vendor/libssl.a'
 expect_fail 'another linked framework file' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '' '' '' '' '' '      - sdk: Vendor.framework\n'
+expect_fail 'an SDK framework outside the allow-list' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '' '' '' '' '' '      - carthage: Alamofire\n'
+expect_fail 'a carthage dependency' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '' '' '' '' '' '      - package: Vendored\n'
+expect_fail 'a package dependency' 'mobile_build_phase_check ios' 'regenerated template'
+project_yml '' '' '' '' '' '      - target: Helper\n'
+expect_fail 'a target dependency' 'mobile_build_phase_check ios' 'regenerated template'
 project_yml
 ( cd "${src}" && git init -q && git add taurine-mobile/src-tauri/gen/apple/project.yml )
 expect_fail 'a committed gen/apple' 'mobile_build_phase_reset ios' 'is committed'
@@ -483,40 +505,87 @@ rm -rf "${src}/.git" "${gen}"
 grep -qF 'mobile_build_phase_reset android' .github/workflows/android-validation.yml && grep -qF 'mobile_build_phase_check android' .github/workflows/android-validation.yml || fail 'the Android init does not regenerate and check the build phase'
 grep -qF 'mobile_build_phase_reset ios' .github/actions/ios-project-init/action.yml && grep -qF 'mobile_build_phase_check ios' .github/actions/ios-project-init/action.yml || fail 'the iOS init does not regenerate and check the build phase'
 
-# ---- Built graph: what cargo actually compiled, judged against the door ----------------------
-bg="${work}/bg"; rm -rf "${bg}"; mkdir -p "${bg}/target/aarch64-linux-android/debug/deps" "${bg}/reg"
-mkpkg() { mkdir -p "${bg}/$1/src"; printf '[package]\nname = "%s"\n' "$2" >"${bg}/$1/Cargo.toml"; : >"${bg}/$1/src/lib.rs"; }
-mkpkg ws/taurine-mobile taurine-mobile; mkpkg ws/taurine-tls-openssl taurine-tls-openssl; mkpkg ws/taurine-db-dbx taurine-db-dbx
-mkpkg reg/openssl-0.10.81 openssl; mkpkg reg/openssl-sys-0.9.117 openssl-sys; mkpkg reg/tokio-openssl-0.6.5 tokio-openssl
-mkpkg reg/native-tls-0.2.12 native-tls; mkpkg "reg/dir with space-1.0.0" spaced
-jq -n --arg b "${bg}" '
-  def pkg($id; $dir): {id: $id, name: $id, manifest_path: ($b + "/" + $dir + "/Cargo.toml")};
-  def node($id; $deps): {id: $id, deps: [$deps[] | {pkg: .}]};
-  {packages: [pkg("taurine-mobile"; "ws/taurine-mobile"), pkg("taurine-tls-openssl"; "ws/taurine-tls-openssl"), pkg("taurine-db-dbx"; "ws/taurine-db-dbx"),
-              pkg("openssl"; "reg/openssl-0.10.81"), pkg("openssl-sys"; "reg/openssl-sys-0.9.117"), pkg("tokio-openssl"; "reg/tokio-openssl-0.6.5"),
-              pkg("native-tls"; "reg/native-tls-0.2.12"), pkg("spaced"; "reg/dir with space-1.0.0")],
-   resolve: {nodes: [node("taurine-mobile"; ["taurine-db-dbx", "native-tls"]), node("taurine-db-dbx"; ["openssl", "tokio-openssl", "taurine-tls-openssl"]),
-                     node("taurine-tls-openssl"; ["openssl", "openssl-sys"]), node("openssl"; ["openssl-sys"]), node("tokio-openssl"; ["openssl", "openssl-sys"]),
-                     node("native-tls"; ["openssl"]), node("openssl-sys"; []), node("spaced"; [])]}}' >"${work}/meta-all.json"
-d="${bg}/target/aarch64-linux-android/debug"
-printf '%s: %s %s\n\n%s:\n' "${d}/libtaurine_mobile_lib.so" "${bg}/ws/taurine-mobile/src/lib.rs" "${bg}/ws/taurine-db-dbx/src/lib.rs" "${bg}/ws/taurine-mobile/src/lib.rs" >"${d}/libtaurine_mobile_lib.d"
-for c in taurine-tls-openssl:ws/taurine-tls-openssl openssl:reg/openssl-0.10.81 openssl-sys:reg/openssl-sys-0.9.117 tokio-openssl:reg/tokio-openssl-0.6.5; do
-  printf '%s: %s\n' "${d}/deps/lib${c%%:*}.rlib" "${bg}/${c#*:}/src/lib.rs" >"${d}/deps/${c%%:*}-0000.d"
-done
-printf '%s: %s\n' "${d}/deps/libspaced.rlib" "${bg}/reg/dir\\ with\\ space-1.0.0/src/lib.rs" >"${d}/deps/spaced-0000.d"
-expect_pass 'the door-only built graph' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/libtaurine_mobile_lib.d' taurine-mobile"
-grep -qF 'OpenSSL consumers: openssl, taurine-db-dbx, taurine-tls-openssl, tokio-openssl (door only)' "${work}/out" || fail 'the built graph did not list the door consumers'
-printf '%s: %s\n' "${d}/deps/libnative_tls.rlib" "${bg}/reg/native-tls-0.2.12/src/lib.rs" >"${d}/deps/native_tls-0000.d"
-expect_fail 'an extra feature that builds native-tls' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/libtaurine_mobile_lib.d' taurine-mobile" 'native-tls depends on openssl outside the door'
-rm "${d}/deps/native_tls-0000.d"
-expect_fail 'missing dep-info' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/nothing.d' taurine-mobile" 'dep-info is missing'
-printf 'not a dep-info file\n' >"${d}/broken.d"
-expect_fail 'unparseable dep-info' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/broken.d' taurine-mobile" 'does not parse'
-printf '%s: %s\n' "${d}/other.so" "${bg}/reg/openssl-0.10.81/src/lib.rs" >"${d}/other.d"
-expect_fail 'dep-info without the shell crate' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/other.d' taurine-mobile" 'does not contain the shell crate'
+# ---- Built graph, with REAL cargo: a toy workspace built offline ------------------------------
+# Path crates only (no registry), so cargo builds offline in seconds. `openssl`, `openssl-sys`
+# and `openssl-src` are stand-ins with the real names; the door path is
+# taurine-mobile -> taurine-db-dbx -> openssl -> openssl-sys (build: openssl-src).
+toy="${work}/toy"; rm -rf "${toy}"
+crate() { # crate <dir> <name> <deps toml> [lib extra]
+  mkdir -p "${toy}/$1/src"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n[dependencies]\n%s\n' "$2" "${4:-}" "$3" >"${toy}/$1/Cargo.toml"
+  printf 'pub fn f() {}\n' >"${toy}/$1/src/lib.rs"
+}
+crate openssl-src openssl-src ''
+crate openssl-sys openssl-sys '' '[build-dependencies]
+openssl-src = { path = "../openssl-src" }'
+printf 'fn main() {}\n' >"${toy}/openssl-sys/build.rs"
+crate openssl openssl 'openssl-sys = { path = "../openssl-sys" }'
+crate dbx taurine-db-dbx 'openssl = { path = "../openssl" }'
+crate consumer consumer 'openssl = { path = "../openssl" }'
+crate evil evil '' '[build-dependencies]
+openssl-src = { path = "../openssl-src" }'
+printf 'fn main() {}\n' >"${toy}/evil/build.rs"
+crate shell taurine-mobile 'taurine-db-dbx = { path = "../dbx" }
+consumer = { path = "../consumer", optional = true }
+evil = { path = "../evil", optional = true }' '[features]
+extra = ["dep:consumer"]
+evilsrc = ["dep:evil"]'
+printf '[workspace]\nmembers = ["shell", "dbx", "openssl", "openssl-sys", "openssl-src", "consumer", "evil"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
+toy_build() { # toy_build <target-dir> [cargo args]
+  local dir="$1"; shift
+  ( cd "${toy}" && CARGO_TARGET_DIR="${dir}" "${real_cargo}" build --offline -q -p taurine-mobile "$@" ) >/dev/null 2>&1 ||
+    fail "the toy workspace did not build with: $*"
+}
+toy_check() { echo "cd '${toy}' && TCI_REAL_CARGO='${real_cargo}' built_graph_check toy '$1/debug/libtaurine_mobile.d' taurine-mobile"; }
+toy_build "${work}/t-door"
+run_lib "$(toy_check "${work}/t-door")" || { cat "${work}/out" >&2; fail 'the door-only toy graph: should pass'; }
+grep -qF 'OpenSSL consumers: openssl, openssl-sys, taurine-db-dbx (door only)' "${work}/out" || { cat "${work}/out" >&2; fail 'the door-only toy graph did not list its door consumers'; }
+toy_build "${work}/t-extra" --features extra
+expect_fail 'an extra feature that builds a non-door OpenSSL consumer (real cargo)' "$(toy_check "${work}/t-extra")" 'consumer depends on openssl outside the door'
+toy_build "${work}/t-evil" --features evilsrc
+expect_fail 'a non-door crate building openssl-src (real cargo)' "$(toy_check "${work}/t-evil")" 'evil depends on openssl-src outside the door'
+# The basedir is the real path cargo writes (macOS resolves /var to /private/var).
+mkdir -p "${toy}/.cargo"; printf '[build]\ndep-info-basedir = "%s"\n' "$(cd "${toy}/consumer" && pwd -P)" >"${toy}/.cargo/config.toml"
+toy_build "${work}/t-basedir" --features extra
+expect_fail 'a consumer hidden by dep-info-basedir (real cargo)' "$(toy_check "${work}/t-basedir")" 'consumer depends on openssl outside the door'
+expect_fail 'dep-info-basedir in a cargo config' "cd '${toy}' && refuse_openssl_overrides" 'or dep-info-basedir'
+rm -r "${toy}/.cargo"
+expect_fail 'CARGO_BUILD_DEP_INFO_BASEDIR in the job' 'export CARGO_BUILD_DEP_INFO_BASEDIR=/x; refuse_openssl_overrides' 'job environment'
+printf 'pub fn consumer_impl() {}\n' >"${toy}/shell/src/consumer_impl.rs"
+printf '[lib]\npath = "../shell/src/consumer_impl.rs"\n' >>"${toy}/consumer/Cargo.toml"
+toy_build "${work}/t-libpath" --features extra
+expect_fail 'a [lib] path pointing into the shell crate (real cargo)' "$(toy_check "${work}/t-libpath")" 'consumer has a target whose sources lie outside its own directory'
+git -C "${work}" init -q 2>/dev/null || true
+crate consumer consumer 'openssl = { path = "../openssl" }'
+expect_fail 'missing dep-info (real cargo)' "$(toy_check "${work}/t-none")" 'dep-info is missing'
+printf 'not a dep-info file\n' >"${work}/t-door/debug/libtaurine_mobile.d"
+expect_fail 'unparseable dep-info (real cargo)' "$(toy_check "${work}/t-door")" 'does not parse'
 grep -qF 'built_graph_check "android-${abi}-built-graph"' .github/workflows/android-validation.yml || fail 'android-native does not judge the built graph'
 grep -qF 'built_graph_check ios-arm64-sim-built-graph' .github/workflows/ios-validation.yml || fail 'ios-native does not judge the built graph'
 grep -qF 'built_graph_check "${os}-desktop-built-graph"' .github/actions/shell-artefact/action.yml || fail 'the desktop check does not judge the built graph'
+expect_fail 'a non-door crate building openssl-src (S1 gate)' 'FAKE_SRC_BAD=1 openssl_door_gate g taurine-mobile -' 'evil-sys depends on openssl-src outside the OpenSSL door'
+
+# ---- B3: the shipped artefact is the judged build ---------------------------------------------
+crate bin taurine-desktop ''
+printf 'fn main() {}\n' >"${toy}/bin/src/main.rs"
+printf '[workspace]\nmembers = ["shell", "dbx", "openssl", "openssl-sys", "openssl-src", "consumer", "evil", "bin"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
+( cd "${toy}" && CARGO_TARGET_DIR="${work}/t-bin" "${real_cargo}" build --offline -q -p taurine-desktop ) >/dev/null 2>&1 || fail 'the toy binary did not build'
+cp "${work}/t-bin/debug/taurine-desktop" "${work}/shipped-bin"
+expect_pass 'a bundled copy of the judged binary (real cargo)' "bind_same_binary b '${work}/shipped-bin' '${work}/t-bin/debug/taurine-desktop'"
+printf 'fn main() { println!("swapped"); }\n' >"${toy}/bin/src/main.rs"
+( cd "${toy}" && CARGO_TARGET_DIR="${work}/t-bin2" "${real_cargo}" build --offline -q -p taurine-desktop ) >/dev/null 2>&1 || fail 'the swapped toy binary did not build'
+cp "${work}/t-bin2/debug/taurine-desktop" "${work}/shipped-bin"
+expect_fail 'a binary swapped in after the build (real cargo)' "bind_same_binary b '${work}/shipped-bin' '${work}/t-bin/debug/taurine-desktop'" 'not the build that was judged'
+# Android: the NDK's llvm-readelf/llvm-strip are not in the policy environment, so stand-ins
+# report a build-id read from the file (the comparison logic is what is under test).
+printf '#!/usr/bin/env bash\nprintf "  Build ID: %%s\\n" "$(head -n 1 "$2")"\n' >"${work}/bin/fake-readelf"; chmod +x "${work}/bin/fake-readelf"
+printf 'abc123\nlib\n' >"${work}/built.so"; printf 'abc123\nstripped\n' >"${work}/shipped.so"
+expect_pass 'an APK library with the judged build-id' "TCI_READELF='${work}/bin/fake-readelf' TCI_STRIP=/bin/cat bind_android_library a '${work}/shipped.so' '${work}/built.so'"
+printf 'def456\nother\n' >"${work}/shipped.so"
+expect_fail 'a .so swapped into the APK after the build' "TCI_READELF='${work}/bin/fake-readelf' TCI_STRIP=/bin/cat bind_android_library a '${work}/shipped.so' '${work}/built.so'" "build-id is not the judged build"
+grep -qF 'bind_android_library "android-${abi}-binding"' .github/workflows/android-validation.yml || fail 'android-native does not bind the APK library to the judged build'
+grep -qF 'bind_same_binary ios-arm64-sim-binding' .github/workflows/ios-validation.yml || fail 'ios-native does not bind libapp.a to the judged build'
+grep -qF 'bind_same_binary "${os}-desktop-binding"' .github/actions/shell-artefact/action.yml || fail 'the desktop check does not bind the bundled binary'
 
 # ---- N8: the weekly release-line cadence fails closed --------------------------------------
 cadence="$(ruby -ryaml -e '

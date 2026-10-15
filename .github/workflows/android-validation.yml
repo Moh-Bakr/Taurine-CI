@@ -317,7 +317,10 @@ jobs:
                 artefact_tree_check "android-${abi}" "${abi_dir}" "${main}" debug "${door}" taurine-mobile "${abi}" || exit 1
                 # The graph cargo actually built for this ABI (Gradle may pass its own features).
                 if [[ "${main}" != - ]]; then
-                  built_graph_check "android-${abi}-built-graph" "$(artefact_depinfo "${triple}" debug libtaurine_mobile_lib)" taurine-mobile || exit 1
+                  depinfo="$(artefact_depinfo "${triple}" debug libtaurine_mobile_lib)"
+                  built_graph_check "android-${abi}-built-graph" "${depinfo}" taurine-mobile || exit 1
+                  # The shipped library must be the one that was judged (Gradle may ship another).
+                  bind_android_library "android-${abi}-binding" "${main}" "${depinfo%.d}.so" || exit 1
                 fi
               done <<<"${abi_dirs}"
               if [[ "${SIZE_PROBE}" == true ]]; then

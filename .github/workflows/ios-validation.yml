@@ -363,7 +363,14 @@ jobs:
                 fi
               }
               # The graph cargo actually built for the simulator (the Xcode phase passes its own args).
-              built_graph_check ios-arm64-sim-built-graph "$(artefact_depinfo aarch64-apple-ios-sim release libtaurine_mobile_lib)" taurine-mobile || exit 1
+              depinfo="$(artefact_depinfo aarch64-apple-ios-sim release libtaurine_mobile_lib)"
+              built_graph_check ios-arm64-sim-built-graph "${depinfo}" taurine-mobile || exit 1
+              # What Xcode linked (the project's Externals libapp.a) must be the judged build.
+              externals="$(find taurine-mobile/src-tauri/gen/apple/Externals -name libapp.a -type f 2>/dev/null | sort || true)"
+              [[ -n "${externals}" ]] || { echo 'ios-binding: FAILED - no libapp.a in the project Externals' >&2; exit 1; }
+              while IFS= read -r linked; do
+                bind_same_binary ios-arm64-sim-binding "${linked}" "${depinfo%.d}.a" || exit 1
+              done <<<"${externals}"
               artefact="$(ios_artefact || true)"
               [[ -n "${artefact}" ]] || { echo 'ios-artefact: FAILED - neither the app binary nor the Rust static library was found' >&2; exit 1; }
               # The whole .app (Frameworks, plug-ins, any other Mach-O): the main executable by the
