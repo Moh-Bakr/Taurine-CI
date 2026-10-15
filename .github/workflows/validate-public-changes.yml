@@ -366,11 +366,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node_bin="$(readlink -f /usr/local/bin/node)"
-          if [[ -e /usr/bin/node ]]; then
-            echo '/usr/bin/node is already installed; leaving it as it is'
+          node_dest=/usr/bin/node
+          if [[ -e "${node_dest}" || -L "${node_dest}" ]]; then
+            # Kept only if it is a real file, and it and its directory belong to root with no group
+            # or other write: a link, or anything a job user could change, would let pull-request
+            # code replace node between base tests.
+            if [[ -n "$(find "${node_dest}" -maxdepth 0 -type f -user root ! -perm -g+w ! -perm -o+w)" &&
+                  -n "$(find "$(dirname "${node_dest}")" -maxdepth 0 -type d -user root ! -perm -g+w ! -perm -o+w)" ]]; then
+              echo "${node_dest} is already installed and only root can change it; leaving it as it is"
+            else
+              echo "::error::${node_dest} exists but is a link or can be changed by someone other than root"
+              exit 1
+            fi
           else
-            sudo install -o root -g root -m 0755 "${node_bin}" /usr/bin/node
+            node_bin="$(readlink -f /usr/local/bin/node)"
+            sudo install -o root -g root -m 0755 "${node_bin}" "${node_dest}"
           fi
 
       # Base tests extract and execute steps from this pull request's copy of the workflow, so
@@ -420,8 +430,17 @@ jobs:
           for tool in "${ruby_bin}" "${bash_bin}" /usr/bin/env /usr/bin/git; do
             [[ -x "${tool}" ]] || { echo "::error::${tool} is missing, so the base policy cannot run in a clean environment"; exit 1; }
           done
+          # HOME is where ruby looks for user gems (~/.gem), node for modules (~/.node_modules), git
+          # for its config: files planted there by pull-request code that one base test runs would
+          # be loaded by the next. So it is emptied and recreated before every base script. The path
+          # stays the same because the base commit's own fixtures expect it; mkdir without -p fails
+          # if anything got there first.
           clean_home="${RUNNER_TEMP}/base-policy-home"
-          mkdir -p "${clean_home}"
+          fresh_home() {
+            rm -rf -- "${clean_home}"
+            mkdir -m 0700 -- "${clean_home}" || { echo "::error::could not give the base policy an empty HOME"; exit 1; }
+          }
+          fresh_home
           scrub=(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "HOME=${clean_home}" LANG=C.UTF-8 LC_ALL=C.UTF-8)
           for name in CI GITHUB_ACTIONS GITHUB_API_URL GITHUB_EVENT_NAME GITHUB_REF GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_SHA GITHUB_WORKSPACE RUNNER_ARCH RUNNER_OS RUNNER_TEMP; do
             [[ -z "${!name+x}" ]] || scrub+=("${name}=${!name}")
@@ -458,7 +477,7 @@ jobs:
           [[ "${BASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the base commit is not a full SHA"; exit 1; }
           checked_out="$("${scrub[@]}" /usr/bin/git -C "${base}" rev-parse --verify HEAD)"
           [[ "${checked_out}" == "${BASE_SHA}" ]] || { echo "::error::the base checkout is ${checked_out}, not the base commit ${BASE_SHA}"; exit 1; }
-          pins="$("${scrub[@]}" "${ruby_bin}" -e '
+          pins="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e '
             require "digest"
             require "open3"
             base = ARGV.fetch(0)
@@ -475,8 +494,11 @@ jobs:
             print rows.sort_by(&:last).map { |digest, path| "#{digest}  #{path}\n" }.join
           ' "${base}")"
           pinned="$(printf '%s\n' "${pins}" | wc -l | tr -d ' ')"
+          # The verifier runs while the previous script's HOME is still there, so it loads no gems at
+          # all: a planted digest gem could otherwise make every file match. The pin is built the
+          # same way, though its HOME is still empty when it runs.
           verify_manifest() {
-            printf '%s\n' "${pins}" | "${scrub[@]}" "${ruby_bin}" -e '
+            printf '%s\n' "${pins}" | "${scrub[@]}" "${ruby_bin}" --disable-gems -e '
               require "digest"
               pinned = STDIN.read.lines.map { |line| line.chomp.split("  ", 2) }.reject { |pair| pair.length != 2 }.to_h { |d, p| [p, d] }
               # FNM_DOTMATCH, so an added hidden file is reported like any other.
@@ -551,6 +573,7 @@ jobs:
           run_guarded() {
             local status=0 leader guard survivors
             guard="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+            fresh_home
             "${scrub[@]}" ${token[@]+"${token[@]}"} "TAURINE_BASE_GUARD=${guard}" "${ruby_bin}" -e '
               Process.setsid
               exec(*ARGV)
@@ -592,5 +615,6 @@ jobs:
           [[ "${executed}" -eq "${expected}" ]] || { echo "::error::ran ${executed} of ${expected} base policy scripts"; exit 1; }
           [[ "${process_failure}" -eq 0 ]] || status=1
           verify_manifest || status=1
+          rm -rf -- "${clean_home}"
           echo "base policy: ${executed} scripts run against ${pinned} pinned files"
           exit "${status}"

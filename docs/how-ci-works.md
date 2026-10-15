@@ -768,6 +768,10 @@ process behind to act later. The base pass is therefore isolated further:
   alive carrying that marker afterwards -- one that left the session, as `Process.daemon` does --
   fails the step too. Survivors are killed either way. The group is taken from the step's own `$!`,
   never from a file a script could overwrite.
+- **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
+  test runs could leave a gem in `~/.gem` or a module in `~/.node_modules` for the next to load:
+  a later check's `require "json"` would run it. `HOME` is deleted and recreated empty before
+  every base script, and the step's own pin builder and verifier run ruby with `--disable-gems`.
 - **No loader variables.** The step shell unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`,
   the allow-list never forwards them, and the step asserts none reaches a base script.
 
@@ -775,8 +779,9 @@ process behind to act later. The base pass is therefore isolated further:
 rewritten, added, removed and hidden base file; a rewrite by the last script, which only the
 final check can see; a base checkout tampered on disk; the same rewrite under poisoned ruby; a
 forged manifest on disk; a forged digest function; a base script that leaves a child in its
-session, the same while planting a bogus group id, and one that daemonises out of it; and planted
-loader variables.
+session, the same while planting a bogus group id, and one that daemonises out of it; planted
+loader variables; a json gem and a node module planted in `HOME` for a later script; and an
+existing `/usr/bin/node` that is a link or not root's alone.
 
 What this does **not** do, plainly:
 

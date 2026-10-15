@@ -327,5 +327,127 @@ expect_pass loader "${loader}" \
   LD_PRELOAD=/tmp/planted.so LD_LIBRARY_PATH=/tmp/planted LD_AUDIT=/tmp/planted-audit.so \
   DYLD_INSERT_LIBRARIES=/tmp/planted.dylib DYLD_LIBRARY_PATH=/tmp/planted
 
-echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind, in its session or escaped from it by Process.daemon, fails the step and is killed, even when the script plants a bogus group id; a rewrite by the last script, a tampered base checkout and a hidden file are caught; and planted loader variables never reach a base script'
+# Files a base script leaves in HOME. Pull-request code that one base test runs could plant a gem
+# or a node module there, and a later base check that requires json, or a module node finds
+# through ~/.node_modules, would load it and could exit 0 from inside. HOME must be empty again
+# for every script. The planter runs first (check-a-*.rb sorts first); the judge always rejects,
+# unless planted code it loads makes it pass.
+planter() {
+  cat > "$1/base-policy/.github/policy/check-a-plant.rb" <<'RB'
+require "fileutils"
+home = ENV.fetch("HOME")
+gems = Gem.user_dir
+FileUtils.mkdir_p(File.join(gems, "specifications"))
+FileUtils.mkdir_p(File.join(gems, "gems/json-99.0.0/lib"))
+File.write(File.join(gems, "specifications/json-99.0.0.gemspec"), <<~SPEC)
+  Gem::Specification.new do |s|
+    s.name = "json"; s.version = "99.0.0"; s.summary = "planted"; s.authors = ["fixture"]
+    s.files = ["lib/json.rb"]; s.require_paths = ["lib"]
+  end
+SPEC
+File.write(File.join(gems, "gems/json-99.0.0/lib/json.rb"), "exit!(0)\n")
+FileUtils.mkdir_p(File.join(home, ".node_modules/taurine-planted"))
+File.write(File.join(home, ".node_modules/taurine-planted/index.js"), "process.exit(0);\n")
+RB
+}
+
+home_gem="$(fixture "${work}/home-gem")"
+passing_scripts "${home_gem}"
+planter "${home_gem}"
+printf '%s\n' 'require "json"' 'warn "the judge loaded the system json and rejects"' 'exit 1' \
+  > "${home_gem}/base-policy/.github/policy/check-z-judge.rb"
+commit_base "${home_gem}"
+expect_reject home-gem "${home_gem}" "The base commit's check-z-judge.rb rejects this pull request"
+
+# A planted digest gem aimed at the verifier rather than at a base check. The verifier runs while
+# the planting script's HOME is still there, so if it loaded gems, a digest that matched every file
+# would hide the rewrite the same script made to a later base script. This only falsifies where
+# RubyGems resolves a default gem's require to a newer installed copy, as Ruby 4.0 does for digest;
+# Ruby 3.2 (the runner's /usr/bin/ruby) and 2.6 keep the default copy, so there it passes with or
+# without --disable-gems.
+home_digest="$(fixture "${work}/home-digest")"
+passing_scripts "${home_digest}"
+cat > "${home_digest}/base-policy/.github/policy/check-a-plant.rb" <<'RB'
+require "fileutils"
+gems = Gem.user_dir
+FileUtils.mkdir_p(File.join(gems, "specifications"))
+FileUtils.mkdir_p(File.join(gems, "gems/digest-99.0.0/lib"))
+File.write(File.join(gems, "specifications/digest-99.0.0.gemspec"), <<~SPEC)
+  Gem::Specification.new do |s|
+    s.name = "digest"; s.version = "99.0.0"; s.summary = "planted"; s.authors = ["fixture"]
+    s.files = ["lib/digest.rb"]; s.require_paths = ["lib"]
+  end
+SPEC
+File.write(File.join(gems, "gems/digest-99.0.0/lib/digest.rb"), "exit!(0)\n")
+File.write(".github/policy/check-pass.sh", "exit 0\n# rewritten by an earlier base script\n")
+RB
+commit_base "${home_digest}"
+expect_reject home-digest "${home_digest}" 'no longer matches the base commit it was pinned to'
+
+# The same through node. The judge names node by the absolute path found here, because the base
+# PATH holds only the system directories, where a developer machine and the fixtures job have none.
+node_for_fixture="$(command -v node || true)"
+home_node_skipped=no
+if [[ -n "${node_for_fixture}" ]]; then
+  home_node="$(fixture "${work}/home-node")"
+  passing_scripts "${home_node}"
+  planter "${home_node}"
+  printf '%s\n' "if $(printf '%q' "${node_for_fixture}") -e 'require(\"taurine-planted\"); process.exit(3)' 2>/dev/null; then exit 0; fi" \
+    'echo "the judge found no planted module and rejects" >&2' 'exit 1' \
+    > "${home_node}/base-policy/.github/policy/test-z-judge.sh"
+  commit_base "${home_node}"
+  expect_reject home-node "${home_node}" "The base commit's test-z-judge.sh rejects this pull request"
+else
+  home_node_skipped=yes
+fi
+
+# The node install step keeps an existing node only if it is a real file that it and its directory
+# leave to root alone. Run that branch of the step, pointed at stand-ins, with nothing installed.
+install_step="Install node where only root can change it"
+ruby "${root}/.github/policy/extract-step.rb" "${workflow}" "${install_step}" run > "${work}/install.sh"
+node_line='node_dest=/usr/bin/node'
+[[ "$(grep -cxF "${node_line}" "${work}/install.sh" || true)" -eq 1 ]] || {
+  echo "base-policy isolation: the install step does not set ${node_line} exactly once" >&2; exit 1;
+}
+run_install() {
+  local label="$1" dest="$2" rc=0
+  ruby -e 'text, from, to = File.read(ARGV[0]), ARGV[1], ARGV[2]; print text.sub(from) { to }' \
+    "${work}/install.sh" "${node_line}" "node_dest=${dest}" > "${work}/install-${label}.sh"
+  bash --noprofile --norc -eo pipefail "${work}/install-${label}.sh" > "${work}/install-${label}.out" 2>&1 || rc=$?
+  printf '%s' "${rc}"
+}
+expect_install_refuses() {
+  local label="$1" dest="$2"
+  if [[ "$(run_install "${label}" "${dest}")" -eq 0 ]] ||
+     ! grep -qF 'exists but is a link or can be changed by someone other than root' "${work}/install-${label}.out"; then
+    echo "base-policy isolation: install ${label}: an existing ${dest} was not refused" >&2
+    sed 's/^/  /' "${work}/install-${label}.out" >&2
+    exit 1
+  fi
+}
+mkdir -p "${work}/install"
+# A link root owns, so it is refused for being a link and not for its owner: /tmp on macOS, /bin on
+# merged-/usr Linux. Where there is none, a link the job user makes still has to be refused.
+root_link="$(ruby -e 'ARGV.each { |p| s = File.lstat(p) rescue next; if s.symlink? && s.uid.zero? then print p; exit end }' /tmp /bin /sbin /lib)"
+if [[ -z "${root_link}" ]]; then
+  root_link="${work}/install/link-node"
+  ln -s /usr/bin/env "${root_link}"
+fi
+expect_install_refuses link "${root_link}"
+printf 'stand-in\n' > "${work}/install/owned-node"
+chmod 0755 "${work}/install/owned-node"
+expect_install_refuses owned "${work}/install/owned-node"
+# A real file root owns, 0755, in a root-owned directory nobody else can write: kept.
+if [[ "$(run_install kept /usr/bin/env)" -ne 0 ]] ||
+   ! grep -qF 'already installed and only root can change it' "${work}/install-kept.out"; then
+  echo 'base-policy isolation: install kept: a root-owned node was not kept' >&2
+  sed 's/^/  /' "${work}/install-kept.out" >&2
+  exit 1
+fi
+
+echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind, in its session or escaped from it by Process.daemon, fails the step and is killed, even when the script plants a bogus group id; a rewrite by the last script, a tampered base checkout and a hidden file are caught; planted loader variables never reach a base script; a gem or node module planted in HOME by one base script is gone before the next; and an existing node is kept only when root alone can change it'
 [[ "${daemon_skipped}" == no ]] || echo 'base-policy isolation: the daemon-escape case above was NOT exercised on this host'
+if [[ "${home_node_skipped}" == yes ]]; then
+  echo 'base-policy isolation: the node HOME case above was NOT exercised on this host: no node'
+  [[ "${GITHUB_ACTIONS:-}" != true ]] || exit 1
+fi
