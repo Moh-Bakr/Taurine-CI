@@ -196,6 +196,9 @@ runs:
           if [[ -n "$(find "${top}" \( -name node_modules -o -name target -o -name .git \) -prune -o -name .npmrc -print 2>/dev/null)" ]]; then
             echo 'tauri-cli: FAILED - the checkout carries an .npmrc' >&2; return 1
           fi
+          if [[ -e "${HOME}/.npmrc" ]]; then
+            echo 'tauri-cli: FAILED - the job user has a ~/.npmrc' >&2; return 1
+          fi
         }
         tauri_cli() {
           local shell="$1" name top; shift
@@ -203,9 +206,13 @@ runs:
           top="$(cd "${shell}" && git rev-parse --show-toplevel 2>/dev/null || true)"
           [[ -n "${top}" ]] || top="$(cd "${shell}/.." && pwd -P)"
           tauri_script_pinned "${shell}" "${top}" || return 1
-          local unset_args=()
+          local unset_args=() empty="${RUNNER_TEMP}/taurine-ci/empty-npmrc"
+          mkdir -p "${RUNNER_TEMP}/taurine-ci" && : >"${empty}-user" && : >"${empty}-global"
           for name in $(compgen -e | grep -iE '^(TAURI_|npm_config_)' || true); do unset_args+=(-u "${name}"); done
-          ( cd "${shell}" && exec env ${unset_args[@]+"${unset_args[@]}"} npm run --ignore-scripts tauri -- "$@" )
+          # npm's user and global config point at empty CI-owned files; the generated
+          # build phases inherit this environment when they call back `npm run -- tauri`.
+          ( cd "${shell}" && exec env ${unset_args[@]+"${unset_args[@]}"} npm_config_userconfig="${empty}-user" npm_config_globalconfig="${empty}-global" \
+              npm run --ignore-scripts tauri -- "$@" )
         }
 
         # The bindgen target/sysroot per Android triple that the source's android scripts set,
@@ -297,12 +304,18 @@ runs:
           [[ "${bad}" -eq 0 ]]
         }
 
-        # Gradle wrapper of the committed Android project: the wrapper jar must be one of Gradle's
-        # published wrapper jars, distributionUrl must be an official
+        # Gradle wrapper of the committed Android project: the wrapper jar must be the wrapper jar
+        # Gradle published for the version distributionUrl names, distributionUrl must be an official
         # https://services.gradle.org/distributions/gradle-<v>-bin.zip, and distributionSha256Sum
         # must be present and equal Gradle's published checksum for that version. The checksums
         # were fetched from services.gradle.org and are pinned here; add a version by pinning both.
-        TCI_GRADLE_WRAPPER_JARS='e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637 7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172 497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7'
+        tci_gradle_wrapper_jar_sha256() {
+          case "$1" in
+            8.14.3) echo 7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172 ;;
+            9.6.1) echo 497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7 ;;
+            *) return 1 ;;
+          esac
+        }
         tci_gradle_distribution_sha256() {
           case "$1" in
             8.14.3) echo bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531 ;;
@@ -314,14 +327,15 @@ runs:
           local dir="${1:-taurine-mobile/src-tauri/gen/android}" props url version want got
           props="${dir}/gradle/wrapper/gradle-wrapper.properties"
           [[ -f "${dir}/gradle/wrapper/gradle-wrapper.jar" && -f "${props}" ]] || { echo 'gradle-wrapper: FAILED - the wrapper jar or properties are missing' >&2; return 1; }
-          if [[ " ${TCI_GRADLE_WRAPPER_JARS} " != *" $(tci_sha256 "${dir}/gradle/wrapper/gradle-wrapper.jar") "* ]]; then
-            echo 'gradle-wrapper: FAILED - the wrapper jar is not a published Gradle wrapper' >&2; return 1
-          fi
           url="$(sed -nE 's/^distributionUrl=//p' "${props}" | tr -d '\r' | sed 's/\\:/:/g')"
           if [[ ! "${url}" =~ ^https://services\.gradle\.org/distributions/gradle-([0-9]+\.[0-9]+(\.[0-9]+)?)-bin\.zip$ ]]; then
             echo 'gradle-wrapper: FAILED - distributionUrl is not an official Gradle -bin distribution' >&2; return 1
           fi
           version="${BASH_REMATCH[1]}"
+          want="$(tci_gradle_wrapper_jar_sha256 "${version}")" || { echo "gradle-wrapper: FAILED - Gradle ${version} has no pinned wrapper jar checksum" >&2; return 1; }
+          if [[ "$(tci_sha256 "${dir}/gradle/wrapper/gradle-wrapper.jar")" != "${want}" ]]; then
+            echo "gradle-wrapper: FAILED - the wrapper jar is not Gradle ${version}'s published wrapper jar" >&2; return 1
+          fi
           want="$(tci_gradle_distribution_sha256 "${version}")" || { echo "gradle-wrapper: FAILED - Gradle ${version} has no pinned distribution checksum" >&2; return 1; }
           got="$(sed -nE 's/^distributionSha256Sum=//p' "${props}" | tr -d '\r')"
           if [[ "${got}" != "${want}" ]]; then

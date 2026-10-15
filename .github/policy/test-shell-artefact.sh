@@ -60,6 +60,7 @@ if [[ "$1" == fetch ]]; then
   exit 0
 fi
 if [[ "$1" == metadata ]]; then
+  if [[ " $* " == *" --all-features "* && -n "${FAKE_META_ALL:-}" ]]; then cat "${FAKE_META_ALL}"; exit 0; fi
   if [[ " $* " == *" --no-deps "* ]]; then
     echo '{"packages":[{"name":"taurine-mobile"},{"name":"taurine-desktop"}],"target_directory":"/nonexistent"}'
     exit 0
@@ -112,8 +113,8 @@ artefact() {
 run_lib() {
   (
     cd "${src}"
-    export PATH="${work}/bin:${PATH}" RUNNER_TEMP="${work}/rt" GITHUB_STEP_SUMMARY="${work}/summary.md" CARGO_HOME="${work}/cargo-home" FAKE_UPSTREAM="${work}/upstream"
-    mkdir -p "${RUNNER_TEMP}"
+    export PATH="${work}/bin:${PATH}" RUNNER_TEMP="${work}/rt" GITHUB_STEP_SUMMARY="${work}/summary.md" CARGO_HOME="${work}/cargo-home" FAKE_UPSTREAM="${work}/upstream" HOME="${work}/home"
+    mkdir -p "${RUNNER_TEMP}" "${HOME}"
     unset OPENSSL_DIR OPENSSL_NO_VENDOR OPENSSL_STATIC OPENSSL_LIB_DIR OPENSSL_INCLUDE_DIR
     source "${work}/sanitize.sh"; source "${work}/mobile-report.sh"; source "${work}/shell-artefact.sh"
     eval "$1"
@@ -221,7 +222,7 @@ printf '{"name":"d","scripts":{"tauri":"tauri"}}\n' >"${tdir}/package.json"
 cat >"${tdir}/node_modules/@tauri-apps/cli/tauri.js" <<'STUB'
 #!/usr/bin/env node
 const env = process.env;
-console.log(`tauri-argv: ${process.argv.slice(2).join(" ")} | cwd=${require("path").basename(process.cwd())} | config=${env.TAURI_CONFIG || "unset"} | other=${env.TAURI_EXTRA || "unset"}`);
+console.log(`tauri-argv: ${process.argv.slice(2).join(" ")} | cwd=${require("path").basename(process.cwd())} | config=${env.TAURI_CONFIG || "unset"} | other=${env.TAURI_EXTRA || "unset"} | user=${require("path").basename(env.npm_config_userconfig || "unset")} | global=${require("path").basename(env.npm_config_globalconfig || "unset")}`);
 STUB
 chmod +x "${tdir}/node_modules/@tauri-apps/cli/tauri.js"
 ln -s ../@tauri-apps/cli/tauri.js "${tdir}/node_modules/.bin/tauri"
@@ -232,7 +233,10 @@ write_npm_lock() {
 }
 write_npm_lock
 expect_pass 'tauri_cli' 'TAURI_CONFIG={} TAURI_EXTRA=1 tauri_cli taurine-desktop build --debug'
-grep -qxF 'tauri-argv: build --debug | cwd=taurine-desktop | config=unset | other=unset' "${work}/out" || fail 'tauri_cli did not run the CLI with only CI arguments and no TAURI_* environment'
+grep -qxF 'tauri-argv: build --debug | cwd=taurine-desktop | config=unset | other=unset | user=empty-npmrc-user | global=empty-npmrc-global' "${work}/out" || fail 'tauri_cli did not run the CLI with only CI arguments, no TAURI_* environment and CI-owned npm config'
+printf 'script-shell=/bin/evil\n' >"${work}/home/.npmrc"
+expect_fail 'a ~/.npmrc for the job user' 'tauri_cli taurine-desktop build' 'has a ~/.npmrc'
+rm "${work}/home/.npmrc"
 write_npm_lock 'git+https://example.invalid/cli.git#1'
 expect_fail 'a git-resolved Tauri CLI' 'tauri_cli taurine-desktop build' 'not a registry package'
 write_npm_lock 'https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.12.0.tgz' ''
@@ -417,16 +421,21 @@ jar_sum="$( (sha256sum "${wrap}/gradle-wrapper.jar" 2>/dev/null || shasum -a 256
 props() { printf 'distributionBase=GRADLE_USER_HOME\ndistributionUrl=%s\n%s' "$1" "${2:+distributionSha256Sum=$2
 }" >"${wrap}/gradle-wrapper.properties"; }
 props 'https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip' bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
-expect_pass 'a pinned Gradle wrapper' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check"
-expect_fail 'an unknown wrapper jar' 'gradle_wrapper_check' 'not a published Gradle wrapper'
+# The stand-in jar plays Gradle 8.14.3's published wrapper jar; a different jar plays 7.0's.
+pin="tci_gradle_wrapper_jar_sha256() { [[ \$1 == 8.14.3 ]] && echo ${jar_sum}; };"
+expect_pass 'the 8.14.3 jar with an 8.14.3 distributionUrl' "${pin} gradle_wrapper_check"
+expect_fail 'a jar that is no published wrapper' 'gradle_wrapper_check' "not Gradle 8.14.3's published wrapper jar"
+printf 'gradle 7.0 wrapper jar\n' >"${wrap}/gradle-wrapper.jar"
+expect_fail 'the 7.0 jar with an 8.14.3 distributionUrl' "${pin} gradle_wrapper_check" "not Gradle 8.14.3's published wrapper jar"
+printf 'wrapper jar\n' >"${wrap}/gradle-wrapper.jar"
 props 'https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip' ''
-expect_fail 'no distributionSha256Sum' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check" 'distributionSha256Sum is missing'
+expect_fail 'no distributionSha256Sum' "${pin} gradle_wrapper_check" 'distributionSha256Sum is missing'
 props 'https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip' 0000000000000000000000000000000000000000000000000000000000000000
-expect_fail 'a wrong distributionSha256Sum' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check" 'distributionSha256Sum is missing'
+expect_fail 'a wrong distributionSha256Sum' "${pin} gradle_wrapper_check" 'distributionSha256Sum is missing'
 props 'https\://example.invalid/gradle-8.14.3-bin.zip' bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
-expect_fail 'a non-official distributionUrl' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check" 'not an official Gradle'
+expect_fail 'a non-official distributionUrl' "${pin} gradle_wrapper_check" 'not an official Gradle'
 props 'https\://services.gradle.org/distributions/gradle-7.6-bin.zip' x
-expect_fail 'an unpinned Gradle version' "TCI_GRADLE_WRAPPER_JARS=${jar_sum} gradle_wrapper_check" 'no pinned distribution checksum'
+expect_fail 'an unpinned Gradle version' "${pin} gradle_wrapper_check" 'no pinned wrapper jar checksum'
 grep -qF 'gradle_wrapper_check || exit 1' .github/workflows/android-validation.yml || fail 'android-native does not check the Gradle wrapper'
 rm -rf "${src}/taurine-mobile/src-tauri/gen"
 
@@ -473,6 +482,41 @@ expect_fail 'a committed gen/apple' 'mobile_build_phase_reset ios' 'is committed
 rm -rf "${src}/.git" "${gen}"
 grep -qF 'mobile_build_phase_reset android' .github/workflows/android-validation.yml && grep -qF 'mobile_build_phase_check android' .github/workflows/android-validation.yml || fail 'the Android init does not regenerate and check the build phase'
 grep -qF 'mobile_build_phase_reset ios' .github/actions/ios-project-init/action.yml && grep -qF 'mobile_build_phase_check ios' .github/actions/ios-project-init/action.yml || fail 'the iOS init does not regenerate and check the build phase'
+
+# ---- Built graph: what cargo actually compiled, judged against the door ----------------------
+bg="${work}/bg"; rm -rf "${bg}"; mkdir -p "${bg}/target/aarch64-linux-android/debug/deps" "${bg}/reg"
+mkpkg() { mkdir -p "${bg}/$1/src"; printf '[package]\nname = "%s"\n' "$2" >"${bg}/$1/Cargo.toml"; : >"${bg}/$1/src/lib.rs"; }
+mkpkg ws/taurine-mobile taurine-mobile; mkpkg ws/taurine-tls-openssl taurine-tls-openssl; mkpkg ws/taurine-db-dbx taurine-db-dbx
+mkpkg reg/openssl-0.10.81 openssl; mkpkg reg/openssl-sys-0.9.117 openssl-sys; mkpkg reg/tokio-openssl-0.6.5 tokio-openssl
+mkpkg reg/native-tls-0.2.12 native-tls; mkpkg "reg/dir with space-1.0.0" spaced
+jq -n --arg b "${bg}" '
+  def pkg($id; $dir): {id: $id, name: $id, manifest_path: ($b + "/" + $dir + "/Cargo.toml")};
+  def node($id; $deps): {id: $id, deps: [$deps[] | {pkg: .}]};
+  {packages: [pkg("taurine-mobile"; "ws/taurine-mobile"), pkg("taurine-tls-openssl"; "ws/taurine-tls-openssl"), pkg("taurine-db-dbx"; "ws/taurine-db-dbx"),
+              pkg("openssl"; "reg/openssl-0.10.81"), pkg("openssl-sys"; "reg/openssl-sys-0.9.117"), pkg("tokio-openssl"; "reg/tokio-openssl-0.6.5"),
+              pkg("native-tls"; "reg/native-tls-0.2.12"), pkg("spaced"; "reg/dir with space-1.0.0")],
+   resolve: {nodes: [node("taurine-mobile"; ["taurine-db-dbx", "native-tls"]), node("taurine-db-dbx"; ["openssl", "tokio-openssl", "taurine-tls-openssl"]),
+                     node("taurine-tls-openssl"; ["openssl", "openssl-sys"]), node("openssl"; ["openssl-sys"]), node("tokio-openssl"; ["openssl", "openssl-sys"]),
+                     node("native-tls"; ["openssl"]), node("openssl-sys"; []), node("spaced"; [])]}}' >"${work}/meta-all.json"
+d="${bg}/target/aarch64-linux-android/debug"
+printf '%s: %s %s\n\n%s:\n' "${d}/libtaurine_mobile_lib.so" "${bg}/ws/taurine-mobile/src/lib.rs" "${bg}/ws/taurine-db-dbx/src/lib.rs" "${bg}/ws/taurine-mobile/src/lib.rs" >"${d}/libtaurine_mobile_lib.d"
+for c in taurine-tls-openssl:ws/taurine-tls-openssl openssl:reg/openssl-0.10.81 openssl-sys:reg/openssl-sys-0.9.117 tokio-openssl:reg/tokio-openssl-0.6.5; do
+  printf '%s: %s\n' "${d}/deps/lib${c%%:*}.rlib" "${bg}/${c#*:}/src/lib.rs" >"${d}/deps/${c%%:*}-0000.d"
+done
+printf '%s: %s\n' "${d}/deps/libspaced.rlib" "${bg}/reg/dir\\ with\\ space-1.0.0/src/lib.rs" >"${d}/deps/spaced-0000.d"
+expect_pass 'the door-only built graph' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/libtaurine_mobile_lib.d' taurine-mobile"
+grep -qF 'OpenSSL consumers: openssl, taurine-db-dbx, taurine-tls-openssl, tokio-openssl (door only)' "${work}/out" || fail 'the built graph did not list the door consumers'
+printf '%s: %s\n' "${d}/deps/libnative_tls.rlib" "${bg}/reg/native-tls-0.2.12/src/lib.rs" >"${d}/deps/native_tls-0000.d"
+expect_fail 'an extra feature that builds native-tls' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/libtaurine_mobile_lib.d' taurine-mobile" 'native-tls depends on openssl outside the door'
+rm "${d}/deps/native_tls-0000.d"
+expect_fail 'missing dep-info' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/nothing.d' taurine-mobile" 'dep-info is missing'
+printf 'not a dep-info file\n' >"${d}/broken.d"
+expect_fail 'unparseable dep-info' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/broken.d' taurine-mobile" 'does not parse'
+printf '%s: %s\n' "${d}/other.so" "${bg}/reg/openssl-0.10.81/src/lib.rs" >"${d}/other.d"
+expect_fail 'dep-info without the shell crate' "FAKE_META_ALL=${work}/meta-all.json built_graph_check bg '${d}/other.d' taurine-mobile" 'does not contain the shell crate'
+grep -qF 'built_graph_check "android-${abi}-built-graph"' .github/workflows/android-validation.yml || fail 'android-native does not judge the built graph'
+grep -qF 'built_graph_check ios-arm64-sim-built-graph' .github/workflows/ios-validation.yml || fail 'ios-native does not judge the built graph'
+grep -qF 'built_graph_check "${os}-desktop-built-graph"' .github/actions/shell-artefact/action.yml || fail 'the desktop check does not judge the built graph'
 
 # ---- N8: the weekly release-line cadence fails closed --------------------------------------
 cadence="$(ruby -ryaml -e '

@@ -362,6 +362,8 @@ jobs:
                   echo "${target_dir}/aarch64-apple-ios-sim/release/libtaurine_mobile_lib.a"
                 fi
               }
+              # The graph cargo actually built for the simulator (the Xcode phase passes its own args).
+              built_graph_check ios-arm64-sim-built-graph "$(artefact_depinfo aarch64-apple-ios-sim release libtaurine_mobile_lib)" taurine-mobile || exit 1
               artefact="$(ios_artefact || true)"
               [[ -n "${artefact}" ]] || { echo 'ios-artefact: FAILED - neither the app binary nor the Rust static library was found' >&2; exit 1; }
               # The whole .app (Frameworks, plug-ins, any other Mach-O): the main executable by the

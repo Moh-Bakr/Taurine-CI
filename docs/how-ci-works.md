@@ -630,7 +630,9 @@ and the public OpenSSL version string only:
   closed set). The npm form is needed because the CLI records how it was started as the
   callback of the generated mobile build phases (started as `node <script>`, it records an
   unrunnable `node tauri`); so the shell's `tauri` script must be exactly `tauri`, with no
-  `pretauri`/`posttauri` script and no `.npmrc` anywhere in the checkout. The CLI's provenance
+  `pretauri`/`posttauri` script, no `.npmrc` anywhere in the checkout and no `~/.npmrc` for the
+  job user, and npm's user and global config point at empty CI-owned files (the generated
+  phases inherit that environment when they call back). The CLI's provenance
   is proven first:
   `node_modules/.bin/tauri` must resolve to that `tauri.js`, and the shell's `package-lock.json`
   entries for `@tauri-apps/cli` and every installed `@tauri-apps/cli-<platform>` must be
@@ -650,8 +652,10 @@ and the public OpenSSL version string only:
   `LIBRARY_SEARCH_PATHS` are the template's, and it links no framework file but the Rust
   `libapp.a`. The rest of a committed `gen/android` (app sources, manifest, the app and root
   Gradle files, `gradle.properties`) is source build logic like a `build.rs`, and can reach the
-  Rust build: a documented same-user residual, backstopped by the artefact proof. Its Gradle
-  wrapper is checked: the wrapper jar must be one of Gradle's published wrapper jars,
+  Rust build, for example running cargo with extra `--features`. It is accepted as source build
+  logic, and what it builds is judged instead: see **Built graph** below. Its Gradle
+  wrapper is checked: the wrapper jar must be Gradle's published wrapper jar for the version
+  `distributionUrl` names,
   `distributionUrl` an official `https://services.gradle.org/distributions/gradle-<v>-bin.zip`,
   and `distributionSha256Sum` present and equal to Gradle's published checksum for that version
   (both pinned in `shell-config`).
@@ -672,7 +676,8 @@ and the public OpenSSL version string only:
   `bundle.iOS.template`, a `bundle.iOS.frameworks` entry outside `{SystemConfiguration}`, the
   installer hooks and templates (WiX `template`, `fragmentPaths` and component/feature/merge
   refs; NSIS `template` and `installerHooks`; deb and rpm maintainer scripts) and
-  `bundle.windows.signCommand`.
+  `bundle.windows.signCommand` (refused for now; release signing will need its own reviewed
+  path later).
   `bundle.resources` (array or object form) must be data, by a content allow-list: every
   source, relative to `src-tauri`, must exist and resolve (symlinks included) inside the
   checkout; globs (`*`, `**`, dotfiles included, as Tauri expands them) and directories are
@@ -681,6 +686,19 @@ and the public OpenSSL version string only:
   newline, form feed and carriage return (so `../../THIRD-PARTY-NOTICES` and SVG pass, and
   archives, jar/dex, WASM and any executable fail). `pg8-measurement` still builds through `npm run tauri`;
   no door or artefact verdict reads its output.
+- **Built graph**: after each shell build, the graph cargo actually compiled is judged, whatever
+  features Gradle code or a build phase passed. Cargo's dep-info for the shipped artefact lists
+  the path crates, and each compiled unit's own dep-info in the same profile's `deps/` lists
+  that crate's sources, registry crates included. Every source path is mapped to the package
+  whose manifest directory contains it (`cargo metadata --locked --all-features`), giving the
+  built set; edges come from the all-features resolve. Every built crate that depends directly
+  on `openssl`, `openssl-sys` or `tokio-openssl` must be on the door path (the S1 parent rules)
+  and `native-tls` must not be built. A missing or unparseable dep-info, or one without the
+  shell crate, fails. Dep-info read: desktop `<target>/debug/taurine-desktop.d` (Linux, macOS,
+  Windows) with `<target>/debug/deps/*.d`; Android `<target>/<triple>/debug/libtaurine_mobile_lib.d`
+  per built ABI; iOS `<target>/aarch64-apple-ios-sim/release/libtaurine_mobile_lib.d`; each
+  with its own `deps/*.d`. A restored compiled-dependency cache (main, protected SHAs only)
+  adds its units to the set, which can only make the check stricter.
 - **Door crates fetched afresh and compared after the build**: before each shell build, every
   cached `.crate` and every extracted `registry/src` copy of the four door crates is deleted in
   every registry directory, `cargo fetch --locked` downloads them again, and every resulting

@@ -222,6 +222,106 @@ runs:
           echo "${label}: passed - door-only (OpenSSL enters ${package} only through taurine-tls-openssl)"
         }
 
+        # built_graph_check <label> <artefact dep-info> <shell package>
+        # Judges the graph cargo actually BUILT, whatever features the build was given (Gradle
+        # code or a build phase can run cargo with extra --features). Cargo's dep-info for the
+        # artefact (<target>/<triple>/<profile>/<artefact>.d) lists the path crates; each
+        # compiled unit's own dep-info in the same profile's deps/ lists that crate's sources,
+        # registry and git crates included. Every source path is mapped to the package whose
+        # manifest directory contains it (cargo metadata --all-features --locked), giving the
+        # built set; the edges are taken from the all-features resolve (a superset). Every built
+        # crate that depends directly on openssl, openssl-sys or tokio-openssl must be on the door
+        # path, with the S1 gate's parent rules, and native-tls must not be built at all. A missing
+        # or unparseable dep-info file, or one that does not contain the shell, fails.
+        built_graph_check() {
+          local label="$1" depinfo="$2" package="$3" python meta
+          [[ -s "${depinfo}" ]] || { echo "${label}: FAILED - the artefact's dep-info is missing" >&2; return 1; }
+          if command -v cygpath >/dev/null 2>&1; then depinfo="$(cygpath -w "${depinfo}")"; fi
+          python="$(tci_python)" || { echo "${label}: FAILED - no Python 3.11+ to read the dep-info" >&2; return 1; }
+          meta="${RUNNER_TEMP}/${label}-metadata.json"
+          cargo metadata --locked --all-features --format-version 1 >"${meta}" 2>/dev/null || { echo "${label}: FAILED - cargo metadata --all-features did not resolve" >&2; return 1; }
+          "${python}" -c '
+        import glob, json, os, re, sys
+        label, depinfo, meta_path, shell = sys.argv[1:5]
+        allowed = {"openssl-sys": {"openssl", "tokio-openssl", "taurine-tls-openssl"},
+                   "openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},
+                   "tokio-openssl": {"taurine-db-dbx"}}
+        def fail(reason):
+            print(label + ": FAILED - " + reason, file=sys.stderr)
+            sys.exit(1)
+        def norm(path):
+            return os.path.normcase(os.path.normpath(path.replace("\\", "/") if os.sep == "/" else path))
+        def paths_of(path, required):
+            try:
+                text = open(path, encoding="utf-8").read()
+            except Exception:
+                if required:
+                    fail("the artefact dep-info cannot be read")
+                return []
+            found = []
+            for line in text.splitlines():
+                if not line.strip() or line.startswith("#"):
+                    continue
+                head, sep, tail = line.partition(": ")
+                if not sep and line.endswith(":"):
+                    head, tail = line[:-1], ""
+                elif not sep:
+                    if required:
+                        fail("the artefact dep-info does not parse")
+                    return []
+                for item in [head] + re.split(r"(?<!\\) ", tail):
+                    item = item.replace("\\ ", " ").strip()
+                    if item:
+                        found.append(item)
+            if required and not found:
+                fail("the artefact dep-info does not parse")
+            return found
+        meta = json.load(open(meta_path))
+        names = {p["id"]: p["name"] for p in meta["packages"]}
+        roots = sorted(((norm(os.path.dirname(p["manifest_path"])) + os.sep, p["id"]) for p in meta["packages"]), key=lambda r: -len(r[0]))
+        paths = paths_of(depinfo, True)
+        for extra in glob.glob(os.path.join(os.path.dirname(depinfo), "deps", "*.d")):
+            paths += paths_of(extra, False)
+        built = set()
+        for path in paths:
+            candidate = norm(path)
+            for root, pkg in roots:
+                if candidate.startswith(root):
+                    built.add(pkg)
+                    break
+        built_names = {names[pkg] for pkg in built}
+        if shell not in built_names:
+            fail("the dep-info does not contain the shell crate")
+        bad = []
+        if "native-tls" in built_names:
+            bad.append("native-tls is built")
+        consumers = set()
+        for node in meta["resolve"]["nodes"]:
+            if node["id"] not in built:
+                continue
+            for dep in node["deps"]:
+                target = names[dep["pkg"]]
+                if target in allowed:
+                    consumers.add(names[node["id"]])
+                    if names[node["id"]] not in allowed[target]:
+                        bad.append(names[node["id"]] + " depends on " + target + " outside the door")
+        for reason in sorted(set(bad)):
+            print(label + ": FAILED - " + reason, file=sys.stderr)
+        if bad:
+            sys.exit(1)
+        print(label + ": built graph of " + str(len(built)) + " crates; OpenSSL consumers: " + (", ".join(sorted(consumers)) or "none") + " (door only)")
+        ' "${label}" "${depinfo}" "${meta}" "${package}"
+        }
+
+        # The dep-info of an artefact: <target-dir>[/<triple>]/<profile>/<file>.d
+        artefact_depinfo() {
+          local triple="$1" profile="$2" file="$3" dir
+          dir="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | tr -d '\r' | jq -r '.target_directory' || true)"
+          [[ -n "${dir}" ]] || return 1
+          if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -u "${dir}")"; fi
+          if [[ "${triple}" == - ]]; then echo "${dir}/${profile}/${file}.d"; else echo "${dir}/${triple}/${profile}/${file}.d"; fi
+        }
+
         artefact_bytes() {
           wc -c <"$1" | tr -d ' \r'
         }
@@ -428,6 +528,7 @@ runs:
           door="$(door_in_graph taurine-desktop -)" || { echo "${os}-desktop-artefact: FAILED - the door query did not resolve" >&2; return 1; }
           file="$(desktop_executable)" || { echo "${os}-desktop-artefact: FAILED - the desktop binary could not be located" >&2; return 1; }
           artefact_check "${os}-desktop-executable" "${file}" debug "${door}" || return 1
+          built_graph_check "${os}-desktop-built-graph" "${file%.exe}.d" taurine-desktop || return 1
           # Everything the bundle ships (Linux: the .deb's contents; macOS: the .app). Windows
           # builds no bundle; sidecars are refused and resources must be data (config checks).
           case "${os}" in
