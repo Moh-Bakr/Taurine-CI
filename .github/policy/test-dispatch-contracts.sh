@@ -365,6 +365,16 @@ if (check_action_references "${work}/shell-references.yml") >"${work}/action.std
   echo 'an unreviewed shell composite reference unexpectedly passed' >&2; exit 1
 fi
 grep -qF 'Unreviewed or mutable Action reference' "${work}/action.stderr"
+# A step written as `- uses:` (no name first) is held to the same allow-list.
+printf '%s\n' 'jobs:' '  validate:' '    steps:' '      - uses: ./.github/actions/shorthand-unreviewed' >"${work}/shorthand-references.yml"
+if (check_action_references "${work}/shorthand-references.yml") >"${work}/action.stdout" 2>"${work}/action.stderr"; then
+  echo 'an unreviewed `- uses:` shorthand reference unexpectedly passed' >&2; exit 1
+fi
+grep -qF 'Unreviewed or mutable Action reference' "${work}/action.stderr"
+printf '%s\n' 'jobs:' '  validate:' '    steps:' '      - uses: actions/checkout@v7' >"${work}/shorthand-mutable.yml"
+if (check_action_references "${work}/shorthand-mutable.yml") >"${work}/action.stdout" 2>"${work}/action.stderr"; then
+  echo 'a mutable `- uses:` shorthand reference unexpectedly passed' >&2; exit 1
+fi
 
 # Removing the reusable-arm preflight map entry must not disable universal checking.
 cp .github/policy/check-universal.rb "${work}/check-universal-mutated.rb"
