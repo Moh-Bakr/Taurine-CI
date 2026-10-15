@@ -767,7 +767,10 @@ process behind to act later. The base pass is therefore isolated further:
   to instead of init. Double-forking, `setsid` and an `exec` with a cleared environment do not take
   a process out of its reach, and a process cannot leave a subreaper's subtree on its own. When the
   script returns, the wrapper finds every remaining descendant through the `/proc` ppid chains,
-  kills it, and repeats until none is left; any that was still running fails the script by name.
+  kills it, and repeats until two passes in a row find none (a pass that meets a parent missing
+  from the listing rescans); any that was still running fails the script by name. The wrapper
+  marks itself not dumpable, and `kernel.yama.ptrace_scope` is raised to at least 1 before
+  drop-root and asserted, so nothing a script starts can attach to the wrapper or the step.
   Zombies (exited, not yet reaped) are reaped quietly, unless other threads of one still run. A
   script that kills its own wrapper fails the step through the wrapper's status. An earlier version
   looked for a marker in each process's environment; an `exec` with a new environment drops it.
@@ -780,8 +783,9 @@ process behind to act later. The base pass is therefore isolated further:
   every base script, and the step's own pin builder and verifier run ruby with `--disable-gems`.
 - **The pull request's tree is pinned too.** Pull-request code an earlier base test runs could
   rewrite what a later one reads -- a workflow file a test extracts steps from, say. Every path
-  outside `.github/policy`, with its type, mode and SHA-256, plus `.git/config`, `.git/hooks` and
-  `.git/info` (which decide what git runs), is recorded before the first base script, held in
+  outside `.github/policy`, with its type, mode and SHA-256, plus `.git/config`, `.git/hooks`,
+  `.git/info` (which decide what git runs) and `HEAD`, `refs`, `packed-refs` and the index (what
+  git reads), is recorded before the first base script, held in
   memory, and checked before every script. It is read with ruby alone, never by running git, which
   would run whatever an edited `.git/config` told it to.
 - **No loader variables.** The step shell unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`,
@@ -820,6 +824,15 @@ What this does **not** do, plainly:
 - **A thread-group leader that exits while its other threads run** shows as a zombie; the wrapper
   counts it as running when more than one task remains, but no fixture can construct one without a
   compiler, so that case is reasoned, not tested. Every descendant, zombie or not, is sent SIGKILL.
+- **Shared scratch space.** `/tmp` and `/dev/shm` are shared by every base script, and so are
+  the ancestors of the workspace (`/home/runner` among them), where node's bare `require` looks
+  for `node_modules`. Nothing in the base pass loads code from `/tmp` or `/dev/shm`; a
+  `node_modules` planted above the workspace would be loaded by a later base script's `node`.
+  Real `node` use in the base pass is small, and none of it requires a bare module name.
+- **Reasoned, not tested.** The second quiet pass: with the unknown-parent rescan, one quiet pass
+  cannot miss a live descendant, so a mutant with one pass survives the fixtures. The ptrace
+  assertion and the non-dumpable wrapper are shown on the runner and, for the wrapper, by a fixture
+  that only falsifies on a kernel without Yama.
 - **Linux only.** The wrapper needs `prctl` and `/proc`. The fixtures that run the step say so and
   pass on macOS without exercising anything, and fail under `GITHUB_ACTIONS` if they ever land
   anywhere but Linux.

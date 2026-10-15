@@ -328,6 +328,26 @@ SH
 commit_base "${zombie}"
 expect_pass zombie "${zombie}"
 
+# A script that tries to read the memory of the wrapper containing it, to find or rewrite what the
+# wrapper will do when it returns. The wrapper is not dumpable, so this is refused whatever
+# ptrace_scope says. Where Yama already confines ptrace to descendants (the hosted runner) it is
+# refused twice over, so this falsifies only on a kernel without Yama.
+memory="$(fixture "${work}/memory")"
+passing_scripts "${memory}"
+cat > "${memory}/base-policy/.github/policy/check-pass.rb" <<'RB'
+# Opening is the access check (ptrace attach mode); any read would fail on an unmapped address
+# anyway, so only the open is judged.
+begin
+  File.open("/proc/#{Process.ppid}/mem", "rb").close
+rescue Errno::EACCES, Errno::EPERM
+  exit 0
+end
+warn "a base script could open the memory of the wrapper containing it"
+exit 1
+RB
+commit_base "${memory}"
+expect_pass memory "${memory}"
+
 # A script that kills the wrapper containing it. Its descendants are then re-parented beyond the
 # wrapper's reach, but the wrapper's status says it was killed, so the step fails anyway.
 killer="$(fixture "${work}/killer")"
@@ -343,17 +363,24 @@ expect_reject killer "${killer}" "The base commit's check-pass.sh rejects this p
 [[ ! -s "${killer_pid}" ]] || kill -KILL "$(cat "${killer_pid}")" 2>/dev/null || true
 
 # The pull request's tree, rewritten by an earlier base script. Each is caught before the next
-# script runs: a tracked file changed, a file added, and .git/config edited to steer later git.
-for case in changed added gitconfig; do
+# script runs: a tracked file changed, a file added, .git/config edited to steer later git, and
+# git's own state -- HEAD, a ref, the index -- rewritten to change what later git reads.
+for case in changed added gitconfig head ref index; do
   tree="$(fixture "${work}/tree-${case}")"
   passing_scripts "${tree}"
   mkdir -p "${tree}/.git" "${tree}/.github/workflows"
   printf 'on: push\n' > "${tree}/.github/workflows/live-proofs.yml"
   printf '[core]\n\tbare = false\n' > "${tree}/.git/config"
+  mkdir -p "${tree}/.git/refs/heads"
+  printf 'ref: refs/heads/main\n' > "${tree}/.git/HEAD"
+  printf 'DIRC fixture index\n' > "${tree}/.git/index"
   case "${case}" in
     changed) edit='File.write(".github/workflows/live-proofs.yml", "on: pull_request\n")'; want='.github/workflows/live-proofs.yml' ;;
     added) edit='File.write("planted.yml", "x\n")'; want='planted.yml' ;;
     gitconfig) edit='File.write(".git/config", "[core]\n\tfsmonitor = /tmp/planted\n")'; want='.git/config' ;;
+    head) edit='File.write(".git/HEAD", "ref: refs/heads/planted\n")'; want='.git/HEAD' ;;
+    ref) edit='File.write(".git/refs/heads/planted", "0" * 40 + "\n")'; want='.git/refs/heads/planted' ;;
+    index) edit='File.write(".git/index", "DIRC planted\n")'; want='.git/index' ;;
   esac
   printf '%s\n' "${edit}" > "${tree}/base-policy/.github/policy/check-a-tree.rb"
   commit_base "${tree}"

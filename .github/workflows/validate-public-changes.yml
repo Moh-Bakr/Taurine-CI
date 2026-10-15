@@ -337,15 +337,21 @@ jobs:
           echo "user@${uid}.service before: $(systemctl is-active "user@${uid}.service" || true)"
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
-          # A socket file nobody listens on can start nothing; what matters is whether anything still
-          # accepts a connection there. Name whatever does, then fail.
+          # Stopping the manager can leave its socket files behind. A socket file nobody listens on
+          # can start nothing; what matters is whether anything still accepts a connection there.
+          # Log the listeners either way, then fail if a connection is accepted.
           for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
+            echo "listeners on ${socket}: $(sudo ss -xlpn | grep -F -- "${socket}" || echo none)"
             if /usr/bin/ruby --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
-              sudo ss -xlpn | grep -F -- "${socket}" || true
               echo "::error::something still accepts connections at ${socket} after the user manager was stopped"
               exit 1
             fi
           done
+          # A process may only ptrace its own descendants, so nothing a base script starts can attach
+          # to the step's shell or to the wrapper containing it.
+          if [[ "$(cat /proc/sys/kernel/yama/ptrace_scope)" -lt 1 ]]; then
+            sudo sysctl -q -w kernel.yama.ptrace_scope=1
+          fi
 
       - name: Remove root before the remaining fixtures
         # Kept as ./ : the policy matches this exact form for local actions.
@@ -404,15 +410,21 @@ jobs:
           echo "user@${uid}.service before: $(systemctl is-active "user@${uid}.service" || true)"
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
-          # A socket file nobody listens on can start nothing; what matters is whether anything still
-          # accepts a connection there. Name whatever does, then fail.
+          # Stopping the manager can leave its socket files behind. A socket file nobody listens on
+          # can start nothing; what matters is whether anything still accepts a connection there.
+          # Log the listeners either way, then fail if a connection is accepted.
           for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
+            echo "listeners on ${socket}: $(sudo ss -xlpn | grep -F -- "${socket}" || echo none)"
             if /usr/bin/ruby --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
-              sudo ss -xlpn | grep -F -- "${socket}" || true
               echo "::error::something still accepts connections at ${socket} after the user manager was stopped"
               exit 1
             fi
           done
+          # A process may only ptrace its own descendants, so nothing a base script starts can attach
+          # to the step's shell or to the wrapper containing it.
+          if [[ "$(cat /proc/sys/kernel/yama/ptrace_scope)" -lt 1 ]]; then
+            sudo sysctl -q -w kernel.yama.ptrace_scope=1
+          fi
 
       # Base tests may call node, and the step below runs them with PATH fixed to the system
       # directories. The runner's node is in /usr/local/bin, which hosted images leave
@@ -522,6 +534,8 @@ jobs:
             echo "::error::the job user can still queue an at job, so a base script could leave work for later"
             exit 1
           fi
+          ptrace_scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo missing)"
+          [[ "${ptrace_scope}" =~ ^[1-3]$ ]] || { echo "::error::kernel.yama.ptrace_scope is ${ptrace_scope}, so a base script could attach to the step"; exit 1; }
           for socket in "/run/user/$(id -u)/bus" "/run/user/$(id -u)/systemd/private"; do
             if "${scrub[@]}" "${ruby_bin}" --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
               echo "::error::something accepts connections at ${socket}, so a base script could start a unit outside this job"
@@ -627,8 +641,8 @@ jobs:
               end
             end
             walk.call(".")
-            %w[.git .git/config].each { |path| record.call("./#{path}") if File.exist?("./#{path}") || File.symlink?("./#{path}") }
-            %w[.git/hooks .git/info].each { |path| Find.find("./#{path}") { |p| record.call(p) } if File.directory?("./#{path}") && !File.symlink?("./#{path}") }
+            %w[.git .git/config .git/HEAD .git/packed-refs .git/index].each { |path| record.call("./#{path}") if File.exist?("./#{path}") || File.symlink?("./#{path}") }
+            %w[.git/hooks .git/info .git/refs].each { |path| Find.find("./#{path}") { |p| record.call(p) } if File.directory?("./#{path}") && !File.symlink?("./#{path}") }
             current = rows.sort.join("\n")
             if ARGV.first == "verify"
               pinned = STDIN.read.split("\n")
@@ -670,7 +684,10 @@ jobs:
             label = ARGV.shift
             begin
               prctl = Fiddle::Function.new(Fiddle.dlopen(nil)["prctl"], [Fiddle::TYPE_INT] + [Fiddle::TYPE_LONG] * 4, Fiddle::TYPE_INT)
-              raise "prctl returned non-zero" unless prctl.call(36, 1, 0, 0, 0).zero?
+              raise "prctl(PR_SET_CHILD_SUBREAPER) failed" unless prctl.call(36, 1, 0, 0, 0).zero?
+              # Not dumpable, so no process of the same user can read or write its memory or attach
+              # to it, whatever ptrace_scope says. Descendants are dumpable again after their exec.
+              raise "prctl(PR_SET_DUMPABLE) failed" unless prctl.call(4, 0, 0, 0, 0).zero?
             rescue StandardError, Fiddle::DLError => e
               warn "::error::base policy: cannot contain #{label}: #{e.message}"
               exit 125
@@ -680,7 +697,14 @@ jobs:
             me = Process.pid
             left = []
             deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
+            # Done only after two passes in a row find nothing: a process can fork between the
+            # listing and the kill, and its child is only seen by the next pass.
+            quiet = 0
             loop do
+              if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+                warn "::error::base policy: the processes #{label} started did not settle within 30 seconds"
+                exit 125
+              end
               parent = {}
               state = {}
               Dir.glob("/proc/[0-9]*/stat").each do |path|
@@ -690,13 +714,23 @@ jobs:
                 state[pid] = fields[0]
                 parent[pid] = fields[1].to_i
               end
+              # A parent missing from the listing exited while it was read: its children may be
+              # ours, so a pass that meets one does not count as quiet.
+              unknown = false
               found = parent.keys.select do |pid|
                 next false if pid == me
                 up = pid
-                up = parent[up] while up && up != me && up > 1
+                up = parent[up] while parent.key?(up) && up != me && up > 1
+                unknown = true unless up == me || up <= 1 || parent.key?(up)
                 up == me
               end
-              break if found.empty?
+              if found.empty? && !unknown
+                quiet += 1
+                break if quiet >= 2
+                sleep 0.05
+                next
+              end
+              quiet = 0
               # Every descendant is killed. A zombie that has exited and only waits to be reaped is
               # not reported as left running -- unless other threads of it still are, which shows
               # its leader as a zombie while the process goes on.
@@ -708,10 +742,6 @@ jobs:
               begin
                 nil while Process.wait(-1, Process::WNOHANG)
               rescue Errno::ECHILD
-              end
-              if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-                warn "::error::base policy: #{label} keeps starting processes faster than they can be killed"
-                exit 125
               end
               sleep 0.05
             end
