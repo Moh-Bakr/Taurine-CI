@@ -1,0 +1,7 @@
+# Workflows (basename, one per line) held to the staged cache-mode rules F to J of
+# check-cache-mode.rb: workflow-level `cache-mode: none`, an explicit job-level value on every
+# job that restores, saves or calls a reusable workflow, and the validate-main /
+# validate-untrusted caller split where main saves a cache. Empty in the policy pull request;
+# the workflow pull request that adds `cache-mode` to a workflow adds its name here in the same
+# change (docs/untrusted-readonly-cache.md, section 4.1). The always-on rules A to E and the
+# actions: write rule need no entry.

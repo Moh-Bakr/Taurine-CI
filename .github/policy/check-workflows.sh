@@ -67,6 +67,12 @@ while IFS= read -r -d '' workflow; do
   fi
 done < <(find .github/workflows .github/actions -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
 
+# cache-mode (always-on rules, plus the staged ones for the workflows in cache-mode-enforced.txt)
+# and the actions: write allow-list (docs/untrusted-readonly-cache.md, P2 and P7).
+cache_mode_files=()
+while IFS= read -r -d '' file; do cache_mode_files+=("${file}"); done < <(find .github/workflows -type f -name '*.yml' -print0 | sort -z)
+ruby "${policy}/check-cache-mode.rb" "${cache_mode_files[@]}"
+
 ruby "${policy}/check-dispatch-contracts.rb"
 ruby "${policy}/check-suite-catalog.rb"
 

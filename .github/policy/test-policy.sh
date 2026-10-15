@@ -384,6 +384,251 @@ drop_expect_fail 'a sudo composite after drop-root' .github/workflows/android-va
   's/(      - name: Remove root before project code\n        # Kept as \.\/ : the policy matches this exact form for local actions\.\n        uses: \.\/\.github\/actions\/drop-root[^\n]*\n)/$1\n      - name: Late privileged setup\n        uses: .\/.github\/actions\/root-setup\n        with:\n          concern: x\n/'
 echo 'drop-root fixtures: a missing drop, project code or a setup composite before it, and sudo or Docker after it are rejected'
 
+# --- Read-only untrusted restore, cache-mode and actions: write (docs/untrusted-readonly-cache.md) ---
+# P1: the untrusted-ref restore gate. The base is the reviewed Linux concern plus one untrusted
+# compiled-dependency restore and one untrusted source restore, with no restore-keys.
+untrusted_base="${base}/untrusted-base.yml"
+perl -0pe '
+  my $pin = "actions/cache/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0";
+  my $compiled = "      - name: Restore compiled third-party dependencies (untrusted, read-only)\n        id: cargo-target-cache-untrusted\n        if: \${{ github.ref == \x27refs/heads/untrusted\x27 && (startsWith(inputs.concern, \x27rust-app-\x27) || inputs.concern == \x27rust-db\x27 || inputs.concern == \x27rust-packaging\x27) }}\n        uses: $pin\n        with:\n          path: |\n            \${{ steps.cargo-target.outputs.dir }}/debug/deps\n            \${{ steps.cargo-target.outputs.dir }}/debug/build\n            \${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint\n          key: \${{ steps.cargo-target.outputs.key }}\n\n";
+  my $sources = "      - name: Restore cached third-party crate sources (untrusted, read-only)\n        id: cargo-sources-untrusted\n        if: \${{ github.ref == \x27refs/heads/untrusted\x27 && (inputs.concern == \x27taurine-cli\x27 || startsWith(inputs.concern, \x27rust-\x27) || inputs.concern == \x27scan-security\x27) }}\n        uses: $pin\n        with:\n          path: |\n            \${{ steps.cargo-home.outputs.dir }}/registry/cache\n          key: cargo-sources-v3-\${{ runner.os }}-\${{ hashFiles(\x27src/Cargo.lock\x27) }}\n\n";
+  s/(      - name: Strip workspace crates from the restored dependency cache\n)/$compiled$1/;
+  s/(      # Defence in depth: do not rely on cargo alone to notice a tampered archive\.)/$sources$1/;
+' .github/workflows/linux-validation-concern.yml > "${untrusted_base}"
+grep -qF 'untrusted, read-only' "${untrusted_base}" || { echo 'the untrusted restore fixture base was not built' >&2; exit 1; }
+untrusted_expect_fail() {
+  local label="$1" needle="$2" expr="$3"
+  perl -0pe "${expr}" "${untrusted_base}" > "${cache_fixture}"
+  if cmp -s "${untrusted_base}" "${cache_fixture}"; then echo "untrusted fixture '${label}' changed nothing" >&2; exit 1; fi
+  if (source "${policy}/check-cache-policy.sh"; check_cache_policy "${cache_fixture}") >/dev/null 2>"${base}/err"; then
+    echo "untrusted fixture '${label}' should fail but passed" >&2
+    exit 1
+  fi
+  grep -qF -- "${needle}" "${base}/err" || { echo "untrusted fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+(source "${policy}/check-cache-policy.sh"; check_cache_policy "${untrusted_base}") || { echo 'a read-only untrusted restore with its own gate and no restore-keys should pass' >&2; exit 1; }
+untrusted_gate='if: \$\{\{ github\.ref == .refs\/heads\/untrusted. && (\(startsWith\(inputs\.concern, .rust-app-.\)[^\n]*) \}\}\n        uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0\n        with:\n          path: \|\n            \$\{\{ steps\.cargo-target'
+untrusted_expect_fail 'untrusted restore with no gate term' 'runs only on main for a protected source SHA' \
+  "s/if: \\\$\\{\\{ github\\.ref == .refs\\/heads\\/untrusted. && (\\(startsWith\\(inputs\\.concern, .rust-app-.\\))/if: \\\$\\{\\{ \$1/"
+untrusted_expect_fail 'untrusted gate re-opened by ||' 'runs only on main for a protected source SHA' \
+  "s/(github\\.ref == .refs\\/heads\\/untrusted. && \\(startsWith\\(inputs\\.concern, .rust-app-.\\)[^\\n]*?) \\}\\}/\$1 || true }}/"
+untrusted_expect_fail 'untrusted term inside an always-true alternative' 'runs only on main for a protected source SHA' \
+  "s/if: \\\$\\{\\{ github\\.ref == .refs\\/heads\\/untrusted. && \\(startsWith\\(inputs\\.concern, .rust-app-./if: \\\$\\{\\{ (github.ref == 'refs\\/heads\\/untrusted' || true) \\&\\& (startsWith(inputs.concern, 'rust-app-/"
+untrusted_expect_fail 'untrusted term negated' 'runs only on main for a protected source SHA' \
+  "s/if: \\\$\\{\\{ github\\.ref == .refs\\/heads\\/untrusted. && \\(startsWith\\(inputs\\.concern, .rust-app-./if: \\\$\\{\\{ !(github.ref == 'refs\\/heads\\/untrusted') \\&\\& (startsWith(inputs.concern, 'rust-app-/"
+untrusted_expect_fail 'untrusted restore carrying both gates' 'runs only on main for a protected source SHA' \
+  "s/if: \\\$\\{\\{ github\\.ref == .refs\\/heads\\/untrusted. && \\(startsWith\\(inputs\\.concern, .rust-app-./if: \\\$\\{\\{ github.ref == 'refs\\/heads\\/untrusted' \\&\\& github.ref == 'refs\\/heads\\/main' \\&\\& steps.verified-source.outputs.protected-ancestor == 'true' \\&\\& (startsWith(inputs.concern, 'rust-app-/"
+untrusted_expect_fail 'untrusted compiled restore with restore-keys' 'must not have restore-keys' \
+  "s/(untrusted, read-only\\)\\n.*?          key: \\\$\\{\\{ steps\\.cargo-target\\.outputs\\.key \\}\\}\\n)/\$1          restore-keys: |\\n            cargo-target-\\n/s"
+untrusted_expect_fail 'untrusted compiled restore with fail-on-cache-miss' 'Unexpected cache option' \
+  "s/(untrusted, read-only\\)\\n.*?          key: \\\$\\{\\{ steps\\.cargo-target\\.outputs\\.key \\}\\}\\n)/\$1          fail-on-cache-miss: true\\n/s"
+untrusted_expect_fail 'untrusted compiled restore with lookup-only' 'Unexpected cache option' \
+  "s/(untrusted, read-only\\)\\n.*?          key: \\\$\\{\\{ steps\\.cargo-target\\.outputs\\.key \\}\\}\\n)/\$1          lookup-only: true\\n/s"
+untrusted_expect_fail 'untrusted restore of an unreviewed path' 'Disallowed cache path line' \
+  "s/(untrusted, read-only\\)\\n.*?)debug\\/build\\n/\$1debug\\n/s"
+untrusted_expect_fail 'untrusted source restore with restore-keys' 'must have no restore-keys' \
+  "s/(untrusted, read-only\\)\\n.*?          key: cargo-sources-v3-\\\$\\{\\{ runner\\.os \\}\\}-\\\$\\{\\{ hashFiles\\('src\\/Cargo\\.lock'\\) \\}\\}\\n)/\$1          restore-keys: |\\n            cargo-sources-v3-\\\$\\{\\{ runner.os \\}\\}-\\n/s"
+# Saves, completion and strip-and-prove never take the untrusted ref.
+untrusted_expect_fail 'a compiled save gated to untrusted instead of main' 'must require the main branch as a top-level term' \
+  "s/(      - name: Save compiled third-party dependencies\\n        if: \\\$\\{\\{ )github\\.ref == .refs\\/heads\\/main./\$1github.ref == 'refs\\/heads\\/untrusted'/"
+untrusted_expect_fail 'a compiled save that also names untrusted' 'must never mention the untrusted ref' \
+  "s/(      - name: Save compiled third-party dependencies\\n        if: \\\$\\{\\{ github\\.ref == .refs\\/heads\\/main. && )/\$1github.ref != 'refs\\/heads\\/untrusted' \\&\\& /"
+untrusted_expect_fail 'a source save that also names untrusted' 'must never mention the untrusted ref' \
+  "s/(      - name: Save verified third-party crate sources\\n        if: \\\$\\{\\{ github\\.ref == .refs\\/heads\\/main. && )/\$1github.ref != 'refs\\/heads\\/untrusted' \\&\\& /"
+untrusted_expect_fail 'a compiled save with no condition' 'must require the main branch as a top-level term' \
+  "s/(      - name: Save compiled third-party dependencies\\n)        if: [^\\n]*\\n/\$1/"
+untrusted_expect_fail 'a strip-and-prove step gated to untrusted' 'runs only on main for a protected source SHA' \
+  "s/(      - name: Strip and prove the compiled dependency cache\\n        id: cargo-target-strip\\n        if: \\\$\\{\\{ )github\\.ref == .refs\\/heads\\/main./\$1github.ref == 'refs\\/heads\\/untrusted'/"
+untrusted_expect_fail 'a source completion step gated to untrusted' 'runs only on main for a protected source SHA' \
+  "s/(      - name: Complete the third-party source set before saving\\n        if: \\\$\\{\\{ )github\\.ref == .refs\\/heads\\/main./\$1github.ref == 'refs\\/heads\\/untrusted'/"
+echo 'untrusted restore fixtures: only a gated, exact-keyed, read-only restore passes; a save, completion or strip step never takes the untrusted ref'
+
+# P3: a cache restore comes after drop-root, never between the source revoke and root removal.
+drop_expect_fail 'a cache restore between the revoke and drop-root' .github/workflows/linux-validation-concern.yml 'drop-root' \
+  's/(      - name: Remove root before project code\n)/      - name: Early cache restore\n        uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: \/tmp\/x\n          key: k\n\n$1/'
+
+# P2 and P7: cache-mode and actions: write.
+mode_root="${base}/cache-mode"
+mkdir -p "${mode_root}/.github/workflows"
+printf '# fixture\n' > "${mode_root}/enforced.txt"
+printf 'split.yml\n' > "${mode_root}/enforced-split.txt"
+write_mode() { # file, content
+  cat > "${mode_root}/.github/workflows/$1"
+}
+mode_run() { (cd "${mode_root}" && ruby "${policy}/check-cache-mode.rb" --enforced-file "${mode_root}/${ENFORCED:-enforced.txt}" ".github/workflows/$1") ; }
+mode_expect_pass() { mode_run "$1" >/dev/null 2>"${base}/err" || { echo "cache-mode fixture '$2' should pass but failed:" >&2; cat "${base}/err" >&2; exit 1; }; }
+mode_expect_fail() {
+  local file="$1" label="$2" needle="$3"
+  if mode_run "${file}" >/dev/null 2>"${base}/err"; then echo "cache-mode fixture '${label}' should fail but passed" >&2; exit 1; fi
+  grep -qF -- "${needle}" "${base}/err" || { echo "cache-mode fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+mode_wf() { # JOBS-YAML [WORKFLOW-LEVEL-LINE]
+  printf 'name: f\non:\n  workflow_dispatch:\npermissions: {}\n%s\njobs:\n%s\n' "${2:-}" "$1"
+}
+main_if="if: \${{ github.ref == 'refs/heads/main' && github.repository == 'Moh-Bakr/Taurine-CI' }}"
+mode_wf "  a:
+    cache-mode: read
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+  b:
+    ${main_if}
+    cache-mode: write
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+  c:
+    cache-mode: none
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true" 'cache-mode: none' | write_mode ok.yml
+mode_expect_pass ok.yml 'read, a main-gated write and none, with a workflow-level none'
+for bad in write-only 'write-all' '${{ github.ref }}' 'Write'; do
+  mode_wf "  a:
+    cache-mode: ${bad}
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true" | write_mode bad.yml
+  mode_expect_fail bad.yml "cache-mode ${bad}" 'must be the literal read, write or none'
+done
+mode_wf "  a:
+    cache-mode: read
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true" 'cache-mode: write' | write_mode bad.yml
+mode_expect_fail bad.yml 'workflow-level write' 'a workflow-level cache-mode is only none'
+mode_wf "  a:
+    cache-mode: read
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true" 'cache-mode: read' | write_mode bad.yml
+mode_expect_fail bad.yml 'workflow-level read' 'a workflow-level cache-mode is only none'
+for cond in "" "if: \${{ github.ref == 'refs/heads/untrusted' }}" "if: \${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted' }}" "if: \${{ github.ref == 'refs/heads/main' || true }}" "if: \${{ !(github.ref == 'refs/heads/main') }}" "if: \${{ (github.ref == 'refs/heads/main' || true) && github.repository == 'x' }}"; do
+  mode_wf "  a:
+    ${cond}
+    cache-mode: write
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true" | write_mode bad.yml
+  mode_expect_fail bad.yml "write gated by [${cond}]" 'cache-mode write needs the exact top-level term'
+done
+printf 'name: called\non:\n  workflow_call:\npermissions: {}\njobs:\n  a:\n    cache-mode: read\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n' > "${mode_root}/.github/workflows/called.yml"
+mode_expect_fail called.yml 'cache-mode in a called workflow' "a called workflow must not set cache-mode"
+printf 'name: called\non:\n  workflow_call:\npermissions: {}\ncache-mode: none\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n' > "${mode_root}/.github/workflows/called.yml"
+mode_expect_fail called.yml 'workflow-level cache-mode in a called workflow' "a called workflow must not set cache-mode"
+# Staged rules F to J, over a caller split.
+cat > "${mode_root}/.github/workflows/split-concern.yml" <<'YAML'
+name: concern
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  v:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+YAML
+write_split() { # main-job cache-mode, main-job if, untrusted-job cache-mode, untrusted-job if, workflow-level
+  cat > "${mode_root}/.github/workflows/split.yml" <<YAML
+name: split
+on:
+  workflow_dispatch:
+permissions: {}
+${5-cache-mode: none}
+jobs:
+  validate-main:
+    ${2}
+    ${1}
+    uses: ./.github/workflows/split-concern.yml
+  validate-untrusted:
+    ${4}
+    ${3}
+    uses: ./.github/workflows/split-concern.yml
+YAML
+}
+read_if="if: \${{ github.ref == 'refs/heads/untrusted' }}"
+ENFORCED=enforced-split.txt
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}"
+mode_expect_pass split.yml 'a validate-main / validate-untrusted split'
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}" ''
+mode_expect_fail split.yml 'enforced workflow without workflow-level none' 'needs a workflow-level cache-mode: none'
+write_split '' "${main_if}" 'cache-mode: read' "${read_if}"
+mode_expect_fail split.yml 'caller job with no cache-mode' 'must declare its own cache-mode'
+write_split 'cache-mode: read' "${main_if}" 'cache-mode: read' "${read_if}"
+mode_expect_fail split.yml 'saving caller job that is only read' 'needs a sibling job'
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: write' "${read_if}"
+mode_expect_fail split.yml 'untrusted half granted write' 'cache-mode write needs the exact top-level term'
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "if: \${{ github.ref == 'refs/heads/main' }}"
+mode_expect_fail split.yml 'untrusted half gated to main' 'needs a sibling job'
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "if: \${{ github.ref == 'refs/heads/untrusted' || true }}"
+mode_expect_fail split.yml 'untrusted half gate re-opened' 'needs a sibling job'
+write_split 'cache-mode: write' "if: \${{ github.ref == 'refs/heads/main' && github.ref != 'refs/heads/untrusted' }}" 'cache-mode: read' "${read_if}"
+mode_expect_fail split.yml 'main half naming untrusted' 'must not mention the untrusted ref'
+write_split 'cache-mode: write' "${main_if}" '' "${read_if}"
+mode_expect_fail split.yml 'untrusted half with no cache-mode' 'must declare its own cache-mode'
+cat > "${mode_root}/.github/workflows/split.yml" <<YAML
+name: split
+on:
+  workflow_dispatch:
+permissions: {}
+cache-mode: none
+jobs:
+  inline-save:
+    cache-mode: read
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+  inline-restore:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+YAML
+mode_expect_fail split.yml 'an inline save job that is only read' 'must be cache-mode write'
+mode_expect_fail split.yml 'an inline restore job with no cache-mode' 'must declare its own cache-mode'
+unset ENFORCED
+# P7: actions: write.
+mkdir -p "${mode_root}/p7"
+cp .github/workflows/cache-prune.yml "${mode_root}/p7/cache-prune.yml"
+p7_run() { ruby "${policy}/check-cache-mode.rb" --enforced-file "${mode_root}/enforced.txt" "$1"; }
+p7_run "${mode_root}/p7/cache-prune.yml" >/dev/null || { echo 'the reviewed cache-prune workflow should pass the actions: write rules' >&2; exit 1; }
+p7_run .github/workflows/weekly-validation.yml >/dev/null || { echo 'the reviewed weekly workflow should pass the actions: write rules' >&2; exit 1; }
+p7_expect_fail() { # label needle perl-expr file
+  local label="$1" needle="$2" expr="$3" name="$4" src="${5:-.github/workflows/$4}"
+  perl -0pe "${expr}" "${src}" > "${mode_root}/p7/${name}"
+  if cmp -s "${src}" "${mode_root}/p7/${name}"; then echo "actions: write fixture '${label}' changed nothing" >&2; exit 1; fi
+  if p7_run "${mode_root}/p7/${name}" >/dev/null 2>"${base}/err"; then echo "actions: write fixture '${label}' should fail but passed" >&2; exit 1; fi
+  grep -qF -- "${needle}" "${base}/err" || { echo "actions: write fixture '${label}' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+p7_expect_fail 'cache-prune without the main term' 'needs the exact top-level terms' \
+  's/ && github\.ref == .refs\/heads\/main.//' cache-prune.yml
+p7_expect_fail 'cache-prune main term re-opened by ||' 'needs the exact top-level terms' \
+  's/(if: github\.repository == .Moh-Bakr\/Taurine-CI. && github\.ref == .refs\/heads\/main.)/$1 || true/' cache-prune.yml
+p7_expect_fail 'cache-prune with an environment' 'must have no environment' \
+  's/(    runs-on: ubuntu-24\.04\n)/    environment: source-read\n$1/' cache-prune.yml
+p7_expect_fail 'cache-prune calling a local composite' 'no local composite' \
+  's/(    steps:\n)/$1      - uses: .\/.github\/actions\/sanitize\n/' cache-prune.yml
+p7_expect_fail 'cache-prune reading a secret' 'must read no secret' \
+  's/(          GH_TOKEN: )\$\{\{ github\.token \}\}/$1\${{ secrets.X }}/' cache-prune.yml
+p7_expect_fail 'cache-prune with workflow-level actions: write' 'not the whole workflow' \
+  's/^permissions: \{\}$/permissions:\n  actions: write/m' cache-prune.yml
+p7_expect_fail 'a weekly dispatch job without the main term' 'needs a job gated by the exact top-level term' \
+  's/(  dispatch:\n    if: github\.repository == .Moh-Bakr\/Taurine-CI.) && github\.ref == .refs\/heads\/main./$1/' weekly-validation.yml
+p7_expect_fail 'actions: write on the scorecard job' 'held to cache-prune.yml' \
+  's/(      actions: )read/${1}write/' scorecard.yml
+p7_expect_fail 'write-all on the scorecard job' 'held to cache-prune.yml' \
+  's/    permissions:\n      contents: read\n      actions: read\n      checks: read\n      issues: read\n      pull-requests: read\n/    permissions: write-all\n/' scorecard.yml
+echo 'cache-mode fixtures: literal read, write or none only; write only on main-gated jobs; none inside called workflows is refused; the caller split is required where a workflow saves; actions: write is held to the two reviewed places'
+
+# P8: actionlint lacks the cache-mode key, so lint.sh ignores exactly that message and nothing else.
+lint_ignores() { grep -oE "\-ignore '[^']*'" "$1"; }
+expected_ignores="$(printf '%s\n' "-ignore 'SC2016:'" "-ignore 'SC2129:'" "-ignore '^unexpected key \"cache-mode\" for \"(job|workflow)\" section\\. '")"
+[[ "$(lint_ignores .github/policy/lint.sh)" == "${expected_ignores}" ]] || { echo 'lint.sh must ignore exactly SC2016, SC2129 and the anchored cache-mode unexpected-key message' >&2; lint_ignores .github/policy/lint.sh >&2; exit 1; }
+for extra in "-ignore 'syntax-check'" "-ignore 'unexpected key'" "-ignore 'cache-mode'"; do
+  sed "s#^\"\${tools}/actionlint\" -ignore#\"\${tools}/actionlint\" ${extra} -ignore#" .github/policy/lint.sh > "${base}/lint-fixture.sh"
+  [[ "$(lint_ignores "${base}/lint-fixture.sh")" != "${expected_ignores}" ]] || { echo "lint.sh fixture with ${extra} should differ from the reviewed ignores" >&2; exit 1; }
+done
+echo 'lint fixtures: only the anchored cache-mode message is ignored'
+
 # Ref isolation freshness guard: the reviewed guard (inline in the source-checkout composite) is extracted and run against a stubbed compare API. identical and
 # behind are accepted (behind with a warning naming the sync command); ahead, diverged and an
 # unreadable answer are refused, and a run from main is not subject to the guard.
