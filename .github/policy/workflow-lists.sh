@@ -50,9 +50,12 @@ protected_dispatch_workflows=(
 
 # classify_workflow FILE: prints `source` (check_protected_source) or `dispatcher` (check_dispatcher).
 # A workflow in protected_source_workflows is a source workflow, except one that is also listed in
-# protected_dispatch_workflows and has no inline environment: that is a pure dispatcher whose source
-# jobs live in a reusable concern workflow. Any other protected source workflow with no environment
-# stays a source workflow, so check_protected_source still refuses it.
+# protected_dispatch_workflows and carries no source access in its PARSED structure (classify-workflow.rb:
+# no environment, no source-checkout or App-token step, no secret or variable reference outside a
+# reusable call's own secrets map): that is a pure dispatcher whose source jobs live in a reusable
+# concern workflow. Indentation never decides it. Any other protected source workflow stays a source
+# workflow, so check_protected_source still refuses it.
+workflow_lists_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 classify_workflow() {
   local file="$1" candidate in_source=0 in_dispatch=0
   for candidate in "${protected_source_workflows[@]}"; do
@@ -61,7 +64,7 @@ classify_workflow() {
   for candidate in "${protected_dispatch_workflows[@]}"; do
     [[ "${file}" == "${candidate}" || "${file}" == "./${candidate}" ]] && in_dispatch=1
   done
-  if (( in_source )) && ! { (( in_dispatch )) && ! grep -qE '^    environment:' "${file}"; }; then
+  if (( in_source )) && ! { (( in_dispatch )) && [[ "$(ruby "${workflow_lists_dir}/classify-workflow.rb" "${file}")" == dispatcher ]]; }; then
     echo source
   else
     echo dispatcher
