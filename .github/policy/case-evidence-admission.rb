@@ -493,8 +493,12 @@ begin
   block!('concern_unsupported') unless scope
 
   source_root = File.realpath(source_argument)
-  block!('source_path_invalid') unless File.directory?(source_root) && !within?(source_root, CONTROL_ROOT) &&
-    !within?(CONTROL_ROOT, source_root)
+  # The hosted layout puts the source checkout at <workspace>/src, inside the control checkout that
+  # holds this producer, so a source root inside the control root is the normal case and must not
+  # be refused. What must never happen is the other direction -- the control root at or inside the
+  # source root -- which would let the source tree stand in for the control assets. Those are bound
+  # to the control commit below, and the source must be a work tree of its own (checked against git).
+  block!('source_path_invalid') unless File.directory?(source_root) && !within?(CONTROL_ROOT, source_root)
   work = File.realpath(work_argument)
   block!('work_dir_invalid') unless File.directory?(work) && !within?(work, source_root) &&
     !within?(work, CONTROL_ROOT) && (File.stat(work).mode & 0o077).zero?
@@ -519,6 +523,10 @@ begin
   # and the envelopes are built from one set of environment values and compared
   # against each other, which proves nothing.
   git = git_tool
+  # Nested under the control checkout, a source directory that is not its own work tree would be
+  # answered for by the control repository above it; require git's own top level to be this directory.
+  source_top = git_capture(git, source_root, ['rev-parse', '--show-toplevel'], 'source_path_invalid').strip
+  block!('source_path_invalid') unless File.directory?(source_top) && File.realpath(source_top) == source_root
   block!('source_sha_mismatch') unless git_head!(git, source_root, 'source_sha_mismatch') == source_sha
   block!('control_sha_mismatch') unless git_head!(git, CONTROL_ROOT, 'control_checkout_invalid') == control_sha
   require_clean!(git, source_root, 'source_checkout_dirty')

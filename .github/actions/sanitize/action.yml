@@ -87,6 +87,22 @@ runs:
             done | sort -u | sanitize_stream | head -60
         }
 
+        # cargo-deny's exit status is a bitmask of the checks that failed: advisories 1, bans 2,
+        # licences 4, sources 8. Bit 1 is also what a tool error returns, so for a run that did not
+        # include advisories it means the tool did not run, as does any bit above 8. Prints the
+        # failed checks for a status that is only check failures; returns 1, printing nothing, for
+        # a status that means the tool did not complete. $2 is the checks the run asked for.
+        deny_exit_checks() {
+          local status="$1" scope="$2" names='' bit name
+          [[ "${status}" -le 15 ]] || return 1
+          if [[ "${scope}" != *advisories* && $((status & 1)) -ne 0 ]]; then return 1; fi
+          for bit in 1:advisories 2:bans 4:licences 8:sources; do
+            name="${bit#*:}"
+            if (( status & ${bit%%:*} )); then names="${names:+${names}, }${name}"; fi
+          done
+          printf '%s' "${names}"
+        }
+
         # cargo-deny advisories: the advisory id only (never the package or the title).
         deny_advisory_detail() {
           jq -r 'select(.type == "diagnostic") | select(.fields.advisory != null) | "  \(.fields.advisory.id)"' "$1" 2>/dev/null |

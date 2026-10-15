@@ -30,6 +30,16 @@ git -C "$control" commit -qm 'synthetic control'
 control_sha="$(git -C "$control" rev-parse HEAD)"
 admission="$control/.github/policy/case-evidence-admission.rb"
 
+# The hosted layout: the workspace is the control checkout and the source checkout is its src/
+# directory, inside it. Every fixture below runs that way, because the first real run did not --
+# the harness had used sibling directories, and a producer that refused any source inside the
+# control tree passed here and then blocked every hosted run. $tmp/source is a link to it, so the
+# fixtures keep their paths while the producer sees the real nested one.
+mkdir -p "$control/src"
+ln -s "$control/src" "$tmp/source"
+# The fake runner looks for its mode file beside the source checkout, which is now the control tree.
+ln -s "$tmp/mode" "$control/mode"
+
 ruby -rjson -rfileutils -rrbconfig -rdigest -e '
   tmp, assets, root = ARGV
   source = File.join(tmp, "source")
@@ -227,7 +237,7 @@ run_admission() {
     CI_EXPECTED_SELECTION_MODE=full \
     CI_EXPECTED_SELECTED_SUITE_IDS="$selected" \
     CI_PLATFORM=linux \
-    ruby "$admission" "$concern" "$tmp/source" "$tmp/execution.json" "$tmp/work" 2> "$tmp/producer.stderr"
+    ruby "${ADMISSION:-$admission}" "$concern" "${SOURCE_DIR:-$tmp/source}" "$tmp/execution.json" "$tmp/work" 2> "$tmp/producer.stderr"
 }
 
 expect_blocked() {
@@ -410,6 +420,21 @@ for placement in value key array; do
   git -C "$tmp/source" revert --no-edit HEAD >/dev/null
   source_sha="$(git -C "$tmp/source" rev-parse HEAD)"
 done
+
+# The path boundary, in the hosted layout. A source inside the control tree is the normal case (every
+# fixture above); what is refused is the control tree being the source, or inside it, or a source
+# directory that is not a work tree of its own and so would be answered for by the control
+# repository above it.
+SOURCE_DIR="$control" expect_blocked 'the control checkout given as the source' source_path_invalid
+mkdir -p "$tmp/source/ctl"
+cp -R "$control/.github" "$tmp/source/ctl/.github"
+ADMISSION="$tmp/source/ctl/.github/policy/case-evidence-admission.rb" expect_blocked 'a control checkout inside the source checkout' source_path_invalid
+rm -rf "$tmp/source/ctl"
+mkdir "$control/src-nogit"
+cp -R "$control/src/." "$control/src-nogit/"
+rm -rf "$control/src-nogit/.git"
+SOURCE_DIR="$control/src-nogit" expect_blocked 'a source directory that is not a work tree of its own' source_path_invalid
+rm -rf "$control/src-nogit"
 
 # The runner is pinned, not merely read: a lockfile bump blocks.
 ruby -rjson -e '
