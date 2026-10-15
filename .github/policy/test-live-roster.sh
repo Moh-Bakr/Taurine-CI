@@ -131,6 +131,8 @@ fi
 case "${FAKE_CARGO_MODE:-pass2}" in
   pass8) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
   pass2) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
+  pass3) printf 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
+  filtered3) printf 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\n' ;;
   filtered2) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\n' ;;
   pass1) printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
   pass0) printf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
@@ -198,7 +200,14 @@ fi
 grep -Fq 'taurine-db-conformance [dbx_pg_mtls_live] dbx_pg_mtls_ passed=8 skipped=0' "${work}/runner-pgtls/suite-results.txt" || {
   echo 'live roster fixture: mTLS suite did not produce the required eight executed cases' >&2; exit 1;
 }
-run_fake_actions tls-legacy "${legacy_config}" tls-legacy pass2 pass
+# The tls-legacy arm requires two legacy-peer proofs, or three once the cancel first-bytes proof is
+# selected by the same filter. The fixture follows whichever count the live-run action under test
+# requires, so this script passes the action both before and after that count changes.
+legacy_pass=pass2
+if grep -Eq '"\$\{name:-\}" == legacy \]\]; then required_count=3' .github/actions/live-run/action.yml; then
+  legacy_pass=pass3
+fi
+run_fake_actions tls-legacy "${legacy_config}" tls-legacy "${legacy_pass}" pass
 run_fake_actions tls-legacy "${legacy_config}" compiler-heavy compiler-heavy reject
 grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live codes=E0046=1' "${work}/fake-compiler-heavy.err" || {
   echo 'live roster fixture: an early Rust compiler code was hidden by warning-heavy output' >&2; exit 1;
@@ -241,10 +250,10 @@ fi
 grep -Fq -- '-p taurine-db-conformance --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live legacy -- --nocapture' "${work}/cargo-tls-legacy.log" || {
   echo 'live roster fixture: tls-legacy did not pass the fixed feature and filter to cargo' >&2; exit 1;
 }
-grep -Fq 'taurine-db-conformance [dbx_pg_tls_live] legacy passed=2 skipped=0' "${work}/runner-tls-legacy/suite-results.txt" || {
+grep -Fq 'taurine-db-conformance [dbx_pg_tls_live] legacy passed='"${legacy_pass#pass}"' skipped=0' "${work}/runner-tls-legacy/suite-results.txt" || {
   echo 'live roster fixture: legacy DBX TLS suite did not produce the required two executed tests' >&2; exit 1;
 }
-run_fake_actions tls-legacy "${legacy_config}" filtered-legacy filtered2 pass
+run_fake_actions tls-legacy "${legacy_config}" filtered-legacy "filtered${legacy_pass#pass}" pass
 for suite in pgtls tls-legacy; do
   if [[ "${suite}" == pgtls ]]; then config="${pgtls_config}"; else config="${legacy_config}"; fi
   for mode in pass0 pass1 ignored filtered skipped failed; do
