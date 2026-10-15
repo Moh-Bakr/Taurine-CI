@@ -12,6 +12,14 @@
 # reproduced (it is not available here); only the command it executes is.
 set -euo pipefail
 
+# The step contains each base script with a Linux child subreaper and reads /proc, so it only runs
+# on Linux -- as the policy jobs do. Anywhere else, say so rather than fail every fixture for that.
+if [[ "$(uname -s)" != Linux ]]; then
+  echo "${0##*/}: NOT EXERCISED HERE -- the base-policy step runs only on Linux; the policy jobs run this"
+  [[ "${GITHUB_ACTIONS:-}" != true ]] || exit 1
+  exit 0
+fi
+
 # The step refuses to run while passwordless sudo is available, so these fixtures can only run where
 # it is not: a developer machine, or after drop-root in the policy workflow. Say so rather than
 # report every fixture as failing for a reason that has nothing to do with it.

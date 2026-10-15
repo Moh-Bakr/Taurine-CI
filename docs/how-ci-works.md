@@ -762,16 +762,28 @@ process behind to act later. The base pass is therefore isolated further:
   only in the step's memory, and re-verified before every base script and once after the last.
   A rewritten, added, removed or hidden base file fails the step. The manifest is never written to
   disk, where a base script could rewrite it to match its own edit.
-- **Nothing outlives a script.** Each base script runs in its own session, created by the pinned
-  ruby with `Process.setsid`, and the step fails if any process is still in it when the script
-  returns. Each script also runs with a fresh random marker in its environment; any process still
-  alive carrying that marker afterwards -- one that left the session, as `Process.daemon` does --
-  fails the step too. Survivors are killed either way. The group is taken from the step's own `$!`,
-  never from a file a script could overwrite.
+- **Nothing outlives a script.** Each base script runs under a wrapper -- the pinned ruby, calling
+  `prctl(PR_SET_CHILD_SUBREAPER)` through Fiddle -- that every orphaned descendant is re-parented
+  to instead of init. Double-forking, `setsid` and an `exec` with a cleared environment do not take
+  a process out of its reach, and a process cannot leave a subreaper's subtree on its own. When the
+  script returns, the wrapper finds every remaining descendant through the `/proc` ppid chains,
+  kills it, and repeats until none is left; any that was still running fails the script by name.
+  Zombies (exited, not yet reaped) are reaped quietly, unless other threads of one still run. A
+  script that kills its own wrapper fails the step through the wrapper's status. An earlier version
+  looked for a marker in each process's environment; an `exec` with a new environment drops it.
+- **Nothing started for later.** Before drop-root the job user is denied `cron` and `at`, and the
+  step asserts that neither accepts a job and that no user systemd manager socket exists, so
+  nothing outside the job's process tree can start work for it later.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
   test runs could leave a gem in `~/.gem` or a module in `~/.node_modules` for the next to load:
   a later check's `require "json"` would run it. `HOME` is deleted and recreated empty before
   every base script, and the step's own pin builder and verifier run ruby with `--disable-gems`.
+- **The pull request's tree is pinned too.** Pull-request code an earlier base test runs could
+  rewrite what a later one reads -- a workflow file a test extracts steps from, say. Every path
+  outside `.github/policy`, with its type, mode and SHA-256, plus `.git/config`, `.git/hooks` and
+  `.git/info` (which decide what git runs), is recorded before the first base script, held in
+  memory, and checked before every script. It is read with ruby alone, never by running git, which
+  would run whatever an edited `.git/config` told it to.
 - **No loader variables.** The step shell unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`,
   the allow-list never forwards them, and the step asserts none reaches a base script.
 
@@ -779,8 +791,10 @@ process behind to act later. The base pass is therefore isolated further:
 rewritten, added, removed and hidden base file; a rewrite by the last script, which only the
 final check can see; a base checkout tampered on disk; the same rewrite under poisoned ruby; a
 forged manifest on disk; a forged digest function; a base script that leaves a child in its
-session, the same while planting a bogus group id, and one that daemonises out of it; planted
-loader variables; a json gem and a node module planted in `HOME` for a later script; and an
+session, the same while planting a bogus group id, one that daemonises out of it, one that leaves
+its session with a cleared environment and keeps writing into the next script's `HOME`, one that
+kills its own wrapper, and one that only leaves a zombie; a tracked file changed, a file added and
+`.git/config` edited in the pull request's tree; planted loader variables; a json gem and a node module planted in `HOME` for a later script; and an
 existing `/usr/bin/node` that is a link or not root's alone.
 
 What this does **not** do, plainly:
@@ -797,21 +811,21 @@ What this does **not** do, plainly:
 - **Pull-request code runs inside the base pass.** The two test scripts named above execute steps
   taken from the pull request's workflow. Everything listed here limits what that code can do; it
   does not stop it running.
-- **The pull request's tree is not pinned.** The base scripts judge the files in the workspace,
-  and pull-request code running inside the pass could change those between one script and the
-  next. Only the base policy is pinned.
-- **An escapee that clears its environment, or starts with a fresh one, is not seen.** The marker
-  is inherited, so any process that does not inherit it carries none. That includes a process
-  handed to `cron`, `at` or `systemd-run --user`, which the scheduler starts with its own
-  environment; a process under a nested `env -i`; and one whose `/proc/<pid>/environ` cannot be
-  read -- a setuid or non-dumpable process -- because a failed read is skipped silently rather
-  than treated as a match. What such a process can do is what the residuals on pull-request code
-  running inside the pass and on the unpinned tree already describe. The marker is read from
-  `/proc`, which exists on the Linux runner; on macOS the fixture that tests it reports that it
-  did not run.
-- **A window between scripts.** An escaped process is found when the script that started it
-  returns. Until then it runs alongside that script and can act -- including on the base files the
-  next verification will check, though any change it makes there is caught by that verification.
+- **The tree is pinned between scripts, not during one.** A script can change the tree while it
+  runs and change it back before it returns; only the scripts that come after it are protected.
+  The same holds for the base files.
+- **Work handed to something outside the job's process tree.** `cron`, `at` and a user systemd
+  manager are shut out, but any other service that starts processes on the job user's behalf
+  would not be seen by the subreaper. None is known on the hosted image.
+- **A thread-group leader that exits while its other threads run** shows as a zombie; the wrapper
+  counts it as running when more than one task remains, but no fixture can construct one without a
+  compiler, so that case is reasoned, not tested. Every descendant, zombie or not, is sent SIGKILL.
+- **Linux only.** The wrapper needs `prctl` and `/proc`. The fixtures that run the step say so and
+  pass on macOS without exercising anything, and fail under `GITHUB_ACTIONS` if they ever land
+  anywhere but Linux.
+- **An existing `/usr/bin/node` is trusted if root alone can change it.** A root-owned wrapper
+  script that execs a path the job user can write would pass that check. No hosted image ships
+  one; the step installs its own copy where none exists.
 - **`DYLD_*` forwarding cannot be observed on macOS**, which strips those names under System
   Integrity Protection; on Linux the dynamic loader ignores them.
 - **The sudo assertion cannot be exercised off a runner.** It needs passwordless sudo to be present

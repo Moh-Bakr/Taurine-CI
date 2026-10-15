@@ -318,6 +318,20 @@ jobs:
         shell: bash
         run: bash .github/policy/test-base-policy-sudo.sh --require
 
+      # cron and at start what the job user hands them later, outside this job's process tree,
+      # where the per-script containment cannot see it. Deny both to the job user while root is
+      # still available; the base-policy step asserts it, and that no user systemd manager is
+      # reachable either.
+      - name: Deny the job user cron and at
+        shell: bash
+        run: |
+          set -euo pipefail
+          user="$(id -un)"
+          for tool in cron at; do
+            sudo rm -f "/etc/${tool}.allow"
+            printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
+          done
+
       - name: Remove root before the remaining fixtures
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
@@ -355,6 +369,20 @@ jobs:
           path: base-policy
           fetch-depth: 1
           persist-credentials: false
+
+      # cron and at start what the job user hands them later, outside this job's process tree,
+      # where the per-script containment cannot see it. Deny both to the job user while root is
+      # still available; the base-policy step asserts it, and that no user systemd manager is
+      # reachable either.
+      - name: Deny the job user cron and at
+        shell: bash
+        run: |
+          set -euo pipefail
+          user="$(id -un)"
+          for tool in cron at; do
+            sudo rm -f "/etc/${tool}.allow"
+            printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
+          done
 
       # Base tests may call node, and the step below runs them with PATH fixed to the system
       # directories. The runner's node is in /usr/local/bin, which hosted images leave
@@ -452,6 +480,24 @@ jobs:
             echo "::error::passwordless sudo is still available, so a base script could act as root"
             exit 1
           fi
+          # Nothing outside this job may start processes for the job user later: no cron, no at, no
+          # user systemd manager. An allowed crontab or at job is removed again before failing.
+          if [[ -x /usr/bin/crontab ]] && printf '' | /usr/bin/crontab - 2>/dev/null; then
+            /usr/bin/crontab -r 2>/dev/null || true
+            echo "::error::the job user can still install a crontab, so a base script could leave work for later"
+            exit 1
+          fi
+          if [[ -x /usr/bin/at ]] && printf 'true\n' | /usr/bin/at now + 1 hour 2>/dev/null; then
+            /usr/bin/atq 2>/dev/null | while read -r job _; do /usr/bin/atrm "${job}" 2>/dev/null || true; done
+            echo "::error::the job user can still queue an at job, so a base script could leave work for later"
+            exit 1
+          fi
+          for socket in "/run/user/$(id -u)/bus" "/run/user/$(id -u)/systemd/private"; do
+            if [[ -S "${socket}" ]]; then
+              echo "::error::a user systemd manager is reachable at ${socket}, so a base script could start a unit outside this job"
+              exit 1
+            fi
+          done
           # Defence in depth: `env -i` above already starts every base script with nothing but the
           # allow-listed names, so no loader variable can reach one. This asserts it rather than
           # relying on it.
@@ -519,82 +565,135 @@ jobs:
           }
           verify_manifest || exit 1
 
-          # Each base script runs in a session of its own, so whatever it starts is in that session
-          # too, and the session is torn down when the script returns. A base script that leaves a
-          # listener or a watcher behind cannot outlive its own check.
-          #
-          # The session is created by the already-pinned ruby rather than by setsid: one fewer
-          # binary to depend on, and setsid is not present on every machine these fixtures run on.
-          # env and ruby both exec rather than fork, so the pid this shell started is the pid that
-          # calls Process.setsid and then becomes the base script: it names the session and its
-          # group. It is taken from `$!`, never from a file, because a base script could rewrite a
-          # file to point the teardown at some other group and keep its own child alive.
-          #
-          # Leaving a process behind is a failure, not a warning: a base script has no reason to,
-          # and a process that outlives its check can act on the next one. Two ways out are
-          # watched.
-          #
-          # A process still in the script's session when it returns is found through the group.
-          #
-          # A process that left the session -- a double fork and setsid, as Process.daemon does --
-          # is in no group the teardown can kill. It is found by a marker instead: each script
-          # runs with a fresh random TAURINE_BASE_GUARD value in its environment, which every
-          # process it starts inherits through fork, exec and daemon alike. Anything still alive
-          # with that value once the script has returned has outlived it. An earlier version
-          # diffed the runner user's process list instead; that cannot tell an escapee from an
-          # unrelated process the same user started meanwhile, and it failed closed on exactly
-          # that in testing. The marker is per script, so it does not have that problem.
-          marked_pids() {
-            local marker="TAURINE_BASE_GUARD=$1" found=''
-            if [[ -d /proc/self ]]; then
-              local environ
-              for environ in /proc/[0-9]*/environ; do
-                if tr '\0' '\n' 2>/dev/null < "${environ}" | grep -Fxq -- "${marker}"; then
-                  found+="${environ//[^0-9]/} "
-                fi
-              done
+          # The pull request's own tree is input to every base script, and pull-request code that an
+          # earlier base test runs could rewrite what a later one reads -- a workflow file a test
+          # extracts steps from, say. So the tree is pinned as well: every path outside
+          # .github/policy (pinned above) with its type, mode and SHA-256, plus .git/config,
+          # .git/hooks and .git/info, which decide what git runs. It is taken here, before any base
+          # script, held in memory, and checked again before every script; any change fails the
+          # step. It is read with ruby alone and never by running git, which would run whatever an
+          # edited .git/config told it to.
+          tree_state='
+            require "digest"
+            require "find"
+            rows = []
+            record = lambda do |path|
+              stat = File.lstat(path)
+              kind =
+                if stat.symlink? then "link #{File.readlink(path).dump}"
+                elsif stat.file? then "file #{(stat.mode & 0o7777).to_s(8)} #{Digest::SHA256.file(path).hexdigest}"
+                elsif stat.directory? then "dir #{(stat.mode & 0o7777).to_s(8)}"
+                else "other #{stat.ftype}"
+                end
+              rows << "#{path.delete_prefix("./").dump} #{kind}"
+            end
+            walk = lambda do |top|
+              Find.find(top) do |path|
+                if path == "./.github/policy" || path == "./.git"
+                  Find.prune
+                else
+                  record.call(path) unless path == "."
+                end
+              end
+            end
+            walk.call(".")
+            %w[.git .git/config].each { |path| record.call("./#{path}") if File.exist?("./#{path}") || File.symlink?("./#{path}") }
+            %w[.git/hooks .git/info].each { |path| Find.find("./#{path}") { |p| record.call(p) } if File.directory?("./#{path}") && !File.symlink?("./#{path}") }
+            current = rows.sort.join("\n")
+            if ARGV.first == "verify"
+              pinned = STDIN.read.split("\n")
+              now = current.split("\n")
+              unless now == pinned
+                changed = (now - pinned) | (pinned - now)
+                paths = changed.map { |line| line.split(" ").first }.uniq.first(10)
+                warn "::error::the pull request tree changed while the base policy ran: #{paths.join(", ")}"
+                exit 1
+              end
             else
-              # No /proc: read each process's environment through ps. Exclude this shell's own
-              # descendants, which carry the marker only as an argument to the search itself.
-              found="$(ps -E -A -o pid=,ppid=,command= | awk -v me="$$" -v needle="${marker}" '
-                { parent[$1] = $2; line[$1] = $0 }
-                END {
-                  for (p in line) {
-                    if (index(line[p], needle) == 0) continue
-                    q = p
-                    while (q != me && q > 1 && (q in parent)) q = parent[q]
-                    if (q != me) printf "%s ", p
-                  }
-                }')"
-            fi
-            printf '%s' "${found}"
+              print current
+            end
+          '
+          tree_pin="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${tree_state}" pin)"
+          verify_tree() {
+            printf '%s' "${tree_pin}" | "${scrub[@]}" "${ruby_bin}" --disable-gems -e "${tree_state}" verify
           }
-          process_failure=0
+
+          # Nothing a base script starts may outlive it: a process left running can act on the next
+          # script -- re-plant its freshly emptied HOME, rewrite a base script after it was verified,
+          # or change the tree a later test reads.
+          #
+          # Each script runs under a wrapper that makes itself the child subreaper for everything
+          # below it (prctl PR_SET_CHILD_SUBREAPER, through ruby's Fiddle): a descendant whose
+          # parent exits is re-parented to the wrapper rather than to init, so double-forking,
+          # setsid, or exec with a cleared environment do not take a process out of its reach. A
+          # process cannot leave a subreaper's subtree on its own. When the script returns, the
+          # wrapper finds every remaining descendant through the /proc ppid chains, kills it, and
+          # repeats until none is left; finding any fails the script by name. Nothing here depends
+          # on anything the escaping process controls -- an earlier version looked for a marker in
+          # each process's environment, which an exec with a new environment simply drops.
+          #
+          # If a script kills the wrapper itself, the wrapper's own status is non-zero and the step
+          # fails; a descendant re-parented away by that cannot change the verdict. Linux only: the
+          # policy jobs run on ubuntu-24.04, and the wrapper fails closed where prctl is missing.
+          subreaper='
+            require "fiddle"
+            label = ARGV.shift
+            begin
+              prctl = Fiddle::Function.new(Fiddle.dlopen(nil)["prctl"], [Fiddle::TYPE_INT] + [Fiddle::TYPE_LONG] * 4, Fiddle::TYPE_INT)
+              raise "prctl returned non-zero" unless prctl.call(36, 1, 0, 0, 0).zero?
+            rescue StandardError, Fiddle::DLError => e
+              warn "::error::base policy: cannot contain #{label}: #{e.message}"
+              exit 125
+            end
+            child = fork { Process.setsid; exec(*ARGV) }
+            _, status = Process.wait2(child)
+            me = Process.pid
+            left = []
+            deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
+            loop do
+              parent = {}
+              state = {}
+              Dir.glob("/proc/[0-9]*/stat").each do |path|
+                stat = File.read(path) rescue next
+                fields = stat[(stat.rindex(")") + 2)..].split(" ")
+                pid = path[/\d+/].to_i
+                state[pid] = fields[0]
+                parent[pid] = fields[1].to_i
+              end
+              found = parent.keys.select do |pid|
+                next false if pid == me
+                up = pid
+                up = parent[up] while up && up != me && up > 1
+                up == me
+              end
+              break if found.empty?
+              # Every descendant is killed. A zombie that has exited and only waits to be reaped is
+              # not reported as left running -- unless other threads of it still are, which shows
+              # its leader as a zombie while the process goes on.
+              running = found.reject do |pid|
+                %w[Z X].include?(state[pid]) && (Dir.children("/proc/#{pid}/task").length <= 1 rescue true)
+              end
+              left |= running
+              found.each { |pid| Process.kill(:KILL, pid) rescue nil }
+              begin
+                nil while Process.wait(-1, Process::WNOHANG)
+              rescue Errno::ECHILD
+              end
+              if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+                warn "::error::base policy: #{label} keeps starting processes faster than they can be killed"
+                exit 125
+              end
+              sleep 0.05
+            end
+            unless left.empty?
+              warn "::error::base policy: #{label} left #{left.length} process(es) running when it returned; they were killed"
+              exit 125
+            end
+            exit(status.exitstatus || 128 + status.termsig.to_i)
+          '
           run_guarded() {
-            local status=0 leader guard survivors
-            guard="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
             fresh_home
-            "${scrub[@]}" ${token[@]+"${token[@]}"} "TAURINE_BASE_GUARD=${guard}" "${ruby_bin}" -e '
-              Process.setsid
-              exec(*ARGV)
-            ' "$@" &
-            leader=$!
-            wait "${leader}" || status=$?
-            if kill -0 -- "-${leader}" 2>/dev/null; then
-              kill -TERM -- "-${leader}" 2>/dev/null || true
-              sleep 1
-              kill -KILL -- "-${leader}" 2>/dev/null || true
-              echo "::error::base policy: ${check##*/} left a process running in its session when it returned; it was killed"
-              process_failure=1
-            fi
-            survivors="$(marked_pids "${guard}")"
-            if [[ -n "${survivors// /}" ]]; then
-              # shellcheck disable=SC2086
-              kill -KILL ${survivors} 2>/dev/null || true
-              echo "::error::base policy: ${check##*/} left a process that escaped its session (pid ${survivors% }); it was killed"
-              process_failure=1
-            fi
-            return "${status}"
+            "${scrub[@]}" ${token[@]+"${token[@]}"} "${ruby_bin}" --disable-gems -e "${subreaper}" "${check##*/}" "$@"
           }
 
           status=0
@@ -602,6 +701,7 @@ jobs:
           for check in .github/policy/check-*.rb .github/policy/check-*.sh .github/policy/lint.sh .github/policy/test-*.sh .github/policy/test-*.rb; do
             [[ -f "${check}" ]] || continue
             verify_manifest || { status=1; break; }
+            verify_tree || { status=1; break; }
             executed=$((executed + 1))
             token=()
             if [[ "${check##*/}" == lint.sh && -n "${GH_TOKEN+x}" ]]; then token=("GH_TOKEN=${GH_TOKEN}"); fi
@@ -613,7 +713,6 @@ jobs:
             echo '::endgroup::'
           done
           [[ "${executed}" -eq "${expected}" ]] || { echo "::error::ran ${executed} of ${expected} base policy scripts"; exit 1; }
-          [[ "${process_failure}" -eq 0 ]] || status=1
           verify_manifest || status=1
           rm -rf -- "${clean_home}"
           echo "base policy: ${executed} scripts run against ${pinned} pinned files"

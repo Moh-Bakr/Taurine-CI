@@ -9,6 +9,14 @@
 # Run from the repository root. Usage: test-base-policy-isolation.sh [workflow-file]
 set -euo pipefail
 
+# The step contains each base script with a Linux child subreaper and reads /proc, so it only runs
+# on Linux -- as the policy jobs do. Anywhere else, say so rather than fail every fixture for that.
+if [[ "$(uname -s)" != Linux ]]; then
+  echo "${0##*/}: NOT EXERCISED HERE -- the base-policy step runs only on Linux; the policy jobs run this"
+  [[ "${GITHUB_ACTIONS:-}" != true ]] || exit 1
+  exit 0
+fi
+
 # The step refuses to run while passwordless sudo is available, so these fixtures can only run where
 # it is not: a developer machine, or after drop-root in the policy workflow. Say so rather than
 # report every fixture as failing for a reason that has nothing to do with it.
@@ -107,6 +115,17 @@ expect_reject() {
     sed 's/^/  got:    /' "${work}/${label}.out" >&2
     exit 1
   }
+}
+
+# The step's log must show the judge as the very next script after the planter.
+next_after() {
+  local label="$1" first="$2" second="$3"
+  ruby -e '
+    groups = File.readlines(ARGV[0]).filter_map { |l| l[/::group::base policy: (\S+)/, 1] }
+    i = groups.index(ARGV[1])
+    abort "#{ARGV[1]} did not run" unless i
+    abort "#{ARGV[2]} was not the next script after #{ARGV[1]}: #{groups.inspect}" unless groups[i + 1] == ARGV[2]
+  ' "${work}/${label}.out" "${first}" "${second}" || { echo "base-policy isolation: ${label}: wrong order" >&2; exit 1; }
 }
 
 # A base policy that passes, passes. Everything below is a departure from this one case, so if this
@@ -216,7 +235,7 @@ SH
 commit_base "${survivor}"
 rm -f "${child_pid}"
 # Leaving a process behind fails the step, by name, and the process is gone.
-expect_reject survivor "${survivor}" 'left a process running in its session when it returned'
+expect_reject survivor "${survivor}" 'check-pass.sh left 1 process(es) running when it returned; they were killed'
 [[ -s "${child_pid}" ]] || { echo 'base-policy isolation: the survivor fixture started no child' >&2; exit 1; }
 # Give the teardown a moment to land, then the child must be gone.
 sleep 1
@@ -242,7 +261,7 @@ exit 0
 SH
 commit_base "${steerer}"
 rm -f "${steered_pid}"
-expect_reject steerer "${steerer}" 'left a process running in its session when it returned'
+expect_reject steerer "${steerer}" 'check-pass.sh left 1 process(es) running when it returned; they were killed'
 [[ -s "${steered_pid}" ]] || { echo 'base-policy isolation: the steerer fixture started no child' >&2; exit 1; }
 sleep 1
 if kill -0 "$(cat "${steered_pid}")" 2>/dev/null; then
@@ -252,20 +271,8 @@ if kill -0 "$(cat "${steered_pid}")" 2>/dev/null; then
 fi
 
 # A process that leaves the session altogether: Process.daemon double-forks and calls setsid, so
-# it is in no group the teardown kills and is re-parented away from the step. It must still be
-# found, fail the step by name, and be killed.
-#
-# The step finds it by the marker in its environment, which it reads from /proc. Where there is
-# no /proc -- macOS, where ps also hides the environment of Apple's own binaries such as
-# /usr/bin/ruby -- the marker cannot be read, so this fixture says plainly that it did not run
-# rather than passing. The policy job runs on Linux, where it does.
-if [[ ! -d /proc/self ]]; then
-  echo 'base-policy isolation: NOT EXERCISED HERE -- the daemon-escape fixture needs /proc; it runs in the Linux policy job' >&2
-  daemon_skipped=yes
-else
-  daemon_skipped=no
-fi
-if [[ "${daemon_skipped}" == no ]]; then
+# it is re-parented away from the script. The wrapper is the subreaper it is re-parented to, so it
+# is still found, fails the step by name, and is killed.
 daemon="$(fixture "${work}/daemon")"
 passing_scripts "${daemon}"
 daemon_pid="${work}/daemon-child.pid"
@@ -276,14 +283,82 @@ sleep 120
 RB
 commit_base "${daemon}"
 rm -f "${daemon_pid}"
-expect_reject daemon "${daemon}" 'left a process that escaped its session'
+expect_reject daemon "${daemon}" 'check-pass.rb left 1 process(es) running when it returned; they were killed'
 [[ -s "${daemon_pid}" ]] || { echo 'base-policy isolation: the daemon fixture started no process' >&2; exit 1; }
 if kill -0 "$(cat "${daemon_pid}")" 2>/dev/null; then
   kill -KILL "$(cat "${daemon_pid}")" 2>/dev/null || true
   echo 'base-policy isolation: a daemonised process outlived the step' >&2
   exit 1
 fi
+
+# The escape a marker in the environment could not see: script N leaves its session AND clears its
+# environment (setsid, then env -i), and keeps writing into HOME. Script N+1 must find its HOME
+# still empty, and the process must be gone. Script N is the reviewer's command, verbatim.
+envclear="$(fixture "${work}/envclear")"
+passing_scripts "${envclear}"
+cat > "${envclear}/base-policy/.github/policy/check-a-daemon.sh" <<'SH'
+( /usr/bin/setsid /usr/bin/env -i /bin/sh -c 'while :; do printf planted > "$1/planted"; sleep 0.02; done' daemon "$HOME" </dev/null >/dev/null 2>&1 & )
+sleep 0.3; exit 0
+SH
+cat > "${envclear}/base-policy/.github/policy/check-b-judge.sh" <<'SH'
+sleep 0.3
+[[ ! -e "${HOME}/planted" ]] || { echo 'a process from the previous script wrote into this HOME' >&2; exit 1; }
+SH
+commit_base "${envclear}"
+expect_reject envclear "${envclear}" 'base policy: check-a-daemon.sh left '
+next_after envclear check-a-daemon.sh check-b-judge.sh
+if grep -qF "The base commit's check-b-judge.sh rejects" "${work}/envclear.out"; then
+  echo 'base-policy isolation: envclear: script N+1 found its HOME re-planted' >&2; exit 1
 fi
+sleep 0.3
+if pgrep -f "${work}/envclear/runner/base-policy-home" > /dev/null; then
+  pkill -KILL -f "${work}/envclear/runner/base-policy-home" || true
+  echo 'base-policy isolation: envclear: the environment-cleared process outlived its script' >&2; exit 1
+fi
+
+# A child that has exited but was never reaped is a zombie, not a process left running: the script
+# below execs into sleep, which never waits for it, so it is handed to the wrapper unreaped. Base
+# tests leave these routinely, so the step must reap them quietly and pass.
+zombie="$(fixture "${work}/zombie")"
+passing_scripts "${zombie}"
+cat > "${zombie}/base-policy/.github/policy/check-pass.sh" <<'SH'
+/bin/true &
+exec /bin/sleep 0.3
+SH
+commit_base "${zombie}"
+expect_pass zombie "${zombie}"
+
+# A script that kills the wrapper containing it. Its descendants are then re-parented beyond the
+# wrapper's reach, but the wrapper's status says it was killed, so the step fails anyway.
+killer="$(fixture "${work}/killer")"
+passing_scripts "${killer}"
+killer_pid="${work}/killer-child.pid"
+cat > "${killer}/base-policy/.github/policy/check-pass.sh" <<SH
+( sleep 120 & printf '%s\n' "\$!" > "${killer_pid}" )
+kill -KILL "\${PPID}"
+SH
+commit_base "${killer}"
+rm -f "${killer_pid}"
+expect_reject killer "${killer}" "The base commit's check-pass.sh rejects this pull request"
+[[ ! -s "${killer_pid}" ]] || kill -KILL "$(cat "${killer_pid}")" 2>/dev/null || true
+
+# The pull request's tree, rewritten by an earlier base script. Each is caught before the next
+# script runs: a tracked file changed, a file added, and .git/config edited to steer later git.
+for case in changed added gitconfig; do
+  tree="$(fixture "${work}/tree-${case}")"
+  passing_scripts "${tree}"
+  mkdir -p "${tree}/.git" "${tree}/.github/workflows"
+  printf 'on: push\n' > "${tree}/.github/workflows/live-proofs.yml"
+  printf '[core]\n\tbare = false\n' > "${tree}/.git/config"
+  case "${case}" in
+    changed) edit='File.write(".github/workflows/live-proofs.yml", "on: pull_request\n")'; want='.github/workflows/live-proofs.yml' ;;
+    added) edit='File.write("planted.yml", "x\n")'; want='planted.yml' ;;
+    gitconfig) edit='File.write(".git/config", "[core]\n\tfsmonitor = /tmp/planted\n")'; want='.git/config' ;;
+  esac
+  printf '%s\n' "${edit}" > "${tree}/base-policy/.github/policy/check-a-tree.rb"
+  commit_base "${tree}"
+  expect_reject "tree-${case}" "${tree}" "the pull request tree changed while the base policy ran: \"${want}\""
+done
 
 # The last base script rewrites one that already ran. No script runs after it, so only the
 # final verification can notice.
@@ -352,16 +427,6 @@ File.write(File.join(home, ".node_modules/taurine-planted/index.js"), "process.e
 RB
 }
 
-# The step's log must show the judge as the very next script after the planter.
-next_after() {
-  local label="$1" first="$2" second="$3"
-  ruby -e '
-    groups = File.readlines(ARGV[0]).filter_map { |l| l[/::group::base policy: (\S+)/, 1] }
-    i = groups.index(ARGV[1])
-    abort "#{ARGV[1]} did not run" unless i
-    abort "#{ARGV[2]} was not the next script after #{ARGV[1]}: #{groups.inspect}" unless groups[i + 1] == ARGV[2]
-  ' "${work}/${label}.out" "${first}" "${second}" || { echo "base-policy isolation: ${label}: wrong order" >&2; exit 1; }
-}
 
 home_gem="$(fixture "${work}/home-gem")"
 passing_scripts "${home_gem}"
@@ -482,8 +547,7 @@ if [[ "$(run_install kept /usr/bin/env)" -ne 0 ]] ||
   exit 1
 fi
 
-echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind, in its session or escaped from it by Process.daemon, fails the step and is killed, even when the script plants a bogus group id; a rewrite by the last script, a tampered base checkout and a hidden file are caught; planted loader variables never reach a base script; a gem or node module planted in HOME by one base script is gone before the next, and a HOME replaced by a link is removed without following it; and an existing node is kept only when root alone can change it'
-[[ "${daemon_skipped}" == no ]] || echo 'base-policy isolation: the daemon-escape case above was NOT exercised on this host'
+echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind -- in its session, daemonised, or out of its session with a cleared environment -- fails the step and is killed, even when the script plants a bogus group id, and a script that kills its own wrapper fails the step; the pull request tree changed by an earlier script fails the step; a rewrite by the last script, a tampered base checkout and a hidden file are caught; planted loader variables never reach a base script; a gem or node module planted in HOME by one base script is gone before the next, and a HOME replaced by a link is removed without following it; and an existing node is kept only when root alone can change it'
 if [[ "${home_node_skipped}" == yes ]]; then
   echo 'base-policy isolation: the node HOME case above was NOT exercised on this host: no node'
   [[ "${GITHUB_ACTIONS:-}" != true ]] || exit 1

@@ -17,6 +17,11 @@ fi
 workflow="${1:-.github/workflows/validate-public-changes.yml}"
 step="Run the base commit's policy against this pull request"
 
+if [[ "$(uname -s)" != Linux ]]; then
+  echo 'base-policy sudo: NOT EXERCISED HERE -- the base-policy step runs only on Linux; the policy job runs this'
+  [[ "${require}" != yes ]] || exit 1
+  exit 0
+fi
 if ! /usr/bin/sudo -n true 2>/dev/null; then
   if [[ "${require}" == yes ]]; then
     echo 'base-policy sudo: passwordless sudo is not available here, so the rule was not exercised' >&2
