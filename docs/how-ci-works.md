@@ -852,6 +852,19 @@ What this does **not** do, plainly:
 - **The sudo assertion cannot be exercised off a runner.** It needs passwordless sudo to be present
   to prove it is gone, which a developer machine does not have.
 
+### Where the base-pass step lives
+
+The base-policy step is in `validate-public-changes.yml` today. `workflow-lists.sh` already names
+`.github/workflows/base-policy.yml` as the reusable half of the public policy gate, ahead of the
+file, because a pull request is judged by the base commit's checks: the move can only land after
+the checks that govern it do. `check-dispatchers.sh` accepts that file only if its sole trigger is
+`workflow_call`, with no other trigger, secret, artifact, cache or OIDC grant, and
+`check-actions.sh` allows the entrypoint to call it. The three tests that run the step
+(`test-base-policy-env.sh`, `-isolation.sh` and `-sudo.sh`) find it through
+`base-pass-workflow.sh`, in whichever of the two files holds it and only when exactly one does
+(`test-base-pass-locate.sh`). Moving the jobs, and what the entrypoint then requires of them, is a
+separate change.
+
 ## Accepted residual risks
 
 These are known, reviewed and accepted; each is limited by the controls named.
