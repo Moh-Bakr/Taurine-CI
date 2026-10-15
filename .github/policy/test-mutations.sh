@@ -24,7 +24,7 @@ missed=0
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb test-preflight.sh test-cache-scope-audit.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     case "${check}" in
       *.rb) ruby ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
@@ -171,6 +171,30 @@ mutation '11. cache-prune given the source-read environment' "${cache_prune}" ' 
     runs-on: ubuntu-24.04
 '
 mutation '11. lint.sh ignores every unknown key' .github/policy/lint.sh "-ignore '^unexpected key \"cache-mode\" for \"(job|workflow)\" section\. '" "-ignore 'unexpected key'"
+
+# 12. The caller split, the audit and the explicit cache grants (docs/untrusted-readonly-cache.md, section 4.1).
+windows=.github/workflows/windows-validation.yml
+audit=.github/actions/cache-scope-audit/action.yml
+mutation '12. the Linux untrusted half loses cache-mode read' "${linux}" '    cache-mode: read
+    uses: ./.github/workflows/linux-validation-concern.yml' '    uses: ./.github/workflows/linux-validation-concern.yml'
+mutation '12. the Linux untrusted half granted write' "${linux}" '    cache-mode: read
+    uses: ./.github/workflows/linux-validation-concern.yml' '    cache-mode: write
+    uses: ./.github/workflows/linux-validation-concern.yml'
+mutation '12. the Linux untrusted half runs without the audit' "${linux}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' }}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}"
+mutation '12. the Linux audit no longer limited to untrusted' "${linux}" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
+    needs: [validate-input]" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && needs.validate-input.result == 'success' }}
+    needs: [validate-input]"
+mutation '12. the Linux workflow-level none dropped' "${linux}" 'cache-mode: none
+' ''
+mutation '12. the Windows Rust untrusted half granted write' "${windows}" '    cache-mode: read
+    uses: ./.github/workflows/windows-validation-concern.yml' '    cache-mode: write
+    uses: ./.github/workflows/windows-validation-concern.yml'
+mutation '12. the live-proofs workflow-level none dropped' .github/workflows/live-proofs.yml 'cache-mode: none
+' ''
+mutation '12. the pg8 arm caller without an explicit none' .github/workflows/pg8-measurement.yml '    cache-mode: none
+    uses: ./.github/workflows/pg8-measurement-arm.yml' '    uses: ./.github/workflows/pg8-measurement-arm.yml'
+mutation '12. the cache-scope audit accepts a non-empty scope' "${audit}" "if [[ \"\${total}\" != 0 ]]; then" 'if [[ "${total}" == never ]]; then'
+mutation '12. the cache-scope audit asks for the main scope' "${audit}" 'ref=refs/heads/untrusted&per_page=1' 'ref=refs/heads/main&per_page=1'
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a

@@ -1,0 +1,52 @@
+name: Audit the untrusted cache scope
+description: >
+  Run in a job with no environment, no secret and no source, only for a run on the untrusted
+  ref (docs/untrusted-readonly-cache.md, section 3.3). Nothing may write the untrusted ref's
+  Actions cache scope: every untrusted job runs with `cache-mode: read`, so the scope is expected
+  to hold no entry at all. The step lists the scope through this repository's cache API with the
+  job's own token (actions: read, nothing else) and refuses unless the answer is readable and its
+  total is exactly zero, of any key (a lookup prefix-matches, so a longer key can shadow a
+  shorter one: filtering on a prefix would miss it). Run before the untrusted source jobs it
+  stops them; run after them it reports a planting attempt. It is a detector: a concurrent
+  writer can still act between the check and a restore, which is why `cache-mode: read` is the
+  control. Only the entry count is printed, never a key.
+
+inputs:
+  github-token:
+    description: The job's own token (actions read), used only for the one cache listing
+    required: true
+  phase:
+    description: before or after the untrusted source jobs, for the message only
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse any entry in the untrusted cache scope
+      shell: bash
+      env:
+        CONTROL_PLANE_TOKEN: ${{ inputs.github-token }}
+        AUDIT_PHASE: ${{ inputs.phase }}
+      run: |
+        set -euo pipefail
+        if [[ "${GITHUB_REF}" != refs/heads/untrusted ]]; then
+          echo 'The untrusted cache scope audit only runs for the untrusted ref' >&2
+          exit 1
+        fi
+        code="$(curl --silent --show-error --retry 5 --retry-delay 2 --retry-max-time 60 --output "${RUNNER_TEMP}/untrusted-caches.json" --write-out '%{http_code}' \
+          -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" -H 'X-GitHub-Api-Version: 2022-11-28' \
+          "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted&per_page=1")" || code=000
+        if [[ "${code}" != 200 ]]; then
+          echo "The untrusted cache scope could not be read (HTTP ${code}); refusing to continue" >&2
+          exit 1
+        fi
+        total="$(jq -r 'if (.total_count | type) == "number" then .total_count else "unreadable" end' "${RUNNER_TEMP}/untrusted-caches.json" 2>/dev/null || echo unreadable)"
+        if [[ "${total}" == unreadable ]]; then
+          echo 'The untrusted cache scope answer was not readable; refusing to continue' >&2
+          exit 1
+        fi
+        if [[ "${total}" != 0 ]]; then
+          echo "The untrusted cache scope holds ${total} entries (${AUDIT_PHASE} the untrusted source jobs); it must hold none. Purge it with: gh cache delete --all --ref refs/heads/untrusted -R ${GITHUB_REPOSITORY}" >&2
+          exit 1
+        fi
+        echo "untrusted cache scope: empty (${AUDIT_PHASE} the untrusted source jobs)"

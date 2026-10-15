@@ -34,6 +34,10 @@ on:
 # Deny by default; each job below declares the one permission it needs.
 permissions: {}
 
+# No job caches unless it declares its own cache-mode; the reviewed split is validate-main (write,
+# main only) and validate-untrusted (read) (docs/untrusted-readonly-cache.md, section 4.1).
+cache-mode: none
+
 concurrency:
   # Each run has its own group: GitHub keeps only one PENDING run per group, so a shared per-SHA
   # group let a later dispatch silently cancel an earlier pending one. Runs are never

@@ -21,6 +21,12 @@
 #     main and never mentions the untrusted ref, and a sibling job with the same `uses` is
 #     `read` and gated by the exact top-level term github.ref == 'refs/heads/untrusted'
 #     (validate-main / validate-untrusted split: expressions are rejected, so the split is mandatory);
+#  K. a validate-untrusted half (read, untrusted-gated, calling a saving workflow) needs the
+#     `cache-audit` job directly and the exact top-level term needs.cache-audit.result == 'success';
+#     `cache-audit` runs only on the untrusted ref, has no environment, no secret and only
+#     actions: read and contents: read, and calls ./.github/actions/cache-scope-audit with
+#     phase before; `cache-audit-after` needs cache-audit and every untrusted half, runs on the
+#     untrusted ref and calls the composite with phase after;
 #  I. a job whose steps contain actions/cache/save is `write`;
 #  J. a job whose steps contain actions/cache/restore (and no save) is `read` or `write`.
 # Always on, over every workflow and composite action given: `actions: write` (or write-all) is
@@ -52,7 +58,7 @@ def requires?(value, term)
 end
 
 def load(path)
-  YAML.safe_load(File.read(path), aliases: false) || {}
+  YAML.safe_load(File.read(path, encoding: 'UTF-8'), aliases: false) || {}
 end
 
 def triggers(doc)
@@ -73,11 +79,27 @@ def uses_of(steps, pattern)
   steps.any? { |s| s['uses'].to_s.match?(pattern) }
 end
 
-# Workflows (basename) held to the staged rules F to J. Empty in the policy pull request; the
+# Workflows (basename) held to the staged rules F to J (every workflow with a dispatch trigger but macOS); the
 # workflow pull request that adds `cache-mode` to a workflow adds its name here in the same change
 # (docs/untrusted-readonly-cache.md, section 4.1). The always-on rules A to D and the
 # actions: write rule need no entry. Fixtures pass their own list with --enforced-file.
-ENFORCED_WORKFLOWS = [].freeze
+ENFORCED_WORKFLOWS = %w[
+  android-validation.yml
+  cache-prune.yml
+  ios-validation.yml
+  linux-validation.yml
+  live-proofs.yml
+  orchestrate-validation.yml
+  pg8-measurement.yml
+  scorecard.yml
+  source-read.yml
+  validate-public-changes.yml
+  weekly-validation.yml
+  windows-validation.yml
+].freeze
+# macos-validation.yml is deliberately absent: its matrix job runs inline and saves caches, so it
+# cannot be split into validate-main / validate-untrusted until it becomes a reusable workflow
+# (docs/untrusted-readonly-cache.md, section 6). Until then macOS keeps today's default grant.
 
 enforced_file = nil
 args = ARGV.dup
@@ -113,6 +135,7 @@ docs.each do |path, doc|
     failures << "#{path}: a called workflow must not set cache-mode; it inherits its caller's grant" if called
   end
 
+  untrusted_halves = []
   jobs.each do |name, job|
     next unless job.is_a?(Hash)
     mode = job['cache-mode']
@@ -129,7 +152,7 @@ docs.each do |path, doc|
     next unless enforced.include?(base)
 
     callee = job['uses'].to_s.start_with?('./.github/workflows/') ? job['uses'].to_s.sub(%r{\A\./}, '') : nil
-    callee_text = callee && File.exist?(callee) ? File.read(callee) : ''
+    callee_text = callee && File.exist?(callee) ? File.read(callee, encoding: 'UTF-8') : ''
     callee_saves = callee_text.match?(%r{uses:\s*actions/cache/save@})
     caches = saves || restores || !callee.nil?
     if mode.nil? && caches
@@ -143,6 +166,11 @@ docs.each do |path, doc|
     end
     next unless callee_saves || saves
 
+    if mode == 'read' && callee && requires?(job['if'], UNTRUSTED)
+      untrusted_halves << name
+      failures << "#{path}: job #{name} (untrusted half) must need the cache-audit job directly" unless Array(job['needs']).include?('cache-audit')
+      failures << "#{path}: job #{name} (untrusted half) needs the exact top-level term needs.cache-audit.result == 'success'" unless requires?(job['if'], "needs.cache-audit.result == 'success'")
+    end
     if mode == 'read' && callee && !requires?(job['if'], UNTRUSTED)
       failures << "#{path}: job #{name} calls #{callee}, which saves, read-only without the exact top-level term #{UNTRUSTED}: it is not the validate-untrusted half, and main's validate-main half (a sibling job with cache-mode write gated to main) needs a sibling job"
     end
@@ -161,6 +189,28 @@ docs.each do |path, doc|
   next unless enforced.include?(base)
   next if called
   failures << "#{path}: an enforced workflow needs a workflow-level cache-mode: none" unless wf_mode == 'none'
+  next if untrusted_halves.empty?
+
+  audit_job = lambda do |job_name, phase, needs_all|
+    job = jobs[job_name]
+    unless job.is_a?(Hash)
+      failures << "#{path}: the untrusted split needs a #{job_name} job"
+      next
+    end
+    failures << "#{path}: job #{job_name} must run only on the untrusted ref (exact top-level term #{UNTRUSTED})" unless requires?(job['if'], UNTRUSTED)
+    failures << "#{path}: job #{job_name} must have no environment, no secrets and no cache-mode" if job.key?('environment') || job.key?('secrets') || job.key?('cache-mode')
+    failures << "#{path}: job #{job_name} must grant exactly actions: read and contents: read" unless job['permissions'] == { 'actions' => 'read', 'contents' => 'read' }
+    needs_all.each { |n| failures << "#{path}: job #{job_name} must need #{n}" unless Array(job['needs']).include?(n) }
+    steps = steps_of(job)
+    audit_calls = steps.select { |st| st['uses'].to_s == './.github/actions/cache-scope-audit' }
+    if audit_calls.length != 1 || audit_calls.first['with'] != { 'github-token' => '${{ github.token }}', 'phase' => phase }
+      failures << "#{path}: job #{job_name} must call ./.github/actions/cache-scope-audit exactly once with the job token and phase #{phase}"
+    end
+    other = steps.reject { |st| %r{\Aactions/checkout@[0-9a-f]{40}\z}.match?(st['uses'].to_s) || st['uses'].to_s == './.github/actions/cache-scope-audit' }
+    failures << "#{path}: job #{job_name} may run only the public checkout and the audit composite" unless other.empty?
+  end
+  audit_job.call('cache-audit', 'before', ['validate-input'].select { |n| jobs.key?(n) })
+  audit_job.call('cache-audit-after', 'after', ['cache-audit'] + untrusted_halves)
 end
 
 # P7: actions: write (or write-all) only where reviewed.
@@ -184,7 +234,7 @@ docs.each do |path, doc|
       failures << "#{path}: job #{name}: actions: write needs the exact top-level terms #{REPOSITORY} and #{MAIN}" unless terms && terms.include?(MAIN) && terms.include?(REPOSITORY)
       failures << "#{path}: job #{name}: the cache-deleting job must have no environment" if job.key?('environment')
       failures << "#{path}: job #{name}: the cache-deleting job must use no local composite action" if steps_of(job).any? { |s| s['uses'].to_s.start_with?('./.github/actions/') }
-      failures << "#{path}: the cache-deleting workflow must read no secret" if File.read(path).match?(/secrets\./)
+      failures << "#{path}: the cache-deleting workflow must read no secret" if File.read(path, encoding: 'UTF-8').match?(/secrets\./)
     when 'weekly-validation.yml'
       if job.nil? || !requires?(job['if'], MAIN)
         failures << "#{path}: #{where}: actions: write (dispatch) needs a job gated by the exact top-level term #{MAIN}"

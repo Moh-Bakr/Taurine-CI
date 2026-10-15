@@ -21,6 +21,10 @@ on:
 
 permissions: {}
 
+# No job caches unless it declares its own cache-mode; the reviewed split is validate-main (write,
+# main only) and validate-untrusted (read) (docs/untrusted-readonly-cache.md, section 4.1).
+cache-mode: none
+
 concurrency:
   group: public-policy-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -84,6 +88,12 @@ jobs:
       - name: Test the environment pre-flight against stub endpoints
         shell: bash
         run: bash .github/policy/test-preflight.sh
+
+      # The untrusted cache scope audit, run against a stub curl: it passes only on a readable,
+      # empty scope and refuses entries, bad answers, other statuses and other refs.
+      - name: Test the untrusted cache scope audit against stub endpoints
+        shell: bash
+        run: bash .github/policy/test-cache-scope-audit.sh
 
       # The three steps that hold the source token, run against stub curl, git and date: each
       # revokes on every path, calls only the reviewed endpoints and refuses what it must.

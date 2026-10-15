@@ -57,6 +57,10 @@ on:
 
 permissions: {}
 
+# No job caches unless it declares its own cache-mode; the reviewed split is validate-main (write,
+# main only) and validate-untrusted (read) (docs/untrusted-readonly-cache.md, section 4.1).
+cache-mode: none
+
 concurrency:
   # Each run has its own group: GitHub keeps only one PENDING run per group, so a shared per-SHA
   # group let a later dispatch silently cancel an earlier pending one. Runs are never
@@ -231,16 +235,64 @@ jobs:
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
-  validate:
+  # The untrusted ref's cache scope must be empty before any untrusted source job runs: nothing may
+  # write it (every untrusted job is cache-mode read), so any entry is a planting attempt or a
+  # leftover that could shadow main's entry for the same key (docs/untrusted-readonly-cache.md,
+  # section 3.3). No source, no environment and no secret: the job's own token, actions: read.
+  cache-audit:
+    if: ${{ github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
+    needs: [validate-input]
+    name: Audit the untrusted cache scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Refuse any entry in the untrusted cache scope
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/cache-scope-audit  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+          phase: before
+
+  validate-main:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
     needs: [validate-input, plan]
     strategy:
       fail-fast: false
       # The TypeScript concerns, filtered by the plan job (the `only` input).
       matrix: ${{ fromJSON(needs.plan.outputs.ts_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    cache-mode: write
+    uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
+      windows_image: ${{ inputs.windows_image }}
+
+  validate-untrusted:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success'
+    needs: [validate-input, plan, cache-audit]
+    strategy:
+      fail-fast: false
+      # The TypeScript concerns, filtered by the plan job (the `only` input).
+      matrix: ${{ fromJSON(needs.plan.outputs.ts_matrix) }}
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    cache-mode: read
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
     # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
     secrets:
@@ -263,16 +315,17 @@ jobs:
   # that needs Perl and NASM on MSVC for code with no Windows-only
   # paths. This OS compiles the `cfg(windows)` storage and credential
   # paths through the `rust-domain` library check.
-  validate-rust:
+  validate-rust-main:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.rust
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust
     needs: [validate-input, plan]
     strategy:
       fail-fast: false
       # The Rust crate-test concerns, filtered by the plan job (the `only` input).
       matrix: ${{ fromJSON(needs.plan.outputs.rust_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    cache-mode: write
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
     # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
     secrets:
@@ -281,6 +334,51 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
       windows_image: ${{ inputs.windows_image }}
+
+  validate-rust-untrusted:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && inputs.rust && needs.cache-audit.result == 'success'
+    needs: [validate-input, plan, cache-audit]
+    strategy:
+      fail-fast: false
+      # The Rust crate-test concerns, filtered by the plan job (the `only` input).
+      matrix: ${{ fromJSON(needs.plan.outputs.rust_matrix) }}
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    cache-mode: read
+    uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
+      windows_image: ${{ inputs.windows_image }}
+
+  # After the untrusted source jobs: the scope must still be empty. A planting attempt that a
+  # blocked save would only log as a warning is reported here (a detector, not a lock).
+  cache-audit-after:
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}
+    needs: [cache-audit, validate-untrusted, validate-rust-untrusted]
+    name: Audit the untrusted cache scope after the run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Refuse any entry in the untrusted cache scope
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/cache-scope-audit  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+          phase: after
 
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed
@@ -291,7 +389,7 @@ jobs:
   # listed without a comparison; update the table when a run is a new normal.
   timings:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate, validate-rust]
+    needs: [validate-main, validate-untrusted, validate-rust-main, validate-rust-untrusted]
     name: Timings
     runs-on: ubuntu-24.04
     # Reporting only: a queued, slow or cancelled timings job must never fail a run whose
@@ -315,7 +413,7 @@ jobs:
           mode: table
           label: Windows
           baseline-seconds: '{"rust-app-1":2740,"rust-app-2":2740,"rust-db":1165,"rust-domain":874,"rust-ovpn":759,"rust-net":595,"rust-packaging":1213,"rust-tls-openssl":58,"desktop-shard-1":1061,"desktop-shard-2":929,"desktop-quality":321,"mobile":287,"contracts":136,"bundle-budget":220}'
-          name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
+          name-pattern: '^validate(-rust)?-(main|untrusted) \(.+\) / Windows (?<concern>.+)$'
           github-token: ${{ github.token }}
 
   # One verdict for the dispatch: every possible concern is listed, those that did not
@@ -323,7 +421,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate, validate-rust]
+    needs: [validate-main, validate-untrusted, validate-rust-main, validate-rust-untrusted]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -344,7 +442,7 @@ jobs:
           label: Windows
           expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           required-concerns: ${{ inputs.rust && '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]' || '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]' }}
-          name-pattern: '^validate(-rust)? \(.+\) / Windows (?<concern>.+)$'
+          name-pattern: '^validate(-rust)?-(main|untrusted) \(.+\) / Windows (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
           github-token: ${{ github.token }}

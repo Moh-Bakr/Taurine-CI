@@ -237,7 +237,36 @@ place for unreviewed code is a ref whose cache main never reads. Hence two refs:
 | Ref | Runs | Caches |
 | --- | --- | --- |
 | `main` | Only SHAs on `develop`, `uat` or `main` of the source repository (protected ancestry). Anything else is refused, fail-closed, after the token is revoked and before project code, with a message saying to use `untrusted`. | The only ref that may restore or save caches. |
-| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip, or an ancestor of it (an older, previously reviewed main commit) with no `.github/` change on main since; a run from an `untrusted` that is ahead of main, has diverged from it, or is behind a later `.github/` change stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
+| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip, or an ancestor of it (an older, previously reviewed main commit) with no `.github/` change on main since; a run from an `untrusted` that is ahead of main, has diverged from it, or is behind a later `.github/` change stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`), and on Linux and Windows its jobs run with `cache-mode: read` (see [Cache grants](#cache-grants-cache-mode)). |
+
+### Cache grants (`cache-mode`)
+
+GitHub's job-level `cache-mode` (`read`, `write`, `write-only`, `none`) is enforced by the cache token a
+runner receives: a spike (`docs/untrusted-readonly-cache.md`, section 7a-result) showed that a direct write with
+the runtime token is declined under `read` and `none`, so project code cannot write a scope its job was
+not granted. The policy (`check-cache-mode.rb`) therefore holds these grants:
+
+- every dispatch workflow except `macos-validation.yml` declares workflow-level `cache-mode: none`; a job
+  that caches or calls a reusable workflow declares its own value; `write-only` and any expression are
+  refused (GitHub rejects the `github` context there); a called workflow never sets it, so it inherits its
+  caller's grant and cannot widen it;
+- on Linux and Windows each saving caller is split into `validate-main` (`cache-mode: write`, only on
+  `main`) and `validate-untrusted` (`cache-mode: read`, only on `untrusted`), so a run from `untrusted`
+  can never write any cache scope. No untrusted restore exists yet: that is a later stage, behind a
+  measured baseline and the owner's decision, and the "never restores" statements below stay true;
+- an untrusted run first passes the `cache-audit` job (`cache-scope-audit` composite: no source, no
+  environment, no secret, `actions: read`), which fails unless the `untrusted` cache scope holds no entry
+  at all, and `cache-audit-after` repeats it after the run to report a planting attempt. The owner purges
+  the scope once before the first run: `gh cache delete --all --ref refs/heads/untrusted -R
+  Moh-Bakr/Taurine-CI` (always with `--ref`: without it the command deletes every cache, main's included);
+- `actions: write` is held to `cache-prune.yml` (main-only, no source) and the weekly dispatch job.
+
+Residuals, stated plainly. `macos-validation.yml` runs its matrix job inline and saves in it, so it cannot
+be split until that job becomes a reusable workflow; until then macOS `untrusted` runs keep the default
+grant for a trusted trigger (they can still write the `untrusted` scope, which the Linux and Windows audits
+would then report). On Windows administrator rights cannot be dropped, so any future untrusted restore
+there would extract as an administrator: it is out of scope until it has its own review. The audit is a
+detector, not a lock: `cache-mode: read` is the control.
 
 ### Dispatching feature-branch validation
 

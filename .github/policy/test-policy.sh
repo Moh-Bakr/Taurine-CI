@@ -528,7 +528,8 @@ jobs:
     steps:
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
 YAML
-write_split() { # main-job cache-mode, main-job if, untrusted-job cache-mode, untrusted-job if, workflow-level
+write_split() { # main-job cache-mode, main-job if, untrusted-job cache-mode, untrusted-job if, workflow-level, untrusted-job extra-needs-and-if override, audit-job body override
+  local unt_needs="${6-[cache-audit]}"
   cat > "${mode_root}/.github/workflows/split.yml" <<YAML
 name: split
 on:
@@ -536,17 +537,53 @@ on:
 permissions: {}
 ${5-cache-mode: none}
 jobs:
+  validate-input:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+${7-$(audit_jobs)}
   validate-main:
     ${2}
     ${1}
     uses: ./.github/workflows/split-concern.yml
   validate-untrusted:
+    needs: ${unt_needs}
     ${4}
     ${3}
     uses: ./.github/workflows/split-concern.yml
 YAML
 }
-read_if="if: \${{ github.ref == 'refs/heads/untrusted' }}"
+audit_jobs() {
+  cat <<'YAML'
+  cache-audit:
+    if: ${{ github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
+    needs: [validate-input]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/cache-scope-audit
+        with:
+          github-token: ${{ github.token }}
+          phase: before
+  cache-audit-after:
+    if: ${{ always() && github.ref == 'refs/heads/untrusted' }}
+    needs: [cache-audit, validate-untrusted]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/cache-scope-audit
+        with:
+          github-token: ${{ github.token }}
+          phase: after
+YAML
+}
+read_if="if: \${{ github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}"
 ENFORCED=enforced-split.txt
 write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}"
 mode_expect_pass split.yml 'a validate-main / validate-untrusted split'
@@ -566,6 +603,24 @@ write_split 'cache-mode: write' "if: \${{ github.ref == 'refs/heads/main' && git
 mode_expect_fail split.yml 'main half naming untrusted' 'must not mention the untrusted ref'
 write_split 'cache-mode: write' "${main_if}" '' "${read_if}"
 mode_expect_fail split.yml 'untrusted half with no cache-mode' 'must declare its own cache-mode'
+# K: the untrusted half needs the audit before it, and the audit jobs are exactly reviewed.
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}" 'cache-mode: none' ''
+mode_expect_fail split.yml 'untrusted half without needs cache-audit' 'must need the cache-audit job directly'
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "if: \${{ github.ref == 'refs/heads/untrusted' }}"
+mode_expect_fail split.yml 'untrusted half without the audit success term' "needs.cache-audit.result == 'success'"
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}" 'cache-mode: none' '[cache-audit]' ''
+mode_expect_fail split.yml 'no audit jobs at all' 'needs a cache-audit job'
+audit_mutation() { # label needle perl-expr
+  write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}"
+  perl -0pi -e "$3" "${mode_root}/.github/workflows/split.yml"
+  mode_expect_fail split.yml "$1" "$2"
+}
+audit_mutation 'audit not limited to the untrusted ref' 'must run only on the untrusted ref' 's/if: \$\{\{ github\.ref == .refs\/heads\/untrusted. && needs\.validate-input/if: \${{ needs.validate-input/'
+audit_mutation 'audit with an environment' 'no environment, no secrets' 's/(  cache-audit:\n)/$1    environment: source-read\n/'
+audit_mutation 'audit with an extra permission' 'exactly actions: read and contents: read' 's/(      actions: read\n      contents: read\n    steps:\n      - uses: actions\/checkout\@[0-9a-f]+\n      - uses: .\/.github\/actions\/cache-scope-audit\n        with:\n          github-token: \$\{\{ github.token \}\}\n          phase: before)/      actions: read\n      contents: read\n      issues: write\n    steps:\n      - uses: actions\/checkout\@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: .\/.github\/actions\/cache-scope-audit\n        with:\n          github-token: \${{ github.token }}\n          phase: before/'
+audit_mutation 'audit before-phase swapped' 'phase before' 's/phase: before/phase: after/'
+audit_mutation 'audit running another command' 'only the public checkout and the audit composite' 's/(      - uses: .\/.github\/actions\/cache-scope-audit\n        with:\n          github-token: \$\{\{ github.token \}\}\n          phase: before\n)/$1      - run: true\n/'
+audit_mutation 'after-audit not needing the untrusted half' 'must need validate-untrusted' 's/needs: \[cache-audit, validate-untrusted\]/needs: [cache-audit]/'
 cat > "${mode_root}/.github/workflows/split.yml" <<YAML
 name: split
 on:
@@ -618,6 +673,36 @@ p7_expect_fail 'actions: write on the scorecard job' 'held to cache-prune.yml' \
 p7_expect_fail 'write-all on the scorecard job' 'held to cache-prune.yml' \
   's/    permissions:\n      contents: read\n      actions: read\n      checks: read\n      issues: read\n      pull-requests: read\n/    permissions: write-all\n/' scorecard.yml
 echo 'cache-mode fixtures: literal read, write or none only; write only on main-gated jobs; none inside called workflows is refused; the caller split is required where a workflow saves; actions: write is held to the two reviewed places'
+
+# The composite cache rule matches `actions/cache` as a whole path segment: this repository's own
+# cache listing endpoint (`/actions/caches`) is allowed, the cache actions are not.
+composite_probe="${base}/composite-probe.yml"
+for text in 'uses: actions/cache/restore@x' 'uses: actions/cache/save@x' 'uses: actions/cache@x' 'uses: actions/cache' 'run: echo actions/cache'; do
+  printf 'name: p\nruns:\n  using: composite\n  steps:\n    - %s\n' "${text}" > "${composite_probe}"
+  if (source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action "${composite_probe}") >/dev/null 2>&1; then
+    echo "a composite containing '${text}' should be refused" >&2; exit 1
+  fi
+done
+(source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action .github/actions/cache-scope-audit/action.yml) || { echo 'the cache-scope-audit composite should pass the composite rules' >&2; exit 1; }
+# The reviewed Linux and Windows dispatchers pass the enforced rules as shipped.
+ruby "${policy}/check-cache-mode.rb" .github/workflows/linux-validation.yml .github/workflows/windows-validation.yml .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml >/dev/null || { echo 'the reviewed Linux and Windows dispatchers should pass the cache-mode rules' >&2; exit 1; }
+real_mode_fail() { # label needle perl-expr file
+  mkdir -p "${mode_root}/real/.github/workflows"
+  cp .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml "${mode_root}/real/.github/workflows/"
+  perl -0pe "$3" ".github/workflows/$4" > "${mode_root}/real/.github/workflows/$4"
+  if cmp -s ".github/workflows/$4" "${mode_root}/real/.github/workflows/$4"; then echo "cache-mode fixture '$1' changed nothing" >&2; exit 1; fi
+  if (cd "${mode_root}/real" && ruby "${policy}/check-cache-mode.rb" ".github/workflows/$4") >/dev/null 2>"${base}/err"; then echo "cache-mode fixture '$1' should fail but passed" >&2; exit 1; fi
+  grep -qF -- "$2" "${base}/err" || { echo "cache-mode fixture '$1' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+real_mode_fail 'Linux workflow-level none dropped' 'needs a workflow-level cache-mode: none' 's/\ncache-mode: none\n/\n/' linux-validation.yml
+real_mode_fail 'Linux validate-untrusted not read' 'cache-mode write needs the exact top-level term' 's/cache-mode: read\n/cache-mode: write\n/' linux-validation.yml
+real_mode_fail 'Linux validate-untrusted without the audit need' 'must need the cache-audit job directly' 's/needs: \[validate-input, plan, select, cache-audit\]/needs: [validate-input, plan, select]/' linux-validation.yml
+real_mode_fail 'Linux validate-main only read' 'needs a sibling job' 's/cache-mode: write\n/cache-mode: read\n/' linux-validation.yml
+real_mode_fail 'Linux select caller without its explicit none' 'must declare its own cache-mode' 's/    cache-mode: none\n    uses: .\/.github\/workflows\/select-concerns.yml/    uses: .\/.github\/workflows\/select-concerns.yml/' linux-validation.yml
+real_mode_fail 'Windows validate-rust-untrusted gated to main' 'needs a sibling job' "s/(  validate-rust-untrusted:\\n(?:.*\\n)*?    if: github\\.repository == 'Moh-Bakr\\/Taurine-CI' && github\\.ref == )'refs\\/heads\\/untrusted'/\$1'refs\\/heads\\/main'/" windows-validation.yml
+real_mode_fail 'Windows validate-main downgraded to read' 'read-only without the exact top-level term' "s/(  validate-main:\\n(?:.*\\n)*?)    cache-mode: write\\n/\$1    cache-mode: read\\n/" windows-validation.yml
+real_mode_fail 'Windows without the after-audit' 'needs a cache-audit-after job' 's/\n  cache-audit-after:\n/\n  cache-audit-later:\n/' windows-validation.yml
+echo 'cache-mode real-tree fixtures: the reviewed Linux and Windows dispatchers pass; each weakening of the split, the audit or the explicit grants is refused'
 
 # P8: actionlint lacks the cache-mode key, so lint.sh ignores exactly that message and nothing else.
 lint_ignores() { grep -oE "\-ignore '[^']*'" "$1"; }
