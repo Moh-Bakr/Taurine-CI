@@ -48,6 +48,11 @@ check_action_references() {
       ./.github/workflows/live-proof-arm.yml) ;;
       ./.github/workflows/pg8-measurement-arm.yml) ;;
       ./.github/actions/mobile-report) ;;
+      # The OpenSSL door's shell checks (shell-artefact installs shell-config). Allowed before
+      # the composites exist, so the pull request that adds them is judged by a base that
+      # already knows them; a tree without them still passes, since nothing references them.
+      ./.github/actions/shell-artefact) ;;
+      ./.github/actions/shell-config) ;;
       ./.github/actions/android-sdk-setup) ;;
       ./.github/actions/ios-project-init) ;;
       ./.github/actions/android-emulator-tests) ;;

@@ -355,6 +355,17 @@ if (check_action_references "${work}/pg8-references.yml") >"${work}/action.stdou
 fi
 grep -qF 'Unreviewed or mutable Action reference' "${work}/action.stderr"
 
+# The shell-check composites are reviewed references (allowed before they exist); a neighbouring
+# name is not.
+printf '%s\n' 'jobs:' '  validate:' '    steps:' '      - name: artefact checks' '        uses: ./.github/actions/shell-artefact' \
+  '      - name: build-input checks' '        uses: ./.github/actions/shell-config' >"${work}/shell-references.yml"
+check_action_references "${work}/shell-references.yml"
+printf '%s\n' '      - name: unreviewed' '        uses: ./.github/actions/shell-unreviewed' >>"${work}/shell-references.yml"
+if (check_action_references "${work}/shell-references.yml") >"${work}/action.stdout" 2>"${work}/action.stderr"; then
+  echo 'an unreviewed shell composite reference unexpectedly passed' >&2; exit 1
+fi
+grep -qF 'Unreviewed or mutable Action reference' "${work}/action.stderr"
+
 # Removing the reusable-arm preflight map entry must not disable universal checking.
 cp .github/policy/check-universal.rb "${work}/check-universal-mutated.rb"
 ruby -e 'path=ARGV.fetch(0); text=File.read(path); entry="  '\''.github/workflows/pg8-measurement-arm.yml'\'' => '\''preflight'\'',\n"; abort "required PG8 arm mapping missing from fixture" unless text.include?(entry); File.write(path,text.sub(entry,""))' \
@@ -366,4 +377,4 @@ grep -qF 'the reviewed PG8 dispatcher and reusable arm must keep their exact pre
 
 echo 'dispatch contracts: Plan selection accepts valid visual opt-in, preserves partial only identity, and rejects disabled/unknown concerns'
 echo 'dispatch contracts: strict stage-2 policy rejects the old Linux selection-mode expression'
-echo 'dispatch contracts: source-SHA, local-reference, and PG8 preflight-mapping mutations were rejected'
+echo 'dispatch contracts: source-SHA, local-reference (PG8 and shell-check composites), and PG8 preflight-mapping mutations were rejected'
