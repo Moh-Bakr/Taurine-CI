@@ -746,9 +746,16 @@ mappings, a value on the next line, a space before the colon and a complex key a
 `uses` they are. It refuses aliases, duplicate mapping keys (`yaml-guard.rb`, shared with
 `check-structure.rb`), a load error, a non-mapping job or step and a non-string value, and a textual
 tripwire fails the file when more lines look like a `uses` key than the walk found.
-The same walk refuses a container image not pinned by an `@sha256:<64 hex>` digest
-(`jobs.<id>.container`, a string or a mapping with `image`, and `jobs.<id>.services.*.image`; an
-expression is accepted only as the exact reviewed text in `action-allowlist.rb` or exactly `${{ fromJSON('<one JSON literal>') }}` with a pinned image, because any other expression can fall back to an unpinned image through `vars`, `env`, `inputs`, `matrix` or `needs`). Run with
+The same walk holds containers and services to a closed shape. The runner puts a container's
+`options` before its image in `docker create` (`DockerCommandManager.DockerCreate` in
+`actions/runner`, and `ports` are not quoted either), so a positional token in `options` would
+become the image that runs. Therefore the only keys are `image` and `options`; `options` is exact
+reviewed text (`CONTAINER_OPTIONS_ALLOWLIST`), never free text; the image is a single token pinned
+by `@sha256:<64 hex>`; and an expression is accepted only as the exact reviewed text in
+`action-allowlist.rb` or exactly `${{ fromJSON('<one JSON literal>') }}`, where the literal obeys
+the same rules and may not repeat a key (even by escape), use a case variant or add a key. Any other
+expression can fall back to an unpinned image through `vars`, `env`, `inputs`, `matrix` or `needs`.
+Run with
 no arguments it walks the tree itself (the same `.yml` and `.yaml` files `check-workflows.sh`
 checks) and exits non-zero when it checked no file, so a direct run never passes having checked
 nothing. The tripwire fails closed, so any non-comment line holding the text `uses:` (a trailing

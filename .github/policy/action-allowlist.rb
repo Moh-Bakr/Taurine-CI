@@ -74,3 +74,12 @@ CONTAINER_EXPRESSION_ALLOWLIST = [
   # otherwise (`|| null`). The condition and the null fallback are why it is not the plain shape.
   %q(${{ inputs.concern == 'e2e-visual' && fromJSON('{"image":"mcr.microsoft.com/playwright@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471","options":"--ipc=host"}') || null }}),
 ].freeze
+
+# The reviewed container `options`, as exact text. The runner puts options before the image in
+# `docker create`, so a positional token (or an unreviewed flag such as --privileged or -v) in
+# free text would change what runs; only text listed here is accepted, in a container, a service or
+# a fromJSON literal.
+CONTAINER_OPTIONS_ALLOWLIST = [
+  # The Playwright visual tier needs a shared IPC namespace for the browser.
+  '--ipc=host',
+].freeze

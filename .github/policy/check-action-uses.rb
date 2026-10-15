@@ -19,11 +19,11 @@
 # lines of the file that look like a `uses` key and fails if the walk found fewer references, so
 # a disagreement between this parser and GitHub's fails closed.
 #
-# The same walk refuses a container image that is not pinned by an `@sha256:<64 hex>` digest:
-# `jobs.<id>.container` (a string or a mapping with `image`) and `jobs.<id>.services.<name>.image`.
-# An expression is accepted only as exact reviewed text (action-allowlist.rb) or exactly
-# `${{ fromJSON('<one JSON literal>') }}` with the literal's image pinned; any other expression is
-# refused, since it can fall back to an unpinned image through vars, env, inputs, matrix or needs.
+# The same walk holds containers and services to the rules at the container block below: images
+# pinned by digest as a single token, `options` as exact reviewed text, only the `image` and
+# `options` keys, and expressions as exact reviewed text or one fromJSON literal under the same
+# rules. The runner puts `options` before the image in `docker create`, so free text there could
+# swap the image that runs.
 #
 # The tripwire fails closed, so it has false positives by design: any non-comment line that holds
 # the text `uses:` (a trailing comment, a `run:` script, a description) counts as a line that looks
@@ -44,7 +44,6 @@ PINNED = %r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}\z}
 # A line that looks like a `uses` key: the word, optional quotes and spaces, a colon. Comment-only
 # lines are ignored; a flow mapping can hold several on one line.
 LOOKS_LIKE_USES = /uses["']?\s*:/
-DIGEST = /@sha256:[0-9a-f]{64}\z/
 
 # Every reference in a parsed document, or a finding for a shape this check cannot read.
 def references(doc, findings)
@@ -83,33 +82,155 @@ def references(doc, findings)
   refs
 end
 
-# An image reference must carry a digest. An expression is accepted only as exact reviewed text
-# (CONTAINER_EXPRESSION_ALLOWLIST) or exactly `${{ fromJSON('<one JSON literal>') }}` whose image is
-# pinned; any other expression can fall back to an unpinned image and is refused.
+# A container (or service) is an image plus options, and both reach `docker create`. The runner puts
+# the options BEFORE the image (DockerCommandManager.DockerCreate in actions/runner, commit
+# 16834edc670a195bbd0aab375201360c47737f8c, src/Runner.Worker/Container: `{ContainerCreateOptions}` is
+# added to the argument list before `{ContainerImage}`, and `-p {port}` is not quoted), so any
+# positional token in `options` or `ports` would become the image that runs. Therefore:
+#   - the only keys are `image` and `options`; ports, volumes, env, credentials and anything else are
+#     refused until someone reviews them;
+#   - `options` is exact reviewed text (CONTAINER_OPTIONS_ALLOWLIST), never free text;
+#   - the image is one token pinned by an `@sha256:<64 hex>` digest, with no whitespace;
+#   - an expression is accepted only as exact reviewed text (CONTAINER_EXPRESSION_ALLOWLIST) or exactly
+#     `${{ fromJSON('<one JSON literal>') }}`, and the literal gets the same rules (keys image and
+#     options only, no duplicate or escaped-duplicate key, case-variant keys refused as unknown).
 FROM_JSON_ONLY = /\A\$\{\{\s*fromJSON\('([^']*)'\)\s*\}\}\z/
+CONTAINER_KEYS = %w[image options].freeze
+IMAGE_REF = %r{\A[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}\z}
+
+# A small strict JSON reader that reports every key an object repeats, after escape decoding (so
+# "image" and "\u0069mage" are the same key). Ruby's own JSON parser resolves a duplicate silently to
+# the last value, and whether it exposes the repeat depends on its version, so the check cannot rely
+# on it. Returns [value, duplicate_keys]; raises JSON::ParserError on anything it cannot read.
+class StrictJson
+  def self.parse(text)
+    reader = new(text)
+    value = reader.value
+    reader.finish
+    [value, reader.duplicates]
+  end
+
+  attr_reader :duplicates
+
+  def initialize(text)
+    @text = text
+    @pos = 0
+    @duplicates = []
+  end
+
+  def finish
+    skip
+    raise JSON::ParserError, 'trailing text' unless @pos == @text.length
+  end
+
+  def value
+    skip
+    case @text[@pos]
+    when '{' then object
+    when '"' then string
+    else scalar
+    end
+  end
+
+  private
+
+  def skip
+    @pos += 1 while @text[@pos]&.match?(/\s/)
+  end
+
+  def object
+    @pos += 1
+    result = {}
+    skip
+    if @text[@pos] == '}'
+      @pos += 1
+      return result
+    end
+    loop do
+      skip
+      raise JSON::ParserError, 'object key expected' unless @text[@pos] == '"'
+
+      key = string
+      skip
+      raise JSON::ParserError, 'colon expected' unless @text[@pos] == ':'
+
+      @pos += 1
+      @duplicates << key if result.key?(key)
+      result[key] = value
+      skip
+      case @text[@pos]
+      when ',' then @pos += 1
+      when '}' then @pos += 1
+                    return result
+      else raise JSON::ParserError, 'comma or brace expected'
+      end
+    end
+  end
+
+  def string
+    start = @pos
+    @pos += 1
+    loop do
+      raise JSON::ParserError, 'unterminated string' if @pos >= @text.length
+
+      if @text[@pos] == '\\' then @pos += 2
+      elsif @text[@pos] == '"' then @pos += 1
+                                    break
+      else @pos += 1
+      end
+    end
+    JSON.parse("[#{@text[start...@pos]}]").first
+  end
+
+  # Numbers, true, false, null. An array is not accepted in a container literal.
+  def scalar
+    token = @text[@pos..][/\A(?:-?\d[\d.eE+-]*|true|false|null)/] or raise JSON::ParserError, 'value expected'
+    @pos += token.length
+    JSON.parse("[#{token}]").first
+  end
+end
+
+def options_findings(where, options, findings)
+  return if options.is_a?(String) && CONTAINER_OPTIONS_ALLOWLIST.include?(options)
+
+  findings << "#{where}: container options must be exact reviewed text (the runner puts them before the image, so a positional token swaps the image): #{options.inspect}"
+end
+
+# A mapping with `image` and optionally `options`, however it was written.
+def spec_findings(where, spec, findings)
+  unless spec.is_a?(Hash)
+    findings << "#{where} is not a mapping"
+    return
+  end
+  (spec.keys - CONTAINER_KEYS).each { |k| findings << "#{where}: the key #{k.inspect} is not reviewed (only image and options are)" }
+  options_findings("#{where}.options", spec['options'], findings) if spec.key?('options')
+  image_findings("#{where}.image", spec['image'], findings)
+end
 
 def image_findings(where, value, findings)
   unless value.is_a?(String) && !value.strip.empty?
     findings << "#{where}: the image is not a non-empty string (#{value.inspect})"
     return
   end
-  image = value
   if value.include?('${{')
     return if CONTAINER_EXPRESSION_ALLOWLIST.include?(value)
 
     literal = value[FROM_JSON_ONLY, 1]
-    parsed = begin
-      literal && JSON.parse(literal)
+    parsed, duplicates = begin
+      literal ? StrictJson.parse(literal) : [nil, []]
     rescue JSON::ParserError
-      nil
+      [nil, []]
     end
-    image = parsed['image'] if parsed.is_a?(Hash) && parsed['image'].is_a?(String)
-    if image.equal?(value)
+    unless parsed.is_a?(Hash) && parsed['image'].is_a?(String)
       findings << "#{where}: the image expression is not exactly ${{ fromJSON('<one JSON literal with an image>') }} and not on the reviewed list: #{value}"
       return
     end
+    duplicates.each { |k| findings << "#{where}: the JSON literal repeats the key #{k.inspect}" }
+    (parsed.keys - CONTAINER_KEYS).each { |k| findings << "#{where}: the JSON literal has the key #{k.inspect}, not reviewed (only image and options are)" }
+    options_findings("#{where} literal options", parsed['options'], findings) if parsed.key?('options')
+    value = parsed['image']
   end
-  findings << "Every container image must be pinned by an @sha256:<64 hex> digest (#{where}): #{image}" unless image.match?(DIGEST)
+  findings << "Every container image must be pinned by an @sha256:<64 hex> digest, as a single token (#{where}): #{value}" unless value.match?(IMAGE_REF)
 end
 
 def container_findings(doc, findings)
@@ -121,7 +242,7 @@ def container_findings(doc, findings)
 
     if job.key?('container')
       c = job['container']
-      c.is_a?(Hash) ? image_findings("jobs.#{id}.container.image", c['image'], findings) : image_findings("jobs.#{id}.container", c, findings)
+      c.is_a?(Hash) ? spec_findings("jobs.#{id}.container", c, findings) : image_findings("jobs.#{id}.container", c, findings)
     end
     next unless job.key?('services')
 
@@ -130,11 +251,7 @@ def container_findings(doc, findings)
       findings << "jobs.#{id}.services is not a mapping"
       next
     end
-    services.each do |name, svc|
-      if svc.is_a?(Hash) then image_findings("jobs.#{id}.services.#{name}.image", svc['image'], findings)
-      else findings << "jobs.#{id}.services.#{name} is not a mapping"
-      end
-    end
+    services.each { |name, svc| spec_findings("jobs.#{id}.services.#{name}", svc, findings) }
   end
 end
 

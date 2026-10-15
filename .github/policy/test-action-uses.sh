@@ -194,6 +194,97 @@ jobs:
         image: ${{ vars.DB_IMAGE }}
 FXEND
 
+# Options reach `docker create` before the image (the runner's DockerCreate): exact reviewed text only.
+fixture_file container-options-image-swap reject:'container options must be exact reviewed text' <<'FXEND'
+jobs:
+  j:
+    container:
+      image: mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      options: --ipc=host evil/image:latest
+FXEND
+fixture_file container-options-privileged reject:'container options must be exact reviewed text' <<'FXEND'
+jobs:
+  j:
+    container:
+      image: mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      options: --privileged -v /:/host
+FXEND
+fixture_file service-options-image-swap reject:'container options must be exact reviewed text' <<'FXEND'
+jobs:
+  j:
+    services:
+      db:
+        image: mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        options: --ipc=host evil/image:latest
+FXEND
+fixture_file service-options-privileged reject:'container options must be exact reviewed text' <<'FXEND'
+jobs:
+  j:
+    services:
+      db:
+        image: mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        options: --privileged -v /:/host
+FXEND
+fixture_file container-options-not-string reject:'container options must be exact reviewed text' <<'FXEND'
+jobs:
+  j:
+    container:
+      image: mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      options: [--ipc=host]
+FXEND
+fixture_file literal-options-image-swap reject:'container options must be exact reviewed text' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","options":"--ipc=host evil/image:latest"}') }}
+FXEND
+fixture_file container-image-two-tokens reject:'single token' <<'FXEND'
+jobs:
+  j:
+    container: evil/image:latest mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+FXEND
+fixture_file container-ports-key reject:'is not reviewed' <<'FXEND'
+jobs:
+  j:
+    container:
+      image: mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      ports:
+        - "80 evil/image:latest"
+FXEND
+fixture_file service-env-key reject:'is not reviewed' <<'FXEND'
+jobs:
+  j:
+    services:
+      db:
+        image: mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        env:
+          A: b
+FXEND
+fixture_file literal-duplicate-image reject:'repeats the key' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"alpine:3","image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}') }}
+FXEND
+fixture_file literal-escaped-duplicate reject:'repeats the key' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","image":"alpine:3"}') }}
+FXEND
+fixture_file literal-case-variant reject:'not reviewed' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","IMAGE":"alpine:3"}') }}
+FXEND
+fixture_file literal-extra-key reject:'not reviewed' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","credentials":{"username":"a"}}') }}
+FXEND
+fixture_file literal-duplicate-options reject:'repeats the key' <<'FXEND'
+jobs:
+  j:
+    container: ${{ fromJSON('{"image":"mcr.example/pw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","options":"--ipc=host","options":"--ipc=host"}') }}
+FXEND
+
 # run_suite DIR: run every fixture against DIR/check-action-uses.rb; prints the first failure.
 run_suite() {
   local checker="$1/check-action-uses.rb" name expect out rc=0 failed=0
@@ -230,14 +321,20 @@ mutant 'composite steps not read' "steps_of.call('runs', runs['steps']) if runs.
 mutant 'job steps not read' 'steps_of.call("jobs.#{id}", job['"'"'steps'"'"']) if job.is_a?(Hash)' 'nil'
 mutant 'job-level uses not read' 'take.call("jobs.#{id}", job)' 'nil'
 mutant 'a non-mapping step accepted' 'unless mapping.is_a?(Hash)' 'unless true'
-mutant 'the image digest rule removed' 'unless image.match?(DIGEST)' 'if false'
+mutant 'the image digest rule removed' 'unless value.match?(IMAGE_REF)' 'if false'
+mutant 'the single-token image rule loosened' '%r{\A[A-Za-z0-9._/:-]+@' '%r{\A.+@'
+mutant 'container options accepted as free text' 'return if options.is_a?(String) && CONTAINER_OPTIONS_ALLOWLIST.include?(options)' 'return'
+mutant 'extra container keys accepted' '(spec.keys - CONTAINER_KEYS).each' '[].each'
+mutant 'duplicate literal keys accepted' 'duplicates.each { |k|' '[].each { |k|'
+mutant 'extra literal keys accepted' '(parsed.keys - CONTAINER_KEYS).each' '[].each'
+mutant 'literal options unchecked' 'options_findings("#{where} literal options", parsed['"'"'options'"'"'], findings) if parsed.key?('"'"'options'"'"')' 'nil'
 mutant 'the exact fromJSON-only shape loosened' 'literal = value[FROM_JSON_ONLY, 1]' "literal = value[/fromJSON\\('([^']*)'\\)/, 1]"
-mutant 'an unparsed expression accepted' 'if image.equal?(value)' 'if false'
+mutant 'an unreadable literal refused as readable' 'rescue JSON::ParserError' 'rescue ZeroDivisionError'
 mutant 'the reviewed expression list ignored' 'return if CONTAINER_EXPRESSION_ALLOWLIST.include?(value)' 'nil'
 mutant 'container images not walked' '  container_findings(doc, findings)
 ' ''
 mutant 'services not walked' '    next unless job.key?('"'"'services'"'"')' '    next'
-mutant 'a non-mapping service accepted' 'else findings << "jobs.#{id}.services.#{name} is not a mapping"' 'else nil'
+mutant 'a non-mapping container spec accepted' 'unless spec.is_a?(Hash)' 'unless true'
 mutant 'a non-list steps value accepted' 'else findings << "#{where}.steps is not a list"' 'else nil'
 
 # --- no arguments: the script walks the tree itself and never passes having checked nothing ---
