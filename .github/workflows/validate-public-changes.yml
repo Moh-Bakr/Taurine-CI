@@ -268,6 +268,9 @@ jobs:
       # (/usr/local/bin) is not found. Put a copy in /usr/bin, which is on that PATH. Pull-request
       # code run by a base test still has passwordless sudo and could replace this copy, exactly as
       # it can replace ruby today (the known gap in docs/how-ci-works.md, "Changing the policy").
+      # A pull request can also pre-plant the copy's source: /usr/local/bin is writable without sudo
+      # on hosted images, so the copy turns a no-sudo plant into a root-owned binary on the base PATH.
+      # That is not a new capability while sudo is present.
       # Real isolation lands with the base-pass isolation change (#313, R1).
       - name: Install node on the base pass PATH (interim)
         if: github.event_name == 'pull_request'
