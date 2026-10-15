@@ -24,7 +24,7 @@ missed=0
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb test-preflight.sh test-cache-scope-audit.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     case "${check}" in
       *.rb) ruby ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
@@ -205,6 +205,13 @@ mutation '11. an untrusted-only cargo-source restore with no cache-mode' "${linu
 mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]' '    cache-mode: read
     cache-mode: write
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
+
+# 13. The audits reach the verdict, and an untrusted restore waits for macOS (docs/untrusted-readonly-cache.md).
+mutation '13. the Linux result no longer needs the after-audit' "${linux}" '    needs: [plan, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [plan, validate-main, validate-untrusted, select]'
+mutation '13. the Windows result stops passing blocking-failures' "${windows}" "          blocking-failures: " "          selection-note: "
+mutation '13. run-result ignores the blocking count' .github/actions/run-result/action.yml '        if [[ "${blocking}" -gt 0 ]]; then
+          # A check outside' '        if [[ "${blocking}" == never ]]; then
+          # A check outside'
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a

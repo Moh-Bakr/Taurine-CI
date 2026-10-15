@@ -534,7 +534,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && needs.plan.result == 'success' }}
-    needs: [plan, validate-main, validate-untrusted, select]
+    needs: [plan, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -560,3 +560,4 @@ jobs:
           base-sha: ${{ inputs.base_sha }}
           selection-mode: ${{ inputs.profile == 'full' && inputs.base_sha == '' && inputs.only == '' && 'full' || 'partial' }}
           github-token: ${{ github.token }}
+          blocking-failures: ${{ (contains(fromJSON('["failure","cancelled"]'), needs.cache-audit.result) || contains(fromJSON('["failure","cancelled"]'), needs.cache-audit-after.result)) && '1' || '0' }}

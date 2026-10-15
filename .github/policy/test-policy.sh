@@ -581,6 +581,14 @@ audit_jobs() {
         with:
           github-token: ${{ github.token }}
           phase: after
+  result:
+    if: ${{ always() }}
+    needs: [cache-audit, cache-audit-after, validate-main, validate-untrusted]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: ./.github/actions/run-result
+        with:
+          blocking-failures: ${{ (contains(fromJSON('["failure","cancelled"]'), needs.cache-audit.result) || contains(fromJSON('["failure","cancelled"]'), needs.cache-audit-after.result)) && '1' || '0' }}
 YAML
 }
 read_if="if: \${{ github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}"
@@ -621,6 +629,10 @@ audit_mutation 'audit with an extra permission' 'exactly actions: read and conte
 audit_mutation 'audit before-phase swapped' 'phase before' 's/phase: before/phase: after/'
 audit_mutation 'audit running another command' 'only the public checkout and the audit composite' 's/(      - uses: .\/.github\/actions\/cache-scope-audit\n        with:\n          github-token: \$\{\{ github.token \}\}\n          phase: before\n)/$1      - run: true\n/'
 audit_mutation 'after-audit not needing the untrusted half' 'must need validate-untrusted' 's/needs: \[cache-audit, validate-untrusted\]/needs: [cache-audit]/'
+audit_mutation 'result not needing the after-audit' 'the result job must need cache-audit-after' 's/needs: \[cache-audit, cache-audit-after, validate-main, validate-untrusted\]/needs: [cache-audit, validate-main, validate-untrusted]/'
+audit_mutation 'result not passing blocking-failures' 'must pass blocking-failures exactly' 's/\n          blocking-failures: [^\n]*\n/\n          selection-mode: full\n/'
+audit_mutation 'result passing another blocking expression' 'must pass blocking-failures exactly' "s/ && '1' \|\| '0' \}\}/ \&\& '0' || '0' }}/"
+audit_mutation 'no result job' 'needs a result job' 's/\n  result:\n    if: \$\{\{ always\(\) \}\}\n    needs: \[[^\n]*\]\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: .\/.github\/actions\/run-result\n        with:\n          blocking-failures: [^\n]*\n/\n/'
 cat > "${mode_root}/.github/workflows/split.yml" <<YAML
 name: split
 on:
@@ -675,6 +687,16 @@ many_expect_fail 'untrusted restore in a workflow nobody enforces' 'but is not i
 printf 'lone.yml\n' > "${mode_root}/enforced-lone.txt"
 ENFORCED=enforced-lone.txt
 many_expect_fail 'untrusted restore in an enforced workflow without cache-mode' 'must declare its own cache-mode' .github/workflows/lone.yml
+# M: an untrusted restore is refused while any workflow that can run on the untrusted ref is not enforced.
+printf 'name: macish\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  validate:\n    if: ${{ github.ref == '"'"'refs/heads/main'"'"' || github.ref == '"'"'refs/heads/untrusted'"'"' }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n' > "${mode_root}/.github/workflows/macish.yml"
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "if: \${{ github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}"
+ENFORCED=enforced-split.txt
+many_expect_fail 'an untrusted restore while an unenforced workflow can run on untrusted' 'can run on the untrusted ref without cache-mode enforcement' .github/workflows/split.yml .github/workflows/split-concern.yml .github/workflows/macish.yml
+printf 'split.yml\nmacish.yml\n' > "${mode_root}/enforced-both.txt"
+printf 'name: macish\non:\n  workflow_dispatch:\npermissions: {}\ncache-mode: none\njobs:\n  validate:\n    if: ${{ github.ref == '"'"'refs/heads/main'"'"' || github.ref == '"'"'refs/heads/untrusted'"'"' }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n' > "${mode_root}/.github/workflows/macish.yml"
+ENFORCED=enforced-both.txt
+many_run .github/workflows/split.yml .github/workflows/split-concern.yml .github/workflows/macish.yml >/dev/null 2>"${base}/err" || { echo 'an untrusted restore with every untrusted-running workflow enforced should pass' >&2; cat "${base}/err" >&2; exit 1; }
+unset ENFORCED
 unset ENFORCED
 # L: two-deep reusable nesting is unsupported and fails closed.
 printf 'name: nested\non:\n  workflow_call:\npermissions: {}\njobs:\n  inner:\n    uses: ./.github/workflows/split-concern.yml\n' > "${mode_root}/.github/workflows/nested.yml"
@@ -767,6 +789,8 @@ real_mode_fail 'Linux validate-main only read' 'needs a sibling job' 's/cache-mo
 real_mode_fail 'Linux select caller without its explicit none' 'must declare its own cache-mode' 's/    cache-mode: none\n    uses: .\/.github\/workflows\/select-concerns.yml/    uses: .\/.github\/workflows\/select-concerns.yml/' linux-validation.yml
 real_mode_fail 'Windows validate-rust-untrusted gated to main' 'needs a sibling job' "s/(  validate-rust-untrusted:\\n(?:.*\\n)*?    if: github\\.repository == 'Moh-Bakr\\/Taurine-CI' && github\\.ref == )'refs\\/heads\\/untrusted'/\$1'refs\\/heads\\/main'/" windows-validation.yml
 real_mode_fail 'Windows validate-main downgraded to read' 'read-only without the exact top-level term' "s/(  validate-main:\\n(?:.*\\n)*?)    cache-mode: write\\n/\$1    cache-mode: read\\n/" windows-validation.yml
+real_mode_fail 'Linux result without blocking-failures' 'must pass blocking-failures exactly' 's/\n          blocking-failures: [^\n]*\n/\n/' linux-validation.yml
+real_mode_fail 'Windows result not needing the after-audit' 'the result job must need cache-audit-after' 's/(    needs: \[validate-main, validate-untrusted, validate-rust-main, validate-rust-untrusted, cache-audit), cache-audit-after\]\n    name: Result/$1]\n    name: Result/' windows-validation.yml
 real_mode_fail 'Windows without the after-audit' 'needs a cache-audit-after job' 's/\n  cache-audit-after:\n/\n  cache-audit-later:\n/' windows-validation.yml
 echo 'cache-mode real-tree fixtures: the reviewed Linux and Windows dispatchers pass; each weakening of the split, the audit or the explicit grants is refused'
 printf 'name: p\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted"\n' > "${composite_probe}"

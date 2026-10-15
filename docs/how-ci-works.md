@@ -264,7 +264,9 @@ not granted. The policy (`check-cache-mode.rb`) therefore holds these grants:
 Residuals, stated plainly. `macos-validation.yml` runs its matrix job inline and saves in it, so it cannot
 be split until that job becomes a reusable workflow; until then macOS `untrusted` runs keep the default
 grant for a trusted trigger (they can still write the `untrusted` scope, which the Linux and Windows audits
-would then report). On Windows administrator rights cannot be dropped, so any future untrusted restore
+would then report). The policy refuses any
+untrusted cache restore while macOS (or any other workflow that can run on `untrusted`) is not enforced, so the
+macOS split must come first. A failed audit also fails the Result verdict on Linux and Windows. On Windows administrator rights cannot be dropped, so any future untrusted restore
 there would extract as an administrator: it is out of scope until it has its own review. The audit is a
 detector, not a lock: `cache-mode: read` is the control.
 

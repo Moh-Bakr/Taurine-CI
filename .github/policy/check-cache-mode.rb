@@ -30,6 +30,8 @@
 #     actions: read and contents: read, and calls ./.github/actions/cache-scope-audit with
 #     phase before; `cache-audit-after` needs cache-audit and every untrusted half, runs on the
 #     untrusted ref and calls the composite with phase after;
+#     The dispatch's `result` job needs both audits and passes run-result the exact
+#     blocking-failures expression, so a failed audit cannot print PASS;
 #  I. a job whose steps contain actions/cache/save is `write`;
 #  J. a job whose steps contain actions/cache/restore (and no save) is `read` or `write`.
 # Always on, over every workflow and composite action given: `actions: write` (or write-all) is
@@ -42,6 +44,9 @@ MAIN = "github.ref == 'refs/heads/main'".freeze
 UNTRUSTED = "github.ref == 'refs/heads/untrusted'".freeze
 REPOSITORY = "github.repository == 'Moh-Bakr/Taurine-CI'".freeze
 MODES = %w[read write none].freeze
+# What the dispatch's Result job passes to run-result so a failed untrusted cache scope audit (before
+# or after the run) can never print a passing verdict.
+BLOCKING_EXPR = %q(${{ (contains(fromJSON('["failure","cancelled"]'), needs.cache-audit.result) || contains(fromJSON('["failure","cancelled"]'), needs.cache-audit-after.result)) && '1' || '0' }}).freeze
 
 # The top-level conjuncts of an `if:` value, as check-cache-policy.sh's cond_top_terms: the
 # ${{ }} wrapper is dropped, every parenthesised group is removed whole, and the rest is split on
@@ -279,6 +284,19 @@ docs.each do |path, doc|
   end
   audit_job.call('cache-audit', 'before', ['validate-input'].select { |n| jobs.key?(n) })
   audit_job.call('cache-audit-after', 'after', ['cache-audit'] + untrusted_halves)
+
+  result = jobs['result']
+  if result.is_a?(Hash)
+    %w[cache-audit cache-audit-after].each do |needed|
+      failures << "#{path}: the result job must need #{needed}, so a failed audit reaches the verdict" unless Array(result['needs']).include?(needed)
+    end
+    verdict_step = steps_of(result).find { |st| st['uses'].to_s == './.github/actions/run-result' }
+    unless verdict_step && verdict_step.dig('with', 'blocking-failures') == BLOCKING_EXPR
+      failures << "#{path}: the result job's run-result step must pass blocking-failures exactly as the reviewed audit expression, so a failed audit cannot print PASS"
+    end
+  else
+    failures << "#{path}: the untrusted split needs a result job that carries the audits into the verdict"
+  end
 end
 
 # F1 (review of the policy half): the untrusted-ref cache gate relaxes check-cache-policy.sh's
@@ -288,6 +306,7 @@ end
 # untrusted ref, and every workflow that calls it, must already be an enforced workflow. Without a
 # cache-mode key a job gets the default write grant, and an untrusted restore under write could be
 # shadowed by a planted entry.
+any_untrusted_cache = false
 docs.each do |path, doc|
   next if path.include?('/actions/')
   base = File.basename(path)
@@ -295,6 +314,8 @@ docs.each do |path, doc|
     job.is_a?(Hash) && steps_of(job).any? { |st| st['uses'].to_s.start_with?('actions/cache') && st['if'].to_s.include?('refs/heads/untrusted') }
   end
   next unless untrusted_cache
+
+  any_untrusted_cache = true
 
   if triggers(doc).include?('workflow_call')
     callers = docs.select do |_other_path, other|
@@ -307,6 +328,22 @@ docs.each do |path, doc|
     end
   else
     failures << "#{path}: has a cache step gated to the untrusted ref but is not in ENFORCED_WORKFLOWS, so its jobs would keep the default write grant" unless enforced.include?(base)
+  end
+end
+
+# M (hard precondition for any untrusted restore): while any workflow that can run on the untrusted
+# ref has no cache-mode enforcement, it keeps the default write grant, so one of its jobs could plant a
+# shadow entry between another workflow's scope audit and its restore. Today that is
+# macos-validation.yml, whose matrix job is inline and must become a reusable workflow first. So an
+# untrusted-gated cache step is refused while any non-called workflow with a job gated to the untrusted
+# ref is outside ENFORCED_WORKFLOWS.
+if any_untrusted_cache
+  docs.each do |path, doc|
+    next if path.include?('/actions/') || triggers(doc).include?('workflow_call')
+    runs_untrusted = (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).values.any? { |job| job.is_a?(Hash) && job['if'].to_s.include?('refs/heads/untrusted') }
+    next unless runs_untrusted
+    next if enforced.include?(File.basename(path))
+    failures << "#{path}: can run on the untrusted ref without cache-mode enforcement, so an untrusted cache restore is refused while it keeps the default write grant (split and enforce it first)"
   end
 end
 
