@@ -142,7 +142,7 @@ def uses_of(steps, pattern)
   steps.any? { |s| s['uses'].to_s.match?(pattern) }
 end
 
-# Workflows (basename) held to the staged rules F to J (every workflow with a dispatch trigger but macOS); the
+# Workflows (basename) held to the staged rules F to J (every workflow with a dispatch trigger); the
 # workflow pull request that adds `cache-mode` to a workflow adds its name here in the same change
 # (docs/untrusted-readonly-cache.md, section 4.1). The always-on rules A to D and the
 # actions: write rule need no entry. Fixtures pass their own list with --enforced-file.
@@ -152,6 +152,7 @@ ENFORCED_WORKFLOWS = %w[
   ios-validation.yml
   linux-validation.yml
   live-proofs.yml
+  macos-validation.yml
   orchestrate-validation.yml
   pg8-measurement.yml
   scorecard.yml
@@ -160,9 +161,8 @@ ENFORCED_WORKFLOWS = %w[
   weekly-validation.yml
   windows-validation.yml
 ].freeze
-# macos-validation.yml is deliberately absent: its matrix job runs inline and saves caches, so it
-# cannot be split into validate-main / validate-untrusted until it becomes a reusable workflow
-# (docs/untrusted-readonly-cache.md, section 6). Until then macOS keeps today's default grant.
+# macos-validation.yml joined the set when its matrix job became the reusable macos-validation-concern.yml
+# and was split like Linux and Windows, which clears rule M's macOS refusal.
 
 enforced_file = nil
 args = ARGV.dup

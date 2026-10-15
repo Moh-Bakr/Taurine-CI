@@ -436,7 +436,9 @@ relies on them (the base-commit pass would otherwise reject the workflow change)
 - **Stage 2:** untrusted restore of both caches, on one concern (`rust-db`, own group, saves
   itself on main), only if the spike passed; measurement gate, then the other Linux Rust
   concerns. There is no sources-only stage: the source cache is not safe without enforcement.
-- **Precondition for Stage 2 (found in review of the workflow half): the macOS split comes first.**
+- **Precondition for Stage 2 (found in review of the workflow half): the macOS split comes first. Done:
+  `macos-validation.yml` now calls the reusable `macos-validation-concern.yml` through the same
+  validate-main / validate-untrusted pair, and is in `ENFORCED_WORKFLOWS`.**
   `macos-validation.yml` keeps the default write grant on `untrusted` until its matrix job becomes a
   reusable workflow and is split like Linux and Windows. With an untrusted restore enabled, a
   concurrent macOS job could plant a shadow entry between Linux's before-audit and its restore, so

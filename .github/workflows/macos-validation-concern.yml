@@ -1,0 +1,400 @@
+name: macOS validation concern (protected)
+
+# One macOS concern, called by macos-validation.yml once per planned concern. The job lived inline in
+# the dispatcher; it is a reusable workflow so the dispatcher can run it twice with different cache
+# grants (validate-main with cache-mode write, validate-untrusted with cache-mode read), because
+# GitHub rejects an expression in cache-mode (docs/untrusted-readonly-cache.md, section 4.1). The
+# steps are unchanged but for reading the concern from the call's inputs instead of a matrix.
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to validate from private Taurine
+        required: true
+        type: string
+      concern:
+        description: Independent validation concern to execute
+        required: true
+        type: string
+      flavor:
+        description: Build flavour for the rust-packaging smoke (prod, dev or uat)
+        required: false
+        default: prod
+        type: string
+    secrets:
+      SOURCE_READER_PRIVATE_KEY:
+        description: The source-reader App private key, passed explicitly by the dispatcher (never inherited)
+        required: true
+
+permissions: {}
+
+env:
+  SOURCE_REPOSITORY_ID: '1330267721'
+  SOURCE_REPOSITORY_OWNER: Moh-Bakr
+  SOURCE_REPOSITORY_NAME: Taurine
+
+jobs:
+  validate:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
+    name: macOS ${{ inputs.concern }} validation
+    environment: source-read
+    runs-on: macos-15
+    # The TypeScript concerns stay on the reviewed 45. The Rust concerns compile
+    # their closure on a three-core runner (the rust-app shards restore compiled
+    # third-party crates on main, for a protected source SHA; compiled private
+    # source is never cached): `rust-app-1`/`rust-app-2` carry DuckDB's C++
+    # amalgamation, Tauri and over a hundred test binaries (about 40 minutes
+    # cold on the four-core Linux runner), `rust-db` the same drivers' offline
+    # suites (about 10 there).
+    timeout-minutes: ${{ (startsWith(inputs.concern, 'rust-app') || inputs.concern == 'rust-packaging') && 120 || inputs.concern == 'rust-db' && 90 || startsWith(inputs.concern, 'rust-') && 60 || 45 }}
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Start the concern timer
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: start
+
+      - name: Validate protected dispatch input
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REPOSITORY}" != "Moh-Bakr/Taurine-CI" || ( "${GITHUB_REF}" != "refs/heads/main" && "${GITHUB_REF}" != "refs/heads/untrusted" ) ]]; then
+            echo 'macos-validation must run only from the protected main or untrusted branch' >&2
+            exit 1
+          fi
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_sha must be a full 40-character hexadecimal commit SHA' >&2
+            exit 1
+          fi
+
+      - name: Check out the exact private source SHA
+        id: verified-source
+        # Kept as ./ : the policy matches this exact form for the private-source action.
+        uses: ./.github/actions/source-checkout  # zizmor: ignore[self-repository]
+        with:
+          source-sha: ${{ inputs.source_sha }}
+          app-client-id: ${{ vars.SOURCE_READER_APP_ID }}
+          app-private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          repository-id: ${{ env.SOURCE_REPOSITORY_ID }}
+          repository-owner: ${{ env.SOURCE_REPOSITORY_OWNER }}
+          repository-name: ${{ env.SOURCE_REPOSITORY_NAME }}
+          # Gates every cache save below: only a SHA on a protected private branch may write.
+          check-protected-ancestry: 'true'
+
+      - name: Start the egress audit
+        # Audit only: records outbound destinations, never blocks, never fails the job.
+        continue-on-error: true
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: start
+
+      # Every step that needs root runs here, before root is removed and before any project
+      # code (finding H2; see the root-setup and drop-root composites).
+      - name: Run the privileged setup
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/root-setup  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+
+      - name: Remove root before project code
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
+
+      - name: Install the shared sanitizers
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/sanitize  # zizmor: ignore[self-repository]
+
+      - name: Install the shared concern reporting
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
+
+      - name: Set up Node.js and install the locked JavaScript dependencies
+        if: ${{ !startsWith(inputs.concern, 'rust-') || inputs.concern == 'rust-packaging' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
+        with:
+          root: true
+          desktop: true
+          mobile: true
+          vendor-fetch: ${{ inputs.concern != 'rust-packaging' }}
+
+      - name: Set up the Rust toolchain and native dependencies
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+
+      - name: Fetch pinned vendored sources
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/vendor-fetch  # zizmor: ignore[self-repository]
+
+      # Third-party crate sources only: cargo's registry index, the downloaded
+      # `.crate` archives and the git dependency databases. Never `target/`, never
+      # an extracted source tree, never anything under the checked-out private
+      # source, so no private code ever enters this cache. The key is the OS and a
+      # hash of the private Cargo.lock files (which reveals nothing about their
+      # contents), shared by every Rust concern on this OS: one entry per OS and
+      # lockfile set, not one per concern. The fallback key is safe here because every
+      # restored archive is re-verified against the lock checksums below.
+      - name: Locate Cargo home for the third-party source cache
+        id: cargo-home
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${CARGO_HOME:-${HOME}/.cargo}"
+          if command -v cygpath >/dev/null 2>&1; then
+            dir="$(cygpath -m "${dir}")"
+          fi
+          echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
+
+      # Third-party crate source cache (restore, completion and save): main only, for a protected
+      # source SHA (ref isolation, finding H1). A cache write needs only the runner's runtime token, so
+      # any run's code can write its own ref's scope; feature-branch SHAs therefore run from the
+      # untrusted ref, whose scope main never reads, and main runs only protected-ancestry SHAs (the
+      # source checkout refuses any other). Each of the three steps carries both top-level terms
+      # (github.ref == main, protected-ancestor == true) and the cache policy fails if one does not.
+      - name: Restore cached third-party crate sources
+        id: cargo-sources
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: cargo-sources-v3-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
+          restore-keys: |
+            cargo-sources-v3-${{ runner.os }}-
+
+      # Defence in depth: do not rely on cargo alone to notice a tampered archive.
+      # Every restored `.crate` must hash to the checksum recorded for it in a
+      # private Cargo.lock; anything that does not match, or is not in a lock at
+      # all, is deleted before cargo runs. Only counts are printed.
+      - name: Verify restored crate archives against Cargo.lock
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
+        with:
+          sources-dir: ${{ steps.cargo-home.outputs.dir }}
+          cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}
+          os-label: macOS
+
+      # Saved before any project code runs, so nothing the private SHA's build scripts, proc
+      # macros or tests do can reach what is saved: only from the protected main branch, only
+      # for a source SHA on a protected private branch (the source-checkout ancestry answer),
+      # only on a miss, and under the key the restore step computed (cache-primary-key), never
+      # a hashFiles evaluated later. Only registry/cache is cached: every `.crate` in it is
+      # re-hashed against Cargo.lock on restore, whereas the registry index and git databases
+      # could not be verified, so cargo rebuilds them. The entry is shared by every Rust concern
+      # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
+      # cargo verifies each download against the lock checksum and runs no build script.
+      - name: Complete the third-party source set before saving
+        if: ${{ github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r lock; do
+            manifest="$(dirname "${lock}")/Cargo.toml"
+            [[ -f "${manifest}" ]] || continue
+            if ! cargo fetch --locked --manifest-path "${manifest}" >"${RUNNER_TEMP}/cargo-fetch.log" 2>&1; then
+              echo 'cargo-fetch: one lockfile could not be fetched completely (detail withheld)'
+            fi
+          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*' | sort)
+          echo 'cargo-fetch: done'
+
+      - name: Save verified third-party crate sources
+        if: ${{ github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: ${{ steps.cargo-sources.outputs.cache-primary-key }}
+
+      # Compiled third-party dependency cache: main only, for a protected source SHA (ref isolation,
+      # finding H1). cargo never re-verifies a compiled .rlib, so an entry is only as trustworthy as
+      # whoever could write main's scope: since main runs only protected-ancestry SHAs (feature SHAs run
+      # from the untrusted ref, whose scope main never reads), that is protected code only. Every
+      # restore, strip and save step carries both top-level terms and the cache policy enforces it. The
+      # locate step only computes the key and keeps the target directory outside the private checkout.
+      # One group per measured compile-bound concern family: rust-app (the two shards share one
+      # build), rust-db (measured 1016 s compile against 133 s of tests), rust-domain and
+      # rust-packaging. Each single-job group is its own designated saver. Short concerns
+      # (rust-net, rust-ovpn) and rust-tls-openssl (its own Cargo.lock, which the strip and
+      # proof cannot classify against) stay outside on purpose.
+      - name: Locate the compiled dependency cache
+        id: cargo-target
+        if: ${{ startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: locate
+          group: ${{ (inputs.concern == 'rust-db' && 'rust-db') || (inputs.concern == 'rust-domain' && 'rust-domain') || (inputs.concern == 'rust-packaging' && 'rust-packaging') || 'rust-app' }}
+          features: ${{ inputs.concern == 'rust-packaging' && 'tauri-debug-build' || 'test-default' }}
+          os-label: macOS
+
+      - name: Restore compiled third-party dependencies
+        id: cargo-target-cache
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-target.outputs.dir }}/debug/deps
+            ${{ steps.cargo-target.outputs.dir }}/debug/build
+            ${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint
+          key: ${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored dependency cache
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored
+          dir: ${{ steps.cargo-target.outputs.dir }}
+          cache-hit: ${{ steps.cargo-target-cache.outputs.cache-hit }}
+          os-label: macOS
+
+      - name: Run isolated macOS validation concern
+        id: concern-validation
+        if: ${{ !startsWith(inputs.concern, 'rust-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/macos-concern-js  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+
+      - name: Run isolated macOS Rust concern
+        id: concern-rust
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/macos-concern-rust  # zizmor: ignore[self-repository]
+        with:
+          concern: ${{ inputs.concern }}
+          flavor: ${{ inputs.flavor }}
+
+      # Disabled with the restore above (finding H1). When re-enabled: only the build that
+      # runs everything the key covers saves it, only on a miss, only for a protected source
+      # SHA, only after the concern passed and the strip-and-prove step succeeded. One
+      # designated saver per group: rust-app-2 for the rust-app shards (doctests skipped
+      # there), and each single-job group its own concern.
+      - name: Strip and prove the compiled dependency cache
+        id: cargo-target-strip
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: save
+          dir: ${{ steps.cargo-target.outputs.dir }}
+          os-label: macOS
+
+      - name: Save compiled third-party dependencies
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-target.outputs.dir }}/debug/deps
+            ${{ steps.cargo-target.outputs.dir }}/debug/build
+            ${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint
+          key: ${{ steps.cargo-target.outputs.key }}
+
+      - name: Publish sanitized validation proof
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONCERN: ${{ inputs.concern }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
+          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
+          [[ "${checked_out_sha}" == "${requested_sha}" ]]
+          {
+            echo "## macOS ${CONCERN} validation"
+            echo
+            echo "- Source SHA: \`${checked_out_sha}\`"
+            echo '- Isolated concern passed; no other concern relies on this runner'
+            echo '- Source token: revoked before dependency installation and project commands'
+            echo '- Outputs: no source files, logs, reports, or artifacts published'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # The sanitized proof above says validation passed; this section names the
+      # tests that passed, so a public run shows exactly which tests a SHA
+      # exercised. The inventory is repo-relative file paths and test titles,
+      # plus status and duration — never test source, fixtures, data values or
+      # environment details. The collector (checked out with the source it
+      # reports on) re-scans every path and title with the repository's own
+      # secret-shape rules and drops rather than publishes anything that
+      # matches; it builds the whole section in memory and writes it once, so
+      # nothing reaches the summary unless the sanitized render completed. The
+      # runner's raw reporter JSON stays in RUNNER_TEMP and is not uploaded.
+      - name: Publish test identities exercised by this concern
+        # Failed validation still owns useful sanitized identities (as on Linux). Never run
+        # private collector code without successful exact-source verification and token
+        # revocation, or after cancellation/setup-only failures.
+        if: ${{ always() && !cancelled() && steps.verified-source.outcome == 'success' && (steps.concern-validation.outcome == 'success' || steps.concern-validation.outcome == 'failure') }}
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONCERN: ${{ inputs.concern }}
+        run: |
+          set -euo pipefail
+          # Only the concerns that ran a JavaScript test suite have an
+          # inventory; every other concern leaves its summary as it was.
+          case "${CONCERN}" in
+            desktop-shard-1|desktop-shard-2|mobile|orchestrate-skill) ;;
+            *) exit 0 ;;
+          esac
+          checked_out_sha="$(git rev-parse --verify HEAD | tr '[:upper:]' '[:lower:]')"
+          requested_sha="$(printf '%s' "${REQUESTED_SOURCE_SHA}" | tr '[:upper:]' '[:lower:]')"
+          [[ "${checked_out_sha}" == "${requested_sha}" ]]
+          # The collector exits zero even when it cannot collect (fail closed:
+          # a fixed "unavailable" line instead of an error or a partial list),
+          # but if the collector itself fails to run, publish the same fixed
+          # line rather than letting the step turn a green concern red. The
+          # section goes to the step log as well as the summary: the summary is
+          # what a reader sees, the log is the greppable record of exactly
+          # which identities were published to this run.
+          mkdir -p "${RUNNER_TEMP}/test-ids"
+          section_file="${RUNNER_TEMP}/test-ids/summary-section.md"
+          if ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
+            TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}/src" \
+            taurine-desktop/node_modules/.bin/vite-node scripts/ci/collect-test-ids.ts \
+            > "${section_file}"; then
+            {
+              echo "### Tests exercised by this run"
+              echo
+              echo "Test inventory unavailable: the collector did not complete."
+            } > "${section_file}"
+          fi
+          cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
+          cat "${section_file}"
+
+      # The job's own wall-clock time, shown next to its result; the timings job
+      # tabulates it against a committed baseline.
+      - name: Report concern duration
+        if: ${{ always() }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/timings  # zizmor: ignore[self-repository]
+        with:
+          mode: report
+
+      - name: Report observed egress
+        if: always()
+        continue-on-error: true
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/egress-audit  # zizmor: ignore[self-repository]
+        with:
+          phase: report

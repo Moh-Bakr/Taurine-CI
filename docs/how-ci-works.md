@@ -246,11 +246,11 @@ runner receives: a spike (`docs/untrusted-readonly-cache.md`, section 7a-result)
 the runtime token is declined under `read` and `none`, so project code cannot write a scope its job was
 not granted. The policy (`check-cache-mode.rb`) therefore holds these grants:
 
-- every dispatch workflow except `macos-validation.yml` declares workflow-level `cache-mode: none`; a job
+- every dispatch workflow declares workflow-level `cache-mode: none`; a job
   that caches or calls a reusable workflow declares its own value; `write-only` and any expression are
   refused (GitHub rejects the `github` context there); a called workflow never sets it, so it inherits its
   caller's grant and cannot widen it;
-- on Linux and Windows each saving caller is split into `validate-main` (`cache-mode: write`, only on
+- on Linux, macOS and Windows each saving caller is split into `validate-main` (`cache-mode: write`, only on
   `main`) and `validate-untrusted` (`cache-mode: read`, only on `untrusted`), so a run from `untrusted`
   can never write any cache scope. No untrusted restore exists yet: that is a later stage, behind a
   measured baseline and the owner's decision, and the "never restores" statements below stay true;
@@ -261,12 +261,11 @@ not granted. The policy (`check-cache-mode.rb`) therefore holds these grants:
   Moh-Bakr/Taurine-CI` (always with `--ref`: without it the command deletes every cache, main's included);
 - `actions: write` is held to `cache-prune.yml` (main-only, no source) and the weekly dispatch job.
 
-Residuals, stated plainly. `macos-validation.yml` runs its matrix job inline and saves in it, so it cannot
-be split until that job becomes a reusable workflow; until then macOS `untrusted` runs keep the default
-grant for a trusted trigger (they can still write the `untrusted` scope, which the Linux and Windows audits
-would then report). The policy refuses any
-untrusted cache restore while macOS (or any other workflow that can run on `untrusted`) is not enforced, so the
-macOS split must come first. A failed audit also fails the Result verdict on Linux and Windows. On Windows administrator rights cannot be dropped, so any future untrusted restore
+Residuals, stated plainly. macOS joined the split when its matrix job became the reusable
+`macos-validation-concern.yml` (called by `macos-validation.yml` as `validate-main` and
+`validate-untrusted`, like Linux and Windows). The policy refuses any untrusted cache restore while any
+workflow that can run on `untrusted` is not enforced, so no restore can precede a complete split. A failed
+audit also fails the Result verdict on every platform that has the split. On Windows administrator rights cannot be dropped, so any future untrusted restore
 there would extract as an administrator: it is out of scope until it has its own review. The audit is a
 detector, not a lock: `cache-mode: read` is the control.
 
@@ -507,7 +506,7 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
 | Workflow | Concerns |
 | --- | --- |
 | `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and the opt-in e2e-visual and scan-history |
-| `macos-validation.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app, rust-packaging, rust-tls-openssl |
+| `macos-validation.yml` and `macos-validation-concern.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app, rust-packaging, rust-tls-openssl |
 | `windows-validation.yml` and `windows-validation-concern.yml` | The same app concerns plus contracts; Rust concerns with `rust=true`; `windows_image` selects `windows-2022` (default) or `windows-2025` |
 | `android-validation.yml` | android-native (debug build for aarch64); android-rust with `rust=true` (compile-only mobile test targets, not executed) |
 | `ios-validation.yml` | ios-native (unsigned simulator build); ios-rust with `rust=true` (compile-only) |
@@ -533,7 +532,7 @@ that runs after the revoke lives in composites under `.github/actions/`.
 | --- | --- | --- |
 | Shared | every protected workflow | `source-checkout` (mint, exact checkout, verify, revoke), `sanitize`, `timings`, `node-setup`, `rust-toolchain`, `vendor-fetch`, `verify-cargo-cache`, `concern-report`, `run-result` |
 | Linux | `linux-validation.yml` calls `linux-validation-concern.yml`; `select-concerns.yml` plans | `linux-concern-js`, `linux-concern-e2e`, `linux-concern-rust`, `scan-concern`, `select-concerns`, `linux-test-identities` |
-| macOS | `macos-validation.yml` | `macos-concern-js`, `macos-concern-rust` |
+| macOS | `macos-validation.yml` calls `macos-validation-concern.yml` | `macos-concern-js`, `macos-concern-rust` |
 | Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust` |
 | Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report` |
 | iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report` |

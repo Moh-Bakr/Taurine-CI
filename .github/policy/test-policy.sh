@@ -773,10 +773,10 @@ for text in 'uses: actions/cache/restore@x' 'uses: actions/cache/save@x' 'uses: 
 done
 (source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action .github/actions/cache-scope-audit/action.yml) || { echo 'the cache-scope-audit composite should pass the composite rules' >&2; exit 1; }
 # The reviewed Linux and Windows dispatchers pass the enforced rules as shipped.
-ruby "${policy}/check-cache-mode.rb" .github/workflows/linux-validation.yml .github/workflows/windows-validation.yml .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml >/dev/null || { echo 'the reviewed Linux and Windows dispatchers should pass the cache-mode rules' >&2; exit 1; }
+ruby "${policy}/check-cache-mode.rb" .github/workflows/linux-validation.yml .github/workflows/windows-validation.yml .github/workflows/macos-validation.yml .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml .github/workflows/macos-validation-concern.yml >/dev/null || { echo 'the reviewed Linux and Windows dispatchers should pass the cache-mode rules' >&2; exit 1; }
 real_mode_fail() { # label needle perl-expr file
   mkdir -p "${mode_root}/real/.github/workflows"
-  cp .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml "${mode_root}/real/.github/workflows/"
+  cp .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml .github/workflows/macos-validation-concern.yml "${mode_root}/real/.github/workflows/"
   perl -0pe "$3" ".github/workflows/$4" > "${mode_root}/real/.github/workflows/$4"
   if cmp -s ".github/workflows/$4" "${mode_root}/real/.github/workflows/$4"; then echo "cache-mode fixture '$1' changed nothing" >&2; exit 1; fi
   if (cd "${mode_root}/real" && ruby "${policy}/check-cache-mode.rb" ".github/workflows/$4") >/dev/null 2>"${base}/err"; then echo "cache-mode fixture '$1' should fail but passed" >&2; exit 1; fi
@@ -791,6 +791,10 @@ real_mode_fail 'Windows validate-rust-untrusted gated to main' 'needs a sibling 
 real_mode_fail 'Windows validate-main downgraded to read' 'read-only without the exact top-level term' "s/(  validate-main:\\n(?:.*\\n)*?)    cache-mode: write\\n/\$1    cache-mode: read\\n/" windows-validation.yml
 real_mode_fail 'Linux result without blocking-failures' 'must pass blocking-failures exactly' 's/\n          blocking-failures: [^\n]*\n/\n/' linux-validation.yml
 real_mode_fail 'Windows result not needing the after-audit' 'the result job must need cache-audit-after' 's/(    needs: \[validate-main, validate-untrusted, validate-rust-main, validate-rust-untrusted, cache-audit), cache-audit-after\]\n    name: Result/$1]\n    name: Result/' windows-validation.yml
+real_mode_fail 'macOS validate-untrusted granted write' 'cache-mode write needs the exact top-level term' "s/(  validate-untrusted:\\n(?:.*\\n)*?)    cache-mode: read\\n/\$1    cache-mode: write\\n/" macos-validation.yml
+real_mode_fail 'macOS validate-untrusted without the audit need' 'must need the cache-audit job directly' 's/needs: \[plan, cache-audit\]/needs: [plan]/' macos-validation.yml
+real_mode_fail 'macOS workflow-level none dropped' 'needs a workflow-level cache-mode: none' 's/\ncache-mode: none\n/\n/' macos-validation.yml
+real_mode_fail 'macOS without the after-audit' 'needs a cache-audit-after job' 's/\n  cache-audit-after:\n/\n  cache-audit-later:\n/' macos-validation.yml
 real_mode_fail 'Windows without the after-audit' 'needs a cache-audit-after job' 's/\n  cache-audit-after:\n/\n  cache-audit-later:\n/' windows-validation.yml
 echo 'cache-mode real-tree fixtures: the reviewed Linux and Windows dispatchers pass; each weakening of the split, the audit or the explicit grants is refused'
 printf 'name: p\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted"\n' > "${composite_probe}"
