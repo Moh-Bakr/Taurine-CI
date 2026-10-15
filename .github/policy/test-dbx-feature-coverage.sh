@@ -128,9 +128,17 @@ done
 # dbx-core's `legacy-tls` pass is conditional on what the source declares. Fixtures are the
 # `cargo metadata --no-deps` shape; nothing here compiles anything.
 row_count() { printf '%s\n' "${deferred_results[@]}" | grep -c "^rust-dbx-core-legacy-tls-tests|" || true; }
-live_meta='{"packages":[{"name":"other","features":{}},{"name":"dbx-core","features":{"default":[],"legacy-tls":["dep:openssl","dep:postgres-openssl","dep:openssl-src"]}}]}'
-empty_meta='{"packages":[{"name":"dbx-core","features":{"default":[],"legacy-tls":[]}}]}'
-absent_meta='{"packages":[{"name":"dbx-core","features":{"default":[]}}]}'
+# Every dbx-core package carries a `manifest_path`, as real `cargo metadata` output does, pointing at a
+# source tree with nothing gated on the feature. Today's pass ignores it; a pass that also searches
+# the sources reads it, so the same fixtures hold for both.
+mkdir -p "${fixture}/clean/src"
+printf 'pub fn nothing_here() {}\n' > "${fixture}/clean/src/lib.rs"
+meta_for() { # features-json source-dir
+  printf '{"packages":[{"name":"dbx-core","manifest_path":"%s/Cargo.toml","features":%s}]}' "$2" "$1"
+}
+live_meta='{"packages":[{"name":"other","features":{}},{"name":"dbx-core","manifest_path":"'"${fixture}"'/clean/Cargo.toml","features":{"default":[],"legacy-tls":["dep:openssl","dep:postgres-openssl","dep:openssl-src"]}}]}'
+empty_meta="$(meta_for '{"default":[],"legacy-tls":[]}' "${fixture}/clean")"
+absent_meta="$(meta_for '{"default":[]}' "${fixture}/clean")"
 
 # A live (non-empty) feature, as older branches declare: the pass runs, exactly as before.
 reset_case
