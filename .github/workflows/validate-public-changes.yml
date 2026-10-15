@@ -318,6 +318,23 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # Base tests may call node, and the step below runs them with PATH fixed to the system
+      # directories. The runner's node is in /usr/local/bin, which hosted images leave
+      # world-writable, so that directory cannot join that PATH: pull-request code run by one base
+      # test could replace node for the next. Install a copy, while root is still available, into
+      # /usr/bin, which is already on that PATH and which only root can change. The base PATH
+      # itself stays exactly as the base commit's own fixtures expect it.
+      - name: Install node where only root can change it
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_bin="$(readlink -f /usr/local/bin/node)"
+          if [[ -e /usr/bin/node ]]; then
+            echo '/usr/bin/node is already installed; leaving it as it is'
+          else
+            sudo install -o root -g root -m 0755 "${node_bin}" /usr/bin/node
+          fi
+
       # Base tests extract and execute steps from this pull request's copy of the workflow, so
       # pull-request code runs inside this job. Take away the runner's passwordless sudo and
       # Docker before any of it does, with the same composite the source-validation jobs use
@@ -472,7 +489,7 @@ jobs:
             if [[ -d /proc/self ]]; then
               local environ
               for environ in /proc/[0-9]*/environ; do
-                if tr '\0' '\n' < "${environ}" 2>/dev/null | grep -Fxq -- "${marker}"; then
+                if tr '\0' '\n' 2>/dev/null < "${environ}" | grep -Fxq -- "${marker}"; then
                   found+="${environ//[^0-9]/} "
                 fi
               done

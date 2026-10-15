@@ -753,6 +753,10 @@ process behind to act later. The base pass is therefore isolated further:
   `drop-root` composite the source-validation jobs run before project code, then the step
   asserts `sudo -n true` is refused. Without that, pull-request code run by a base test could
   write `/etc/ld.so.preload` or replace ruby.
+- **Only root-owned tools.** The base scripts run with `PATH` fixed to `/usr/bin:/bin:/usr/sbin:/sbin`.
+  Base tests that need node get a copy installed into `/usr/bin` before `drop-root`, because the
+  runner's own node lives in `/usr/local/bin`, which hosted images leave world-writable: on the
+  base `PATH`, pull-request code run by one base test could replace it for the next.
 - **Pinned to the base commit.** The base checkout's `HEAD` must equal the pull request's base SHA.
   A SHA-256 manifest is built from that commit's git objects -- not from the files on disk -- held
   only in the step's memory, and re-verified before every base script and once after the last.
