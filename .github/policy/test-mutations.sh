@@ -195,6 +195,16 @@ mutation '12. the pg8 arm caller without an explicit none' .github/workflows/pg8
     uses: ./.github/workflows/pg8-measurement-arm.yml' '    uses: ./.github/workflows/pg8-measurement-arm.yml'
 mutation '12. the cache-scope audit accepts a non-empty scope' "${audit}" "if [[ \"\${total}\" != 0 ]]; then" 'if [[ "${total}" == never ]]; then'
 mutation '12. the cache-scope audit asks for the main scope' "${audit}" 'ref=refs/heads/untrusted&per_page=1' 'ref=refs/heads/main&per_page=1'
+# 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
+# must be rejected, because the default grant for a job with no cache-mode is write.
+mutation '11. an untrusted-only cargo-source restore with no cache-mode' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
+            cargo-sources-v3-${{ runner.os }}-
+' ''
+mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]' '    cache-mode: read
+    cache-mode: write
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
