@@ -108,7 +108,10 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
       report["suites"] = []
     end
     count = report.fetch("suites").sum { |suite| suite.fetch("specs").length }
-    File.write(ENV.fetch("TAURINE_CASE_EVIDENCE_REPORT_PATH"), JSON.generate(report))
+    json = JSON.generate(report).b
+    # Not valid UTF-8, which JSON.generate itself refuses to write: spliced in as raw bytes.
+    json = json.sub("alpha".b, "\\xFF\\xFE".b) if mode == "discovery-invalid-title"
+    File.binwrite(ENV.fetch("TAURINE_CASE_EVIDENCE_REPORT_PATH"), json)
     unless mode == "marker-failed"
       File.write(ENV.fetch("TAURINE_CASE_EVIDENCE_COMPLETION_PATH"),
         JSON.generate({"schema_version" => 1, "status" => "complete", "error_class" => nil, "count" => count}))
@@ -199,7 +202,9 @@ execution_fixture() {
     when "empty"
       report["suites"] = []
     end
-    File.write(target, JSON.generate(report))
+    json = JSON.generate(report).b
+    json = json.sub("alpha".b, "\xFF\xFE".b) if mode == "execution-invalid-title"
+    File.binwrite(target, json)
   ' "$tmp/execution.json" "$1" "${2:-}"
 }
 
@@ -219,7 +224,7 @@ run_admission() {
     CI_EXPECTED_SELECTION_MODE=full \
     CI_EXPECTED_SELECTED_SUITE_IDS="$selected" \
     CI_PLATFORM=linux \
-    ruby "$admission" "$concern" "$tmp/source" "$tmp/execution.json" "$tmp/work"
+    ruby "$admission" "$concern" "$tmp/source" "$tmp/execution.json" "$tmp/work" 2> "$tmp/producer.stderr"
 }
 
 expect_blocked() {
@@ -234,6 +239,14 @@ expect_blocked() {
     abort "wrong disposition for #{ARGV.fetch(2)}: #{result.inspect}" unless
       result["status"] == "case_evidence_blocked" && result["error_class"] == ARGV.fetch(1)
   ' "$out" "$want" "$label"
+  # Whatever the reason, neither stream may carry a case title: the producer's stderr goes to the
+  # public job log, and its stdout to the step summary.
+  for leaked in "$out" "$(cat "$tmp/producer.stderr")"; do
+    if LC_ALL=C grep -Fq -e 'alpha' -e "$(printf '\377\376')" <<<"$leaked"; then
+      echo "a case title escaped the admission output (${label})" >&2
+      exit 1
+    fi
+  done
 }
 
 : > "$tmp/mode"
@@ -254,6 +267,31 @@ ruby -rjson -e '
   abort "wrong totals" unless result.fetch("counts") ==
     {"discovered" => 5, "executed" => 5, "passed" => 5, "retried_pass" => 0, "skipped" => 0}
 ' "$positive"
+# The validator, run on its own: an envelope with a title that is not valid UTF-8 is one fixed class
+# and prints nothing on stderr. The producer runs the validator as a child and discards what it
+# says, but the validator is also a program of its own.
+contract="$control/.github/policy/case-evidence-contract.rb"
+for part in expected discovery-envelope execution-envelope; do
+  cp "$tmp/work/${part}-smoke.json" "$tmp/contract-${part}.json"
+done
+ruby -e 'path = ARGV[0]; File.binwrite(path, File.binread(path).sub("alpha".b, "\xFF\xFE".b))' "$tmp/contract-discovery-envelope.json"
+contract_status=0
+contract_out="$(env -i PATH="$(dirname "$(command -v ruby)"):/usr/bin:/bin" ruby "$contract" "$tmp/contract-expected.json" \
+  "$tmp/contract-discovery-envelope.json" "$tmp/contract-execution-envelope.json" 2> "$tmp/contract.stderr")" || contract_status=$?
+[[ "$contract_status" -eq 1 ]] || { echo 'the validator accepted an envelope that is not valid UTF-8' >&2; exit 1; }
+grep -Fq '"error_class":"input_encoding_invalid"' <<<"$contract_out" || {
+  echo "the validator did not name the encoding class: ${contract_out}" >&2; exit 1;
+}
+if [[ -s "$tmp/contract.stderr" ]] || LC_ALL=C grep -Fq 'alpha' <<<"$contract_out"; then
+  echo 'the validator printed a case title for an envelope that is not valid UTF-8' >&2; exit 1
+fi
+# The workflow step must keep the producer's stderr out of the public job log.
+ruby "$root/.github/policy/extract-step.rb" "$root/.github/workflows/linux-validation-concern.yml" \
+  'Reconcile case evidence for the browser concern' run > "$tmp/reconcile-step.sh"
+grep -Eq 'case-evidence-admission\.rb.*\\$' "$tmp/reconcile-step.sh" &&
+  grep -Fq '"${work}" 2>/dev/null)" || status=$?' "$tmp/reconcile-step.sh" || {
+  echo 'the reconcile step does not discard the producer stderr' >&2; exit 1;
+}
 for leaked in 'parameterized value' 'inner.spec.ts' 'tests/e2e' 'outer group'; do
   if grep -Fq "$leaked" <<<"$positive"; then
     echo "private case detail escaped the admission output: ${leaked}" >&2
@@ -304,6 +342,19 @@ echo empty > "$tmp/mode"
 expect_blocked 'an unexpectedly empty discovered suite' reporter_failed
 echo marker-failed > "$tmp/mode"
 expect_blocked 'a reporter that wrote no completion marker' report_path_invalid
+# A title that is not valid UTF-8 -- from the discovery reporter, or in the execution report -- is
+# a fixed class and prints nothing. JSON.generate raises on it, and an uncaught raise puts the
+# exception text, which on newer json carries the title, on the stderr the public log receives.
+echo discovery-invalid-title > "$tmp/mode"
+expect_blocked 'a discovery report with a title that is not valid UTF-8' report_encoding_invalid
+: > "$tmp/mode"
+execution_fixture "$assets/real-execution-feedback.json" execution-invalid-title
+expect_blocked 'an execution report with a title that is not valid UTF-8' report_encoding_invalid
+if [[ -s "$tmp/producer.stderr" ]]; then
+  echo 'the producer wrote to stderr on a blocked run' >&2
+  exit 1
+fi
+execution_fixture "$assets/real-execution-feedback.json"
 
 : > "$tmp/mode"
 # The source repository must not be able to switch this gate off by removing

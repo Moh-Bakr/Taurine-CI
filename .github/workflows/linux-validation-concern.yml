@@ -643,7 +643,7 @@ jobs:
           chmod 700 "${work}"
           status=0
           result="$(ruby .github/policy/case-evidence-admission.rb \
-            "${CONCERN}" "${GITHUB_WORKSPACE}/src" "${report}" "${work}")" || status=$?
+            "${CONCERN}" "${GITHUB_WORKSPACE}/src" "${report}" "${work}" 2>/dev/null)" || status=$?
           # Raw reports, titles and case identities stay in that directory; only
           # the aggregate the producer printed is published.
           rm -rf "${work}"

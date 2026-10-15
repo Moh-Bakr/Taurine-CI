@@ -379,10 +379,16 @@ begin
   # Read as UTF-8 whatever the locale: the producer starts this validator with an empty
   # environment, where the default external encoding is US-ASCII and the first non-ASCII byte in a
   # real test title would make JSON.parse raise.
-  expected = JSON.parse(File.read(expected_path, encoding: Encoding::UTF_8))
+  utf8_json = lambda do |path|
+    text = File.read(path, encoding: Encoding::UTF_8)
+    # JSON.generate raises on invalid UTF-8 and quotes the string in its message, so refuse it here.
+    reject!('input_encoding_invalid') unless text.valid_encoding?
+    JSON.parse(text)
+  end
+  expected = utf8_json.call(expected_path)
   validate_expected(expected)
-  discovery_envelope = JSON.parse(File.read(discovery_path, encoding: Encoding::UTF_8))
-  execution_envelope = JSON.parse(File.read(execution_path, encoding: Encoding::UTF_8))
+  discovery_envelope = utf8_json.call(discovery_path)
+  execution_envelope = utf8_json.call(execution_path)
   discovery = validate_envelope(discovery_envelope, expected, 'discovery')
   execution = validate_envelope(execution_envelope, expected, 'execution')
   discovery_ids = discovery.map { |item| item.fetch('case_id') }.sort
@@ -394,7 +400,9 @@ begin
 rescue ContractError => error
   puts JSON.generate({ 'schema_version' => 1, 'status' => 'shadow_blocked', 'error_class' => error.code })
   exit 1
-rescue JSON::ParserError, KeyError, TypeError, SystemCallError, ArgumentError, NoMethodError
+rescue StandardError
+  # Every other failure -- a parse error, an encoding error, a missing key -- is one fixed class: the
+  # message of an uncaught exception can carry the text that raised it.
   puts JSON.generate({ 'schema_version' => 1, 'status' => 'shadow_blocked', 'error_class' => 'invalid_input' })
   exit 1
 end
