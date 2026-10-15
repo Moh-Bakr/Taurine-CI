@@ -114,6 +114,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-scan-deny.sh
 
+      - name: Test that the base-pass step is found in either public policy workflow
+        shell: bash
+        run: bash .github/policy/test-base-pass-locate.sh
+
       - name: Test sanitized build-failure category classification
         shell: bash
         run: bash .github/policy/test-build-failure-category.sh

@@ -12,6 +12,20 @@ check_dispatcher() {
     fi
   done
   if (( ! protected_dispatch )); then
+    if [[ "$workflow" == "$public_policy_reusable_workflow" || "$workflow" == "./$public_policy_reusable_workflow" ]]; then
+      # The reusable half of the public policy gate. It is called, so workflow_call is its one
+      # trigger; every other trigger, artifact or cache path, OIDC grant and secret stays refused,
+      # and it declares no secrets of its own (the entrypoint passes it none).
+      if ! grep -qE '^on:[[:space:]]*$' "$workflow" || ! grep -qE '^[[:space:]]+workflow_call:' "$workflow"; then
+        echo "The reusable public policy workflow must be triggered by workflow_call: $workflow" >&2
+        exit 1
+      fi
+      if grep -nE '^[[:space:]]+(pull_request|pull_request_target|push|schedule|workflow_dispatch|workflow_run|repository_dispatch):|actions/(upload|download)-artifact|actions/cache|id-token:[[:space:]]*write|secrets\.|^[[:space:]]+secrets:' "$workflow"; then
+        echo "Unsafe trigger, artifact/cache path, OIDC grant or secret in the reusable public policy workflow: $workflow" >&2
+        exit 1
+      fi
+      return 0
+    fi
     if [[ "$workflow" != "$public_policy_workflow" && "$workflow" != "./$public_policy_workflow" ]] && \
       grep -nE 'pull_request_target:|workflow_run:|workflow_call:|actions/(upload|download)-artifact|actions/cache|id-token:[[:space:]]*write|secrets\.' "$workflow"; then
       echo "Unsafe trigger, artifact/cache path, OIDC grant, or Actions secret found in public policy workflows: $workflow" >&2
