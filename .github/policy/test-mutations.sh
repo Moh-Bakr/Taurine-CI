@@ -135,6 +135,54 @@ mutation '9. exit 0 at the start of the environment pre-flight' "${preflight}" '
 mutation '9. protected branches only accepted' "${preflight}" "!= \$'false\\ttrue' ]]; then" "== never ]]; then"
 mutation '9. any branch-policy list accepted' "${preflight}" "!= 'branch:main,branch:untrusted' ]]; then" "== never ]]; then"
 
+# 11. Read-only untrusted cache restore, cache-mode and actions: write (docs/untrusted-readonly-cache.md).
+cache_prune=.github/workflows/cache-prune.yml
+scorecard=.github/workflows/scorecard.yml
+mutation '11. cache-mode write-only on the Linux caller' "${linux}" '    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]' '    cache-mode: write-only
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
+mutation '11. an ungated cache-mode write on the Linux caller' "${linux}" '    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]' '    cache-mode: write
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
+mutation '11. a workflow-level cache-mode write in the Linux dispatcher' "${linux}" 'permissions: {}
+' 'permissions: {}
+cache-mode: write
+'
+mutation '11. cache-mode inside the called Linux concern' "${linux_concern}" '  validate:
+    permissions:
+      contents: read
+    name: Linux ${{ inputs.concern }}' '  validate:
+    cache-mode: read
+    permissions:
+      contents: read
+    name: Linux ${{ inputs.concern }}'
+mutation '11. a cache restore between the revoke and root removal' "${linux_concern}" '      - name: Remove root before project code' '      - name: Early cache restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/early
+          key: early
+
+      - name: Remove root before project code'
+mutation '11. the compiled save gated to untrusted' "${linux_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' &&" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/untrusted' &&"
+mutation '11. actions: write on the scorecard job' "${scorecard}" '      actions: read' '      actions: write'
+mutation '11. cache-prune no longer main-only' "${cache_prune}" " && github.ref == 'refs/heads/main'" ''
+mutation '11. cache-prune given the source-read environment' "${cache_prune}" '    runs-on: ubuntu-24.04
+' '    environment: source-read
+    runs-on: ubuntu-24.04
+'
+mutation '11. lint.sh ignores every unknown key' .github/policy/lint.sh "-ignore '^unexpected key \"cache-mode\" for \"(job|workflow)\" section\. '" "-ignore 'unexpected key'"
+
+# 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
+# must be rejected, because the default grant for a job with no cache-mode is write.
+mutation '11. an untrusted-only cargo-source restore with no cache-mode' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
+            cargo-sources-v3-${{ runner.os }}-
+' ''
+mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]' '    cache-mode: read
+    cache-mode: write
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
+
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
 # toJSON(secrets) read to that concern in the same change: its own policy passes, and the base

@@ -20,7 +20,9 @@ PRE_DROP_USES = [
   %r{\A\./\.github/actions/live-start-[a-z]+\z},
   # Only the Semgrep container run (checked below): the scanners themselves come after.
   %r{\A\./\.github/actions/scan-concern\z},
-  %r{\Aactions/(setup-node|cache/restore)@[0-9a-f]{40}\z}
+  # A cache restore is not here: it extracts with absolute paths as the job user, so it comes
+  # after drop-root, never between the revoke and the root removal (docs/untrusted-readonly-cache.md, P3).
+  %r{\Aactions/setup-node@[0-9a-f]{40}\z}
 ].freeze
 PROJECT_COMMAND = /^\s*(sudo\s+)?(npm|npx|pnpm|yarn|node|cargo|rustup|rustc|dotnet|nuget|xcodebuild|xcrun|gradle|gradlew|make|cmake|pip|pip3|python|python3|ruby|brew|choco|vcpkg|bash\s+scripts\/|sh\s+scripts\/|\.\/scripts\/)(\s|$)/
 SUDO = /(^|[\s;&|(`])sudo(\s|$)/

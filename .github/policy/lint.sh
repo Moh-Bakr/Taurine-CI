@@ -43,7 +43,11 @@ fetch https://github.com/zizmorcore/zizmor/releases/download/v1.30.1/zizmor-x86_
 tar xzf "${tools}/actionlint.tar.gz" -C "${tools}" actionlint
 tar xzf "${tools}/zizmor.tar.gz" -C "${tools}" zizmor
 "${tools}/actionlint" -version | head -n 1
-"${tools}/actionlint" -ignore 'SC2016:' -ignore 'SC2129:'
+# - actionlint 1.7.12 (the latest release) does not know GitHub's `cache-mode` job and workflow
+#   key and reports it as an unexpected key. Exactly that message is ignored, by an anchored
+#   pattern; every other unknown key, and every other syntax-check finding, still fails.
+"${tools}/actionlint" -ignore 'SC2016:' -ignore 'SC2129:' \
+  -ignore '^unexpected key "cache-mode" for "(job|workflow)" section\. '
 workflows=()
 while IFS= read -r -d '' file; do
   workflows+=("${file}")
