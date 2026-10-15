@@ -183,6 +183,29 @@ printf '%s\n' "${deferred_results[@]}" | grep -qF 'sources gate code on a legacy
 reset_case
 dbx_core_legacy_tls_pass '{"packages":[{"name":"dbx-core","manifest_path":"/nonexistent-dir/Cargo.toml","features":{"legacy-tls":["dep:openssl"]}}]}'
 [[ "${deferred_failed}" -eq 0 && -s "${calls}" ]]   # live: the source tree is never consulted
+# Gates the previous search missed: a build script reading CARGO_FEATURE_LEGACY_TLS, a gate in an
+# `include!`d non-.rs file, a gate split across lines, and a symlink (which fails closed). Each
+# tree is otherwise clean and declares the feature empty, so only the gate or the symlink can
+# change the outcome: a found gate runs the pass, a symlink fails closed.
+mkdir -p "${fixture}/g-build/src" "${fixture}/g-include/src" "${fixture}/g-split/src" "${fixture}/g-link/src" "${fixture}/g-link/real"
+printf 'pub fn nothing_here() {}\n' | tee "${fixture}/g-build/src/lib.rs" "${fixture}/g-include/src/lib.rs" \
+  "${fixture}/g-split/src/lib.rs" "${fixture}/g-link/src/lib.rs" >/dev/null
+printf 'fn main() { let _ = std::env::var("CARGO_FEATURE_LEGACY_TLS"); }\n' > "${fixture}/g-build/build.rs"
+printf 'include!("generated.inc");\n' > "${fixture}/g-include/src/lib.rs"
+printf '#[cfg(feature = "legacy-tls")]\npub fn gated() {}\n' > "${fixture}/g-include/src/generated.inc"
+printf '#[cfg(feature\n    = "legacy-tls")]\npub fn gated() {}\n' > "${fixture}/g-split/src/lib.rs"
+ln -s "${fixture}/g-link/real" "${fixture}/g-link/src/linked"
+for tree in g-build g-include g-split; do
+  reset_case
+  dbx_core_legacy_tls_pass "$(meta_for '{"legacy-tls":[]}' "${fixture}/${tree}")"
+  [[ "${deferred_failed}" -eq 0 && -s "${calls}" && "$(row_count)" -eq 1 ]] \
+    || { echo "the gate in ${tree} was not found (the pass should have run)" >&2; exit 1; }
+  grep -qE '^rust-dbx-core-legacy-tls-tests\|env RUST_MIN_STACK=33554432 cargo test .*--features legacy-tls ' "${calls}"
+done
+reset_case
+dbx_core_legacy_tls_pass "$(meta_for '{"legacy-tls":[]}' "${fixture}/g-link")"
+[[ "${deferred_failed}" -eq 1 && ! -s "${calls}" && "$(row_count)" -eq 1 ]]
+printf '%s\n' "${deferred_results[@]}" | grep -qF 'sources could not be searched for legacy-tls gates'
 for dir in "${fixture}/does-not-exist"; do
   reset_case
   dbx_core_legacy_tls_pass "$(meta_for '{"legacy-tls":[]}' "${dir}")"
