@@ -13,6 +13,8 @@ protected_source_workflows=(
   ".github/workflows/select-concerns.yml"
   ".github/workflows/macos-validation.yml"
   ".github/workflows/windows-validation-concern.yml"
+  # The macOS matrix job becomes this reusable workflow (docs/untrusted-readonly-cache.md, section 6).
+  ".github/workflows/macos-validation-concern.yml"
   ".github/workflows/android-validation.yml"
   ".github/workflows/ios-validation.yml"
   ".github/workflows/orchestrate-validation.yml"
@@ -27,6 +29,7 @@ protected_source_workflows=(
 )
 reusable_protected_workflows=(
   ".github/workflows/windows-validation-concern.yml"
+  ".github/workflows/macos-validation-concern.yml"
   ".github/workflows/linux-validation-concern.yml"
   ".github/workflows/select-concerns.yml"
   ".github/workflows/live-proof-arm.yml"
@@ -34,9 +37,33 @@ reusable_protected_workflows=(
 )
 protected_dispatch_workflows=(
   ".github/workflows/windows-validation.yml"
+  # macOS is classified by shape (see classify_workflow): while its matrix job is inline it holds the
+  # source-read environment and is checked as a source workflow; once the job moves to the reusable
+  # concern workflow it has none and is checked as a dispatcher, exactly like Windows.
+  ".github/workflows/macos-validation.yml"
   ".github/workflows/linux-validation.yml"
   # Dispatch-only: validates the engine selection and fans out to live-proof-arm.yml.
   ".github/workflows/live-proofs.yml"
   # Dispatch-only: binds a PG8 measurement request and fans out to its protected arm.
   ".github/workflows/pg8-measurement.yml"
 )
+
+# classify_workflow FILE: prints `source` (check_protected_source) or `dispatcher` (check_dispatcher).
+# A workflow in protected_source_workflows is a source workflow, except one that is also listed in
+# protected_dispatch_workflows and has no inline environment: that is a pure dispatcher whose source
+# jobs live in a reusable concern workflow. Any other protected source workflow with no environment
+# stays a source workflow, so check_protected_source still refuses it.
+classify_workflow() {
+  local file="$1" candidate in_source=0 in_dispatch=0
+  for candidate in "${protected_source_workflows[@]}"; do
+    [[ "${file}" == "${candidate}" || "${file}" == "./${candidate}" ]] && in_source=1
+  done
+  for candidate in "${protected_dispatch_workflows[@]}"; do
+    [[ "${file}" == "${candidate}" || "${file}" == "./${candidate}" ]] && in_dispatch=1
+  done
+  if (( in_source )) && ! { (( in_dispatch )) && ! grep -qE '^    environment:' "${file}"; }; then
+    echo source
+  else
+    echo dispatcher
+  fi
+}

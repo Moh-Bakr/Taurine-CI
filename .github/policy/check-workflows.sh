@@ -51,16 +51,7 @@ while IFS= read -r -d '' workflow; do
     continue
   fi
 
-  protected_source=0
-  for protected_workflow in "${protected_source_workflows[@]}"; do
-    if [[ "$workflow" == "$protected_workflow" || "$workflow" == "./$protected_workflow" ]]; then
-      protected_source=1
-      break
-    fi
-  done
-
-
-  if (( protected_source )); then
+  if [[ "$(classify_workflow "$workflow")" == source ]]; then
     check_protected_source "$workflow"
   else
     check_dispatcher "$workflow"

@@ -796,6 +796,50 @@ echo 'cache-mode real-tree fixtures: the reviewed Linux and Windows dispatchers 
 printf 'name: p\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted"\n' > "${composite_probe}"
 (source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action "${composite_probe}") >/dev/null 2>&1 || { echo 'a composite that only reads the cache listing endpoint should pass the composite rules' >&2; exit 1; }
 
+# Classification of the macOS workflow by shape (workflow-lists.sh): inline environment means a
+# source workflow, none means a pure dispatcher; no other protected source workflow gains that
+# freedom, so check_protected_source still refuses an environment-less one.
+classify() { (source "${policy}/workflow-lists.sh"; classify_workflow "$1"); }
+classify_root="${base}/classify"
+mkdir -p "${classify_root}/.github/workflows"
+printf 'jobs:\n  validate:\n    environment: source-read\n' > "${classify_root}/inline.yml"
+printf 'jobs:\n  validate-main:\n    uses: ./.github/workflows/macos-validation-concern.yml\n' > "${classify_root}/dispatcher.yml"
+(cd "${classify_root}" && mkdir -p .github/workflows && cp inline.yml .github/workflows/macos-validation.yml && [[ "$(classify .github/workflows/macos-validation.yml)" == source ]]) || { echo 'an inline macOS workflow must be classified as a source workflow' >&2; exit 1; }
+(cd "${classify_root}" && cp dispatcher.yml .github/workflows/macos-validation.yml && [[ "$(classify .github/workflows/macos-validation.yml)" == dispatcher ]]) || { echo 'an environment-less macOS workflow must be classified as a dispatcher' >&2; exit 1; }
+(cd "${classify_root}" && cp dispatcher.yml .github/workflows/source-read.yml && [[ "$(classify .github/workflows/source-read.yml)" == source ]]) || { echo 'an environment-less source-read workflow must stay a source workflow' >&2; exit 1; }
+(cd "${classify_root}" && cp inline.yml .github/workflows/windows-validation.yml && [[ "$(classify .github/workflows/windows-validation.yml)" == dispatcher ]]) || { echo 'the Windows dispatcher must stay a dispatcher' >&2; exit 1; }
+(cd "${classify_root}" && cp dispatcher.yml .github/workflows/macos-validation-concern.yml && [[ "$(classify .github/workflows/macos-validation-concern.yml)" == source ]]) || { echo 'the macOS concern workflow must be a source workflow' >&2; exit 1; }
+# The macOS dispatcher must call the reviewed concern workflow once it is a dispatcher.
+mac_dispatcher="${classify_root}/.github/workflows/macos-validation.yml"
+write_mac() { # called workflow
+  cat > "${mac_dispatcher}" <<YAML
+name: macos
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        required: true
+permissions: {}
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "[[ \"\${REQUESTED_SOURCE_SHA}\" =~ ^[0-9a-fA-F]{40}\$ ]]"
+  validate-main:
+    uses: ./.github/workflows/$1
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: \${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+YAML
+}
+write_mac macos-validation-concern.yml
+(cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/workflow-lists.sh" && source "${policy}/check-cache-policy.sh" && source "${policy}/check-dispatchers.sh" && check_dispatcher .github/workflows/macos-validation.yml) >/dev/null 2>"${base}/err" || { echo 'a macOS dispatcher calling the reviewed concern workflow should pass' >&2; cat "${base}/err" >&2; exit 1; }
+write_mac windows-validation-concern.yml
+if (cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/workflow-lists.sh" && source "${policy}/check-cache-policy.sh" && source "${policy}/check-dispatchers.sh" && check_dispatcher .github/workflows/macos-validation.yml) >/dev/null 2>"${base}/err"; then
+  echo 'a macOS dispatcher calling another workflow should be refused' >&2; exit 1
+fi
+grep -qF 'must call the reviewed concern workflow' "${base}/err" || { echo 'the macOS dispatcher refusal has the wrong message' >&2; cat "${base}/err" >&2; exit 1; }
+echo 'macOS classification fixtures: an inline job is a source workflow, an environment-less macOS workflow is a dispatcher that must call its reviewed concern workflow'
+
 # P8: actionlint lacks the cache-mode key, so lint.sh ignores exactly that message and nothing else.
 lint_ignores() { grep -oE "\-ignore '[^']*'" "$1"; }
 expected_ignores="$(printf '%s\n' "-ignore 'SC2016:'" "-ignore 'SC2129:'" "-ignore '^unexpected key \"cache-mode\" for \"(job|workflow)\" section\\. '")"

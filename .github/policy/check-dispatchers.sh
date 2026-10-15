@@ -59,6 +59,10 @@ check_dispatcher() {
     echo "The protected Windows dispatcher must call the reviewed concern workflow: $workflow" >&2
     exit 1
   fi
+  if [[ "$workflow" == ".github/workflows/macos-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/macos-validation-concern\.yml' "$workflow"; then
+    echo "The protected macOS dispatcher must call the reviewed concern workflow: $workflow" >&2
+    exit 1
+  fi
   if [[ "$workflow" == ".github/workflows/linux-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/linux-validation-concern\.yml' "$workflow"; then
     echo "The protected Linux dispatcher must call the reviewed concern workflow: $workflow" >&2
     exit 1
