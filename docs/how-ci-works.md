@@ -736,6 +736,19 @@ the literal over the constant and read the diff. `test-structure.sh` holds the f
 fixtures and `test-mutations.sh` the mutations. This guards against accidental or unreviewed
 drift; as with the rest of the policy, a pull request that edits the manifest and the tree together is caught only by review.
 
+## Action reference check
+
+`check-action-uses.rb` holds every `uses` to a full commit SHA (remote actions) and to the exact
+reviewed list in `action-allowlist.rb` (one line per entry, so adding a reviewed local action is a
+one-line change). It reads the parsed YAML, not its text: it collects `jobs.<id>.uses`,
+`jobs.<id>.steps[*].uses` and a composite's `runs.steps[*].uses`, so quoted or escaped keys, flow
+mappings, a value on the next line, a space before the colon and a complex key are all read as the
+`uses` they are. It refuses aliases, duplicate mapping keys (`yaml-guard.rb`, shared with
+`check-structure.rb`), a load error, a non-mapping job or step and a non-string value, and a textual
+tripwire fails the file when more lines look like a `uses` key than the walk found.
+`test-action-uses.sh` carries the fixtures (the spellings a grep missed, each refused) and mutates
+every guard in a copy, failing if a mutant survives.
+
 ## Changing the policy
 
 A pull request carries its own `.github/policy/`, so on its own the policy run would let a
