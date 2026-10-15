@@ -281,4 +281,5 @@ jobs:
     permissions:
       contents: read
     name: Base policy
-    uses: ./.github/workflows/base-policy.yml
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.
+    uses: ./.github/workflows/base-policy.yml  # zizmor: ignore[self-repository]
