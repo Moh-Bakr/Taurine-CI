@@ -848,6 +848,55 @@ if (cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/work
   echo 'a dispatcher with neither the SHA regexp nor the identity proof should be refused' >&2; exit 1
 fi
 grep -qF 'must require a full source SHA' "${base}/err" || { echo 'the missing-SHA refusal has the wrong message' >&2; cat "${base}/err" >&2; exit 1; }
+# Classification and the dispatcher rules read the parsed structure, never indentation: a job
+# re-indented by two more spaces parses identically, so it must still classify as source and still
+# be refused by the dispatcher rules (review of the macOS precursor).
+reindented="${classify_root}/reindented.yml"
+printf 'jobs:\n    validate-main:\n        uses: ./.github/workflows/macos-validation-concern.yml\n    validate:\n          environment: source-read\n          runs-on: macos-15\n' > "${reindented}"
+[[ "$(ruby "${policy}/classify-workflow.rb" "${reindented}")" == source ]] || { echo 'a re-indented inline source job must classify as source' >&2; exit 1; }
+(cd "${classify_root}" && cp "${reindented}" .github/workflows/macos-validation.yml && [[ "$(classify .github/workflows/macos-validation.yml)" == source ]]) || { echo 'a re-indented inline source job in the macOS workflow must stay a source workflow (classify_workflow)' >&2; exit 1; }
+printf 'jobs:\n  validate-main:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n' > "${reindented}"
+[[ "$(ruby "${policy}/classify-workflow.rb" "${reindented}")" == dispatcher ]] || { echo 'a dispatcher that only passes the key to a reusable call must classify as a dispatcher' >&2; exit 1; }
+source_cases=(
+  $'jobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: ./.github/actions/source-checkout\n'
+  $'jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: echo\n        env:\n          K: ${{ secrets.OTHER }}\n'
+  $'jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: echo ${{ vars.SOURCE_READER_APP_ID }}\n'
+  $'jobs:\n  a:\n    uses: ./.github/workflows/x.yml\n    with:\n      k: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n'
+  $'env:\n  K: ${{ secrets.X }}\njobs:\n  a:\n    uses: ./.github/workflows/x.yml\n'
+  $'jobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: actions/create-github-app-token@abc\n'
+  $'jobs: [not, a, mapping\n'
+)
+for case_text in "${source_cases[@]}"; do
+  printf '%s' "${case_text}" > "${reindented}"
+  [[ "$(ruby "${policy}/classify-workflow.rb" "${reindented}")" == source ]] || { echo "a workflow with source access must classify as source: ${case_text}" >&2; exit 1; }
+done
+dispatcher_check() { # label needle yaml
+  printf '%s' "$3" > "${mac_dispatcher}"
+  if ruby "${policy}/dispatcher-structure.rb" "${mac_dispatcher}" >/dev/null 2>"${base}/err"; then echo "dispatcher fixture '$1' should be refused" >&2; exit 1; fi
+  grep -qF -- "$2" "${base}/err" || { echo "dispatcher fixture '$1' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+dispatch_head=$'name: d\non:\n  workflow_dispatch:\n    inputs:\n      source_sha:\n        required: true\npermissions: {}\njobs:\n'
+sha_job=$'  plan:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: "[[ \\"${S}\\" =~ ^[0-9a-fA-F]{40}$ ]]"\n'
+good_call=$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n'
+printf '%s' "${dispatch_head}${sha_job}${good_call}" > "${mac_dispatcher}"
+ruby "${policy}/dispatcher-structure.rb" "${mac_dispatcher}" || { echo 'the reviewed dispatcher shape should pass the structural rules' >&2; exit 1; }
+dispatcher_check 'a re-indented inline source job' 'must not enter an environment' "${dispatch_head}$(printf '%s' "${sha_job}${good_call}"$'  validate:\n    environment: source-read\n    runs-on: macos-15\n' | sed 's/^/  /')"$'\n'
+dispatcher_check 'an inline source job beside the concern call' 'must not enter an environment' "${dispatch_head}${sha_job}${good_call}"$'  validate:\n    environment: source-read\n    runs-on: macos-15\n'
+dispatcher_check 'a call passing another secret' 'must pass exactly one secret' "${dispatch_head}${sha_job}"$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n      OTHER: ${{ secrets.OTHER }}\n'
+dispatcher_check 'a call passing no secret' 'must pass exactly one secret' "${dispatch_head}${sha_job}"$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n'
+dispatcher_check 'a call inheriting secrets' 'must not inherit secrets' "${dispatch_head}${sha_job}"$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets: inherit\n'
+dispatcher_check 'a call to a third-party workflow' 'calls only local reusable workflows' "${dispatch_head}${sha_job}"$'  v:\n    uses: owner/repo/.github/workflows/x.yml@main\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n'
+dispatcher_check 'a step reading a secret' 'must not read a secret or variable' "${dispatch_head}${sha_job}${good_call}"$'  other:\n    runs-on: x\n    steps:\n      - run: echo ${{ secrets.X }}\n'
+dispatcher_check 'a call reading a secret in with' 'outside its secrets map' "${dispatch_head}${sha_job}"$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n    with:\n      k: ${{ secrets.X }}\n'
+printf '%s' $'name: d\non:\n  workflow_dispatch:\n  push:\npermissions: {}\njobs:\n  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n' > "${mac_dispatcher}"
+if ruby "${policy}/dispatcher-structure.rb" "${mac_dispatcher}" >/dev/null 2>"${base}/err"; then echo 'a dispatcher with a push trigger should be refused' >&2; exit 1; fi
+# Relying on the identity proof for the SHA is allowed only for a workflow registered in check-dispatch-contracts.rb.
+identity_dispatcher="${classify_root}/.github/workflows/unregistered.yml"
+printf '%s' "${dispatch_head}"$'  plan:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: ruby .github/policy/dispatch-identity.rb\n'"${good_call}" > "${identity_dispatcher}"
+if ruby "${policy}/dispatcher-structure.rb" "${identity_dispatcher}" >/dev/null 2>"${base}/err"; then echo 'an unregistered dispatcher relying on the identity proof should be refused' >&2; exit 1; fi
+grep -qF 'registered in check-dispatch-contracts.rb' "${base}/err" || { echo 'the unregistered identity refusal has the wrong message' >&2; cat "${base}/err" >&2; exit 1; }
+cp "${identity_dispatcher}" "${classify_root}/.github/workflows/macos-validation.yml"
+ruby "${policy}/dispatcher-structure.rb" "${classify_root}/.github/workflows/macos-validation.yml" || { echo 'the registered macOS dispatcher may rely on the identity proof' >&2; exit 1; }
 echo 'macOS classification fixtures: an inline job is a source workflow, an environment-less macOS workflow is a dispatcher that must call its reviewed concern workflow'
 
 # P8: actionlint lacks the cache-mode key, so lint.sh ignores exactly that message and nothing else.
