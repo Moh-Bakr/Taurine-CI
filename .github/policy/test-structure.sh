@@ -33,10 +33,12 @@ fresh
 ruby "${check}" "${dir}/t" >/dev/null || { echo 'the reviewed tree fails its own structure check' >&2; exit 1; }
 echo 'accepted  the reviewed tree'
 
-# --print reproduces the constant in the script (the manifest is not stale or hand-drifted).
-ruby "${check}" --print "${dir}/t" | diff -q - <(sed -n '/^CONTROL_PLANE_MANIFEST/,/\.freeze$/p' "${check}") >/dev/null \
-  || { echo 'CONTROL_PLANE_MANIFEST differs from `check-structure.rb --print`' >&2; exit 1; }
-echo 'accepted  the manifest equals the printed structure'
+# The constant equals the structure of the tree (compared as JSON; the Ruby literal's formatting
+# differs between Ruby versions, so --print is for humans only).
+actual_json="$(ruby "${check}" --json-actual "${dir}/t")"
+[[ "${actual_json}" == '{"required_check"'* && "${actual_json}" == "$(ruby "${check}" --json-manifest "${dir}/t")" ]] \
+  || { echo 'CONTROL_PLANE_MANIFEST differs from the structure of the tree' >&2; exit 1; }
+echo 'accepted  the manifest equals the tree structure'
 
 fresh; rm "${dir}/t/.github/workflows/cache-prune.yml"
 expect_reject 'a workflow deleted' 'in the manifest but missing from the tree'

@@ -30,6 +30,8 @@ require 'json'
 require 'yaml'
 
 print_mode = ARGV.delete('--print')
+json_actual = ARGV.delete('--json-actual')
+json_manifest = ARGV.delete('--json-manifest')
 root = ARGV.first || '.'
 FORBIDDEN_TRIGGERS = %w[pull_request_target workflow_run].freeze
 
@@ -190,6 +192,16 @@ def actual_structure(root)
 end
 
 actual = actual_structure(root)
+
+# Both as JSON, so a fixture can compare them without depending on how this Ruby formats a hash.
+if json_actual
+  puts JSON.generate({ 'required_check' => CONTROL_PLANE_MANIFEST['required_check'] }.merge(actual))
+  exit 0
+end
+if json_manifest
+  puts JSON.generate(CONTROL_PLANE_MANIFEST)
+  exit 0
+end
 
 if print_mode
   require 'pp'
