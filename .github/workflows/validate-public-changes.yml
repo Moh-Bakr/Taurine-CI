@@ -338,8 +338,7 @@ jobs:
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
-          # Stopping the manager can leave socket files behind; only a listener that accepts a
-          # connection matters. Log the listeners, then fail if one does.
+          # Stopping it can leave socket files behind; only a listener that accepts matters.
           for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
             echo "listeners on ${socket}: $(sudo ss -xlpn | grep -F -- "${socket}" || echo none)"
             if /usr/bin/ruby --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
@@ -357,14 +356,12 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
 
-      # Rejecting fixtures with RUBYOPT, RUBYLIB, BASH_ENV and a PATH shim planted: the step must
-      # still reject.
+      # Planted RUBYOPT, RUBYLIB, BASH_ENV and a PATH shim: the step must still reject.
       - name: Test that planted environment cannot make the base policy pass
         shell: bash
         run: bash .github/policy/test-base-policy-env.sh
 
-      # The pin, process containment and loader scrub, each broken by its own fixture. /proc exists
-      # here, so the daemon-escape fixture runs rather than reporting that it could not.
+      # The pin, process containment and loader scrub, each broken by its own fixture.
       - name: Test the base-policy job's pin, process containment and loader scrub
         shell: bash
         run: bash .github/policy/test-base-policy-isolation.sh
@@ -407,8 +404,7 @@ jobs:
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
-          # Stopping the manager can leave socket files behind; only a listener that accepts a
-          # connection matters. Log the listeners, then fail if one does.
+          # Stopping it can leave socket files behind; only a listener that accepts matters.
           for socket in "/run/user/${uid}/bus" "/run/user/${uid}/systemd/private"; do
             echo "listeners on ${socket}: $(sudo ss -xlpn | grep -F -- "${socket}" || echo none)"
             if /usr/bin/ruby --disable-gems -rsocket -e 'UNIXSocket.new(ARGV[0]).close' "${socket}" 2>/dev/null; then
@@ -431,9 +427,8 @@ jobs:
           set -euo pipefail
           node_dest=/usr/bin/node
           if [[ -e "${node_dest}" || -L "${node_dest}" ]]; then
-            # Kept only if it is a real file, and it and its directory belong to root with no group
-            # or other write: a link, or anything a job user could change, would let pull-request
-            # code replace node between base tests.
+            # Kept only if a real file that it and its directory leave to root alone: a link, or
+            # anything a job user could change, would let pull-request code replace node.
             if [[ -n "$(find "${node_dest}" -maxdepth 0 -type f -user root ! -perm -g+w ! -perm -o+w)" &&
                   -n "$(find "$(dirname "${node_dest}")" -maxdepth 0 -type d -user root ! -perm -g+w ! -perm -o+w)" ]]; then
               echo "${node_dest} is already installed and only root can change it; leaving it as it is"
@@ -446,10 +441,9 @@ jobs:
             sudo install -o root -g root -m 0755 "${node_bin}" "${node_dest}"
           fi
 
-      # Base tests extract and execute steps from this pull request's copy of the workflow, so
-      # pull-request code runs inside this job. Take away the runner's passwordless sudo and
-      # Docker before any of it does, with the same composite the source-validation jobs use
-      # before project code; the step below asserts sudo is gone.
+      # Base tests execute steps from this pull request's copy of the workflow, so its code runs
+      # here. Drop sudo and Docker first, with the composite the source jobs use; the step below
+      # asserts sudo is gone.
       - name: Remove root before the base policy runs
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/drop-root  # zizmor: ignore[self-repository]
@@ -484,10 +478,9 @@ jobs:
           cp -R "${base}/.github/policy" .github/policy
           diff -rq "${base}/.github/policy" .github/policy > /dev/null || { echo "::error::the base policy was not copied faithfully"; exit 1; }
 
-          # Only the allow-listed names reach a base script, or any command this step runs on its
-          # behalf. The loader variables are named here because they change what every process
-          # loads before its first instruction, and are asserted absent below rather than merely
-          # left out of the list.
+          # Only the allow-listed names reach a base script, or any command this step runs for it.
+          # The loader variables are asserted absent below, not merely left out: they change what
+          # every process loads before its first instruction.
           ruby_bin=/usr/bin/ruby
           bash_bin=/bin/bash
           for tool in "${ruby_bin}" "${bash_bin}" /usr/bin/env /usr/bin/git; do
@@ -576,9 +569,7 @@ jobs:
           }
           log_listeners
           assert_nothing_deferred || exit 1
-          # Defence in depth: `env -i` above already starts every base script with nothing but the
-          # allow-listed names, so no loader variable can reach one. This asserts it rather than
-          # relying on it.
+          # Defence in depth: `env -i` already keeps loader variables out; this asserts it.
           loaders="$("${scrub[@]}" /usr/bin/env | grep -E '^(LD_|DYLD_)' || true)"
           [[ -z "${loaders}" ]] || { echo "::error::loader variables reached the base policy environment: ${loaders%%=*}"; exit 1; }
 
