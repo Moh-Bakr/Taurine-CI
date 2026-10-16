@@ -104,6 +104,13 @@ jobs:
         shell: bash
         run: bash .github/policy/test-sanitizers.sh
 
+      # The OpenSSL door's shell checks: gate, artefact proof, built graph, binding, the
+      # base-policy toolchain copy and the Windows build tools. Its own step, not a sub-run of
+      # another test, because it reads the real workflows that the mutation fixtures replace.
+      - name: Test the OpenSSL door's shell checks
+        shell: bash
+        run: bash .github/policy/test-shell-artefact.sh
+
       - name: Test the compiled dependency cache strip against hostile outputs
         shell: bash
         run: bash .github/policy/test-rust-target-cache.sh
