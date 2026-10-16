@@ -62,6 +62,20 @@ expect_guard "${entry_guard}" BASE_PASS_RESULT 'the entrypoint guard'
   || fail 'the policy job does not need exactly the base-policy call'
 [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["if"]')" == '${{ always() }}' ]] \
   || fail 'the policy job does not always run, so a failed base pass could skip it'
+# The guard is the policy job's FIRST step: before the checkout and before any step that runs this
+# pull request's scripts, which can export BASH_ENV, PATH or RUBYOPT through GITHUB_ENV and
+# GITHUB_PATH and so change how a later step behaves, the guard included.
+[[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["name"]')" == 'Require the base-policy workflow to have passed' ]] \
+  || fail 'the entrypoint guard is not the first step of the policy job'
+# The guard step carries only these keys, with this shell and this env: `shell: true {0}` would run the
+# script as an argument to `true`, and an env of BASE_PASS_RESULT: success would read a constant, either
+# way the guard passes whatever the base pass did.
+[[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first.keys.sort.inspect')" == '["env", "if", "name", "run", "shell"]' ]] \
+  || fail 'the entrypoint guard step has keys other than name, if, shell, env and run'
+[[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["shell"]')" == bash ]] \
+  || fail 'the entrypoint guard step does not use exactly shell: bash'
+[[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["env"].to_a.inspect')" == '[["BASE_PASS_RESULT", "${{ needs.base-pass.result }}"]]' ]] \
+  || fail 'the entrypoint guard step env is not exactly BASE_PASS_RESULT: needs.base-pass.result'
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy-result"]["needs"].inspect')" == '["base-policy-fixtures", "base-policy"]' ]] \
   || fail 'the result job does not need both base-policy jobs'
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy-result"]["if"]')" == '${{ always() }}' ]] \
@@ -89,7 +103,12 @@ no_unsafe() {
   [[ -z "${got}" ]] || fail "the base pass could be skipped or its failure ignored (${2}: ${got})"
 }
 no_unsafe "${entry}" base-pass 'if,continue-on-error,environment,secrets' ''
-no_unsafe "${entry}" policy 'continue-on-error,environment' 'continue-on-error'
+# The guard's job runs on the plain hosted runner and in no container or service: a digest-pinned image can
+# carry ENV BASH_ENV or RUBYOPT, or a ruby of its own, that changes how the guard behaves, and another
+# runner label changes what runs it.
+no_unsafe "${entry}" policy 'continue-on-error,environment,container,services' 'continue-on-error'
+[[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["runs-on"]')" == ubuntu-24.04 ]] \
+  || fail 'the policy job does not run on exactly ubuntu-24.04'
 no_unsafe "${reusable}" base-policy 'continue-on-error,environment' 'if,continue-on-error'
 no_unsafe "${reusable}" base-policy-fixtures 'if,continue-on-error,environment' 'if,continue-on-error'
 no_unsafe "${reusable}" base-policy-result 'continue-on-error,environment' 'continue-on-error'

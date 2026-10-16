@@ -37,6 +37,25 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
+      # FIRST, before the checkout and before any step that runs this pull request's scripts: those can
+      # append to GITHUB_ENV or GITHUB_PATH (BASH_ENV, PATH, RUBYOPT) and so change how any LATER step's
+      # shell behaves, this guard included. The base-policy pass runs in its own workflow (below), so
+      # the result it reached cannot be influenced by anything the checks here export; this step keeps
+      # the required status check honest: it fails when that workflow did not pass. It needs nothing
+      # from the repository. test-base-policy-result.sh pins its position.
+      - name: Require the base-policy workflow to have passed
+        if: ${{ always() }}
+        shell: bash
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}
+        run: |
+          set -euo pipefail
+          if [[ "${BASE_PASS_RESULT}" != 'success' ]]; then
+            echo "::error::the base-policy workflow did not pass (result: ${BASE_PASS_RESULT})"
+            exit 1
+          fi
+          echo 'base policy: the base-policy workflow passed'
+
       - name: Check out public policy repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,13 +77,18 @@ jobs:
 
       # Rules for every workflow and composite: SHA pins, permissions: {}, no
       # pull_request_target, no secrets: inherit, source-checkout first in protected jobs.
-      - name: Check the universal workflow rules, the control-plane structure and the Action references
+      - name: Check the universal workflow rules and the Action references
         shell: bash
         run: |
           ruby .github/policy/check-universal.rb
-          ruby .github/policy/check-structure.rb --strict
           bash .github/policy/test-structure.sh
           bash .github/policy/test-action-uses.sh
+
+      # Dedicated and exactly one command (check-strict-structure.rb asserts it): the strict form of the
+      # structure check, where a transitional alternative left in the manifest is an error.
+      - name: Check the control-plane structure, strictly
+        shell: bash
+        run: ruby .github/policy/check-structure.rb --strict
 
       # Trust tiers: reviewed Actions, token revocation order, cache, secrets, dispatchers.
       - name: Enforce immutable reviewed Actions and safe workflow features
@@ -263,21 +287,6 @@ jobs:
       - name: Check the egress allow-list
         shell: bash
         run: bash .github/policy/check-egress-allowlist.sh
-      # The base-policy pass runs in its own workflow (below), so the result it reached cannot be
-      # influenced by anything the checks above exported. This step keeps the required status
-      # check honest: it fails when that workflow did not pass.
-      - name: Require the base-policy workflow to have passed
-        if: ${{ always() }}
-        shell: bash
-        env:
-          BASE_PASS_RESULT: ${{ needs.base-pass.result }}
-        run: |
-          set -euo pipefail
-          if [[ "${BASE_PASS_RESULT}" != 'success' ]]; then
-            echo "::error::the base-policy workflow did not pass (result: ${BASE_PASS_RESULT})"
-            exit 1
-          fi
-          echo 'base policy: the base-policy workflow passed'
 
   # The base commit's policy run against this pull request's tree, and the fixtures that test the
   # step that runs it, in base-policy.yml (see its header). `policy` requires this call's result.

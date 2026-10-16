@@ -26,7 +26,7 @@ missed=0
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb check-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb check-structure.rb check-strict-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
     # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
@@ -274,6 +274,174 @@ mutation '12. a protected dispatcher widened to a push trigger' "${linux}" 'on:
   workflow_dispatch:' 'on:
   push:
   workflow_dispatch:'
+mutation '12. the policy job no longer runs the structure check with --strict' "${public}" 'check-structure.rb --strict' 'check-structure.rb'
+SC='        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. an exit 0 before the strict command' "${public}" "${SC}" '        run: |
+          exit 0
+          ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. set +e before the strict command' "${public}" "${SC}" '        run: |
+          set +e
+          ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict command made best-effort' "${public}" "${SC}" '        run: ruby .github/policy/check-structure.rb --strict || true
+'
+mutation '13. the strict step made if: false' "${public}" "${SC}" '        if: ${{ false }}
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict command inside a heredoc' "${public}" "${SC}" "        run: |
+          cat <<'EOF'
+          ruby .github/policy/check-structure.rb --strict
+          EOF
+"
+mutation '13. the strict command in a function that is never called' "${public}" "${SC}" '        run: |
+          strict() { ruby .github/policy/check-structure.rb --strict; }
+'
+mutation '13. an exit trap before the strict command' "${public}" "${SC}" "        run: |
+          trap 'exit 0' EXIT
+          ruby .github/policy/check-structure.rb --strict
+"
+mutation '13. the strict step given another shell invocation (the shell is replaced, not duplicated)' "${public}" '      - name: Check the control-plane structure, strictly
+        shell: bash
+        run: ruby' '      - name: Check the control-plane structure, strictly
+        shell: bash --noprofile --norc {0}
+        run: ruby'
+mutation '13. the strict step given an env block' "${public}" "${SC}" '        env:
+          BASH_ENV: /dev/null
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict step made continue-on-error' "${public}" "${SC}" '        continue-on-error: true
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. env at the workflow level of the policy workflow (BASH_ENV)' "${public}" 'concurrency:
+  group: public-policy-' 'env:
+  BASH_ENV: /dev/null
+
+concurrency:
+  group: public-policy-'
+mutation '13. defaults at the workflow level of the policy workflow' "${public}" 'concurrency:
+  group: public-policy-' 'defaults:
+  run:
+    working-directory: /tmp
+
+concurrency:
+  group: public-policy-'
+mutation '13. env on the policy job (RUBYOPT)' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    env:
+      RUBYOPT: -e0
+'
+mutation '13. defaults on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    defaults:
+      run:
+        working-directory: /tmp
+'
+mutation '13. a second YAML document appended to a workflow' .github/workflows/cache-prune.yml 'name: Prune stale caches (scheduled)
+' 'name: Prune stale caches (scheduled)
+---
+ignored: true
+---
+'
+mutation '13. a digest-pinned container on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    container: mcr.example/runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation '13. a service on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    services:
+      db:
+        image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation '13. the policy job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: self-hosted
+    timeout-minutes: 25
+    steps:'
+mutation '13. the policy job on another hosted label' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:'
+mutation '13. a command chained onto an exempt helper line in test-structure.sh' .github/policy/test-structure.sh 'NOT rejected under --strict: $1" >&2; exit 1; fi' 'NOT rejected under --strict: $1" >&2; exit 1; fi; ruby "${check}" --strict "${dir}/t" >/dev/null'
+mutation '13. --strict run on the real tree by another policy script (the base pass would run it)' .github/policy/test-policy.sh 'set -euo pipefail
+' 'set -euo pipefail
+ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. --strict run on the real tree inside test-structure.sh' .github/policy/test-structure.sh "echo 'accepted  the reviewed tree'" "ruby \"\${check}\" --strict \"\${dir}/t\" >/dev/null
+echo 'accepted  the reviewed tree'"
+mutation '12. the policy job made conditional' "${public}" '    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    if: ${{ github.event_name == '"'"'push'"'"' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:'
+mutation '12. the strict structure step made conditional' "${public}" '      - name: Check the control-plane structure, strictly
+        shell: bash' "      - name: Check the control-plane structure, strictly
+        if: \${{ false }}
+        shell: bash"
+
+# mutation_by CHECKER LABEL FILE OLD NEW: like mutation, but the named check alone must refuse the tree.
+# test-base-policy-result.sh pins the shape of base-policy.yml, which the reusable-workflow fixtures
+# (11.) deliberately replace, so it is not part of offline_policy.
+mutation_by() {
+  local checker="$1" label="$2"; shift 2
+  fresh_tree
+  while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
+  : > "${dir}/log"
+  if (cd "${dir}/tree" && bash ".github/policy/${checker}" >>"${dir}/log" 2>&1); then
+    verdict "${label}" ''
+  else
+    verdict "${label}" "${checker}"
+  fi
+}
+mutation_by test-base-policy-result.sh '14. a step ahead of the base-policy guard in the policy job' "${public}" '    steps:
+      # FIRST, before the checkout' '    steps:
+      - name: Early step
+        shell: bash
+        run: echo early
+      # FIRST, before the checkout'
+mutation_by test-base-policy-result.sh '14. the base-policy guard moved after the checkout' "${public}" '      - name: Require the base-policy workflow to have passed
+        if: ${{ always() }}' '      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Require the base-policy workflow to have passed
+        if: ${{ always() }}'
+
+mutation_by test-base-policy-result.sh '14. a digest-pinned container on the guard job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    container: mcr.example/runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation_by test-base-policy-result.sh '14. a service on the guard job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    services:
+      db:
+        image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation_by test-base-policy-result.sh '14. the guard job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: self-hosted
+    timeout-minutes: 25
+    steps:'
+
+mutation_by test-base-policy-result.sh '14. the guard step run as an argument to true (shell: true {0})' "${public}" '        shell: bash
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '        shell: true {0}
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
+mutation_by test-base-policy-result.sh '14. the guard step reading a constant (BASE_PASS_RESULT: success)' "${public}" '          BASE_PASS_RESULT: ${{ needs.base-pass.result }}
+        run: |' '          BASE_PASS_RESULT: success
+        run: |'
+mutation_by test-base-policy-result.sh '14. an extra key on the guard step (working-directory)' "${public}" '        shell: bash
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '        shell: bash
+        working-directory: /tmp
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a

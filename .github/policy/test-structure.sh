@@ -97,15 +97,33 @@ fresh; swap .github/policy/workflow-lists.sh '  ".github/workflows/ios-validatio
 ' ''
 expect_reject 'a protected workflow dropped from its trust tier' 'tier changed'
 
+# --strict is the policy job's OWN-copy mode, so it is exercised only on a synthetic tree built here:
+# the base pass runs this very script against the pull request's real tree, where a step-B tree
+# matches only the final shape while main's manifest still lists the transitional alternative, and
+# --strict would (correctly) refuse that. The helpers refuse any root that is not marked synthetic,
+# so no strict case can ever run on the real tree.
+make_synth() { # builds the synthetic tree ${dir}/s and the check copy ${dir}/v/synth.rb whose manifest matches it
+  rm -rf "${dir:?}/s" "${dir:?}/v"; mkdir -p "${dir}/s/.github/workflows" "${dir}/s/.github/policy" "${dir}/v"
+  cp "${src}/.github/workflows/validate-public-changes.yml" "${src}/.github/workflows/cache-prune.yml" "${dir}/s/.github/workflows/"
+  cp "${src}/.github/policy/workflow-lists.sh" "${dir}/s/.github/policy/"
+  : > "${dir}/s/.synthetic"
+}
+synth_runner() { # [PRUNE_JSON]: the check copy's manifest becomes the synthetic tree's structure, optionally with its cache-prune entry replaced
+  cp "${check}" "${dir}/v/synth.rb"; cp "${check%/*}/yaml-guard.rb" "${dir}/v/"
+  ruby "${check}" --json-actual "${dir}/s" > "${dir}/v/actual.json"
+  # The literal is built from JSON with inspect, not read from --print, whose formatting differs between Ruby versions.
+  PRUNE="${1:-}" ruby -rjson -e 's = File.read(ARGV[0]); m = JSON.parse(File.read(ARGV[1])); m["workflows"][".github/workflows/cache-prune.yml"] = JSON.parse(ENV["PRUNE"]) unless ENV["PRUNE"].to_s.empty?; re = /^CONTROL_PLANE_MANIFEST = \{.*?\}\.freeze$/m; abort("manifest not found") unless s.match?(re); File.write(ARGV[0], s.sub(re) { "CONTROL_PLANE_MANIFEST = #{m.inspect}.freeze" })' "${dir}/v/synth.rb" "${dir}/v/actual.json"
+}
+strict_root() { [[ -f "${dir}/s/.synthetic" && ! -e "${dir}/s/.github/policy/check-structure.rb" ]] || { echo 'a strict-mode case must run on the synthetic tree only' >&2; exit 1; }; }
 expect_strict_reject() { # LABEL MESSAGE
-  local out
-  if out="$(ruby "${runner:-${check}}" --strict "${dir}/t" 2>&1)"; then echo "NOT rejected under --strict: $1" >&2; exit 1; fi
+  local out; strict_root
+  if out="$(ruby "${dir}/v/synth.rb" --strict "${dir}/s" 2>&1)"; then echo "NOT rejected under --strict: $1" >&2; exit 1; fi
   grep -qF -- "$2" <<<"${out}" || { echo "rejected $1 for the wrong reason ($2):" >&2; echo "${out}" >&2; exit 1; }
   echo "rejected  $1"
 }
 expect_strict_accept() { # LABEL
-  local out
-  out="$(ruby "${runner:-${check}}" --strict "${dir}/t" 2>&1)" || { echo "rejected under --strict, expected accepted: $1" >&2; echo "${out}" >&2; exit 1; }
+  local out; strict_root
+  out="$(ruby "${dir}/v/synth.rb" --strict "${dir}/s" 2>&1)" || { echo "rejected under --strict, expected accepted: $1" >&2; echo "${out}" >&2; exit 1; }
   echo "accepted  $1"
 }
 
@@ -125,16 +143,23 @@ expect_accept 'step B under the base copy: the new tree matches the first altern
 # Step B under its own copy (the old alternative deleted).
 variant "${prune_old}" "${prune_new}"
 expect_accept 'step B under its own copy: the new shape alone'
+prune_old_json='{"tier":"public","triggers":["schedule","workflow_dispatch"],"jobs":["prune"]}'
+prune_new_json='{"tier":"public","triggers":["push","schedule","workflow_dispatch"],"jobs":["prune"]}'
 # --strict (the policy job's own copy) turns the lingering-alternative warning into an error, so step B
 # must have deleted its transitional alternatives; step A (tree on a non-final shape) is unaffected.
-fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dispatch:
+make_synth; swap_s() { OLD="$1" NEW="$2" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("text not found"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/s/.github/workflows/cache-prune.yml"; }
+swap_s 'workflow_dispatch:' 'workflow_dispatch:
   push:'
-variant "${prune_old}" "[${prune_new}, ${prune_old}]"
+synth_runner "[${prune_new_json}, ${prune_old_json}]"
 expect_strict_reject 'strict: step B left its transitional alternative behind' 'transitional alternative(s) remain'
-variant "${prune_old}" "${prune_new}"
+synth_runner
 expect_strict_accept 'strict: step B with the alternative deleted'
-fresh; variant "${prune_old}" "[${prune_new}, ${prune_old}]"
+make_synth; synth_runner "[${prune_new_json}, ${prune_old_json}]"
 expect_strict_accept 'strict: step A (tree still on the transitional shape)'
+# The strict helpers refuse a root that is not the synthetic tree, so no strict case can run on the real tree.
+fresh; mkdir -p "${dir}/s"; rm -f "${dir}/s/.synthetic"
+if (strict_root) 2>/dev/null; then echo 'strict_root accepted a tree that is not synthetic' >&2; exit 1; fi
+echo 'refused   a strict-mode case on a tree that is not the synthetic one'
 # A job added that is in neither alternative (linux-validation.yml, whatever its alternatives are).
 fresh; swap .github/workflows/linux-validation.yml '
 jobs:
@@ -151,6 +176,28 @@ fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dis
   pull_request:'
 variant "${prune_old}" "[${prune_new}, ${prune_old}]"
 expect_reject 'a tree matching neither alternative' 'matches none of the 2 reviewed shapes'
+# A tree holding the job sets of BOTH alternatives (final jobs plus the old ones) matches neither shape:
+# each alternative is matched exactly, never as a union. The same case kills a union-matcher mutant.
+alt_a='{"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["p1", "prune"]}'
+alt_b='{"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["p2", "prune"]}'
+fresh; swap .github/workflows/cache-prune.yml '
+jobs:
+' '
+jobs:
+  p1:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo
+  p2:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo
+'
+variant "${prune_old}" "[${alt_a}, ${alt_b}]"
+expect_reject 'a tree holding the job sets of both alternatives' 'matches none of the 2 reviewed shapes'
+OLD='hit = alts.index(state)' NEW="hit = alts.index(state) || (state.is_a?(Hash) && state['jobs'].all? { |j| alts.any? { |a| a.is_a?(Hash) && a['jobs'].include?(j) } } ? 0 : nil)" \
+  ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${runner}"
+if ruby "${runner}" "${dir}/t" >/dev/null 2>&1; then echo 'bites     a union matcher accepts that tree, so the fixture kills it'; else echo 'MUTANT SURVIVED: the union matcher still refuses the both-alternatives tree' >&2; exit 1; fi
 # Absent as a transitional alternative: a deleted workflow, then a new one.
 fresh; rm "${dir}/t/.github/workflows/cache-prune.yml"
 variant "\".github/workflows/cache-prune.yml\" =>
@@ -187,6 +234,9 @@ expect_reject 'an alternative without the required check job' 'lacks the require
 fresh; variant "${pol_old}" "[${pol_old}, \"absent\"]"
 expect_reject 'an alternative that lets the policy workflow be absent' 'required status check would be dropped'
 
+# A second YAML document is read by one parser and ignored by another: refused.
+fresh; printf '\n---\nextra: true\n' >> "${dir}/t/.github/workflows/cache-prune.yml"
+expect_reject 'a second YAML document in a workflow' 'YAML documents, not one'
 # --- YAML 1.1 spellings and duplicate keys ---
 # The quoted "on" beside a bare on (read as true) hides a trigger from a one-key reader.
 fresh; printf '\n"on":\n  push:\n' >> "${dir}/t/.github/workflows/cache-prune.yml"
