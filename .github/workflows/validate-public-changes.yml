@@ -93,6 +93,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-revoke.sh
 
+      - name: Test the weekly openssl-src patch cadence
+        shell: bash
+        run: bash .github/policy/test-weekly-cadence.sh
+
       # Every weakening an independent review found is applied to a copy of the tree and must be
       # rejected, including a pull request that weakens its own policy.
       - name: Prove each reviewed weakening fails the policy
