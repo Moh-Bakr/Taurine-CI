@@ -275,6 +275,35 @@ mutation '12. a protected dispatcher widened to a push trigger' "${linux}" 'on:
   push:
   workflow_dispatch:'
 
+# mutation_by CHECKER LABEL FILE OLD NEW: like mutation, but the named check alone must refuse the tree.
+# test-base-policy-result.sh pins the shape of base-policy.yml, which the reusable-workflow fixtures
+# (11.) deliberately replace, so it is not part of offline_policy.
+mutation_by() {
+  local checker="$1" label="$2"; shift 2
+  fresh_tree
+  while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
+  : > "${dir}/log"
+  if (cd "${dir}/tree" && bash ".github/policy/${checker}" >>"${dir}/log" 2>&1); then
+    verdict "${label}" ''
+  else
+    verdict "${label}" "${checker}"
+  fi
+}
+mutation_by test-base-policy-result.sh '14. a step ahead of the base-policy guard in the policy job' "${public}" '    steps:
+      # FIRST, before the checkout' '    steps:
+      - name: Early step
+        shell: bash
+        run: echo early
+      # FIRST, before the checkout'
+mutation_by test-base-policy-result.sh '14. the base-policy guard moved after the checkout' "${public}" '      - name: Require the base-policy workflow to have passed
+        if: ${{ always() }}' '      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Require the base-policy workflow to have passed
+        if: ${{ always() }}'
+
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
 # toJSON(secrets) read to that concern in the same change: its own policy passes, and the base

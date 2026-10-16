@@ -62,6 +62,11 @@ expect_guard "${entry_guard}" BASE_PASS_RESULT 'the entrypoint guard'
   || fail 'the policy job does not need exactly the base-policy call'
 [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["if"]')" == '${{ always() }}' ]] \
   || fail 'the policy job does not always run, so a failed base pass could skip it'
+# The guard is the policy job's FIRST step: before the checkout and before any step that runs this
+# pull request's scripts, which can export BASH_ENV, PATH or RUBYOPT through GITHUB_ENV and
+# GITHUB_PATH and so change how a later step behaves, the guard included.
+[[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["name"]')" == 'Require the base-policy workflow to have passed' ]] \
+  || fail 'the entrypoint guard is not the first step of the policy job'
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy-result"]["needs"].inspect')" == '["base-policy-fixtures", "base-policy"]' ]] \
   || fail 'the result job does not need both base-policy jobs'
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy-result"]["if"]')" == '${{ always() }}' ]] \
