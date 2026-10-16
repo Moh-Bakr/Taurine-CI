@@ -51,27 +51,15 @@ check_dispatcher() {
     echo "The protected dispatcher has an unapproved trigger: $workflow" >&2
     exit 1
   fi
-  if ! grep -qE '^[[:space:]]+source_sha:' "$workflow" || ! grep -qE '\^\[0-9a-fA-F\]\{40\}' "$workflow"; then
-    echo "The protected dispatcher must require a full source SHA: $workflow" >&2
-    exit 1
-  fi
-  # Every protected dispatcher passes exactly one secret, the source-reader App key,
-  # by name, to each workflow it calls; none inherits secrets.
-  if grep -qE '^[[:space:]]+secrets:[[:space:]]+inherit' "$workflow"; then
-    echo "A protected dispatcher must not inherit secrets: $workflow" >&2
-    exit 1
-  fi
-  calls="$(grep -cE '^    uses:' "$workflow")"
-  if [[ "$(grep -cE '^      [A-Z_]+:[[:space:]]+\$\{\{ secrets\.' "$workflow")" != "${calls}" ]]; then
-    echo "Every workflow a protected dispatcher calls must receive exactly one secret, the App private key: $workflow" >&2
-    exit 1
-  fi
-  if [[ "$(grep -cE '^      SOURCE_READER_PRIVATE_KEY:[[:space:]]+\$\{\{ secrets\.SOURCE_READER_PRIVATE_KEY \}\}[[:space:]]*$' "$workflow")" != "${calls}" ]]; then
-    echo "The protected dispatcher must pass secrets.SOURCE_READER_PRIVATE_KEY by name to each called workflow: $workflow" >&2
-    exit 1
-  fi
+  # Trigger, source SHA, secrets and environment rules, read from the parsed workflow so that
+  # re-indenting a job cannot hide it from a line-anchored grep (dispatcher-structure.rb).
+  ruby "$(dirname "${BASH_SOURCE[0]}")/dispatcher-structure.rb" "$workflow" || exit 1
   if [[ "$workflow" == ".github/workflows/windows-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/windows-validation-concern\.yml' "$workflow"; then
     echo "The protected Windows dispatcher must call the reviewed concern workflow: $workflow" >&2
+    exit 1
+  fi
+  if [[ "$workflow" == ".github/workflows/macos-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/macos-validation-concern\.yml' "$workflow"; then
+    echo "The protected macOS dispatcher must call the reviewed concern workflow: $workflow" >&2
     exit 1
   fi
   if [[ "$workflow" == ".github/workflows/linux-validation.yml" ]] && ! grep -qE 'uses:[[:space:]]+\./\.github/workflows/linux-validation-concern\.yml' "$workflow"; then
