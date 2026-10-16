@@ -10,6 +10,8 @@
 # older commit's) and MUTATION_REPORT=1 lists each verdict instead of stopping at the first
 # mutation that is not rejected.
 set -euo pipefail
+# Never inherit the skip from the caller's environment: only reject_file sets it, for one call.
+unset SKIP_STRUCTURE
 
 src="${PWD}"
 dir="$(mktemp -d)"
@@ -27,7 +29,7 @@ offline_policy() {
   for check in check-universal.rb check-structure.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
-    # rule (accept_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
+    # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
     [[ "${check}" == check-structure.rb && -n "${SKIP_STRUCTURE:-}" ]] && continue
     case "${check}" in
       *.rb) ruby ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;

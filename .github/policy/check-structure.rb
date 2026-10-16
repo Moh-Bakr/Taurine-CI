@@ -39,9 +39,10 @@
 # exact keys and plain names is refused when the manifest is validated, the forbidden-trigger
 # denial and the required-check pin apply to every alternative, and the tree must match one of
 # them. When it matches only the final one while others remain, the run prints a warning
-# annotation: it cannot fail, because the base's copy (step A's manifest) judges step B's tree
-# in exactly that state, so a failing rule would deadlock the transition it exists to allow.
-# Removing the transitional alternative is part of step B and is held by review.
+# annotation: the base pass (main's copy, step A's manifest) judges step B's tree in exactly that
+# state, so there it can only warn or the transition it exists to allow would deadlock. The policy
+# job runs the pull request's OWN copy with --strict, where the same state is an error: step B must
+# have removed its transitional alternatives, so a transition cannot linger.
 #
 # YAML 1.1 reads a bare `on` key as true, so the `on` and `true` keys are unioned, a file with
 # both is refused, and so is any duplicate mapping key (a Psych AST walk), which the loader
@@ -51,15 +52,18 @@
 # like a rename does, and a pull request that edits the constant and the tree together passes
 # this check. The controls for those are review, or an Enterprise-only ruleset-required workflow.
 #
+# `ruby check-structure.rb --strict` is the policy job's own-copy run (see above).
 # `ruby check-structure.rb --print` prints the current structure as a Ruby literal to paste over
 # the constant after a reviewed change. Run from the repository root; an optional first argument
 # names another root (fixtures).
 require 'json'
 require 'yaml'
+require_relative 'yaml-guard'
 
 print_mode = ARGV.delete('--print')
 json_actual = ARGV.delete('--json-actual')
 json_manifest = ARGV.delete('--json-manifest')
+strict = ARGV.delete('--strict')
 root = ARGV.first || '.'
 FORBIDDEN_TRIGGERS = %w[pull_request_target workflow_run].freeze
 TIERS = %w[policy policy-reusable protected-source protected-reusable protected-dispatch public].freeze
@@ -108,10 +112,17 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
     {"tier" => "protected-dispatch",
      "triggers" => ["workflow_dispatch"],
      "jobs" => ["plan", "prove", "timings"]},
+   # Step A of the macOS split (#336): the new reusable concern workflow may be absent (now) or
+   # present, and the entrypoint's job set is the final shape with the current one transitional.
+   ".github/workflows/macos-validation-concern.yml" =>
+    [{"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]}, "absent"],
    ".github/workflows/macos-validation.yml" =>
-    {"tier" => "protected-source",
-     "triggers" => ["workflow_dispatch"],
-     "jobs" => ["plan", "result", "timings", "validate"]},
+    [{"tier" => "protected-source",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "timings", "validate-main", "validate-untrusted"]},
+     {"tier" => "protected-source",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["plan", "result", "timings", "validate"]}],
    ".github/workflows/orchestrate-validation.yml" =>
     {"tier" => "protected-source",
      "triggers" => ["workflow_dispatch"],
@@ -195,50 +206,17 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/actions/sanitize/action.yml" => "present",
    ".github/actions/scan-concern/action.yml" => "present",
    ".github/actions/select-concerns/action.yml" => "present",
+   # Step A of the shell-toolchain change (#340): both composites may be absent (now) or present.
+   ".github/actions/shell-artefact/action.yml" => ["present", "absent"],
+   ".github/actions/shell-config/action.yml" => ["present", "absent"],
    ".github/actions/source-checkout/action.yml" => "present",
    ".github/actions/timings/action.yml" => "present",
    ".github/actions/vendor-fetch/action.yml" => "present",
    ".github/actions/verify-cargo-cache/action.yml" => "present",
    ".github/actions/windows-concern-rust/action.yml" => "present"}}.freeze
 
-# One YAML key as the loader resolves it: a plain scalar by its YAML 1.1 type (so a bare `on` is
-# true), a quoted one as its string.
-def key_of(node)
-  return node.value unless node.plain
-
-  YAML.safe_load(node.value)
-rescue StandardError
-  node.value
-end
-
-# Every duplicate mapping key in a document, by resolved key, and `on` next to true.
-def duplicate_keys(node, path, found)
-  if node.is_a?(Psych::Nodes::Mapping)
-    seen = {}
-    node.children.each_slice(2) do |k, v|
-      if k.is_a?(Psych::Nodes::Scalar)
-        key = key_of(k)
-        found << "#{path.join('.')}: the key #{k.value.inspect} appears twice" if seen.key?(key)
-        seen[key] = true
-      end
-      duplicate_keys(v, path + [k.respond_to?(:value) ? k.value : '?'], found)
-    end
-    found << "#{path.join('.')}: both `on` and a bare on (read as true) are keys" if seen.key?(true) && seen.key?('on')
-  elsif node.respond_to?(:children) && node.children
-    node.children.each { |c| duplicate_keys(c, path, found) }
-  end
-end
-
 def read_yaml(path)
   YAML.safe_load(File.read(path, encoding: 'UTF-8'), aliases: false) || {}
-end
-
-def yaml_duplicates(path)
-  found = []
-  Psych.parse_stream(File.read(path, encoding: 'UTF-8')).children.each do |doc|
-    duplicate_keys(doc.root, [], found) if doc.root
-  end
-  found
 end
 
 # The tier arrays in workflow-lists.sh, read as text (the file is bash).
@@ -278,7 +256,7 @@ def actual_structure(root, problems)
   workflows = {}
   Dir.glob(File.join(root, '.github/workflows/*.{yml,yaml}')).sort.each do |file|
     rel = file.delete_prefix("#{root}/")
-    yaml_duplicates(file).each { |d| problems << "#{rel}: #{d}" }
+    YamlGuard.yaml_duplicates(file).each { |d| problems << "#{rel}: #{d}" }
     doc = read_yaml(file)
     problems << "#{rel}: both the `on` key and a bare on (true) key are present" if doc.key?('on') && doc.key?(true)
     workflows[rel] = { 'tier' => tier_of(rel, lists, policy, policy_reusable), 'triggers' => triggers_of(doc), 'jobs' => (doc['jobs'] || {}).keys.sort }
@@ -286,7 +264,7 @@ def actual_structure(root, problems)
   actions = {}
   Dir.glob(File.join(root, '.github/actions/*/action.{yml,yaml}')).sort.each do |f|
     rel = f.delete_prefix("#{root}/")
-    yaml_duplicates(f).each { |d| problems << "#{rel}: #{d}" }
+    YamlGuard.yaml_duplicates(f).each { |d| problems << "#{rel}: #{d}" }
     actions[rel] = 'present'
   end
   { 'workflows' => workflows, 'actions' => actions }
@@ -419,6 +397,10 @@ reviewed_actions = manifest['actions'] || {}
   match_entry(rel, reviewed_actions[rel], actual['actions'][rel] || 'absent', problems, warnings, 'composite action')
 end
 
+if strict
+  warnings.each { |w| problems << w.sub(/\A::warning title=[^:]*::/, '') }
+  warnings.clear
+end
 warnings.each { |w| puts w }
 if problems.empty?
   puts "control-plane structure: #{actual['workflows'].size} workflows and #{actual['actions'].size} composites match the reviewed manifest"
