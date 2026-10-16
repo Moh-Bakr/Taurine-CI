@@ -26,7 +26,7 @@ missed=0
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb check-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb check-structure.rb check-strict-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
     # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
@@ -275,6 +275,49 @@ mutation '12. a protected dispatcher widened to a push trigger' "${linux}" 'on:
   push:
   workflow_dispatch:'
 mutation '12. the policy job no longer runs the structure check with --strict' "${public}" 'check-structure.rb --strict' 'check-structure.rb'
+SC='        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. an exit 0 before the strict command' "${public}" "${SC}" '        run: |
+          exit 0
+          ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. set +e before the strict command' "${public}" "${SC}" '        run: |
+          set +e
+          ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict command made best-effort' "${public}" "${SC}" '        run: ruby .github/policy/check-structure.rb --strict || true
+'
+mutation '13. the strict step made if: false' "${public}" "${SC}" '        if: ${{ false }}
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict command inside a heredoc' "${public}" "${SC}" "        run: |
+          cat <<'EOF'
+          ruby .github/policy/check-structure.rb --strict
+          EOF
+"
+mutation '13. the strict command in a function that is never called' "${public}" "${SC}" '        run: |
+          strict() { ruby .github/policy/check-structure.rb --strict; }
+'
+mutation '13. an exit trap before the strict command' "${public}" "${SC}" "        run: |
+          trap 'exit 0' EXIT
+          ruby .github/policy/check-structure.rb --strict
+"
+mutation '13. the strict step given another shell invocation' "${public}" "${SC}" '        shell: bash --noprofile --norc {0}
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict step given an env block' "${public}" "${SC}" '        env:
+          BASH_ENV: /dev/null
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict step made continue-on-error' "${public}" "${SC}" '        continue-on-error: true
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. --strict run on the real tree by another policy script (the base pass would run it)' .github/policy/test-policy.sh 'set -euo pipefail
+' 'set -euo pipefail
+ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. --strict run on the real tree inside test-structure.sh' .github/policy/test-structure.sh "echo 'accepted  the reviewed tree'" "ruby \"\${check}\" --strict \"\${dir}/t\" >/dev/null
+echo 'accepted  the reviewed tree'"
 mutation '12. the policy job made conditional' "${public}" '    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -282,8 +325,8 @@ mutation '12. the policy job made conditional' "${public}" '    if: ${{ always()
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:'
-mutation '12. the strict structure step made conditional' "${public}" '      - name: Check the universal workflow rules, the control-plane structure and the Action references
-        shell: bash' "      - name: Check the universal workflow rules, the control-plane structure and the Action references
+mutation '12. the strict structure step made conditional' "${public}" '      - name: Check the control-plane structure, strictly
+        shell: bash' "      - name: Check the control-plane structure, strictly
         if: \${{ false }}
         shell: bash"
 

@@ -97,15 +97,35 @@ fresh; swap .github/policy/workflow-lists.sh '  ".github/workflows/ios-validatio
 ' ''
 expect_reject 'a protected workflow dropped from its trust tier' 'tier changed'
 
+# --strict is the policy job's OWN-copy mode, so it is exercised only on a synthetic tree built here:
+# the base pass runs this very script against the pull request's real tree, where a step-B tree
+# matches only the final shape while main's manifest still lists the transitional alternative, and
+# --strict would (correctly) refuse that. The helpers refuse any root that is not marked synthetic,
+# so no strict case can ever run on the real tree.
+make_synth() { # builds the synthetic tree ${dir}/s and the check copy ${dir}/v/synth.rb whose manifest matches it
+  rm -rf "${dir:?}/s" "${dir:?}/v"; mkdir -p "${dir}/s/.github/workflows" "${dir}/s/.github/policy" "${dir}/v"
+  cp "${src}/.github/workflows/validate-public-changes.yml" "${src}/.github/workflows/cache-prune.yml" "${dir}/s/.github/workflows/"
+  cp "${src}/.github/policy/workflow-lists.sh" "${dir}/s/.github/policy/"
+  : > "${dir}/s/.synthetic"
+}
+synth_runner() { # prints nothing; sets the check copy's manifest to the synthetic tree's printed structure
+  cp "${check}" "${dir}/v/synth.rb"; cp "${check%/*}/yaml-guard.rb" "${dir}/v/"
+  ruby "${check}" --print "${dir}/s" > "${dir}/v/manifest.txt"
+  ruby -e 's = File.read(ARGV[0]); m = File.read(ARGV[1]).strip; re = /^CONTROL_PLANE_MANIFEST = \{.*?\}\.freeze$/m; abort("manifest not found") unless s.match?(re); File.write(ARGV[0], s.sub(re) { m })' "${dir}/v/synth.rb" "${dir}/v/manifest.txt"
+}
+synth_prune() { # NEW: the synthetic manifest's cache-prune entry becomes NEW (a shape or an array of shapes)
+  NEW="$1" ruby -e 's = File.read(ARGV[0]); re = /(".github\/workflows\/cache-prune\.yml" =>\s*)\{[^}]*\}/m; abort("prune entry not found") unless s.match?(re); File.write(ARGV[0], s.sub(re) { "#{$1}#{ENV["NEW"]}" })' "${dir}/v/synth.rb"
+}
+strict_root() { [[ -f "${dir}/s/.synthetic" && ! -e "${dir}/s/.github/policy/check-structure.rb" ]] || { echo 'a --strict case must run on the synthetic tree only' >&2; exit 1; }; }
 expect_strict_reject() { # LABEL MESSAGE
-  local out
-  if out="$(ruby "${runner:-${check}}" --strict "${dir}/t" 2>&1)"; then echo "NOT rejected under --strict: $1" >&2; exit 1; fi
+  local out; strict_root
+  if out="$(ruby "${dir}/v/synth.rb" --strict "${dir}/s" 2>&1)"; then echo "NOT rejected under --strict: $1" >&2; exit 1; fi
   grep -qF -- "$2" <<<"${out}" || { echo "rejected $1 for the wrong reason ($2):" >&2; echo "${out}" >&2; exit 1; }
   echo "rejected  $1"
 }
 expect_strict_accept() { # LABEL
-  local out
-  out="$(ruby "${runner:-${check}}" --strict "${dir}/t" 2>&1)" || { echo "rejected under --strict, expected accepted: $1" >&2; echo "${out}" >&2; exit 1; }
+  local out; strict_root
+  out="$(ruby "${dir}/v/synth.rb" --strict "${dir}/s" 2>&1)" || { echo "rejected under --strict, expected accepted: $1" >&2; echo "${out}" >&2; exit 1; }
   echo "accepted  $1"
 }
 
@@ -127,14 +147,19 @@ variant "${prune_old}" "${prune_new}"
 expect_accept 'step B under its own copy: the new shape alone'
 # --strict (the policy job's own copy) turns the lingering-alternative warning into an error, so step B
 # must have deleted its transitional alternatives; step A (tree on a non-final shape) is unaffected.
-fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dispatch:
+make_synth; swap_s() { OLD="$1" NEW="$2" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("text not found"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/s/.github/workflows/cache-prune.yml"; }
+swap_s 'workflow_dispatch:' 'workflow_dispatch:
   push:'
-variant "${prune_old}" "[${prune_new}, ${prune_old}]"
+synth_runner; synth_prune "[${prune_new}, ${prune_old}]"
 expect_strict_reject 'strict: step B left its transitional alternative behind' 'transitional alternative(s) remain'
-variant "${prune_old}" "${prune_new}"
+synth_runner
 expect_strict_accept 'strict: step B with the alternative deleted'
-fresh; variant "${prune_old}" "[${prune_new}, ${prune_old}]"
+make_synth; synth_runner; synth_prune "[${prune_new}, ${prune_old}]"
 expect_strict_accept 'strict: step A (tree still on the transitional shape)'
+# The strict helpers refuse a root that is not the synthetic tree, so no strict case can run on the real tree.
+fresh; mkdir -p "${dir}/s"; rm -f "${dir}/s/.synthetic"
+if (strict_root) 2>/dev/null; then echo 'strict_root accepted a tree that is not synthetic' >&2; exit 1; fi
+echo 'refused   a --strict case on a tree that is not the synthetic one'
 # A job added that is in neither alternative (linux-validation.yml, whatever its alternatives are).
 fresh; swap .github/workflows/linux-validation.yml '
 jobs:

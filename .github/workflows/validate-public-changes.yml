@@ -58,13 +58,18 @@ jobs:
 
       # Rules for every workflow and composite: SHA pins, permissions: {}, no
       # pull_request_target, no secrets: inherit, source-checkout first in protected jobs.
-      - name: Check the universal workflow rules, the control-plane structure and the Action references
+      - name: Check the universal workflow rules and the Action references
         shell: bash
         run: |
           ruby .github/policy/check-universal.rb
-          ruby .github/policy/check-structure.rb --strict
           bash .github/policy/test-structure.sh
           bash .github/policy/test-action-uses.sh
+
+      # Dedicated and exactly one command (check-strict-structure.rb asserts it): the strict form of the
+      # structure check, where a transitional alternative left in the manifest is an error.
+      - name: Check the control-plane structure, strictly
+        shell: bash
+        run: ruby .github/policy/check-structure.rb --strict
 
       # Trust tiers: reviewed Actions, token revocation order, cache, secrets, dispatchers.
       - name: Enforce immutable reviewed Actions and safe workflow features
