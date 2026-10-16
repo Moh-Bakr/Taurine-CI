@@ -26,7 +26,13 @@ missed=0
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
+<<<<<<< HEAD
   for check in check-universal.rb check-structure.rb check-strict-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+||||||| 1dbf542
+  for check in check-universal.rb check-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+=======
+  for check in check-universal.rb check-structure.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+>>>>>>> d2372b78f9e3fd0bad1abf51ba70316f785c2729
     [[ -f ".github/policy/${check}" ]] || continue
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
     # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
@@ -177,6 +183,42 @@ mutation '11. cache-prune given the source-read environment' "${cache_prune}" ' 
 '
 mutation '11. lint.sh ignores every unknown key' .github/policy/lint.sh "-ignore '^unexpected key \"cache-mode\" for \"(job|workflow)\" section\. '" "-ignore 'unexpected key'"
 
+# 12. The caller split, the audit and the explicit cache grants (docs/untrusted-readonly-cache.md, section 4.1).
+windows=.github/workflows/windows-validation.yml
+audit=.github/actions/cache-scope-audit/action.yml
+mutation '12. the Linux untrusted half loses cache-mode read' "${linux}" '    cache-mode: read
+    uses: ./.github/workflows/linux-validation-concern.yml' '    uses: ./.github/workflows/linux-validation-concern.yml'
+mutation '12. the Linux untrusted half granted write' "${linux}" '    cache-mode: read
+    uses: ./.github/workflows/linux-validation-concern.yml' '    cache-mode: write
+    uses: ./.github/workflows/linux-validation-concern.yml'
+mutation '12. the Linux untrusted half runs without the audit' "${linux}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' }}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}"
+mutation '12. the Linux audit no longer limited to untrusted' "${linux}" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
+    needs: [validate-input]" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && needs.validate-input.result == 'success' }}
+    needs: [validate-input]"
+mutation '12. the Linux workflow-level none dropped' "${linux}" 'cache-mode: none
+' ''
+mutation '12. the Windows Rust untrusted half granted write' "${windows}" '    cache-mode: read
+    uses: ./.github/workflows/windows-validation-concern.yml' '    cache-mode: write
+    uses: ./.github/workflows/windows-validation-concern.yml'
+mutation '12. the live-proofs workflow-level none dropped' .github/workflows/live-proofs.yml 'cache-mode: none
+' ''
+mutation '12. the pg8 arm caller without an explicit none' .github/workflows/pg8-measurement.yml '    cache-mode: none
+    uses: ./.github/workflows/pg8-measurement-arm.yml' '    uses: ./.github/workflows/pg8-measurement-arm.yml'
+mutation '12. the cache-scope audit accepts a non-empty scope' "${audit}" "if [[ \"\${total}\" != 0 ]]; then" 'if [[ "${total}" == never ]]; then'
+mutation '12. the cache-scope audit asks for the main scope' "${audit}" 'ref=refs/heads/untrusted&per_page=1' 'ref=refs/heads/main&per_page=1'
+mutation '12. the base-pass job loses its explicit none' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
+mutation '12. the base-pass job granted read' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    cache-mode: read
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
+mutation '12. the base-pass job granted write' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    cache-mode: write
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
+mutation '12. the base-pass job renamed' .github/workflows/validate-public-changes.yml '
+  base-pass:
+' '
+  base-gate:
+'
 # 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
 # must be rejected, because the default grant for a job with no cache-mode is write.
 mutation '11. an untrusted-only cargo-source restore with no cache-mode' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
@@ -188,6 +230,12 @@ mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    us
     cache-mode: write
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
 
+# 13. The audits reach the verdict, and an untrusted restore waits for macOS (docs/untrusted-readonly-cache.md).
+mutation '13. the Linux result no longer needs the after-audit' "${linux}" '    needs: [plan, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [plan, validate-main, validate-untrusted, select]'
+mutation '13. the Windows result stops passing blocking-failures' "${windows}" "          blocking-failures: " "          selection-note: "
+mutation '13. run-result ignores the blocking count' .github/actions/run-result/action.yml '        if [[ "${blocking}" -gt 0 ]]; then
+          # A check outside' '        if [[ "${blocking}" == never ]]; then
+          # A check outside'
 # 11. The reusable half of the public policy gate. The base-policy pass is meant to move into
 # .github/workflows/base-policy.yml, called by the entrypoint. The checks must accept that file as a
 # plain called workflow and refuse everything that would make it more: another trigger, a secret, or

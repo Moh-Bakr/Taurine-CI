@@ -21,7 +21,7 @@ run_result() {
     GITHUB_REPOSITORY=example/control GITHUB_RUN_ID=42 GITHUB_STEP_SUMMARY="${work}/summary.md" \
     LABEL=Fixture EXPECTED="${expected}" REQUIRED="${required}" \
     NAME_PATTERN='^Fixture (?<concern>.+)$' REQUESTED_SOURCE_SHA="${source}" \
-    BASE_SHA="${base}" SELECTION_MODE="${mode}" bash "${work}/run.sh" 2>&1)" && status=0 || status=$?
+    BASE_SHA="${base}" SELECTION_MODE="${mode}" BLOCKING_FAILURES="${BLOCKING_FAILURES:-0}" bash "${work}/run.sh" 2>&1)" && status=0 || status=$?
   printf '%s\n%s' "${status}" "${output}"
 }
 
@@ -37,6 +37,18 @@ partial_base="$(run_result full '["alpha"]' "${all_success}" 0123456789012345678
 failed_job='{"jobs":[{"name":"Fixture alpha","conclusion":"failure"}]}'
 partial_failed="$(run_result partial '["alpha"]' "${failed_job}")"
 [[ "${partial_failed}" == 1$'\n'* ]] || { echo 'partial mode accepted a failed concern' >&2; exit 1; }
+# A failed untrusted cache scope audit never prints a passing verdict, in either mode.
+blocked="$(BLOCKING_FAILURES=1 run_result full '["alpha"]' "${all_success}")"
+[[ "${blocked}" == 1$'\n'* && "${blocked}" == *'FAIL (the untrusted cache scope audit failed)'* && "${blocked}" != *'PASS'* ]] || { echo 'a failed audit printed or allowed a passing verdict' >&2; exit 1; }
+grep -qF 'untrusted cache scope audit | FAILED' "${work}/summary.md" || { echo 'a failed audit is not in the summary table' >&2; exit 1; }
+blocked_partial="$(BLOCKING_FAILURES=2 run_result partial '["alpha"]' "${all_success}")"
+[[ "${blocked_partial}" == 1$'\n'* && "${blocked_partial}" != *'PASS'* ]] || { echo 'a failed audit passed in partial mode' >&2; exit 1; }
+clean="$(BLOCKING_FAILURES=0 run_result full '["alpha"]' "${all_success}")"
+[[ "${clean}" == *$'\nFixture: PASS (full)'* ]] || { echo 'a zero blocking count must not change the verdict' >&2; exit 1; }
+for bad in x -1 1.5 ' 1'; do
+  invalid="$(BLOCKING_FAILURES="${bad}" run_result full '["alpha"]' "${all_success}")"
+  [[ "${invalid}" == 1$'\n'* && "${invalid}" == *'invalid blocking-failures count'* ]] || { echo "an invalid blocking count '${bad}' was accepted" >&2; exit 1; }
+done
 duplicate_jobs='{"jobs":[{"name":"Fixture alpha","conclusion":"success"},{"name":"Fixture alpha","conclusion":"failure"}]}'
 duplicate="$(run_result partial '["alpha"]' "${duplicate_jobs}")"
 [[ "${duplicate}" == 1$'\n'*'run-result rejected duplicate matching jobs'* ]] || { echo 'duplicate concern jobs were silently collapsed' >&2; exit 1; }

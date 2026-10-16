@@ -34,6 +34,10 @@ on:
 
 permissions: {}
 
+# No job caches unless it declares its own cache-mode; the reviewed split is validate-main (write,
+# main only) and validate-untrusted (read) (docs/untrusted-readonly-cache.md, section 4.1).
+cache-mode: none
+
 # Proof runs are never cancelled automatically: the whole point is to let a slow server
 # finish. Each run has its own group (below), so two selections prove concurrently and none is
 # replaced while pending.
@@ -219,6 +223,7 @@ jobs:
       matrix:
         arm: ${{ fromJSON(needs.plan.outputs.arms) }}
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
+    cache-mode: none
     uses: ./.github/workflows/live-proof-arm.yml  # zizmor: ignore[self-repository]
     # Exactly one secret, the source-reader App key, passed by name: the policy
     # requires this for every protected dispatcher and forbids secrets: inherit.

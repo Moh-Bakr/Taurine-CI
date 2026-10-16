@@ -436,6 +436,14 @@ relies on them (the base-commit pass would otherwise reject the workflow change)
 - **Stage 2:** untrusted restore of both caches, on one concern (`rust-db`, own group, saves
   itself on main), only if the spike passed; measurement gate, then the other Linux Rust
   concerns. There is no sources-only stage: the source cache is not safe without enforcement.
+- **Precondition for Stage 2 (found in review of the workflow half): the macOS split comes first.**
+  `macos-validation.yml` keeps the default write grant on `untrusted` until its matrix job becomes a
+  reusable workflow and is split like Linux and Windows. With an untrusted restore enabled, a
+  concurrent macOS job could plant a shadow entry between Linux's before-audit and its restore, so
+  the policy (rule M in `check-cache-mode.rb`) refuses any untrusted-gated cache step while any
+  workflow that can run on the untrusted ref is outside `ENFORCED_WORKFLOWS`. The audits also reach
+  the verdict: the Result job needs both and passes `run-result` a blocking count, so a failed audit
+  can never print PASS.
 - **Stage 3 (separate decision):** macOS, then Windows (administrator cannot be dropped;
   stricter review).
 

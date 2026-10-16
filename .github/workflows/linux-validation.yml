@@ -51,6 +51,10 @@ on:
 
 permissions: {}
 
+# No job caches unless it declares its own cache-mode; the reviewed split is validate-main (write,
+# main only) and validate-untrusted (read) (docs/untrusted-readonly-cache.md, section 4.1).
+cache-mode: none
+
 concurrency:
   # Each run has its own group: GitHub keeps only one PENDING run per group, so a shared per-SHA
   # group let a later dispatch silently cancel an earlier pending one. Runs are never
@@ -380,6 +384,7 @@ jobs:
     if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && inputs.base_sha != '' && inputs.only == ''
     needs: [validate-input, plan]
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
+    cache-mode: none
     uses: ./.github/workflows/select-concerns.yml  # zizmor: ignore[self-repository]
     # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
     secrets:
@@ -390,14 +395,42 @@ jobs:
       platform: linux
       include_concerns: ${{ needs.plan.outputs.optin }}
 
-  validate:
+  # The untrusted ref's cache scope must be empty before any untrusted source job runs: nothing may
+  # write it (every untrusted job is cache-mode read), so any entry is a planting attempt or a
+  # leftover, and it could shadow main's entry for the same key (docs/untrusted-readonly-cache.md,
+  # section 3.3). No source, no environment and no secret: the job's own token, actions: read.
+  cache-audit:
+    if: ${{ github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
+    needs: [validate-input]
+    name: Audit the untrusted cache scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Refuse any entry in the untrusted cache scope
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/cache-scope-audit  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+          phase: before
+
+  validate-main:
     permissions:
       contents: read
-    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}
     needs: [validate-input, plan, select]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix) }}
+    cache-mode: write
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]
     # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
     secrets:
@@ -412,6 +445,54 @@ jobs:
       # set executes.
       suite_selection: ${{ fromJSON(needs.plan.outputs.suite_reviews)[matrix.concern] || '' }}
 
+  validate-untrusted:
+    permissions:
+      contents: read
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' }}
+    needs: [validate-input, plan, select, cache-audit]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix) }}
+    cache-mode: read
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
+      timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeouts)[matrix.concern] }}
+      # The shadow review this concern's coverage group would run under a
+      # partial selection (empty for unbound concerns and for complete-set
+      # outcomes): the concern reports it in its summary while its full suite
+      # set executes.
+      suite_selection: ${{ fromJSON(needs.plan.outputs.suite_reviews)[matrix.concern] || '' }}
+
+  # After the untrusted source jobs: the scope must still be empty. A planting attempt that a
+  # blocked save would only log as a warning is reported here (a detector, not a lock).
+  cache-audit-after:
+    if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}
+    needs: [cache-audit, validate-untrusted]
+    name: Audit the untrusted cache scope after the run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out public control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Refuse any entry in the untrusted cache scope
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/cache-scope-audit  # zizmor: ignore[self-repository]
+        with:
+          github-token: ${{ github.token }}
+          phase: after
+
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed
   # baseline below, in seconds: the median of the last several successful jobs (re-based
@@ -423,7 +504,7 @@ jobs:
   # listed without a comparison; update the table when a run is a new normal.
   timings:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate]
+    needs: [validate-main, validate-untrusted]
     name: Timings
     runs-on: ubuntu-24.04
     # Reporting only: a queued, slow or cancelled timings job must never fail a run whose
@@ -447,7 +528,7 @@ jobs:
           mode: table
           label: Linux
           baseline-seconds: '{"rust-app-1":1981,"rust-app-2":2100,"rust-db":839,"rust-dbx":603,"rust-domain":186,"rust-net":124,"rust-packaging":999,"rust-tls-openssl":45,"taurine-cli":206,"scan-security":853,"desktop-shard-1":626,"desktop-shard-2":701,"desktop-quality":161,"mobile-quality":146,"frontend-build-budget":118,"contracts":95,"e2e-critical":744,"e2e-a11y":356,"e2e-regression-1":892,"e2e-regression-2":852,"e2e-regression-3":891,"e2e-regression-4":734,"e2e-visual":192}'
-          name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
+          name-pattern: '^validate-(main|untrusted) \(.+\) / Linux (?<concern>.+)$'
           github-token: ${{ github.token }}
 
   # One verdict for the dispatch: every possible concern is listed, those that did not
@@ -455,7 +536,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && needs.plan.result == 'success' }}
-    needs: [plan, validate, select]
+    needs: [plan, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -476,8 +557,9 @@ jobs:
           label: Linux
           expected-concerns: ${{ needs.plan.outputs.expected }}
           required-concerns: ${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}
-          name-pattern: '^validate \(.+\) / Linux (?<concern>.+)$'
+          name-pattern: '^validate-(main|untrusted) \(.+\) / Linux (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           base-sha: ${{ inputs.base_sha }}
           selection-mode: ${{ inputs.profile == 'full' && inputs.base_sha == '' && inputs.only == '' && 'full' || 'partial' }}
           github-token: ${{ github.token }}
+          blocking-failures: ${{ (contains(fromJSON('["failure","cancelled"]'), needs.cache-audit.result) || contains(fromJSON('["failure","cancelled"]'), needs.cache-audit-after.result)) && '1' || '0' }}
