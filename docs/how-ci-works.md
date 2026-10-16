@@ -746,9 +746,12 @@ base pass itself executes. Several base tests -- `test-base-policy-env.sh` and
 pull-request code does run there, and it could rewrite a later base script on disk or leave a
 process behind to act later. The base pass is therefore isolated further:
 
-- **Its own job.** It runs as `base-policy`, separate from the checks in `policy`, so nothing the
-  pull request's own policy scripts export there reaches it. `policy` declares
-  `needs: [base-policy]` and fails unless that job succeeded.
+- **Its own job, in its own workflow.** It runs as `base-policy` in `base-policy.yml`, called by
+  the entrypoint, separate from the checks in `policy`, so nothing the pull request's own policy
+  scripts export there reaches it. `policy` declares `needs: [base-pass]`, the call, and fails
+  unless the whole workflow succeeded. Inside it, `base-policy-result` requires the fixtures job
+  to have passed on every event and the base-policy job on a pull request, so a skipped base pass
+  fails.
 - **No root.** Hosted runners give the job user passwordless sudo. The job runs the same
   `drop-root` composite the source-validation jobs run before project code, then the step
   asserts `sudo -n true` is refused. Without that, pull-request code run by a base test could
@@ -808,8 +811,9 @@ existing `/usr/bin/node` that is a link or not root's alone.
 What this does **not** do, plainly:
 
 - **It hardens the base pass as an honest workflow runs it. It does not defend against a pull
-  request that edits the workflow.** Under `pull_request`, the pull request's own copy of this
-  file defines every job here -- `policy`, `base-policy` and `base-policy-fixtures` alike. It can
+  request that edits the workflow.** Under `pull_request`, the pull request's own copy of these
+  files defines every job -- `policy` and the call in the entrypoint; `base-policy`,
+  `base-policy-fixtures` and `base-policy-result` in `base-policy.yml`. It can
   delete the pin, change `BASE_SHA` or the checkout `ref:`, add `if: false`, drop `needs`,
   replace the step outright, or empty `base-policy-fixtures` so that the tests of the step stop
   testing it, and no check that this workflow runs can stop that, because the pull request also
@@ -854,16 +858,17 @@ What this does **not** do, plainly:
 
 ### Where the base-pass step lives
 
-The base-policy step is in `validate-public-changes.yml` today. `workflow-lists.sh` already names
-`.github/workflows/base-policy.yml` as the reusable half of the public policy gate, ahead of the
-file, because a pull request is judged by the base commit's checks: the move can only land after
-the checks that govern it do. `check-dispatchers.sh` accepts that file only if its sole trigger is
-`workflow_call`, with no other trigger, secret, artifact, cache or OIDC grant, and
+The base-policy jobs are in `.github/workflows/base-policy.yml`, the reusable half of the public
+policy gate, which `validate-public-changes.yml` calls with one job (`base-pass`). They moved out
+only to keep the entrypoint under the file-size limit; what they do is unchanged. A pull request is
+judged by the base commit's checks, so the checks that govern a reusable public workflow had to be
+on the base first: `workflow-lists.sh` names the file, `check-dispatchers.sh` accepts it only if its
+sole trigger is `workflow_call`, with no other trigger, secret, artifact, cache or OIDC grant, and
 `check-actions.sh` allows the entrypoint to call it. The three tests that run the step
 (`test-base-policy-env.sh`, `-isolation.sh` and `-sudo.sh`) find it through
 `base-pass-workflow.sh`, in whichever of the two files holds it and only when exactly one does
-(`test-base-pass-locate.sh`). Moving the jobs, and what the entrypoint then requires of them, is a
-separate change.
+(`test-base-pass-locate.sh`). `test-base-policy-result.sh` holds the rules that keep the base pass on
+the required check: the guards pass only on success, and `policy` needs the call that needs both jobs.
 
 ## Accepted residual risks
 
