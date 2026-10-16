@@ -356,17 +356,17 @@ mutation '13. the strict step given an env block' "${public}" "${SC}" '        e
 mutation '13. the strict step made continue-on-error' "${public}" "${SC}" '        continue-on-error: true
         run: ruby .github/policy/check-structure.rb --strict
 '
-mutation '13. env at the workflow level of the policy workflow (BASH_ENV)' "${public}" 'permissions: {}
+mutation '13. env at the workflow level of the policy workflow (BASH_ENV)' "${public}" 'cache-mode: none
 
-concurrency:' 'permissions: {}
+concurrency:' 'cache-mode: none
 
 env:
   BASH_ENV: /dev/null
 
 concurrency:'
-mutation '13. defaults at the workflow level of the policy workflow' "${public}" 'permissions: {}
+mutation '13. defaults at the workflow level of the policy workflow' "${public}" 'cache-mode: none
 
-concurrency:' 'permissions: {}
+concurrency:' 'cache-mode: none
 
 defaults:
   run:
