@@ -15,6 +15,10 @@ on:
         type: string
 
 permissions: {}
+
+# No job caches unless it declares its own cache-mode; the reviewed split is validate-main (write,
+# main only) and validate-untrusted (read) (docs/untrusted-readonly-cache.md, section 4.1).
+cache-mode: none
 concurrency:
   group: pg8-measurement-${{ github.run_id }}
   cancel-in-progress: false
@@ -78,6 +82,7 @@ jobs:
       actions: read
       contents: read
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    cache-mode: none
     uses: ./.github/workflows/pg8-measurement-arm.yml  # zizmor: ignore[self-repository]
     with:
       source_sha: ${{ inputs.source_sha }}

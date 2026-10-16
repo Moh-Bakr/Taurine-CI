@@ -22,6 +22,10 @@ on:
 
 permissions: {}
 
+# No job caches unless it declares its own cache-mode; the reviewed split is validate-main (write,
+# main only) and validate-untrusted (read) (docs/untrusted-readonly-cache.md, section 4.1).
+cache-mode: none
+
 concurrency:
   # Each run has its own group: GitHub keeps only one PENDING run per group, so a shared per-SHA
   # group let a later dispatch silently cancel an earlier pending one. Runs are never
@@ -214,6 +218,10 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/mobile-report  # zizmor: ignore[self-repository]
 
+      - name: Install the shell artefact checks
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
+
       - name: Locate libclang in the Xcode toolchain
         if: matrix.concern == 'ios-native' || matrix.concern == 'ios-rust'
         shell: bash
@@ -299,6 +307,7 @@ jobs:
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+          source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
           # A failed link names its undefined symbols, which can be private function
           # names, so none are published. What is published is the toolchain (public)
           # and counts: how many symbols, of which kinds, and which static archives
@@ -318,30 +327,73 @@ jobs:
           }
           case "${CONCERN}" in
             ios-native)
-              mobile_run ios-build npm --prefix taurine-mobile run ios:build -- --ci --no-sign --target aarch64-sim
+              # Before the build: no Tauri config may add features or a runner the door gate
+              # cannot see, no OpenSSL override may bypass the vendored build, and the door-only
+              # gate runs on the built target's graph. The build runs the Tauri CLI directly with
+              # CI's own arguments (never the source's npm scripts).
+              refuse_build_feature_overrides || exit 1
+              refuse_openssl_overrides || exit 1
+              openssl_door_gate ios-sim-build-openssl-door-only taurine-mobile aarch64-apple-ios-sim || exit 1
+              verify_door_crate_sources || exit 1
+              mobile_run ios-build tauri_cli taurine-mobile ios build --ci --no-sign --target aarch64-sim
+              # beforeBuildCommand ran in between: the refusals run again on what the build left,
+              # and the door crates cargo built from must still equal their verified archives.
+              refuse_build_feature_overrides || exit 1
+              refuse_openssl_overrides || exit 1
+              verify_door_crate_build_inputs || exit 1
+              # The built app's executable (`tauri ios build` is a release build): size, no
+              # dynamic libssl/libcrypto, the linked OpenSSL 3.5 string when the door is in the
+              # graph, and any native budget in bundle-budget.json (`taurine-mobile.native.
+              # arm64-sim`). When no .app is found, the Rust static library Xcode linked is
+              # measured instead (a static archive has no dynamic dependencies to read).
+              door="$(door_in_graph taurine-mobile aarch64-apple-ios-sim)" || { echo 'ios-artefact: the door graph query did not resolve' >&2; exit 1; }
+              ios_artefact() {
+                local app exe target_dir
+                app="$( { find taurine-mobile/src-tauri/gen/apple -type d -name '*.app' -not -path '*/Externals/*' 2>/dev/null
+                          find "${HOME}/Library/Developer/Xcode/DerivedData" -type d -path '*/Build/Products/*-iphonesimulator/*.app' 2>/dev/null; } | head -n 1 || true)"
+                if [[ -n "${app}" && -f "${app}/Info.plist" ]]; then
+                  exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${app}/Info.plist" 2>/dev/null || true)"
+                  if [[ -n "${exe}" && -f "${app}/${exe}" ]]; then echo "${app}/${exe}"; return 0; fi
+                fi
+                target_dir="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory' || true)"
+                if [[ -n "${target_dir}" && -f "${target_dir}/aarch64-apple-ios-sim/release/libtaurine_mobile_lib.a" ]]; then
+                  echo "${target_dir}/aarch64-apple-ios-sim/release/libtaurine_mobile_lib.a"
+                fi
+              }
+              # The graph cargo actually built for the simulator (the Xcode phase passes its own args).
+              depinfo="$(artefact_depinfo aarch64-apple-ios-sim release libtaurine_mobile_lib)"
+              built_graph_check ios-arm64-sim-built-graph "${depinfo}" taurine-mobile "${door}" || exit 1
+              # What Xcode linked (the project's Externals libapp.a) must be the judged build.
+              externals="$(find taurine-mobile/src-tauri/gen/apple/Externals -name libapp.a -type f 2>/dev/null | sort || true)"
+              [[ -n "${externals}" ]] || { echo 'ios-binding: FAILED - no libapp.a in the project Externals' >&2; exit 1; }
+              while IFS= read -r linked; do
+                bind_same_binary ios-arm64-sim-binding "${linked}" "${depinfo%.d}.a" || exit 1
+              done <<<"${externals}"
+              artefact="$(ios_artefact || true)"
+              [[ -n "${artefact}" ]] || { echo 'ios-artefact: FAILED - neither the app binary nor the Rust static library was found' >&2; exit 1; }
+              # The whole .app (Frameworks, plug-ins, any other Mach-O): the main executable by the
+              # door rule, every other binary must carry no OpenSSL. The static-library fallback
+              # is judged alone.
+              if [[ "${artefact}" == *.a ]]; then
+                artefact_check ios-arm64-sim-app "${artefact}" release "${door}" taurine-mobile arm64-sim || exit 1
+              else
+                artefact_tree_check ios-arm64-sim-app "$(dirname "${artefact}")" "${artefact}" release "${door}" taurine-mobile arm64-sim || exit 1
+              fi
               ;;
             ios-rust)
-              # Gate S1's mobile arm (plan 25): the phone links no OpenSSL.
-              # `cargo tree --invert openssl-sys` exits non-zero exactly when
-              # nothing in the graph depends on it, so the check inverts the
-              # exit: a clean run of the invert query IS the failure. The
-              # error text is pinned so a broken resolve cannot masquerade as
-              # a pass. Cheap, so it runs before the expensive test-target
-              # build and fails the concern first.
-              gate_log="${RUNNER_TEMP}/ios-openssl-absent.log"
-              if cargo tree --locked --package taurine-mobile --invert openssl-sys >"${gate_log}" 2>&1; then
-                echo "ios-openssl-absent: FAILED — openssl-sys is reachable from taurine-mobile (Gate S1, plan 25)" >&2
-                exit 1
-              fi
-              if ! grep -q "did not match any packages" "${gate_log}"; then
-                echo "ios-openssl-absent: the invert query failed for a reason other than absence (detail withheld)" >&2
-                exit 1
-              fi
-              echo "ios-openssl-absent: passed — openssl-sys is not resolvable from taurine-mobile"
+              # Gate S1's mobile arm, door-only form (plan 25; the shells ship the OpenSSL
+              # door since the owner's decision of 2026-10-15). An older source with no
+              # openssl-sys in the mobile graph passes as "absent"; a source with it passes only
+              # when OpenSSL enters through taurine-tls-openssl alone and the single openssl-src
+              # is on 300.5.x. A resolve error fails. Cheap, so it runs before the expensive
+              # test-target build and fails the concern first.
+              openssl_door_gate ios-openssl-door-only taurine-mobile aarch64-apple-ios || exit 1
+              openssl_door_gate ios-sim-openssl-door-only taurine-mobile aarch64-apple-ios-sim || exit 1
+              verify_door_crate_sources || exit 1
               # Compile-only: build and link every test target of the mobile crate for
               # the iOS simulator triple, so the `cfg(target_os = "ios")` code and its
               # tests are type-checked and linked on a hosted runner; the next step
-              # executes them on the simulator.
+              # executes them (and the door's own tests) on the simulator.
               mobile_run ios-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-apple-ios-sim
               ;;
             *)

@@ -34,6 +34,10 @@ inputs:
   github-token:
     description: Token with actions read, for listing the run's jobs
     required: true
+  blocking-failures:
+    description: Count of checks outside the concern jobs whose failure must fail the verdict (the untrusted cache scope audits), computed by the caller; a non-numeric value is refused
+    required: false
+    default: '0'
 
 runs:
   using: composite
@@ -50,6 +54,7 @@ runs:
         REQUESTED_SOURCE_SHA: ${{ inputs.source-sha }}
         BASE_SHA: ${{ inputs.base-sha }}
         SELECTION_MODE: ${{ inputs.selection-mode }}
+        BLOCKING_FAILURES: ${{ inputs.blocking-failures }}
       run: |
         set -euo pipefail
         case "${SELECTION_MODE}" in
@@ -109,9 +114,21 @@ runs:
           fi
           table="${table}| ${concern} | ${conclusion} |"$'\n'
         done < <(jq -r '.[]' <<<"${EXPECTED}")
+        blocking="${BLOCKING_FAILURES:-0}"
+        case "${blocking}" in
+          ''|*[!0-9]*) echo 'run-result rejected an invalid blocking-failures count' >&2; exit 1 ;;
+        esac
+        if [[ "${blocking}" -gt 0 ]]; then
+          # A check outside the concerns (the untrusted cache scope audit) failed: it can never
+          # print a passing verdict.
+          table="${table}| untrusted cache scope audit | FAILED |"$'\n'
+          failed=$((failed + blocking))
+        fi
         selection="${SELECTION_MODE}"
         verdict="PASS (${selection})"
-        if [[ "${failed}" -gt 0 ]]; then
+        if [[ "${blocking}" -gt 0 ]]; then
+          verdict="FAIL (the untrusted cache scope audit failed)"
+        elif [[ "${failed}" -gt 0 ]]; then
           verdict="FAIL (${failed} concern(s) did not succeed)"
         elif [[ "${ran_count}" -eq 0 ]]; then
           verdict='FAIL (no concern ran)'

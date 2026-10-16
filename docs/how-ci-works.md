@@ -237,7 +237,38 @@ place for unreviewed code is a ref whose cache main never reads. Hence two refs:
 | Ref | Runs | Caches |
 | --- | --- | --- |
 | `main` | Only SHAs on `develop`, `uat` or `main` of the source repository (protected ancestry). Anything else is refused, fail-closed, after the token is revoked and before project code, with a message saying to use `untrusted`. | The only ref that may restore or save caches. |
-| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip, or an ancestor of it (an older, previously reviewed main commit) with no `.github/` change on main since; a run from an `untrusted` that is ahead of main, has diverged from it, or is behind a later `.github/` change stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`). |
+| `untrusted` | Any SHA, typically a feature or plan branch tip. Must be main's tip, or an ancestor of it (an older, previously reviewed main commit) with no `.github/` change on main since; a run from an `untrusted` that is ahead of main, has diverged from it, or is behind a later `.github/` change stops before any token is minted. | Never saves a cache (every save requires `github.ref == 'refs/heads/main'`), and on Linux and Windows its jobs run with `cache-mode: read` (see [Cache grants](#cache-grants-cache-mode)). |
+
+### Cache grants (`cache-mode`)
+
+GitHub's job-level `cache-mode` (`read`, `write`, `write-only`, `none`) is enforced by the cache token a
+runner receives: a spike (`docs/untrusted-readonly-cache.md`, section 7a-result) showed that a direct write with
+the runtime token is declined under `read` and `none`, so project code cannot write a scope its job was
+not granted. The policy (`check-cache-mode.rb`) therefore holds these grants:
+
+- every dispatch workflow except `macos-validation.yml` declares workflow-level `cache-mode: none`; a job
+  that caches or calls a reusable workflow declares its own value; `write-only` and any expression are
+  refused (GitHub rejects the `github` context there); a called workflow never sets it, so it inherits its
+  caller's grant and cannot widen it;
+- on Linux and Windows each saving caller is split into `validate-main` (`cache-mode: write`, only on
+  `main`) and `validate-untrusted` (`cache-mode: read`, only on `untrusted`), so a run from `untrusted`
+  can never write any cache scope. No untrusted restore exists yet: that is a later stage, behind a
+  measured baseline and the owner's decision, and the "never restores" statements below stay true;
+- an untrusted run first passes the `cache-audit` job (`cache-scope-audit` composite: no source, no
+  environment, no secret, `actions: read`), which fails unless the `untrusted` cache scope holds no entry
+  at all, and `cache-audit-after` repeats it after the run to report a planting attempt. The owner purges
+  the scope once before the first run: `gh cache delete --all --ref refs/heads/untrusted -R
+  Moh-Bakr/Taurine-CI` (always with `--ref`: without it the command deletes every cache, main's included);
+- `actions: write` is held to `cache-prune.yml` (main-only, no source) and the weekly dispatch job.
+
+Residuals, stated plainly. `macos-validation.yml` runs its matrix job inline and saves in it, so it cannot
+be split until that job becomes a reusable workflow; until then macOS `untrusted` runs keep the default
+grant for a trusted trigger (they can still write the `untrusted` scope, which the Linux and Windows audits
+would then report). The policy refuses any
+untrusted cache restore while macOS (or any other workflow that can run on `untrusted`) is not enforced, so the
+macOS split must come first. A failed audit also fails the Result verdict on Linux and Windows. On Windows administrator rights cannot be dropped, so any future untrusted restore
+there would extract as an administrator: it is out of scope until it has its own review. The audit is a
+detector, not a lock: `cache-mode: read` is the control.
 
 ### Dispatching feature-branch validation
 
@@ -493,7 +524,8 @@ then `scripts/vendor-openvpn3.sh fetch`, which verifies the vendored sources aga
 ## How the files are split
 
 The policy warns on any workflow or composite above 400 lines and fails above 800. Every file is under
-400 except the `concern-report` composite, which is one cohesive reporting library and is kept whole. Files are
+400 except the `concern-report` and `shell-artefact` composites, each one cohesive library kept whole
+(`shell-artefact` installs its build-input half, `shell-config`, as its first step). Files are
 split by responsibility: a workflow keeps everything that must run before project code (input
 validation, the token mint, the exact-SHA checkout and the revoke) plus the job wiring, and the work
 that runs after the revoke lives in composites under `.github/actions/`.
@@ -501,11 +533,11 @@ that runs after the revoke lives in composites under `.github/actions/`.
 | Area | Workflow (entry point) | Composites it calls |
 | --- | --- | --- |
 | Shared | every protected workflow | `source-checkout` (mint, exact checkout, verify, revoke), `sanitize`, `timings`, `node-setup`, `rust-toolchain`, `vendor-fetch`, `verify-cargo-cache`, `concern-report`, `run-result` |
-| Linux | `linux-validation.yml` calls `linux-validation-concern.yml`; `select-concerns.yml` plans | `linux-concern-js`, `linux-concern-e2e`, `linux-concern-rust`, `scan-concern`, `select-concerns`, `linux-test-identities` |
-| macOS | `macos-validation.yml` | `macos-concern-js`, `macos-concern-rust` |
-| Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust` |
-| Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report` |
-| iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report` |
+| Linux | `linux-validation.yml` calls `linux-validation-concern.yml`; `select-concerns.yml` plans | `linux-concern-js`, `linux-concern-e2e`, `linux-concern-rust`, `scan-concern`, `select-concerns`, `linux-test-identities`, `shell-artefact` |
+| macOS | `macos-validation.yml` | `macos-concern-js`, `macos-concern-rust`, `shell-artefact` |
+| Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust`, `shell-artefact` |
+| Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report`, `shell-artefact`, `android-emulator-tests` |
+| iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report`, `shell-artefact`, `ios-simulator-tests` |
 | Live proofs | `live-proofs.yml` calls `live-proof-arm.yml` once per arm | `live-build`, `live-run`, `live-summary`, `live-start-mpp`, `live-start-ibm`, `live-start-rocketmq`, `live-start-iris`, `live-start-pg`, `live-start-sql` |
 | Policy | `validate-public-changes.yml` | the scripts under `.github/policy/` |
 
@@ -609,7 +641,209 @@ days earlier, and `macos-validation` and `windows-validation` with `rust=true` (
 are not part of the weekly run; dispatch them by hand. The base_sha run is the drift check:
 a concern that fails in the full run but is "not selected" in the selective run reveals a gap
 in the `ci-matrix.json` rules. The summary also reports how far the locked `openssl-src` is
-behind the newest 300.5.x release.
+behind the newest 300.5.x release, for the develop, uat and main tips. That patch cadence is a
+warning for develop and **fails the run** for a uat or main tip that is behind, off the 300.5
+line, or still on 3.5 after OpenSSL 3.5 LTS ends (2030-04-08): the release line ships the
+OpenSSL it locks. The release line fails closed: an unresolved tip, a failed root-lock fetch,
+a lock without `openssl-src` or an empty crates.io answer is an error, not a pass
+(`test-weekly-cadence.sh`).
+
+## The OpenSSL door in the shells
+
+Both shells ship the OpenSSL door (`taurine-tls-openssl`, vendored OpenSSL 3.5 LTS). The
+`shell-artefact` composite holds the checks, which publish crate names, versions, byte counts
+and the public OpenSSL version string only:
+
+- **CI owns the build's argv.** Every shell build (desktop `rust-packaging`, `android-native`,
+  `ios-native`, and the Android/iOS project `init`) runs `npm run --ignore-scripts tauri -- <CI
+  arguments>` from the shell directory with every `TAURI_*` and `npm_config_*` variable removed,
+  and never a source-chosen `--features` or `--config` (the macOS flavour `--config` is CI's
+  closed set). The npm form is needed because the CLI records how it was started as the
+  callback of the generated mobile build phases (started as `node <script>`, it records an
+  unrunnable `node tauri`); so the shell's `tauri` script must be exactly `tauri`, with no
+  `pretauri`/`posttauri` script, no `.npmrc` anywhere in the checkout and no `~/.npmrc` for the
+  job user, and npm's user and global config point at empty CI-owned files (the generated
+  phases inherit that environment when they call back). The CLI's provenance
+  is proven first:
+  `node_modules/.bin/tauri` must resolve to that `tauri.js`, and the shell's `package-lock.json`
+  entries for `@tauri-apps/cli` and every installed `@tauri-apps/cli-<platform>` must be
+  resolved from `https://registry.npmjs.org/` with an `integrity`. The Android bindgen
+  environment the source's scripts used to set is set by CI. Tauri's own `beforeBuildCommand`
+  (the frontend build) still runs from the checked config, so every refusal below runs again
+  after the build.
+- **Generated mobile build phases.** The Gradle Rust plugin (`gen/android/buildSrc`) and the
+  Xcode "Build Rust Code" phase (`gen/apple`) call back into the CLI with a command recorded at
+  `init`. A source-committed copy would hand the Rust build to source-chosen arguments, so CI
+  regenerates them: it removes `gen/android/buildSrc` (and the generated `tauri.settings.gradle`)
+  and all of `gen/apple` (refused if committed) before its own `init`, and after `init` the
+  regenerated callback must exist and call the CLI's `tauri.js` with node, never a package
+  manager script beyond that exact `npm run -- tauri` callback. For iOS the regenerated
+  `project.yml` is also checked structurally: its only script phase is "Build Rust Code", it
+  sets no `OTHER_LDFLAGS`, `FRAMEWORK_SEARCH_PATHS` or `LD_RUNPATH_SEARCH_PATHS`, its
+  `LIBRARY_SEARCH_PATHS` are the template's, and its only dependencies are the Rust `libapp.a`
+  and SDK frameworks from the template's set plus `SystemConfiguration` (no `carthage`,
+  `package`, `bundle` or `target` dependency). The rest of a committed `gen/android` (app sources, manifest, the app and root
+  Gradle files, `gradle.properties`) is source build logic like a `build.rs`, and can reach the
+  Rust build, for example running cargo with extra `--features`. It is accepted as source build
+  logic, and what it builds is judged instead: see **Built graph** below. Its Gradle
+  wrapper is checked: the wrapper jar must be Gradle's published wrapper jar for the version
+  `distributionUrl` names, `gradlew` and `gradlew.bat` must equal the start scripts pinned for
+  that version (Gradle publishes no checksums for them, so the scripts the source committed for
+  8.14.3 were pinned by sha256; any other version fails until its scripts are reviewed and
+  pinned). **Upgrading Gradle**: review the new version's start scripts (as generated by that
+  version's `gradle wrapper`), re-hash `gradlew` and `gradlew.bat`, and pin them in
+  `shell-config` in the same change as that version's published wrapper-jar and distribution
+  checksums (fetched from `services.gradle.org`); the source then commits the new wrapper, jar,
+  scripts and `distributionSha256Sum` together,
+  `distributionUrl` an official `https://services.gradle.org/distributions/gradle-<v>-bin.zip`,
+  and `distributionSha256Sum` present and equal to Gradle's published checksum for that version
+  (both pinned in `shell-config`).
+- **Gate S1, door-only** (`android-rust`, `ios-rust` for the mobile graph per target, every
+  built Android ABI and the iOS simulator build before and after the build, and every desktop
+  `rust-packaging` before and after the build): an older source without `openssl-sys` passes
+  as "absent"; otherwise every direct dependent of `openssl-sys`, `openssl`, `tokio-openssl` and
+  the door must be inside the door path (`openssl`, `tokio-openssl`, `taurine-tls-openssl`,
+  `taurine-db-dbx`), the door must be present and the single resolved `openssl-src` must be
+  300.5.x. A resolve error fails. The gate queries the shell crate's manifest default features,
+  which is exactly the built set because CI owns the argv and refuses any Tauri config that could
+  change it: a shell without `src-tauri`; any Tauri config other than a lower-case `tauri*.json`
+  directly in a shell's `src-tauri` (every `tauri*.toml` and `tauri*.json5`, the CLI's platform
+  overlays such as `Tauri.linux.toml` included); and a config that sets `build.features`,
+  `build.runner`, `bundle.externalBin`, any `files` of deb, rpm, AppImage or macOS, any
+  `bundle.macOS.frameworks` (the bundler resolves even a bare name from `~/Library`, `/Library`
+  or `/Network/Library/Frameworks`, never `/System`, so it always copies a framework),
+  `bundle.iOS.template`, a `bundle.iOS.frameworks` entry outside `{SystemConfiguration}`, the
+  installer hooks and templates (WiX `template`, `fragmentPaths` and component/feature/merge
+  refs; NSIS `template` and `installerHooks`; deb and rpm maintainer scripts) and
+  `bundle.windows.signCommand` (refused for now; release signing will need its own reviewed
+  path later).
+  `bundle.resources` (array or object form) must be data, by a content allow-list: every
+  source, relative to `src-tauri`, must exist and resolve (symlinks included) inside the
+  checkout; globs (`*`, `**`, dotfiles included, as Tauri expands them) and directories are
+  expanded and every file checked; a pattern that matches nothing fails; and each file must be
+  a PNG, JPEG, ICO or ICNS image by magic, or UTF-8 text with no control byte other than tab,
+  newline, form feed and carriage return (so `../../THIRD-PARTY-NOTICES` and SVG pass, and
+  archives, jar/dex, WASM and any executable fail). `pg8-measurement` still builds through `npm run tauri`;
+  no door or artefact verdict reads its output.
+- **Built graph**: after each shell build, the graph cargo actually compiled is judged, whatever
+  features Gradle code or a build phase passed. Units are identified by identity, not by where
+  their sources live: every `.fingerprint/<package>-<hash>` and `deps/<crate>-<hash>.d` of the
+  artefact's profile directory (mapped through `cargo metadata --locked --all-features` package
+  and target names), plus the paths in the artefact's own dep-info (relative ones resolved
+  against the workspace root). `build.dep-info-basedir` in any cargo config and
+  `CARGO_BUILD_DEP_INFO_BASEDIR` are refused, and so is a path package whose target sources lie
+  outside its own manifest directory. A `--target` build compiles build-dependencies (`openssl-src`)
+  for the host, so the host profile `<target>/<profile>/` is read too. Any `.fingerprint` or
+  `deps/*.d` entry that is not a
+  `<name>-<16 hex>` unit (or the unhashed `<target>.d` cargo writes) or maps to no package fails,
+  and the door state sets a floor: with the door in the graph the built set must contain
+  `taurine-tls-openssl`, `openssl`, `openssl-sys` and `openssl-src`, without it none of them.
+  Edges come from the all-features resolve; `openssl-src` may be a (build) dependency of
+  `openssl-sys` only, in the gate and here. Every built crate that depends directly
+  on `openssl`, `openssl-sys` or `tokio-openssl` must be on the door path (the S1 parent rules)
+  and `native-tls` must not be built. A missing or unparseable dep-info, or one without the
+  shell crate, fails. Dep-info read: desktop `<target>/debug/taurine-desktop.d` (Linux, macOS,
+  Windows) with `<target>/debug/deps/*.d`; Android `<target>/<triple>/debug/libtaurine_mobile_lib.d`
+  per built ABI; iOS `<target>/aarch64-apple-ios-sim/release/libtaurine_mobile_lib.d`; each
+  with its own `deps/*.d`. A restored compiled-dependency cache (main, protected SHAs only)
+  adds its units to the set, which can only make the check stricter.
+- **The shipped artefact is the judged build**: Android always requires each APK `lib/<abi>/`
+  library to equal the judged `<target>/<triple>/debug/libtaurine_mobile_lib.so` after the
+  NDK's `llvm-strip --strip-all` of both (a GNU build-id can be chosen at link time, so an equal
+  build-id is only an extra check). That AGP's packaged copy matches after the strip is
+  unproven until a hosted run confirms it; iOS requires every `libapp.a` in the project's `Externals` to equal the
+  judged `libtaurine_mobile_lib.a`; desktop requires the bundled main binary (the `.deb`'s
+  `usr/bin`, the `.app`'s executable) to equal `target/debug/<bin>`, or to equal it once both
+  are stripped and unsigned. Windows bundles nothing, so the executable judged is the one built.
+- **The fixtures in the base-policy pass**: `test-shell-artefact.sh` builds a toy workspace with
+  real cargo. The base pass runs every base test with `PATH` fixed to the system directories and
+  an empty `HOME`, where rustup's proxies cannot work, so the base-policy job copies the image's
+  stable toolchain (`bin/` and `lib/` of its real `cargo` and `rustc`) to `/opt/taurine-ci-rust`,
+  owned by root, before root is removed, and the base step passes it as `TCI_REAL_CARGO`. That
+  step runs from `RUNNER_TEMP`, outside both checkouts, resolves the sysroot with the image's own
+  `~/.cargo/bin/rustup run stable` (`RUSTUP_TOOLCHAIN=stable`, `RUSTUP_HOME`/`CARGO_HOME`
+  unset), and refuses a sysroot outside `~/.rustup/toolchains/`, so a `rust-toolchain.toml` in the
+  pull request or base tree cannot make rustup run its own `rustc` while sudo is still available.
+- **What CI judges, and what it does not**: CI builds and judges the iOS **simulator release**
+  artefact and the **desktop debug** artefacts (and the Android debug APK). iOS device builds,
+  App Store archives, desktop release installers and any signed or store artefact are built
+  outside CI and are not judged by these checks.
+- **Door crates fetched afresh and compared after the build**: before each shell build, every
+  cached `.crate` and every extracted `registry/src` copy of the four door crates is deleted in
+  every registry directory, `cargo fetch --locked` downloads them again, and every resulting
+  cached copy must hash to its `Cargo.lock` checksum (at least one per crate). After the build,
+  before anything is deleted, each extracted copy cargo built from is compared file by file with
+  a fresh extraction of its verified archive (`.cargo-ok` aside); any difference fails.
+- **Door crates from crates.io**: `openssl-src`, `openssl-sys`, `openssl` and `tokio-openssl`
+  must each have the crates.io registry `source` and a `checksum` (and no `replace`) in the root
+  `Cargo.lock`, and resolve in `cargo metadata` to that source with the manifest under
+  `CARGO_HOME/registry/src`. A `[patch]` path or git fork, `[replace]`, or a directory/vendored
+  source replacement fails.
+- **What the gate cannot see.** It is name- and graph-based: it knows `openssl-sys`, `openssl`,
+  `tokio-openssl`, `taurine-tls-openssl` and `openssl-src` by name. A renamed or forked crate, a
+  `build.rs` that links a library itself, or a libcrypto compiled inside another `-sys` crate is
+  invisible to it; the artefact proof below is the backstop. Its `openssl-src` count reads the
+  root `Cargo.lock` only, because both shells build from the root workspace (`dbx-core` and
+  `dbx-mongo-shell` keep their own locks, which no shell build reads); revisit that if a shell
+  ever builds from another lock.
+- **No OpenSSL override**: `OPENSSL_NO_VENDOR`, `OPENSSL_DIR`, `OPENSSL_STATIC`,
+  `OPENSSL_LIB_DIR` and `OPENSSL_INCLUDE_DIR` (bare or with a `<TARGET>_` prefix) make
+  `openssl-sys` skip the vendored build. They are refused in the job environment and in every
+  `.cargo/config.toml`/`.cargo/config` cargo can read (nested in the checkout, every parent of
+  the shells up to `/`, and `CARGO_HOME`), before each build and in every gate. Names compare
+  case-insensitively and config keys after TOML decoding (Python `tomllib`; an unparseable
+  config or a missing `tomllib` fails). This is hygiene: the control is the artefact's
+  lock-bound version proof below.
+- **Door tests on the device**: the emulator (x86_64) and simulator run the door crate's library
+  and integration tests through the same runner as the mobile tests, surfacing the fixed
+  `door-roots:` line and, when the source has it, the ignored `public_peer` verify-full
+  handshake (`door-public-peer:` line; a resolve/connect failure is classified as "public peer
+  unreachable from device" and still fails). Only whole lines of the fixed shapes
+  `door-roots: (Os|MozillaFallback), N anchors` and `door-public-peer: roots
+  (Os|MozillaFallback), N anchors` are published, one per key; any other door line is dropped,
+  reported only as `door lines dropped: yes|no`. `lockfile_policy` is excluded on the device (it
+  reads the host `Cargo.lock`); the host `rust-tls-openssl` concern covers it. The aarch64
+  Android door tests are built and linked compile-only.
+- **Artefact linkage** (the desktop executable, plus everything in the Linux `.deb` and the macOS
+  `.app`; the whole Android APK, every ABI in `lib/` and every other binary such as `assets/`;
+  the whole iOS `.app`, its `Frameworks` included; on Windows, which builds no installer, every
+  PE beside the executable in the target directory, the shell's own library judged like the
+  executable; a PE in a subdirectory of the target directory is not scanned because nothing CI
+  builds ships it: there is no installer, `externalBin` is refused and resources must be text
+  or images): the shell's main binary must carry no
+  dynamic `libssl`/`libcrypto` dependency (`readelf -d`, `otool -L`, `dumpbin /dependents`),
+  and the distinct set of `OpenSSL X.Y.Z` strings in the binary must be empty when the door is
+  not in that target's graph, and exactly `OpenSSL 3.5.M` when it is, where `3.5.M` is the
+  build metadata of the single locked `openssl-src` 300.5.x. A second copy, another version
+  or another patch fails. Every other shipped binary must carry no OpenSSL string and no dynamic
+  `libssl`/`libcrypto`. Android judges each built ABI on its own target graph. **Residual:** the
+  proof sees only copies whose version text survived linking. A library deliberately built with
+  the version string stripped (and with `no-filenames`) evades it: the proof catches accidental
+  OpenSSL consumers, not a deliberately disguised one.
+- **Same-user tampering (residual)**: the checks call `grep`, `jq`, `cargo` and the binary
+  readers through `PATH` after project code has run as the same user, and build scripts can
+  write `GITHUB_ENV`/`GITHUB_PATH`, so a hostile build could shadow them. Likewise
+  `CARGO_*`, `RUSTFLAGS`, a cargo `rustc-wrapper`, `linker` or link arguments cannot change the
+  resolved graph but can link extra code; a `beforeBuildCommand` can edit and restore inputs.
+  These are same-user residuals, backstopped by the artefact proof. The gate therefore also runs
+  before each build, where no build script has run yet; the post-build artefact proof shares
+  the job's trust in its own tools.
+- **Scope**: the rule covers native OpenSSL. An OpenSSL compiled to WASM in the frontend, or a
+  JVM/JS TLS stack, is outside it; a native BoringSSL in an Android `.so` is caught as an extra
+  through its `OpenSSL 1.1.1 (compatible; BoringSSL)` text.
+- **Native size budget (advisory)**: a ceiling in the source's `bundle-budget.json`
+  (`<app>.native.<abi>` or `<app>.nativeBytes`) is compared when the source sets one. The
+  source sets the number it is judged against, so this is evidence, not a security control.
+- **Windows toolchain**: every Windows Rust concern sets `OPENSSL_SRC_PERL` to the image's
+  Strawberry Perl (fails closed when it is missing) and puts NASM on the job PATH before any
+  project code, because the vendored OpenSSL builds wherever taurine-app compiles. Both versions
+  are printed in the summary and held to the majors the build is reviewed with: Perl 5, and NASM
+  2 when present (a missing NASM is allowed and means OpenSSL builds `no-asm`).
+- **Artefact size (known limitation)**: CI reports the with-door artefact sizes only (every
+  shell-building concern prints the artefact's byte size and build profile); it does not measure
+  the size the door adds (the with/without-door delta). The owner deferred that comparison
+  (2026-10-16): the door ships with sizes reported with OpenSSL only. Measuring the delta later
+  needs a second full shell build and its own reviewed opt-in dispatch input.
 
 ## The live proofs
 

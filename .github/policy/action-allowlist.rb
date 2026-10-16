@@ -15,6 +15,8 @@ ACTION_ALLOWLIST = [
   'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
   'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
   './.github/workflows/windows-validation-concern.yml',
+  './.github/workflows/macos-validation-concern.yml',
+  './.github/workflows/macos-validation-concern.yml',
   # Local composite actions are reviewed in this repository; each one is added
   # here deliberately and held to the composite rules below.
   './.github/actions/source-checkout',

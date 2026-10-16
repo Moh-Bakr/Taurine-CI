@@ -21,6 +21,10 @@ on:
 
 permissions: {}
 
+# No job caches unless it declares its own cache-mode; the reviewed split is validate-main (write,
+# main only) and validate-untrusted (read) (docs/untrusted-readonly-cache.md, section 4.1).
+cache-mode: none
+
 concurrency:
   group: public-policy-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -111,11 +115,21 @@ jobs:
         shell: bash
         run: bash .github/policy/test-preflight.sh
 
+      # The untrusted cache scope audit, run against a stub curl: it passes only on a readable,
+      # empty scope and refuses entries, bad answers, other statuses and other refs.
+      - name: Test the untrusted cache scope audit against stub endpoints
+        shell: bash
+        run: bash .github/policy/test-cache-scope-audit.sh
+
       # The three steps that hold the source token, run against stub curl, git and date: each
       # revokes on every path, calls only the reviewed endpoints and refuses what it must.
       - name: Test the source-token revoke against stub endpoints
         shell: bash
         run: bash .github/policy/test-revoke.sh
+
+      - name: Test the weekly openssl-src patch cadence
+        shell: bash
+        run: bash .github/policy/test-weekly-cadence.sh
 
       # Every weakening an independent review found is applied to a copy of the tree and must be
       # rejected, including a pull request that weakens its own policy.
@@ -127,6 +141,13 @@ jobs:
       - name: Test the sanitizer expressions against path and token fixtures
         shell: bash
         run: bash .github/policy/test-sanitizers.sh
+
+      # The OpenSSL door's shell checks: gate, artefact proof, built graph, binding, the
+      # base-policy toolchain copy and the Windows build tools. Its own step, not a sub-run of
+      # another test, because it reads the real workflows that the mutation fixtures replace.
+      - name: Test the OpenSSL door's shell checks
+        shell: bash
+        run: bash .github/policy/test-shell-artefact.sh
 
       - name: Test the compiled dependency cache strip against hostile outputs
         shell: bash
@@ -294,5 +315,7 @@ jobs:
     permissions:
       contents: read
     name: Base policy
+    # The policy gate never restores or saves a cache, whatever the trigger.
+    cache-mode: none
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/base-policy.yml  # zizmor: ignore[self-repository]

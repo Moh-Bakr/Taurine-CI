@@ -1,0 +1,613 @@
+name: Install the shell artefact checks
+description: >
+  Writes the OpenSSL door gate and the shell artefact checks (size, linked OpenSSL version,
+  dynamic libssl/libcrypto dependencies, native size budget, built graph and binding) to the
+  runner temp directory, to be sourced after the shared sanitizers by the desktop packaging and
+  mobile concern steps. Reads nothing from the private source itself and publishes nothing; the
+  functions, run later from the checkout, publish fixed lines with crate names, versions and
+  byte counts only.
+
+runs:
+  using: composite
+  steps:
+    - name: Install the shell build-input checks
+      # Kept as ./ : the policy matches this exact form for local actions.
+      uses: ./.github/actions/shell-config  # zizmor: ignore[self-repository]
+
+    - name: Write the shell artefact library
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${RUNNER_TEMP}/taurine-ci"
+        cat > "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh" <<'TCI_SHELL_ARTEFACT_LIBRARY'
+        # shellcheck shell=bash
+        # Shell artefact checks. Sourced after the shared sanitize library, from the private
+        # checkout's root, after the source token is revoked. Every function returns non-zero
+        # on failure instead of exiting, so a caller can record it as a sub-step. Only fixed
+        # lines leave the runner: crate names and versions from the lock, byte counts, budget
+        # names and the public OpenSSL version string. No path, log line or message text.
+        # bash 3.2 (macOS) compatible: no associative arrays, no mapfile.
+        # The build-input refusals and the CI-owned Tauri CLI live in shell-config (installed by
+        # this composite's first step); the gate below runs them too.
+        # shellcheck source=/dev/null
+        source "${RUNNER_TEMP}/taurine-ci/shell-config.sh"
+
+        # The crates the OpenSSL door is made of, and the only crates each one may be a direct
+        # (normal) dependency of. Everything that reaches OpenSSL must enter through
+        # `taurine-db-dbx` (the database subsystem) or the door crate itself; the private
+        # deny.toml bans every other path, and this gate proves it on the resolved graph of the
+        # shell being validated, for the target being built.
+        tci_door_allowed_parents() {
+          case "$1" in
+            openssl-sys) echo 'openssl tokio-openssl taurine-tls-openssl' ;;
+            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;
+            tokio-openssl) echo 'taurine-db-dbx' ;;
+            taurine-tls-openssl) echo 'taurine-db-dbx' ;;
+            # The vendored OpenSSL source is a build-dependency of openssl-sys and nothing else:
+            # any other crate building it would link its own copy of the same 3.5.M.
+            openssl-src) echo 'openssl-sys' ;;
+            *) return 1 ;;
+          esac
+        }
+
+        # tci_inverted <out> <package> <target|-> <edges> <crate> <depth>
+        # The inverted dependency tree of <crate> within <package>'s resolved graph. Prints
+        # present, absent or error. Absent has exactly two pinned shapes: cargo's "did not match
+        # any packages" (the crate is not in the resolve at all) and its "nothing to print"
+        # warning (in the workspace resolve, but not reachable from <package> for <target>).
+        # Anything else that is not a clean tree rooted at <crate> is an error, never absent.
+        tci_inverted() {
+          local out="$1" package="$2" target="$3" edges="$4" crate="$5" depth="$6" rc=0
+          # cargo silently widens an unknown --package to the whole workspace, so the package is
+          # proven to be a workspace member first; a missing member is an error, never absent.
+          if ! cargo metadata --locked --no-deps --format-version 1 2>/dev/null | tr -d '\r' |
+            jq -e --arg p "${package}" 'any(.packages[]; .name == $p)' >/dev/null; then
+            echo error
+            return 0
+          fi
+          local args=(tree --locked --package "${package}" -e "${edges}" --invert "${crate}" --depth "${depth}" --prefix depth)
+          if [[ "${target}" != - ]]; then args+=(--target "${target}"); fi
+          cargo "${args[@]}" >"${out}" 2>&1 || rc=$?
+          tr -d '\r' <"${out}" >"${out}.lf" && mv "${out}.lf" "${out}"
+          if [[ "${rc}" -ne 0 ]]; then
+            if grep -qF "specification \`${crate}\` did not match any packages" "${out}"; then echo absent; else echo error; fi
+          elif grep -qE "^0${crate} v" "${out}"; then
+            echo present
+          elif grep -q 'nothing to print' "${out}"; then
+            echo absent
+          else
+            echo error
+          fi
+        }
+
+        # The direct dependents (depth-1 names) in a tree written by tci_inverted, sorted.
+        tci_dependents() {
+          sed -nE 's/^1([A-Za-z0-9_-]+) v.*/\1/p' "$1" | sort -u
+        }
+
+        # The door's crates must come from crates.io, as published: in the root Cargo.lock every
+        # entry of openssl-src, openssl-sys, openssl and tokio-openssl has the crates.io registry
+        # source and a checksum, and no `replace`; in cargo metadata each resolved package has
+        # that source and its manifest under CARGO_HOME's registry/src (a [patch] path or git
+        # fork, [replace], or a directory/vendored source replacement all fail here).
+        TCI_CRATES_IO='registry+https://github.com/rust-lang/crates.io-index'
+        door_provenance() {
+          local label="$1" crate bad=0 meta home
+          for crate in openssl-src openssl-sys openssl tokio-openssl; do
+            if ! awk -v name="${crate}" -v want="${TCI_CRATES_IO}" '
+                 /^\[\[package\]\]/ { if (n == name) { if (src != want || sum == "" || rep) bad = 1 } n = ""; src = ""; sum = ""; rep = 0; next }
+                 /^name = /     { n = $3; gsub(/"/, "", n) }
+                 /^source = /   { src = $3; gsub(/"/, "", src) }
+                 /^checksum = / { sum = $3 }
+                 /^replace = /  { rep = 1 }
+                 END { if (n == name) { if (src != want || sum == "" || rep) bad = 1 } exit bad }' Cargo.lock; then
+              echo "${label}: FAILED - Cargo.lock's ${crate} is not the crates.io package (source, checksum or replace)" >&2
+              bad=1
+            fi
+          done
+          home="${CARGO_HOME:-${HOME}/.cargo}"
+          if command -v cygpath >/dev/null 2>&1; then home="$(cygpath -m "${home}")"; fi
+          if ! meta="$(cargo metadata --locked --format-version 1 2>/dev/null | tr -d '\r')"; then
+            echo "${label}: FAILED - cargo metadata did not resolve (detail withheld)" >&2
+            return 1
+          fi
+          if ! jq -e --arg src "${TCI_CRATES_IO}" --arg home "$(printf '%s' "${home%/}" | tr 'A-Z\\' 'a-z/')/registry/src/" '
+               [.packages[] | select(.name | IN("openssl-src", "openssl-sys", "openssl", "tokio-openssl"))]
+               | all(.source == $src and (.manifest_path | ascii_downcase | gsub("\\\\"; "/") | startswith($home)))' <<<"${meta}" >/dev/null; then
+            echo "${label}: FAILED - a door crate does not resolve to the crates.io registry copy (patched, git, replaced or vendored source)" >&2
+            bad=1
+          fi
+          [[ "${bad}" -eq 0 ]] && echo "${label}: door crates come from crates.io (lock source and checksum, registry manifests)"
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        # The OpenSSL version the single locked openssl-src 300.5.x vendors: the `+3.5.M` build
+        # metadata of its root Cargo.lock entry. Fails unless exactly one entry is on 300.5.
+        locked_openssl_version() {
+          local versions
+          versions="$(awk '/^name = "openssl-src"$/ { getline; gsub(/version = "|"/, ""); print }' Cargo.lock 2>/dev/null || true)"
+          [[ "$(printf '%s\n' "${versions}" | grep -c .)" -eq 1 && "${versions}" =~ ^300\.5\.[0-9]+\+(3\.5\.[0-9]+)$ ]] || return 1
+          echo "${BASH_REMATCH[1]}"
+        }
+
+        # The ABI directory name Android uses for each Rust target, and back.
+        android_abi_triple() {
+          case "$1" in
+            arm64-v8a) echo aarch64-linux-android ;;
+            armeabi-v7a) echo armv7-linux-androideabi ;;
+            x86) echo i686-linux-android ;;
+            x86_64) echo x86_64-linux-android ;;
+            *) return 1 ;;
+          esac
+        }
+
+        # door_in_graph <package> <target|->: prints present or absent; fails on a resolve error
+        # or a refused build-feature override.
+        door_in_graph() {
+          local state
+          refuse_build_feature_overrides || return 1
+          state="$(tci_inverted "${RUNNER_TEMP}/door-in-graph.log" "$1" "$2" normal taurine-tls-openssl 0)"
+          case "${state}" in
+            present | absent) echo "${state}" ;;
+            *) return 1 ;;
+          esac
+        }
+
+        # openssl_door_gate <label> <package> <target|->
+        # Gate S1, door-only form. Absent: openssl-sys is not in <package>'s graph for
+        # <target> (older sources) - passes, recorded as absent. Present: passes only when every
+        # crate on an inverted path to openssl-sys enters through the door (the allowed parents
+        # above), the door crate itself is present, and exactly one openssl-src is resolved, on
+        # the 3.5 LTS line (300.5.x). A resolve error, a second openssl-src or any other parent
+        # fails. Cheap (cargo tree only), so callers run it before an expensive build.
+        openssl_door_gate() {
+          local label="$1" package="$2" target="$3" log state crate parents parent allowed bad=0 src_line locks edges
+          log="${RUNNER_TEMP}/${label}.log"
+          if ! refuse_build_feature_overrides || ! refuse_openssl_overrides >/dev/null; then
+            echo "${label}: FAILED - the build's features or OpenSSL source are overridden (see above)" >&2
+            return 1
+          fi
+          state="$(tci_inverted "${log}" "${package}" "${target}" normal openssl-sys 1)"
+          case "${state}" in
+            absent)
+              echo "${label}: passed - absent (openssl-sys is not in the ${package} graph for ${target})"
+              return 0
+              ;;
+            error)
+              echo "${label}: FAILED - the openssl-sys query did not resolve (detail withheld)" >&2
+              return 1
+              ;;
+          esac
+          for crate in openssl-sys openssl tokio-openssl taurine-tls-openssl openssl-src; do
+            edges=normal
+            [[ "${crate}" == openssl-src ]] && edges=normal,build
+            state="$(tci_inverted "${log}" "${package}" "${target}" "${edges}" "${crate}" 1)"
+            case "${state}" in
+              absent) continue ;;
+              error)
+                echo "${label}: FAILED - the ${crate} query did not resolve (detail withheld)" >&2
+                bad=1
+                continue
+                ;;
+            esac
+            allowed=" $(tci_door_allowed_parents "${crate}") "
+            parents="$(tci_dependents "${log}" | tr '\n' ' ')"
+            echo "${label}: ${crate} direct dependents: ${parents:-none}"
+            for parent in ${parents}; do
+              if [[ "${allowed}" != *" ${parent} "* ]]; then
+                echo "${label}: FAILED - ${parent} depends on ${crate} outside the OpenSSL door" >&2
+                bad=1
+              fi
+            done
+          done
+          state="$(tci_inverted "${log}" "${package}" "${target}" normal taurine-tls-openssl 0)"
+          if [[ "${state}" != present ]]; then
+            echo "${label}: FAILED - openssl-sys is in the graph but the taurine-tls-openssl door is not" >&2
+            bad=1
+          fi
+          door_provenance "${label}" || bad=1
+          state="$(tci_inverted "${log}" "${package}" "${target}" normal,build openssl-src 0)"
+          src_line="$(grep -E '^0openssl-src v' "${log}" | head -n 2 || true)"
+          # The root lock only: both shells build from the root workspace. dbx-core and
+          # dbx-mongo-shell keep their own locks, which no shell build reads.
+          locks="$(grep -c '^name = "openssl-src"$' Cargo.lock 2>/dev/null || true)"
+          if [[ "${state}" != present || "$(printf '%s\n' "${src_line}" | grep -c .)" -ne 1 || "${locks}" != 1 ]]; then
+            echo "${label}: FAILED - expected exactly one resolved openssl-src (lock entries: ${locks:-0})" >&2
+            bad=1
+          elif [[ ! "${src_line}" =~ ^0openssl-src\ v300\.5\.[0-9]+ ]]; then
+            echo "${label}: FAILED - openssl-src is not on the 3.5 LTS line (300.5.x): $(sed -nE 's/^0openssl-src (v[0-9A-Za-z.+-]+).*/\1/p' <<<"${src_line}")" >&2
+            bad=1
+          else
+            echo "${label}: openssl-src $(sed -nE 's/^0openssl-src (v[0-9A-Za-z.+-]+).*/\1/p' <<<"${src_line}") (single, 3.5 LTS line)"
+          fi
+          if [[ "${bad}" -ne 0 ]]; then
+            echo "${label}: FAILED - OpenSSL is reachable from ${package} other than through the door" >&2
+            return 1
+          fi
+          echo "${label}: passed - door-only (OpenSSL enters ${package} only through taurine-tls-openssl)"
+        }
+
+        # built_graph_check <label> <artefact dep-info> <shell package> <door: present|absent>
+        # Judges the graph cargo actually BUILT, whatever features the build was given (Gradle
+        # code or a build phase can run cargo with extra --features). Units are identified by
+        # identity, never by where their sources live: every `.fingerprint/<package>-<hash>`
+        # directory and every `deps/<crate>-<hash>.d` file of the artefact's profile directory
+        # (mapped through cargo metadata's package names and target names, `-` read as `_`),
+        # plus the paths in the artefact's own dep-info (relative ones resolved against the
+        # workspace root); for a --target build, the host profile's build-dependency units too.
+        # The edges come from the all-features resolve (a superset). Every built
+        # crate that depends directly on openssl, openssl-sys, tokio-openssl or openssl-src must
+        # be on the door path, with the S1 gate's parent rules, and native-tls must not be built.
+        # A path package whose target sources lie outside its own manifest directory is refused
+        # (it could hide inside another crate). A missing or unparseable dep-info file, or one
+        # that does not contain the shell, fails. dep-info-basedir is refused as a cargo override.
+        built_graph_check() {
+          local label="$1" depinfo="$2" package="$3" door="${4:-}" python meta
+          [[ -s "${depinfo}" ]] || { echo "${label}: FAILED - the artefact's dep-info is missing" >&2; return 1; }
+          if command -v cygpath >/dev/null 2>&1; then depinfo="$(cygpath -w "${depinfo}")"; fi
+          python="$(tci_python)" || { echo "${label}: FAILED - no Python 3.11+ to read the dep-info" >&2; return 1; }
+          meta="${RUNNER_TEMP}/${label}-metadata.json"
+          cargo metadata --locked --all-features --format-version 1 >"${meta}" 2>/dev/null || { echo "${label}: FAILED - cargo metadata --all-features did not resolve" >&2; return 1; }
+          "${python}" -c '
+        import glob, json, os, re, sys
+        label, depinfo, meta_path, shell, door = sys.argv[1:6]
+        allowed = {"openssl-sys": {"openssl", "tokio-openssl", "taurine-tls-openssl"},
+                   "openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},
+                   "tokio-openssl": {"taurine-db-dbx"},
+                   "openssl-src": {"openssl-sys"}}
+        def fail(reason):
+            print(label + ": FAILED - " + reason, file=sys.stderr)
+            sys.exit(1)
+        def norm(path):
+            return os.path.normcase(os.path.realpath(path))
+        meta = json.load(open(meta_path))
+        root = meta.get("workspace_root") or os.getcwd()
+        names = {p["id"]: p["name"] for p in meta["packages"]}
+        by_name, by_target = {}, {}
+        for p in meta["packages"]:
+            by_name.setdefault(p["name"], set()).add(p["id"])
+            mdir = norm(os.path.dirname(p["manifest_path"])) + os.sep
+            for t in p["targets"]:
+                by_target.setdefault(t["name"].replace("-", "_"), set()).add(p["id"])
+                if p.get("source") is None and not norm(t["src_path"]).startswith(mdir):
+                    fail(p["name"] + " has a target whose sources lie outside its own directory")
+        try:
+            text = open(depinfo, encoding="utf-8").read()
+        except Exception:
+            fail("the artefact dep-info cannot be read")
+        paths = []
+        for line in text.splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            head, sep, tail = line.partition(": ")
+            if not sep and line.endswith(":"):
+                head, tail = line[:-1], ""
+            elif not sep:
+                fail("the artefact dep-info does not parse")
+            for item in [head] + re.split(r"(?<!\\) ", tail):
+                item = item.replace("\\ ", " ").strip()
+                if item:
+                    paths.append(item if os.path.isabs(item) else os.path.join(root, item))
+        if not paths:
+            fail("the artefact dep-info does not parse")
+        built = set()
+        roots = sorted(((norm(os.path.dirname(p["manifest_path"])) + os.sep, p["id"]) for p in meta["packages"]), key=lambda r: -len(r[0]))
+        for path in paths:
+            candidate = norm(path)
+            for prefix, pkg in roots:
+                if candidate.startswith(prefix):
+                    built.add(pkg)
+                    break
+        profile = os.path.dirname(depinfo)
+        unit = re.compile(r"^(.+)-[0-9a-f]{16}$")
+        # Every entry must be a unit cargo names <name>-<16 hex> (a deps/ file may also be the
+        # unhashed <target>.d cargo writes for an uplifted output) and must map to a package:
+        # anything else fails, so naming drift or a planted entry cannot drop a unit silently.
+        # A --target build compiles build-dependencies (openssl-src among them) for the host,
+        # into <target-dir>/<profile>/, so that profile is read too, under the same rules.
+        profiles = [profile]
+        target_dir = norm(meta.get("target_directory") or "")
+        if target_dir and norm(os.path.dirname(os.path.dirname(profile))) == target_dir:
+            profiles.append(os.path.join(meta["target_directory"], os.path.basename(profile)))
+        for directory in profiles:
+            for entry in glob.glob(os.path.join(directory, ".fingerprint", "*")) + glob.glob(os.path.join(directory, ".fingerprint", ".*")):
+                match = unit.match(os.path.basename(entry))
+                if not match or not by_name.get(match.group(1)):
+                    fail("a fingerprint entry is not a unit of a known package")
+                built |= by_name[match.group(1)]
+            for entry in glob.glob(os.path.join(directory, "deps", "*.d")):
+                stem = os.path.basename(entry)[:-2]
+                match = unit.match(stem)
+                name = (match.group(1) if match else stem).replace("-", "_")
+                if not by_target.get(name):
+                    fail("a deps dep-info file is not a unit of a known target")
+                built |= by_target[name]
+        built_names = {names[pkg] for pkg in built}
+        if shell not in built_names:
+            fail("the dep-info does not contain the shell crate")
+        # Completeness floor: the door state says which of the door crates must be built.
+        door_crates = {"taurine-tls-openssl", "openssl", "openssl-sys", "openssl-src"}
+        if door == "present" and not door_crates <= built_names:
+            fail("the door is in the graph but the built set lacks " + ", ".join(sorted(door_crates - built_names)))
+        if door == "absent" and door_crates & built_names:
+            fail("the door is not in the graph but the built set contains " + ", ".join(sorted(door_crates & built_names)))
+        if door not in ("present", "absent"):
+            fail("no door state was given")
+        bad = []
+        if "native-tls" in built_names:
+            bad.append("native-tls is built")
+        consumers = set()
+        for node in meta["resolve"]["nodes"]:
+            if node["id"] not in built:
+                continue
+            for dep in node["deps"]:
+                target = names[dep["pkg"]]
+                if target in allowed:
+                    consumers.add(names[node["id"]])
+                    if names[node["id"]] not in allowed[target]:
+                        bad.append(names[node["id"]] + " depends on " + target + " outside the door")
+        for reason in sorted(set(bad)):
+            print(label + ": FAILED - " + reason, file=sys.stderr)
+        if bad:
+            sys.exit(1)
+        print(label + ": built graph of " + str(len(built)) + " crates; OpenSSL consumers: " + (", ".join(sorted(consumers)) or "none") + " (door only)")
+        ' "${label}" "${depinfo}" "${meta}" "${package}" "${door}"
+        }
+
+        # Binding the shipped artefact to the build that was judged. bind_same_binary compares
+        # sha256, then (when the bundler stripped or re-signed the copy) the sha256 of stripped,
+        # signature-free copies of both; bind_android_library always requires equal sha256 after
+        # the NDK's llvm-strip --strip-all of both, and, when the built library has a GNU build-id
+        # (NDK llvm-readelf), an equal build-id too. A mismatch, or a missing tool or file, fails.
+        tci_stripped_sha256() {
+          local file="$1" tool="$2" out
+          out="${RUNNER_TEMP}/bind-${RANDOM}-$(basename "$1")"
+          cp "${file}" "${out}" && chmod u+w "${out}"
+          if [[ "$(tci_binary_kind "${out}")" == macho ]]; then
+            codesign --remove-signature "${out}" >/dev/null 2>&1 || true
+            "${tool:-strip}" -S -x "${out}" >/dev/null 2>&1 || return 1
+          else
+            "${tool:-strip}" --strip-all "${out}" >/dev/null 2>&1 || return 1
+          fi
+          tci_sha256 "${out}"
+        }
+        bind_same_binary() {
+          local label="$1" shipped="$2" built="$3" a b
+          [[ -f "${shipped}" && -f "${built}" ]] || { echo "${label}: FAILED - the shipped or the built binary is missing" >&2; return 1; }
+          if [[ "$(tci_sha256 "${shipped}")" == "$(tci_sha256 "${built}")" ]]; then
+            echo "${label}: the shipped binary is the judged build (identical)"; return 0
+          fi
+          a="$(tci_stripped_sha256 "${shipped}" "${4:-}")" && b="$(tci_stripped_sha256 "${built}" "${4:-}")" && [[ -n "${a}" && "${a}" == "${b}" ]] ||
+            { echo "${label}: FAILED - the shipped binary is not the build that was judged" >&2; return 1; }
+          echo "${label}: the shipped binary is the judged build (equal once stripped)"
+        }
+        tci_build_id() {
+          "$1" -n "$2" 2>/dev/null | sed -nE 's/.*Build ID: *([0-9a-fA-F]+).*/\1/p' | head -n 1
+        }
+        bind_android_library() {
+          local label="$1" shipped="$2" built="$3" bin readelf strip a b
+          bin="$(find "${NDK_HOME:-/nonexistent}/toolchains/llvm/prebuilt" -maxdepth 2 -type d -name bin 2>/dev/null | head -n 1 || true)"
+          readelf="${TCI_READELF:-${bin}/llvm-readelf}" strip="${TCI_STRIP:-${bin}/llvm-strip}"
+          [[ -x "${readelf}" && -x "${strip}" ]] || { echo "${label}: FAILED - the NDK's llvm-readelf/llvm-strip are unavailable" >&2; return 1; }
+          [[ -f "${shipped}" && -f "${built}" ]] || { echo "${label}: FAILED - the shipped or the built library is missing" >&2; return 1; }
+          # A build-id alone can be chosen by whoever links (`--build-id=0x...`), so it is only an
+          # extra check: the stripped contents must always be equal.
+          b="$(tci_build_id "${readelf}" "${built}")"
+          if [[ -n "${b}" && "$(tci_build_id "${readelf}" "${shipped}")" != "${b}" ]]; then
+            echo "${label}: FAILED - the shipped library's build-id is not the judged build's" >&2; return 1
+          fi
+          a="$(tci_stripped_sha256 "${shipped}" "${strip}")" && b="$(tci_stripped_sha256 "${built}" "${strip}")" && [[ -n "${a}" && "${a}" == "${b}" ]] ||
+            { echo "${label}: FAILED - the shipped library is not the build that was judged (stripped contents differ)" >&2; return 1; }
+          echo "${label}: the shipped library is the judged build (equal once stripped)"
+        }
+
+        # The dep-info of an artefact: <target-dir>[/<triple>]/<profile>/<file>.d
+        artefact_depinfo() {
+          local triple="$1" profile="$2" file="$3" dir
+          dir="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | tr -d '\r' | jq -r '.target_directory' || true)"
+          [[ -n "${dir}" ]] || return 1
+          if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -u "${dir}")"; fi
+          if [[ "${triple}" == - ]]; then echo "${dir}/${profile}/${file}.d"; else echo "${dir}/${triple}/${profile}/${file}.d"; fi
+        }
+
+        artefact_bytes() {
+          wc -c <"$1" | tr -d ' \r'
+        }
+
+        # Every distinct "OpenSSL X.Y.Z[a]" version string in a binary, one per line, sorted.
+        # Each statically linked OpenSSL carries its own; two lines mean two copies.
+        artefact_openssl_versions() {
+          LC_ALL=C grep -a -o -E 'OpenSSL [0-9]+\.[0-9]+\.[0-9]+[a-z]?' "$1" 2>/dev/null | LC_ALL=C sort -u || true
+        }
+
+        # The first of them (the device door tests' informational line).
+        artefact_openssl_version() {
+          artefact_openssl_versions "$1" | head -n 1
+        }
+
+        # The dynamic library names a binary depends on, one per line (base names only).
+        artefact_dynamic_deps() {
+          local file="$1" kind readelf_bin vswhere dumpbin
+          kind="$(LC_ALL=C head -c 4 "${file}" | od -An -tx1 | tr -d ' \n')"
+          case "${kind}" in
+            7f454c46)
+              readelf_bin="$(command -v readelf || true)"
+              if [[ -z "${readelf_bin}" && -n "${NDK_HOME:-}" ]]; then
+                readelf_bin="$(find "${NDK_HOME}/toolchains/llvm/prebuilt" -name llvm-readelf -type f 2>/dev/null | head -n 1)"
+              fi
+              [[ -n "${readelf_bin}" ]] || return 1
+              "${readelf_bin}" -d "${file}" | sed -nE 's/.*\(NEEDED\).*\[([^]]+)\].*/\1/p'
+              ;;
+            cffaedfe | cefaedfe | cafebabe)
+              otool -L "${file}" | tail -n +2 | awk '{ print $1 }' | sed 's#.*/##'
+              ;;
+            4d5a*)
+              vswhere='/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe'
+              [[ -x "${vswhere}" ]] || return 1
+              dumpbin="$("${vswhere}" -latest -products '*' -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | tr -d '\r' | head -n 1)"
+              [[ -n "${dumpbin}" ]] || return 1
+              MSYS2_ARG_CONV_EXCL='*' "$(cygpath -u "${dumpbin}")" /nologo /dependents "$(cygpath -w "${file}")" |
+                tr -d '\r' | sed -nE 's/^[[:space:]]+([A-Za-z0-9_.+-]+\.[dD][lL][lL])[[:space:]]*$/\1/p'
+              ;;
+            *) return 1 ;;
+          esac
+        }
+
+        # artefact_check <label> <file> <profile> <door: present|absent> [<budget-app> <budget-key>]
+        # Size (always), then the linkage proof, which is the backstop for everything the
+        # name-based gate cannot see (a renamed or forked crate, a build.rs link, a libcrypto
+        # compiled inside another -sys crate): no dynamic libssl/libcrypto dependency, and the
+        # distinct set of "OpenSSL X.Y.Z" strings in the binary is EMPTY when the door is not in
+        # the shell's graph and EXACTLY the version the single locked openssl-src 300.5.x vendors
+        # when it is. A second copy, another version or another patch fails. A static archive
+        # has no dynamic dependencies to read. With a budget app and key, a native ceiling in the
+        # source's bundle-budget.json (`.<app>.native.<key>`, else `.<app>.nativeBytes`) is
+        # compared; the source sets that number, so it is advisory evidence, not a control.
+        artefact_check() {
+          local label="$1" file="$2" profile="$3" door="$4" budget_app="${5:-}" budget_key="${6:-}"
+          local bytes versions expected deps dynamic budget bad=0
+          if [[ ! -f "${file}" ]]; then
+            echo "${label}: FAILED - the built artefact was not found" >&2
+            return 1
+          fi
+          bytes="$(artefact_bytes "${file}")"
+          echo "${label}: size ${bytes} bytes (${profile} build)"
+          echo "- ${label}: ${bytes} bytes (${profile} build)" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "$(LC_ALL=C head -c 7 "${file}")" == '!<arch>' ]]; then
+            echo "${label}: static archive; no dynamic dependencies to read"
+          elif ! deps="$(artefact_dynamic_deps "${file}")"; then
+            echo "${label}: FAILED - the dynamic dependency list could not be read" >&2
+            bad=1
+          else
+            dynamic="$(printf '%s\n' "${deps}" | grep -iE '^(lib)?(ssl|crypto)([-_.][A-Za-z0-9_.-]*)?\.(so|dylib|dll)(\.[0-9.]+)?$' || true)"
+            if [[ -n "${dynamic}" ]]; then
+              echo "${label}: FAILED - dynamic OpenSSL dependency: $(printf '%s' "${dynamic}" | tr '\n' ' ')" >&2
+              bad=1
+            else
+              echo "${label}: no dynamic libssl/libcrypto dependency"
+            fi
+          fi
+          versions="$(artefact_openssl_versions "${file}")"
+          if [[ "${door}" == present ]]; then
+            if ! expected="$(locked_openssl_version)"; then
+              echo "${label}: FAILED - the door is in the graph but Cargo.lock has no single openssl-src 300.5.x" >&2
+              bad=1
+            elif [[ "${versions}" != "OpenSSL ${expected}" ]]; then
+              echo "${label}: FAILED - expected exactly OpenSSL ${expected} (the locked openssl-src); found: $(printf '%s' "${versions:-none}" | tr '\n' ',')" >&2
+              bad=1
+            else
+              echo "${label}: statically linked OpenSSL ${expected} only (matches the locked openssl-src)"
+              echo "- ${label}: statically linked OpenSSL ${expected} only" >> "${GITHUB_STEP_SUMMARY}"
+            fi
+          elif [[ -n "${versions}" ]]; then
+            echo "${label}: FAILED - the door is not in the graph, yet the binary carries: $(printf '%s' "${versions}" | tr '\n' ',')" >&2
+            bad=1
+          else
+            echo "${label}: door absent and no OpenSSL in the binary"
+          fi
+          if [[ -n "${budget_app}" ]]; then
+            budget="$(jq -r --arg app "${budget_app}" --arg key "${budget_key}" \
+              '(.[$app].native[$key]? // .[$app].nativeBytes? // empty) | numbers' bundle-budget.json 2>/dev/null || true)"
+            if [[ -z "${budget}" ]]; then
+              echo "${label}: no native size budget for ${budget_app} in bundle-budget.json"
+            elif (( bytes > budget )); then
+              echo "${label}: FAILED - ${bytes} bytes is over the ${budget_app} native budget of ${budget} bytes" >&2
+              bad=1
+            else
+              echo "${label}: within the ${budget_app} native budget (${bytes} of ${budget} bytes)"
+            fi
+          fi
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        # elf, macho, pe or none, from the file's magic.
+        tci_binary_kind() {
+          case "$(LC_ALL=C head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" in
+            7f454c46) echo elf ;;
+            cffaedfe | cefaedfe | feedfacf | feedface | cafebabe | bebafeca) echo macho ;;
+            4d5a*) echo pe ;;
+            *) echo none ;;
+          esac
+        }
+
+        # artefact_tree_check <label> <root> <main> <profile> <door> [<budget-app> <budget-key>]
+        # Judges <main> with the door state (artefact_check) and every other ELF/Mach-O/PE file
+        # under <root> (frameworks, other jniLibs, sidecars) as a shipped extra that must carry no
+        # OpenSSL version string and no dynamic libssl/libcrypto. Extras are numbered, never named.
+        artefact_tree_check() {
+          local label="$1" root="$2" main="$3" profile="$4" door="$5" app="${6:-}" key="${7:-}" file n=0 bad=0
+          # A main of `-` (an Android ABI directory without the shell library) judges extras only.
+          if [[ "${main}" != - ]]; then
+            [[ -f "${main}" ]] || { echo "${label}: FAILED - the bundle's main binary was not found" >&2; return 1; }
+            artefact_check "${label}-main" "${main}" "${profile}" "${door}" "${app}" "${key}" || bad=1
+          fi
+          # TCI_TREE_MAXDEPTH limits the walk (a cargo target directory); files named in
+          # TCI_TREE_DOOR_NAMES (the shell's own library outputs) are judged by the door rule.
+          local depth=() rule
+          [[ -n "${TCI_TREE_MAXDEPTH:-}" ]] && depth=(-maxdepth "${TCI_TREE_MAXDEPTH}")
+          while IFS= read -r -d '' file; do
+            [[ ( "${main}" != - && "${file}" -ef "${main}" ) || "$(tci_binary_kind "${file}")" == none ]] && continue
+            n=$((n + 1)) rule=absent
+            [[ " ${TCI_TREE_DOOR_NAMES:-} " == *" $(basename "${file}") "* ]] && rule="${door}"
+            if ! GITHUB_STEP_SUMMARY=/dev/null artefact_check "${label}-extra-${n}" "${file}" "${profile}" "${rule}" >"${RUNNER_TEMP}/${label}-extra.log" 2>&1; then
+              grep 'FAILED' "${RUNNER_TEMP}/${label}-extra.log" >&2 || true
+              bad=1
+            fi
+          done < <(find -L "${root}" ${depth[@]+"${depth[@]}"} -type f -print0 2>/dev/null)
+          echo "${label}: ${n} other shipped binaries scanned (each must carry no OpenSSL)"
+          echo "- ${label}: ${n} other shipped binaries scanned" >> "${GITHUB_STEP_SUMMARY}"
+          [[ "${bad}" -eq 0 ]]
+        }
+
+        # The desktop executable a `tauri build --debug` wrote: <target-dir>/debug/<bin>[.exe].
+        desktop_executable() {
+          local meta dir bin
+          meta="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | tr -d '\r')" || return 1
+          dir="$(jq -r '.target_directory' <<<"${meta}")"
+          bin="$(jq -r '[.packages[] | select(.name == "taurine-desktop") | .targets[] | select(.kind | index("bin")) | .name] | first // empty' <<<"${meta}")"
+          [[ -n "${dir}" && -n "${bin}" ]] || return 1
+          if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -u "${dir}")"; fi
+          if [[ -f "${dir}/debug/${bin}.exe" ]]; then echo "${dir}/debug/${bin}.exe"; else echo "${dir}/debug/${bin}"; fi
+        }
+
+        # desktop_artefact_check <os-label>
+        # The packaging concern's artefact proof: the door-only gate on the desktop graph, then
+        # the executable's size and linkage, the built graph, and the bundle bound to the build.
+        desktop_artefact_check() {
+          local os="$1" door file bundle root main
+          openssl_door_gate "${os}-desktop-openssl-door-only" taurine-desktop - || return 1
+          door="$(door_in_graph taurine-desktop -)" || { echo "${os}-desktop-artefact: FAILED - the door query did not resolve" >&2; return 1; }
+          file="$(desktop_executable)" || { echo "${os}-desktop-artefact: FAILED - the desktop binary could not be located" >&2; return 1; }
+          artefact_check "${os}-desktop-executable" "${file}" debug "${door}" || return 1
+          built_graph_check "${os}-desktop-built-graph" "${file%.exe}.d" taurine-desktop "${door}" || return 1
+          # Everything the bundle ships (Linux: the .deb's contents; macOS: the .app). Windows
+          # builds no bundle; sidecars are refused and resources must be data (config checks).
+          case "${os}" in
+            Linux)
+              bundle="$(find "$(dirname "${file}")/bundle/deb" -name '*.deb' -type f 2>/dev/null | head -n 1 || true)"
+              root="${RUNNER_TEMP}/desktop-deb"; rm -rf "${root}"
+              [[ -n "${bundle}" ]] && dpkg-deb -x "${bundle}" "${root}" || { echo 'Linux-desktop-bundle: FAILED - the .deb was not found or did not unpack' >&2; return 1; }
+              main="${root}/usr/bin/$(basename "${file}")"
+              ;;
+            macOS)
+              root="$(find "$(dirname "${file}")/bundle/macos" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -n 1 || true)"
+              [[ -n "${root}" ]] || { echo 'macOS-desktop-bundle: FAILED - the .app was not found' >&2; return 1; }
+              main="${root}/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${root}/Contents/Info.plist" 2>/dev/null || true)"
+              ;;
+            *)
+              # No installer is built (--no-bundle): every PE beside the executable in the target
+              # directory is judged; the shell's own library outputs carry the door like the exe.
+              root="$(dirname "${file}")" main="${file}"
+              TCI_TREE_MAXDEPTH=1 TCI_TREE_DOOR_NAMES="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | tr -d '\r' |
+                jq -r '[.packages[] | select(.name == "taurine-desktop") | .targets[] | select(.kind | index("cdylib") or index("dylib")) | .name + ".dll", .name + ".dll.lib"] | join(" ")' || true)" \
+                artefact_tree_check "${os}-desktop-target" "${root}" "${main}" debug "${door}" || return 1
+              root=''
+              ;;
+          esac
+          if [[ -n "${root}" ]]; then
+            # The bundle's main binary must be the build that was judged.
+            bind_same_binary "${os}-desktop-binding" "${main}" "${file}" || return 1
+            artefact_tree_check "${os}-desktop-bundle" "${root}" "${main}" debug "${door}" || return 1
+          fi
+        }
+        TCI_SHELL_ARTEFACT_LIBRARY

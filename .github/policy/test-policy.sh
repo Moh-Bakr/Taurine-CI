@@ -528,7 +528,8 @@ jobs:
     steps:
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
 YAML
-write_split() { # main-job cache-mode, main-job if, untrusted-job cache-mode, untrusted-job if, workflow-level
+write_split() { # main-job cache-mode, main-job if, untrusted-job cache-mode, untrusted-job if, workflow-level, untrusted-job extra-needs-and-if override, audit-job body override
+  local unt_needs="${6-[cache-audit]}"
   cat > "${mode_root}/.github/workflows/split.yml" <<YAML
 name: split
 on:
@@ -536,17 +537,61 @@ on:
 permissions: {}
 ${5-cache-mode: none}
 jobs:
+  validate-input:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+${7-$(audit_jobs)}
   validate-main:
     ${2}
     ${1}
     uses: ./.github/workflows/split-concern.yml
   validate-untrusted:
+    needs: ${unt_needs}
     ${4}
     ${3}
     uses: ./.github/workflows/split-concern.yml
 YAML
 }
-read_if="if: \${{ github.ref == 'refs/heads/untrusted' }}"
+audit_jobs() {
+  cat <<'YAML'
+  cache-audit:
+    if: ${{ github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
+    needs: [validate-input]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/cache-scope-audit
+        with:
+          github-token: ${{ github.token }}
+          phase: before
+  cache-audit-after:
+    if: ${{ always() && github.ref == 'refs/heads/untrusted' }}
+    needs: [cache-audit, validate-untrusted]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/cache-scope-audit
+        with:
+          github-token: ${{ github.token }}
+          phase: after
+  result:
+    if: ${{ always() }}
+    needs: [cache-audit, cache-audit-after, validate-main, validate-untrusted]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: ./.github/actions/run-result
+        with:
+          blocking-failures: ${{ (contains(fromJSON('["failure","cancelled"]'), needs.cache-audit.result) || contains(fromJSON('["failure","cancelled"]'), needs.cache-audit-after.result)) && '1' || '0' }}
+YAML
+}
+read_if="if: \${{ github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}"
 ENFORCED=enforced-split.txt
 write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}"
 mode_expect_pass split.yml 'a validate-main / validate-untrusted split'
@@ -566,6 +611,28 @@ write_split 'cache-mode: write' "if: \${{ github.ref == 'refs/heads/main' && git
 mode_expect_fail split.yml 'main half naming untrusted' 'must not mention the untrusted ref'
 write_split 'cache-mode: write' "${main_if}" '' "${read_if}"
 mode_expect_fail split.yml 'untrusted half with no cache-mode' 'must declare its own cache-mode'
+# K: the untrusted half needs the audit before it, and the audit jobs are exactly reviewed.
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}" 'cache-mode: none' ''
+mode_expect_fail split.yml 'untrusted half without needs cache-audit' 'must need the cache-audit job directly'
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "if: \${{ github.ref == 'refs/heads/untrusted' }}"
+mode_expect_fail split.yml 'untrusted half without the audit success term' "needs.cache-audit.result == 'success'"
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}" 'cache-mode: none' '[cache-audit]' ''
+mode_expect_fail split.yml 'no audit jobs at all' 'needs a cache-audit job'
+audit_mutation() { # label needle perl-expr
+  write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "${read_if}"
+  perl -0pi -e "$3" "${mode_root}/.github/workflows/split.yml"
+  mode_expect_fail split.yml "$1" "$2"
+}
+audit_mutation 'audit not limited to the untrusted ref' 'must run only on the untrusted ref' 's/if: \$\{\{ github\.ref == .refs\/heads\/untrusted. && needs\.validate-input/if: \${{ needs.validate-input/'
+audit_mutation 'audit with an environment' 'no environment, no secrets' 's/(  cache-audit:\n)/$1    environment: source-read\n/'
+audit_mutation 'audit with an extra permission' 'exactly actions: read and contents: read' 's/(      actions: read\n      contents: read\n    steps:\n      - uses: actions\/checkout\@[0-9a-f]+\n      - uses: .\/.github\/actions\/cache-scope-audit\n        with:\n          github-token: \$\{\{ github.token \}\}\n          phase: before)/      actions: read\n      contents: read\n      issues: write\n    steps:\n      - uses: actions\/checkout\@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: .\/.github\/actions\/cache-scope-audit\n        with:\n          github-token: \${{ github.token }}\n          phase: before/'
+audit_mutation 'audit before-phase swapped' 'phase before' 's/phase: before/phase: after/'
+audit_mutation 'audit running another command' 'only the public checkout and the audit composite' 's/(      - uses: .\/.github\/actions\/cache-scope-audit\n        with:\n          github-token: \$\{\{ github.token \}\}\n          phase: before\n)/$1      - run: true\n/'
+audit_mutation 'after-audit not needing the untrusted half' 'must need validate-untrusted' 's/needs: \[cache-audit, validate-untrusted\]/needs: [cache-audit]/'
+audit_mutation 'result not needing the after-audit' 'the result job must need cache-audit-after' 's/needs: \[cache-audit, cache-audit-after, validate-main, validate-untrusted\]/needs: [cache-audit, validate-main, validate-untrusted]/'
+audit_mutation 'result not passing blocking-failures' 'must pass blocking-failures exactly' 's/\n          blocking-failures: [^\n]*\n/\n          selection-mode: full\n/'
+audit_mutation 'result passing another blocking expression' 'must pass blocking-failures exactly' "s/ && '1' \|\| '0' \}\}/ \&\& '0' || '0' }}/"
+audit_mutation 'no result job' 'needs a result job' 's/\n  result:\n    if: \$\{\{ always\(\) \}\}\n    needs: \[[^\n]*\]\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: .\/.github\/actions\/run-result\n        with:\n          blocking-failures: [^\n]*\n/\n/'
 cat > "${mode_root}/.github/workflows/split.yml" <<YAML
 name: split
 on:
@@ -620,6 +687,16 @@ many_expect_fail 'untrusted restore in a workflow nobody enforces' 'but is not i
 printf 'lone.yml\n' > "${mode_root}/enforced-lone.txt"
 ENFORCED=enforced-lone.txt
 many_expect_fail 'untrusted restore in an enforced workflow without cache-mode' 'must declare its own cache-mode' .github/workflows/lone.yml
+# M: an untrusted restore is refused while any workflow that can run on the untrusted ref is not enforced.
+printf 'name: macish\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  validate:\n    if: ${{ github.ref == '"'"'refs/heads/main'"'"' || github.ref == '"'"'refs/heads/untrusted'"'"' }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n' > "${mode_root}/.github/workflows/macish.yml"
+write_split 'cache-mode: write' "${main_if}" 'cache-mode: read' "if: \${{ github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}"
+ENFORCED=enforced-split.txt
+many_expect_fail 'an untrusted restore while an unenforced workflow can run on untrusted' 'can run on the untrusted ref without cache-mode enforcement' .github/workflows/split.yml .github/workflows/split-concern.yml .github/workflows/macish.yml
+printf 'split.yml\nmacish.yml\n' > "${mode_root}/enforced-both.txt"
+printf 'name: macish\non:\n  workflow_dispatch:\npermissions: {}\ncache-mode: none\njobs:\n  validate:\n    if: ${{ github.ref == '"'"'refs/heads/main'"'"' || github.ref == '"'"'refs/heads/untrusted'"'"' }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n' > "${mode_root}/.github/workflows/macish.yml"
+ENFORCED=enforced-both.txt
+many_run .github/workflows/split.yml .github/workflows/split-concern.yml .github/workflows/macish.yml >/dev/null 2>"${base}/err" || { echo 'an untrusted restore with every untrusted-running workflow enforced should pass' >&2; cat "${base}/err" >&2; exit 1; }
+unset ENFORCED
 unset ENFORCED
 # L: two-deep reusable nesting is unsupported and fails closed.
 printf 'name: nested\non:\n  workflow_call:\npermissions: {}\njobs:\n  inner:\n    uses: ./.github/workflows/split-concern.yml\n' > "${mode_root}/.github/workflows/nested.yml"
@@ -694,8 +771,137 @@ for text in 'uses: actions/cache/restore@x' 'uses: actions/cache/save@x' 'uses: 
     echo "a composite containing '${text}' should be refused" >&2; exit 1
   fi
 done
+(source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action .github/actions/cache-scope-audit/action.yml) || { echo 'the cache-scope-audit composite should pass the composite rules' >&2; exit 1; }
+# The reviewed Linux and Windows dispatchers pass the enforced rules as shipped.
+ruby "${policy}/check-cache-mode.rb" .github/workflows/linux-validation.yml .github/workflows/windows-validation.yml .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml >/dev/null || { echo 'the reviewed Linux and Windows dispatchers should pass the cache-mode rules' >&2; exit 1; }
+real_mode_fail() { # label needle perl-expr file
+  mkdir -p "${mode_root}/real/.github/workflows"
+  cp .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml "${mode_root}/real/.github/workflows/"
+  perl -0pe "$3" ".github/workflows/$4" > "${mode_root}/real/.github/workflows/$4"
+  if cmp -s ".github/workflows/$4" "${mode_root}/real/.github/workflows/$4"; then echo "cache-mode fixture '$1' changed nothing" >&2; exit 1; fi
+  if (cd "${mode_root}/real" && ruby "${policy}/check-cache-mode.rb" ".github/workflows/$4") >/dev/null 2>"${base}/err"; then echo "cache-mode fixture '$1' should fail but passed" >&2; exit 1; fi
+  grep -qF -- "$2" "${base}/err" || { echo "cache-mode fixture '$1' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+real_mode_fail 'Linux workflow-level none dropped' 'needs a workflow-level cache-mode: none' 's/\ncache-mode: none\n/\n/' linux-validation.yml
+real_mode_fail 'Linux validate-untrusted not read' 'cache-mode write needs the exact top-level term' 's/cache-mode: read\n/cache-mode: write\n/' linux-validation.yml
+real_mode_fail 'Linux validate-untrusted without the audit need' 'must need the cache-audit job directly' 's/needs: \[validate-input, plan, select, cache-audit\]/needs: [validate-input, plan, select]/' linux-validation.yml
+real_mode_fail 'Linux validate-main only read' 'needs a sibling job' 's/cache-mode: write\n/cache-mode: read\n/' linux-validation.yml
+real_mode_fail 'Linux select caller without its explicit none' 'must declare its own cache-mode' 's/    cache-mode: none\n    uses: .\/.github\/workflows\/select-concerns.yml/    uses: .\/.github\/workflows\/select-concerns.yml/' linux-validation.yml
+real_mode_fail 'Windows validate-rust-untrusted gated to main' 'needs a sibling job' "s/(  validate-rust-untrusted:\\n(?:.*\\n)*?    if: github\\.repository == 'Moh-Bakr\\/Taurine-CI' && github\\.ref == )'refs\\/heads\\/untrusted'/\$1'refs\\/heads\\/main'/" windows-validation.yml
+real_mode_fail 'Windows validate-main downgraded to read' 'read-only without the exact top-level term' "s/(  validate-main:\\n(?:.*\\n)*?)    cache-mode: write\\n/\$1    cache-mode: read\\n/" windows-validation.yml
+real_mode_fail 'Linux result without blocking-failures' 'must pass blocking-failures exactly' 's/\n          blocking-failures: [^\n]*\n/\n/' linux-validation.yml
+real_mode_fail 'Windows result not needing the after-audit' 'the result job must need cache-audit-after' 's/(    needs: \[validate-main, validate-untrusted, validate-rust-main, validate-rust-untrusted, cache-audit), cache-audit-after\]\n    name: Result/$1]\n    name: Result/' windows-validation.yml
+real_mode_fail 'Windows without the after-audit' 'needs a cache-audit-after job' 's/\n  cache-audit-after:\n/\n  cache-audit-later:\n/' windows-validation.yml
+real_mode_fail 'base-pass loses its explicit none' 'must declare cache-mode: none' 's/    cache-mode: none\n(    # Kept as \.\/ : the policy matches this exact form for protected reusable calls\.)/$1/' validate-public-changes.yml
+real_mode_fail 'base-pass granted read' 'must declare cache-mode: none' 's/    cache-mode: none\n(    # Kept as \.\/ : the policy matches this exact form for protected reusable calls\.)/    cache-mode: read\n$1/' validate-public-changes.yml
+real_mode_fail 'base-pass granted write' 'must declare cache-mode: none' 's/    cache-mode: none\n(    # Kept as \.\/ : the policy matches this exact form for protected reusable calls\.)/    cache-mode: write\n$1/' validate-public-changes.yml
+real_mode_fail 'base-pass renamed' 'is missing or renamed' 's/\n  base-pass:\n/\n  base-gate:\n/' validate-public-changes.yml
+echo 'cache-mode real-tree fixtures: the reviewed Linux and Windows dispatchers pass; each weakening of the split, the audit or the explicit grants is refused'
 printf 'name: p\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted"\n' > "${composite_probe}"
 (source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action "${composite_probe}") >/dev/null 2>&1 || { echo 'a composite that only reads the cache listing endpoint should pass the composite rules' >&2; exit 1; }
+
+# Classification of the macOS workflow by shape (workflow-lists.sh): inline environment means a
+# source workflow, none means a pure dispatcher; no other protected source workflow gains that
+# freedom, so check_protected_source still refuses an environment-less one.
+classify() { (source "${policy}/workflow-lists.sh"; classify_workflow "$1"); }
+classify_root="${base}/classify"
+mkdir -p "${classify_root}/.github/workflows"
+printf 'jobs:\n  validate:\n    environment: source-read\n' > "${classify_root}/inline.yml"
+printf 'jobs:\n  validate-main:\n    uses: ./.github/workflows/macos-validation-concern.yml\n' > "${classify_root}/dispatcher.yml"
+(cd "${classify_root}" && mkdir -p .github/workflows && cp inline.yml .github/workflows/macos-validation.yml && [[ "$(classify .github/workflows/macos-validation.yml)" == source ]]) || { echo 'an inline macOS workflow must be classified as a source workflow' >&2; exit 1; }
+(cd "${classify_root}" && cp dispatcher.yml .github/workflows/macos-validation.yml && [[ "$(classify .github/workflows/macos-validation.yml)" == dispatcher ]]) || { echo 'an environment-less macOS workflow must be classified as a dispatcher' >&2; exit 1; }
+(cd "${classify_root}" && cp dispatcher.yml .github/workflows/source-read.yml && [[ "$(classify .github/workflows/source-read.yml)" == source ]]) || { echo 'an environment-less source-read workflow must stay a source workflow' >&2; exit 1; }
+(cd "${classify_root}" && cp inline.yml .github/workflows/windows-validation.yml && [[ "$(classify .github/workflows/windows-validation.yml)" == dispatcher ]]) || { echo 'the Windows dispatcher must stay a dispatcher' >&2; exit 1; }
+(cd "${classify_root}" && cp dispatcher.yml .github/workflows/macos-validation-concern.yml && [[ "$(classify .github/workflows/macos-validation-concern.yml)" == source ]]) || { echo 'the macOS concern workflow must be a source workflow' >&2; exit 1; }
+# The macOS dispatcher must call the reviewed concern workflow once it is a dispatcher.
+mac_dispatcher="${classify_root}/.github/workflows/macos-validation.yml"
+write_mac() { # called workflow
+  cat > "${mac_dispatcher}" <<YAML
+name: macos
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        required: true
+permissions: {}
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "[[ \"\${REQUESTED_SOURCE_SHA}\" =~ ^[0-9a-fA-F]{40}\$ ]]"
+  validate-main:
+    uses: ./.github/workflows/$1
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: \${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+YAML
+}
+write_mac macos-validation-concern.yml
+(cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/workflow-lists.sh" && source "${policy}/check-cache-policy.sh" && source "${policy}/check-dispatchers.sh" && check_dispatcher .github/workflows/macos-validation.yml) >/dev/null 2>"${base}/err" || { echo 'a macOS dispatcher calling the reviewed concern workflow should pass' >&2; cat "${base}/err" >&2; exit 1; }
+write_mac windows-validation-concern.yml
+if (cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/workflow-lists.sh" && source "${policy}/check-cache-policy.sh" && source "${policy}/check-dispatchers.sh" && check_dispatcher .github/workflows/macos-validation.yml) >/dev/null 2>"${base}/err"; then
+  echo 'a macOS dispatcher calling another workflow should be refused' >&2; exit 1
+fi
+grep -qF 'must call the reviewed concern workflow' "${base}/err" || { echo 'the macOS dispatcher refusal has the wrong message' >&2; cat "${base}/err" >&2; exit 1; }
+# The SHA requirement: the regexp itself, or the reviewed identity proof; neither is refused.
+write_mac macos-validation-concern.yml
+perl -0pi -e 's/      - run: "\[\[[^\n]*\n/      - run: ruby .github\/policy\/dispatch-identity.rb\n/' "${mac_dispatcher}"
+grep -qF 'dispatch-identity.rb' "${mac_dispatcher}" || { echo 'the identity-proof fixture was not built' >&2; exit 1; }
+(cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/workflow-lists.sh" && source "${policy}/check-cache-policy.sh" && source "${policy}/check-dispatchers.sh" && check_dispatcher .github/workflows/macos-validation.yml) >/dev/null 2>"${base}/err" || { echo 'a dispatcher that relies on the identity proof for the SHA should pass' >&2; cat "${base}/err" >&2; exit 1; }
+perl -0pi -e 's/      - run: ruby [^\n]*\n/      - run: true\n/' "${mac_dispatcher}"
+if (cd "${classify_root}" && source "${policy}/lib.sh" && source "${policy}/workflow-lists.sh" && source "${policy}/check-cache-policy.sh" && source "${policy}/check-dispatchers.sh" && check_dispatcher .github/workflows/macos-validation.yml) >/dev/null 2>"${base}/err"; then
+  echo 'a dispatcher with neither the SHA regexp nor the identity proof should be refused' >&2; exit 1
+fi
+grep -qF 'must require a full source SHA' "${base}/err" || { echo 'the missing-SHA refusal has the wrong message' >&2; cat "${base}/err" >&2; exit 1; }
+# Classification and the dispatcher rules read the parsed structure, never indentation: a job
+# re-indented by two more spaces parses identically, so it must still classify as source and still
+# be refused by the dispatcher rules (review of the macOS precursor).
+reindented="${classify_root}/reindented.yml"
+printf 'jobs:\n    validate-main:\n        uses: ./.github/workflows/macos-validation-concern.yml\n    validate:\n          environment: source-read\n          runs-on: macos-15\n' > "${reindented}"
+[[ "$(ruby "${policy}/classify-workflow.rb" "${reindented}")" == source ]] || { echo 'a re-indented inline source job must classify as source' >&2; exit 1; }
+(cd "${classify_root}" && cp "${reindented}" .github/workflows/macos-validation.yml && [[ "$(classify .github/workflows/macos-validation.yml)" == source ]]) || { echo 'a re-indented inline source job in the macOS workflow must stay a source workflow (classify_workflow)' >&2; exit 1; }
+printf 'jobs:\n  validate-main:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n' > "${reindented}"
+[[ "$(ruby "${policy}/classify-workflow.rb" "${reindented}")" == dispatcher ]] || { echo 'a dispatcher that only passes the key to a reusable call must classify as a dispatcher' >&2; exit 1; }
+source_cases=(
+  $'jobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: ./.github/actions/source-checkout\n'
+  $'jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: echo\n        env:\n          K: ${{ secrets.OTHER }}\n'
+  $'jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: echo ${{ vars.SOURCE_READER_APP_ID }}\n'
+  $'jobs:\n  a:\n    uses: ./.github/workflows/x.yml\n    with:\n      k: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n'
+  $'env:\n  K: ${{ secrets.X }}\njobs:\n  a:\n    uses: ./.github/workflows/x.yml\n'
+  $'jobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: actions/create-github-app-token@abc\n'
+  $'jobs: [not, a, mapping\n'
+)
+for case_text in "${source_cases[@]}"; do
+  printf '%s' "${case_text}" > "${reindented}"
+  [[ "$(ruby "${policy}/classify-workflow.rb" "${reindented}")" == source ]] || { echo "a workflow with source access must classify as source: ${case_text}" >&2; exit 1; }
+done
+dispatcher_check() { # label needle yaml
+  printf '%s' "$3" > "${mac_dispatcher}"
+  if ruby "${policy}/dispatcher-structure.rb" "${mac_dispatcher}" >/dev/null 2>"${base}/err"; then echo "dispatcher fixture '$1' should be refused" >&2; exit 1; fi
+  grep -qF -- "$2" "${base}/err" || { echo "dispatcher fixture '$1' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+dispatch_head=$'name: d\non:\n  workflow_dispatch:\n    inputs:\n      source_sha:\n        required: true\npermissions: {}\njobs:\n'
+sha_job=$'  plan:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: "[[ \\"${S}\\" =~ ^[0-9a-fA-F]{40}$ ]]"\n'
+good_call=$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n'
+printf '%s' "${dispatch_head}${sha_job}${good_call}" > "${mac_dispatcher}"
+ruby "${policy}/dispatcher-structure.rb" "${mac_dispatcher}" || { echo 'the reviewed dispatcher shape should pass the structural rules' >&2; exit 1; }
+dispatcher_check 'a re-indented inline source job' 'must not enter an environment' "${dispatch_head}$(printf '%s' "${sha_job}${good_call}"$'  validate:\n    environment: source-read\n    runs-on: macos-15\n' | sed 's/^/  /')"$'\n'
+dispatcher_check 'an inline source job beside the concern call' 'must not enter an environment' "${dispatch_head}${sha_job}${good_call}"$'  validate:\n    environment: source-read\n    runs-on: macos-15\n'
+dispatcher_check 'a call passing another secret' 'must pass exactly one secret' "${dispatch_head}${sha_job}"$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n      OTHER: ${{ secrets.OTHER }}\n'
+dispatcher_check 'a call passing no secret' 'must pass exactly one secret' "${dispatch_head}${sha_job}"$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n'
+dispatcher_check 'a call inheriting secrets' 'must not inherit secrets' "${dispatch_head}${sha_job}"$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets: inherit\n'
+dispatcher_check 'a call to a third-party workflow' 'calls only local reusable workflows' "${dispatch_head}${sha_job}"$'  v:\n    uses: owner/repo/.github/workflows/x.yml@main\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n'
+dispatcher_check 'a step reading a secret' 'must not read a secret or variable' "${dispatch_head}${sha_job}${good_call}"$'  other:\n    runs-on: x\n    steps:\n      - run: echo ${{ secrets.X }}\n'
+dispatcher_check 'a call reading a secret in with' 'outside its secrets map' "${dispatch_head}${sha_job}"$'  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n    with:\n      k: ${{ secrets.X }}\n'
+printf '%s' $'name: d\non:\n  workflow_dispatch:\n  push:\npermissions: {}\njobs:\n  v:\n    uses: ./.github/workflows/macos-validation-concern.yml\n    secrets:\n      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}\n' > "${mac_dispatcher}"
+if ruby "${policy}/dispatcher-structure.rb" "${mac_dispatcher}" >/dev/null 2>"${base}/err"; then echo 'a dispatcher with a push trigger should be refused' >&2; exit 1; fi
+# Relying on the identity proof for the SHA is allowed only for a workflow registered in check-dispatch-contracts.rb.
+identity_dispatcher="${classify_root}/.github/workflows/unregistered.yml"
+printf '%s' "${dispatch_head}"$'  plan:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: ruby .github/policy/dispatch-identity.rb\n'"${good_call}" > "${identity_dispatcher}"
+if ruby "${policy}/dispatcher-structure.rb" "${identity_dispatcher}" >/dev/null 2>"${base}/err"; then echo 'an unregistered dispatcher relying on the identity proof should be refused' >&2; exit 1; fi
+grep -qF 'registered in check-dispatch-contracts.rb' "${base}/err" || { echo 'the unregistered identity refusal has the wrong message' >&2; cat "${base}/err" >&2; exit 1; }
+cp "${identity_dispatcher}" "${classify_root}/.github/workflows/macos-validation.yml"
+ruby "${policy}/dispatcher-structure.rb" "${classify_root}/.github/workflows/macos-validation.yml" || { echo 'the registered macOS dispatcher may rely on the identity proof' >&2; exit 1; }
+echo 'macOS classification fixtures: an inline job is a source workflow, an environment-less macOS workflow is a dispatcher that must call its reviewed concern workflow'
 
 # P8: actionlint lacks the cache-mode key, so lint.sh ignores exactly that message and nothing else.
 lint_ignores() { grep -oE "\-ignore '[^']*'" "$1"; }
