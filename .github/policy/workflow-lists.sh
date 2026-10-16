@@ -6,6 +6,11 @@
 # lists separate the public policy gate from source-bearing jobs and
 # make adding a new protected lane an auditable policy change.
 public_policy_workflow=".github/workflows/validate-public-changes.yml"
+# The reusable half of the public policy gate. The base-policy pass is meant to move out of the
+# entrypoint into this workflow, which the entrypoint calls and whose result its policy job still
+# requires. Named here, ahead of the file, so the checks that govern a public workflow already know
+# it before the move lands: a pull request is judged by the base commit's checks.
+public_policy_reusable_workflow=".github/workflows/base-policy.yml"
 protected_source_workflows=(
   ".github/workflows/source-read.yml"
   ".github/workflows/linux-validation-concern.yml"

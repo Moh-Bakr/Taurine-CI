@@ -212,6 +212,62 @@ mutation '13. the Windows result stops passing blocking-failures' "${windows}" "
 mutation '13. run-result ignores the blocking count' .github/actions/run-result/action.yml '        if [[ "${blocking}" -gt 0 ]]; then
           # A check outside' '        if [[ "${blocking}" == never ]]; then
           # A check outside'
+# 11. The reusable half of the public policy gate. The base-policy pass is meant to move into
+# .github/workflows/base-policy.yml, called by the entrypoint. The checks must accept that file as a
+# plain called workflow and refuse everything that would make it more: another trigger, a secret, or
+# the same shape at any other path. Run before the file exists, because a pull request is judged by
+# the base commit's checks.
+reusable=.github/workflows/base-policy.yml
+reusable_body() {
+  printf '%s\n' 'name: Reusable public policy (fixture)' 'on:' '  workflow_call:' "$@" 'permissions: {}' 'jobs:' '  noop:' \
+    '    name: noop' '    permissions: {}' '    runs-on: ubuntu-24.04' '    steps:' "      - run: 'true'"
+}
+# with_file LABEL PATH BODY: the tree plus one new file.
+with_file() {
+  fresh_tree
+  mkdir -p "$(dirname "${dir}/tree/$2")"
+  printf '%s\n' "$3" > "${dir}/tree/$2"
+  : > "${dir}/log"
+}
+reject_file() {
+  with_file "$1" "$2" "$3"
+  verdict "$1" "$(cd "${dir}/tree" && offline_policy)" || true
+}
+accept_file() {
+  local label="$1" by
+  with_file "$@"
+  if by="$(cd "${dir}/tree" && offline_policy)"; then
+    echo "accepted  ${label}"
+  else
+    echo "REFUSED   ${label}  (by ${by})" >&2
+    missed=$((missed + 1))
+    [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+  fi
+}
+accept_file '11. the reusable public policy workflow as a plain called workflow' "${reusable}" "$(reusable_body)"
+reject_file '11. the same called workflow at a path no tier names' .github/workflows/other-public.yml "$(reusable_body)"
+reject_file '11. the reusable public policy workflow with a schedule trigger' "${reusable}" "$(reusable_body '  schedule:' "    - cron: '0 0 * * *'")"
+reject_file '11. the reusable public policy workflow with a pull_request_target trigger' "${reusable}" "$(reusable_body '  pull_request_target:')"
+reject_file '11. the reusable public policy workflow that is not called' "${reusable}" "$(reusable_body | sed 's/workflow_call:/workflow_dispatch:/')"
+# A trigger on none of the refused lists: only the rule that it be workflow_call refuses this one.
+reject_file '11. the reusable public policy workflow triggered by something other than workflow_call' "${reusable}" "$(reusable_body | sed 's/  workflow_call:/  issues:/')"
+reject_file '11. the reusable public policy workflow declaring a secret' "${reusable}" "$(reusable_body '    secrets:' '      TOKEN:' '        required: false')"
+reject_file '11. the reusable public policy workflow with a deployment environment' "${reusable}" "$(reusable_body | ruby -e 'print STDIN.read.sub("    name: noop\n", "    name: noop\n    environment: prod\n")')"
+reject_file '11. the reusable public policy workflow reading a secret' "${reusable}" "$(reusable_body | sed "s/'true'/'echo \${{ secrets.TOKEN }}'/")"
+# A workflow calling it is accepted: the call is a reviewed local reusable workflow. The caller is a
+# small workflow of its own, so this tests the allow-list and not the size of the entrypoint.
+fresh_tree
+printf '%s\n' "$(reusable_body)" > "${dir}/tree/${reusable}"
+printf '%s\n' 'name: Caller (fixture)' 'on:' '  workflow_dispatch:' 'permissions: {}' 'jobs:' '  call:' '    permissions:' \
+  '      contents: read' '    uses: ./.github/workflows/base-policy.yml' > "${dir}/tree/.github/workflows/call-fixture.yml"
+: > "${dir}/log"
+if by="$(cd "${dir}/tree" && offline_policy)"; then
+  echo 'accepted  11. a workflow calling the reusable public policy workflow'
+else
+  echo "REFUSED   11. a workflow calling the reusable public policy workflow  (by ${by})" >&2
+  missed=$((missed + 1))
+  [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+fi
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a

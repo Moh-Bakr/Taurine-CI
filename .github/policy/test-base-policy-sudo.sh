@@ -14,8 +14,11 @@ if [[ "${1:-}" == --require ]]; then
   require=yes
   shift
 fi
-workflow="${1:-.github/workflows/validate-public-changes.yml}"
+# shellcheck source=base-pass-workflow.sh
+source "$(dirname "${BASH_SOURCE[0]}")/base-pass-workflow.sh"
 step="Run the base commit's policy against this pull request"
+workflow="${1:-}"
+[[ -n "${workflow}" ]] || workflow="$(locate_base_pass_workflow "${step}")"
 
 if [[ "$(uname -s)" != Linux ]]; then
   echo 'base-policy sudo: NOT EXERCISED HERE -- the base-policy step runs only on Linux; the policy job runs this'

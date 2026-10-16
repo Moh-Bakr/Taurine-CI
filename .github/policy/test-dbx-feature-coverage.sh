@@ -125,4 +125,54 @@ for os in linux macos windows; do
   ruby -ryaml -e 'w=YAML.safe_load(File.read(ARGV[0]),aliases:false); run=w.fetch("runs").fetch("steps").map { |s| s["run"].to_s }.join("\n"); branch=run[/^\s*rust-db\)(.*?)^\s*;;/m,1] or abort "missing rust-db"; expected="rust_tests rust-db-tests \"${db_packages[@]}\"\n"; abort "baseline invocation removed" unless branch.include?(expected); abort "missing exact registered feature call" unless branch.include?("dbx_registered_feature_tests \"${db_packages[@]}\"")' \
     "${root}/.github/actions/${os}-concern-rust/action.yml"
 done
-echo 'dbx feature coverage: old source explicitly uncovered; registered required cases, nonempty execution, scoped doctests and failure aggregation verified on synthetic fixtures'
+# dbx-core's `legacy-tls` pass is conditional on what the source declares. Fixtures are the
+# `cargo metadata --no-deps` shape; nothing here compiles anything.
+row_count() { printf '%s\n' "${deferred_results[@]}" | grep -c "^rust-dbx-core-legacy-tls-tests|" || true; }
+# Every dbx-core package carries a `manifest_path`, as real `cargo metadata` output does, pointing at a
+# source tree with nothing gated on the feature. Today's pass ignores it; a pass that also searches
+# the sources reads it, so the same fixtures hold for both.
+mkdir -p "${fixture}/clean/src"
+printf 'pub fn nothing_here() {}\n' > "${fixture}/clean/src/lib.rs"
+meta_for() { # features-json source-dir
+  printf '{"packages":[{"name":"dbx-core","manifest_path":"%s/Cargo.toml","features":%s}]}' "$2" "$1"
+}
+live_meta='{"packages":[{"name":"other","features":{}},{"name":"dbx-core","manifest_path":"'"${fixture}"'/clean/Cargo.toml","features":{"default":[],"legacy-tls":["dep:openssl","dep:postgres-openssl","dep:openssl-src"]}}]}'
+empty_meta="$(meta_for '{"default":[],"legacy-tls":[]}' "${fixture}/clean")"
+absent_meta="$(meta_for '{"default":[]}' "${fixture}/clean")"
+
+# A live (non-empty) feature, as older branches declare: the pass runs, exactly as before.
+reset_case
+dbx_core_legacy_tls_pass "${live_meta}"
+[[ "${deferred_failed}" -eq 0 && "$(row_count)" -eq 1 ]]
+printf '%s\n' "${deferred_results[@]}" | grep -qx 'rust-dbx-core-legacy-tls-tests|passed'
+grep -qE '^rust-dbx-core-legacy-tls-tests\|env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core --features legacy-tls ' "${calls}"
+
+# An empty feature (the retired no-op alias) and an absent one: no test run, one visible row.
+for meta in "${empty_meta}" "${absent_meta}"; do
+  reset_case
+  dbx_core_legacy_tls_pass "${meta}"
+  [[ "${deferred_failed}" -eq 0 && ! -s "${calls}" && "$(row_count)" -eq 1 ]]
+  printf '%s\n' "${deferred_results[@]}" \
+    | grep -qx 'rust-dbx-core-legacy-tls-tests|skipped: dbx-core declares no legacy-tls feature (retired)'
+done
+
+# Unreadable metadata, no single dbx-core package, or an unexpected feature shape: fail closed,
+# run nothing, and the aggregation fails.
+for meta in 'not json at all' '' '{"packages":[]}' \
+  '{"packages":[{"name":"dbx-core","features":{}},{"name":"dbx-core","features":{}}]}' \
+  '{"packages":[{"name":"dbx-core","features":{"legacy-tls":"dep:openssl"}}]}'; do
+  reset_case
+  dbx_core_legacy_tls_pass "${meta}"
+  [[ "${deferred_failed}" -eq 1 && ! -s "${calls}" && "$(row_count)" -eq 1 ]]
+  printf '%s\n' "${deferred_results[@]}" | grep -qF 'rust-dbx-core-legacy-tls-tests|failed: not run (the dbx-core manifest could not be read)'
+  if (finish_deferred) >/dev/null 2>&1; then
+    echo 'an unreadable dbx-core manifest unexpectedly passed aggregation' >&2; exit 1
+  fi
+done
+
+# The Linux rust-dbx case still calls the conditional pass with the workspace metadata, and still
+# records the non-member row; the unconditional step is gone.
+ruby -ryaml -e 'w=YAML.safe_load(File.read(ARGV[0]),aliases:false); run=w.fetch("runs").fetch("steps").map { |s| s["run"].to_s }.join("\n"); branch=run[/^\s*rust-dbx\)(.*?)^\s*;;/m,1] or abort "missing rust-dbx"; abort "conditional pass call missing" unless branch.include?("dbx_core_legacy_tls_pass \"${dbx_meta}\""); abort "unconditional legacy-tls step is back" if branch.include?("--package dbx-core --features legacy-tls"); abort "non-member row missing" unless branch.include?("rust-dbx-core-legacy-tls-tests|skipped: dbx-core is not a workspace member on this branch")' \
+  "${root}/.github/actions/linux-concern-rust/action.yml"
+
+echo 'dbx feature coverage: old source explicitly uncovered; registered required cases, nonempty execution, scoped doctests and failure aggregation verified on synthetic fixtures; dbx-core legacy-tls pass: live runs, empty/absent skips visibly, unreadable fails closed'
