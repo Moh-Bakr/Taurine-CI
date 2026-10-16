@@ -756,6 +756,15 @@ and the public OpenSSL version string only:
   judged `libtaurine_mobile_lib.a`; desktop requires the bundled main binary (the `.deb`'s
   `usr/bin`, the `.app`'s executable) to equal `target/debug/<bin>`, or to equal it once both
   are stripped and unsigned. Windows bundles nothing, so the executable judged is the one built.
+  The `.deb` copy is the one exception the bundler itself makes: Tauri compiles the string
+  `__TAURI_BUNDLE_TYPE_VAR_UNK` into the executable (tauri-utils `platform.rs`) and, for a `.deb`,
+  `.rpm`, AppImage, MSI or NSIS package, overwrites its last three bytes in the copy it ships
+  (`DEB`, `RPM`, `APP`, `MSI`, `NSS`). The Linux binding therefore names `DEB`, and accepts a
+  difference only when the built binary holds exactly one `__TAURI_BUNDLE_TYPE_VAR_UNK`, the
+  shipped one holds `__TAURI_BUNDLE_TYPE_VAR_DEB` at that offset, the lengths are equal and every
+  other byte is equal (before or after stripping). A missing or second marker, another value, or
+  any other changed byte fails. Callers that name no marker (macOS, whose `.app` is not patched,
+  and iOS) accept no marker difference at all.
 - **The fixtures in the base-policy pass**: `test-shell-artefact.sh` builds a toy workspace with
   real cargo. The base pass runs every base test with `PATH` fixed to the system directories and
   an empty `HOME`, where rustup's proxies cannot work, so the base-policy job copies the image's
@@ -774,7 +783,10 @@ and the public OpenSSL version string only:
   every registry directory, `cargo fetch --locked` downloads them again, and every resulting
   cached copy must hash to its `Cargo.lock` checksum (at least one per crate). After the build,
   before anything is deleted, each extracted copy cargo built from is compared file by file with
-  a fresh extraction of its verified archive (`.cargo-ok` aside); any difference fails.
+  the members of its verified archive, read in place with Python's `tarfile` (`.cargo-ok` aside):
+  the same regular files with the same bytes, no extra file or directory, no link; any difference
+  fails. Paths reach Python through `cygpath -m` on Windows, whose Python is a native program
+  that cannot open Git Bash's `/d/a/...` form.
 - **Door crates from crates.io**: `openssl-src`, `openssl-sys`, `openssl` and `tokio-openssl`
   must each have the crates.io registry `source` and a `checksum` (and no `replace`) in the root
   `Cargo.lock`, and resolve in `cargo metadata` to that source with the manifest under
@@ -793,7 +805,9 @@ and the public OpenSSL version string only:
   `.cargo/config.toml`/`.cargo/config` cargo can read (nested in the checkout, every parent of
   the shells up to `/`, and `CARGO_HOME`), before each build and in every gate. Names compare
   case-insensitively and config keys after TOML decoding (Python `tomllib`; an unparseable
-  config or a missing `tomllib` fails). This is hygiene: the control is the artefact's
+  config or a missing `tomllib` fails). On Windows each config path is converted with
+  `cygpath -m` first: the parent walk names the source's own root config by its MSYS path, which
+  the native Windows Python cannot open, and an unopenable config fails as unparseable. This is hygiene: the control is the artefact's
   lock-bound version proof below.
 - **Door tests on the device**: the emulator (x86_64) and simulator run the door crate's library
   and integration tests through the same runner as the mobile tests, surfacing the fixed

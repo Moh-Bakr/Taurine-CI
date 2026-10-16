@@ -139,6 +139,58 @@ expect_fail() {
   if [[ -n "${3:-}" ]] && ! grep -qF "$3" "${work}/out"; then cat "${work}/out" >&2; fail "$1: refused for the wrong reason"; fi
 }
 
+# mutant <label> <library: config|artefact> <old> <new> <pass|fail> <snippet>: with <old> replaced
+# by <new> in the extracted library (it must be there), the snippet's reviewed verdict must no
+# longer hold: a case that passes must fail, a weakening that is refused must be accepted. Proves
+# the fixture would see that edit, without running the whole suite again.
+mutant() {
+  local label="$1" file="${work}/shell-artefact.sh" verdict="$5" snippet="$6"
+  [[ "$2" == config ]] && file="${work}/rt/taurine-ci/shell-config.sh"
+  cp "${file}" "${work}/mutant.keep"
+  OLD="$3" NEW="$4" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found: #{ENV["OLD"][0, 80]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${file}" ||
+    { cp "${work}/mutant.keep" "${file}"; fail "${label}: the mutation no longer applies"; return 0; }
+  if run_lib "${snippet}"; then
+    [[ "${verdict}" == fail ]] || { cat "${work}/out" >&2; fail "mutant survived: ${label}"; }
+  else
+    [[ "${verdict}" == pass ]] || { cat "${work}/out" >&2; fail "mutant survived: ${label}"; }
+  fi
+  cp "${work}/mutant.keep" "${file}"
+}
+
+# A Windows runner's tools, for the cases that name it: Git Bash's cygpath, and the native Windows
+# Python that tci_python finds there, which cannot open an MSYS path (`/d/a/...`). The stand-in
+# cygpath -m marks a path NATIVE:, and the stand-in Python refuses any path argument or stdin path
+# that was not converted, then hands the converted ones to the real Python.
+real_python="$(command -v python3)"
+mkdir -p "${work}/winbin"
+cat >"${work}/winbin/cygpath" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in -m) printf 'NATIVE:%s\n' "$2" ;; *) printf '%s\n' "$2" ;; esac
+STUB
+cat >"${work}/winbin/python3" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == -c && "\$2" == 'import tomllib' ]]; then exec '${real_python}' "\$@"; fi
+args=()
+for arg in "\$@"; do
+  case "\${arg}" in
+    NATIVE:*) args+=("\${arg#NATIVE:}") ;;
+    /*) echo 'native-python: an MSYS path cannot be opened' >&2; exit 1 ;;
+    *) args+=("\${arg}") ;;
+  esac
+done
+if [[ "\$2" == *sys.stdin* ]]; then
+  input="\$(cat)"
+  while IFS= read -r line; do
+    [[ -z "\${line}" || "\${line}" == NATIVE:* ]] || { echo 'native-python: an MSYS path cannot be opened' >&2; exit 1; }
+  done <<<"\${input}"
+  printf '%s\n' "\${input}" | sed 's/^NATIVE://' | '${real_python}' "\${args[@]}"
+  exit "\$?"
+fi
+exec '${real_python}' "\${args[@]}"
+STUB
+chmod +x "${work}/winbin/cygpath" "${work}/winbin/python3"
+windows="PATH='${work}/winbin':\${PATH}"
+
 # ---- N1/N2: the artefact's distinct OpenSSL set, bound to the lock -------------------------
 expect_pass 'present, exactly the locked 3.5.5' "artefact_check t '$(artefact a1 3.5.5)' debug present"
 expect_pass 'absent, no OpenSSL at all' "artefact_check t '$(artefact a2)' debug absent"
@@ -207,6 +259,15 @@ rm "${src}/taurine-mobile/.cargo/config"
 printf '[env]\nOPENSSL_DIR = "/x"\n' >"${work}/cargo-home/config.toml"
 expect_fail 'CARGO_HOME config' 'refuse_openssl_overrides' 'cargo config file'
 rm "${work}/cargo-home/config.toml"
+# The Windows packaging concern: the source's own root cargo config, which the parent walk names by
+# its absolute MSYS path, must reach the native Windows Python in a form it can open. Before the
+# conversion every Windows run refused a clean config as "does not parse".
+printf '[env]\nLIBSQLITE3_FLAGS = { value = "SQLITE_ENABLE_MATH_FUNCTIONS", force = false }\n' >"${src}/.cargo/config.toml"
+expect_pass 'a clean root cargo config read by a native Windows Python' "${windows}; refuse_openssl_overrides"
+mutant 'the cargo config paths handed to Python unconverted' config 'configs="$(tci_cargo_configs | while IFS= read -r file; do tci_native_path "${file}"; done | sort -u)"' 'configs="$(tci_cargo_configs | sort -u)"' pass "${windows}; refuse_openssl_overrides"
+printf '[env]\nOPENSSL_DIR = "/x"\n' >"${src}/.cargo/config.toml"
+expect_fail 'an override in the root cargo config, on Windows' "${windows}; refuse_openssl_overrides" 'sets an OpenSSL override'
+rm "${src}/.cargo/config.toml"
 
 # ---- C1: the door crates must be the crates.io packages -----------------------------------
 expect_pass 'crates.io provenance' 'door_provenance p'
@@ -402,7 +463,7 @@ reg="${work}/cargo-home/registry"
 upstream="${work}/upstream"; mkdir -p "${upstream}"
 for crate in openssl-0.10.81 openssl-src-300.5.5+3.5.5 openssl-sys-0.9.117 tokio-openssl-0.6.5; do
   mkdir -p "${work}/pkg/${crate}/src"; printf 'fn main() {}\n' >"${work}/pkg/${crate}/src/lib.rs"
-  tar -czf "${upstream}/${crate}.crate" -C "${work}/pkg" "${crate}"
+  COPYFILE_DISABLE=1 tar -czf "${upstream}/${crate}.crate" -C "${work}/pkg" "${crate}"
 done
 lock_with_real_sums() {
   ruby -e '
@@ -429,6 +490,16 @@ for crate in openssl-0.10.81 openssl-src-300.5.5+3.5.5 openssl-sys-0.9.117 tokio
   tar -xzf "${reg}/cache/index.crates.io-0000/${crate}.crate" -C "${reg}/src/index.crates.io-0000"; : >"${reg}/src/index.crates.io-0000/${crate}/.cargo-ok"
 done
 expect_pass 'built copies equal their verified archives' 'verify_door_crate_build_inputs'
+expect_pass 'built copies equal their verified archives, read by a native Windows Python' "${windows}; verify_door_crate_build_inputs"
+mutant 'the extracted crate paths handed to Python unconverted' config '"$(tci_native_path "$1")" "$(tci_native_path "$2")" "$3"' '"$1" "$2" "$3"' pass "${windows}; verify_door_crate_build_inputs"
+printf 'planted\n' >"${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/build.rs"
+expect_fail 'a file the archive does not hold, in a registry/src copy' 'verify_door_crate_build_inputs' 'differs from its verified archive'
+mutant 'extra files in a registry/src copy ignored' config 'sys.exit(0 if seen_files == files and seen_dirs == dirs else 1)' 'sys.exit(0 if all(seen_files.get(k) == v for k, v in files.items()) else 1)' fail 'verify_door_crate_build_inputs'
+rm "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/build.rs"
+ln -s lib.rs "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/src/link.rs"
+expect_fail 'a link in a registry/src copy' 'verify_door_crate_build_inputs' 'differs from its verified archive'
+rm "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/src/link.rs"
+expect_pass 'the registry/src copies restored' 'verify_door_crate_build_inputs'
 printf '// planted\n' >>"${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/src/lib.rs"
 expect_fail 'a registry/src copy modified after verification' 'verify_door_crate_build_inputs' 'differs from its verified archive'
 rm -rf "${reg}"
@@ -638,6 +709,64 @@ printf 'fn main() { println!("swapped"); }\n' >"${toy}/bin/src/main.rs"
 ( cd "${toy}" && CARGO_TARGET_DIR="${work}/t-bin2" "${real_cargo}" build --offline -q -p taurine-desktop ) >/dev/null 2>&1 || fail 'the swapped toy binary did not build'
 cp "${work}/t-bin2/debug/taurine-desktop" "${work}/shipped-bin"
 expect_fail 'a binary swapped in after the build (real cargo)' "bind_same_binary b '${work}/shipped-bin' '${work}/t-bin/debug/taurine-desktop'" 'not the build that was judged'
+# The Tauri bundle-type marker: the bundler overwrites the UNK of `__TAURI_BUNDLE_TYPE_VAR_UNK` in
+# the copy it puts in a .deb with DEB (tci_bundle_marker_only). `mark <in> <out> <value> [<byte>]`
+# does what the bundler does, and with <byte> also flips one byte elsewhere (-1: the middle).
+printf 'fn main() { println!("{}", std::hint::black_box("__TAURI_BUNDLE_TYPE_VAR_UNK")); }\n' >"${toy}/bin/src/main.rs"
+( cd "${toy}" && CARGO_TARGET_DIR="${work}/t-bin3" "${real_cargo}" build --offline -q -p taurine-desktop ) >/dev/null 2>&1 || fail 'the marked toy binary did not build'
+marked="${work}/t-bin3/debug/taurine-desktop"
+[[ "$(LC_ALL=C grep -a -o '__TAURI_BUNDLE_TYPE_VAR_UNK' "${marked}" | wc -l | tr -d ' ')" == 1 ]] || fail 'the marked toy binary does not carry exactly one bundle-type marker'
+mark() {
+  ruby -e '
+    input, output, value, flip = ARGV
+    bytes = File.binread(input)
+    at = bytes.index("__TAURI_BUNDLE_TYPE_VAR_UNK") or abort("no marker")
+    bytes[at + 24, 3] = value
+    if flip
+      byte = Integer(flip)
+      byte = bytes.bytesize / 2 if byte.negative?
+      byte += 64 if byte.between?(at - 1, at + 27)
+      bytes.setbyte(byte, bytes.getbyte(byte) ^ 1)
+    end
+    File.binwrite(output, bytes)' "$@"
+}
+bind_marked="bind_same_binary b '${work}/shipped-marked' '${marked}'"
+mark "${marked}" "${work}/shipped-marked" DEB
+expect_pass 'a .deb copy differing only in its DEB marker (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}"
+grep -qF 'apart from the DEB bundle-type marker' "${work}/out" || { cat "${work}/out" >&2; fail 'the marker-only binding was not reported as such'; }
+expect_fail 'a marked copy where no bundle marker is expected (real cargo)' "${bind_marked}" 'not the build that was judged'
+expect_fail 'a marked copy under a marker the bundler never writes' "TCI_BUNDLE_TYPE=XYZ ${bind_marked}" 'not one the Tauri bundler writes'
+mark "${marked}" "${work}/shipped-marked" RPM
+expect_fail 'an RPM marker where the .deb copy carries DEB (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}" 'not the build that was judged'
+mark "${marked}" "${work}/shipped-marked" DEB -1
+expect_fail 'a DEB marker plus one other changed byte (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}" 'not the build that was judged'
+mutant 'the marker comparison that ignores every other byte' artefact 'if shipped[:start] != built[:start] or shipped[end:] != built[end:]:' 'if False:' fail "TCI_BUNDLE_TYPE=DEB ${bind_marked}"
+mark "${work}/t-bin/debug/taurine-desktop" "${work}/shipped-marked" DEB 2>/dev/null && fail 'the unmarked toy binary carries a marker'
+cp "${work}/t-bin/debug/taurine-desktop" "${work}/shipped-unmarked"; ruby -e 'b = File.binread(ARGV[0]); b.setbyte(b.bytesize / 2, b.getbyte(b.bytesize / 2) ^ 1); File.binwrite(ARGV[0], b)' "${work}/shipped-unmarked"
+expect_fail 'a changed copy of a build that carries no marker (real cargo)' "TCI_BUNDLE_TYPE=DEB bind_same_binary b '${work}/shipped-unmarked' '${work}/t-bin/debug/taurine-desktop'" 'not the build that was judged'
+expect_fail 'no marker in the built binary' "tci_bundle_marker_only '${work}/shipped-unmarked' '${work}/t-bin/debug/taurine-desktop' DEB" 'carries no bundle-type marker'
+printf 'head __TAURI_BUNDLE_TYPE_VAR_UNK mid __TAURI_BUNDLE_TYPE_VAR_UNK tail\n' >"${work}/built-two"
+printf 'head __TAURI_BUNDLE_TYPE_VAR_DEB mid __TAURI_BUNDLE_TYPE_VAR_UNK tail\n' >"${work}/shipped-two"
+expect_fail 'two markers in the built binary' "tci_bundle_marker_only '${work}/shipped-two' '${work}/built-two' DEB" 'more than one bundle-type marker'
+expect_fail 'two markers, through the binding' "TCI_BUNDLE_TYPE=DEB bind_same_binary b '${work}/shipped-two' '${work}/built-two'" 'not the build that was judged'
+mutant 'a second marker accepted' artefact 'if built.find(marker, at + 1) >= 0:' 'if False:' fail "tci_bundle_marker_only '${work}/shipped-two' '${work}/built-two' DEB"
+# Stripped as well as marked: the stripped copies differ only in the marker.
+run_lib "cp \"\$(tci_stripped_copy '${marked}' '')\" '${work}/stripped-marked'" || { cat "${work}/out" >&2; fail 'the marked toy binary did not strip'; }
+mark "${work}/stripped-marked" "${work}/shipped-marked" DEB
+expect_pass 'a stripped .deb copy differing only in its DEB marker (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}"
+grep -qF 'equal once stripped, apart from the DEB bundle-type marker' "${work}/out" || { cat "${work}/out" >&2; fail 'the stripped marker-only binding was not reported as such'; }
+mark "${work}/stripped-marked" "${work}/shipped-marked" DEB -1
+expect_fail 'a stripped DEB copy plus one other changed byte (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}" 'not the build that was judged'
+# Without the marker normalisation the .deb binding refuses the bundler's own copy: the defect.
+mark "${marked}" "${work}/shipped-marked" DEB
+mutant 'the bundle-type marker normalisation removed' artefact 'tci_bundle_marker_only() {
+  local python' 'tci_bundle_marker_only() {
+  return 1
+  local python' pass "TCI_BUNDLE_TYPE=DEB ${bind_marked}"
+expect_pass 'the marker-only binding read by a native Windows Python (real cargo)' "${windows}; TCI_BUNDLE_TYPE=DEB ${bind_marked}"
+grep -qF 'TCI_BUNDLE_TYPE="${marker}" bind_same_binary "${os}-desktop-binding"' .github/actions/shell-artefact/action.yml || fail 'the desktop binding does not name the bundle marker'
+[[ "$(ruby -e 'puts File.read(ARGV[0])[/Linux\)\n(.*?);;/m, 1].to_s.scan(/^\s*marker=(\S+)$/).flatten.join(",")' .github/actions/shell-artefact/action.yml)" == DEB ]] ||
+  fail 'the Linux desktop binding does not expect exactly the DEB marker of the .deb it unpacks'
 # Android: the NDK's llvm-readelf/llvm-strip are not in the policy environment, so stand-ins
 # report a build-id read from the file (the comparison logic is what is under test).
 printf '#!/usr/bin/env bash\nprintf "  Build ID: %%s\\n" "$(head -n 1 "$2")"\n' >"${work}/bin/fake-readelf"; chmod +x "${work}/bin/fake-readelf"
