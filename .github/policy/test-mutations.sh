@@ -195,6 +195,14 @@ mutation '12. the pg8 arm caller without an explicit none' .github/workflows/pg8
     uses: ./.github/workflows/pg8-measurement-arm.yml' '    uses: ./.github/workflows/pg8-measurement-arm.yml'
 mutation '12. the cache-scope audit accepts a non-empty scope' "${audit}" "if [[ \"\${total}\" != 0 ]]; then" 'if [[ "${total}" == never ]]; then'
 mutation '12. the cache-scope audit asks for the main scope' "${audit}" 'ref=refs/heads/untrusted&per_page=1' 'ref=refs/heads/main&per_page=1'
+mutation '12. the base-pass job loses its explicit none' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
+mutation '12. the base-pass job granted read' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    cache-mode: read
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
+mutation '12. the base-pass job granted write' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    cache-mode: write
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
 # 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
 # must be rejected, because the default grant for a job with no cache-mode is write.
 mutation '11. an untrusted-only cargo-source restore with no cache-mode' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}

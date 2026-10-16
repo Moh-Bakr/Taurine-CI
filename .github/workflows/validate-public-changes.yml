@@ -291,5 +291,7 @@ jobs:
     permissions:
       contents: read
     name: Base policy
+    # The policy gate never restores or saves a cache, whatever the trigger.
+    cache-mode: none
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/base-policy.yml  # zizmor: ignore[self-repository]
