@@ -348,6 +348,27 @@ mutation '13. a second YAML document appended to a workflow' .github/workflows/c
 ignored: true
 ---
 '
+mutation '13. a digest-pinned container on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    container: mcr.example/runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation '13. a service on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    services:
+      db:
+        image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation '13. the policy job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: self-hosted
+    timeout-minutes: 25
+    steps:'
+mutation '13. the policy job on another hosted label' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:'
+mutation '13. a command chained onto an exempt helper line in test-structure.sh' .github/policy/test-structure.sh 'NOT rejected under --strict: $1" >&2; exit 1; fi' 'NOT rejected under --strict: $1" >&2; exit 1; fi; ruby "${check}" --strict "${dir}/t" >/dev/null'
 mutation '13. --strict run on the real tree by another policy script (the base pass would run it)' .github/policy/test-policy.sh 'set -euo pipefail
 ' 'set -euo pipefail
 ruby .github/policy/check-structure.rb --strict
