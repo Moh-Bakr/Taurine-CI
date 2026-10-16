@@ -26,13 +26,7 @@ missed=0
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-<<<<<<< HEAD
-  for check in check-universal.rb check-structure.rb check-strict-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
-||||||| 1dbf542
-  for check in check-universal.rb check-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
-=======
-  for check in check-universal.rb check-structure.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
->>>>>>> d2372b78f9e3fd0bad1abf51ba70316f785c2729
+  for check in check-universal.rb check-structure.rb check-strict-structure.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
     # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
