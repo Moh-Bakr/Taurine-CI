@@ -19,6 +19,8 @@ ACTION_ALLOWLIST = [
   # here deliberately and held to the composite rules below.
   './.github/actions/source-checkout',
   './.github/actions/environment-preflight',
+  # Run in a job with no source, environment or secret: refuses a non-empty untrusted cache scope.
+  './.github/actions/cache-scope-audit',
   './.github/actions/sanitize',
   './.github/actions/concern-report',
   './.github/actions/timings',
@@ -41,6 +43,7 @@ ACTION_ALLOWLIST = [
   './.github/actions/linux-test-identities',
   './.github/actions/rust-target-cache',
   './.github/workflows/live-proof-arm.yml',
+  './.github/workflows/base-policy.yml',
   './.github/workflows/pg8-measurement-arm.yml',
   './.github/actions/mobile-report',
   './.github/actions/android-sdk-setup',

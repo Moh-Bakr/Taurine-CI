@@ -816,9 +816,12 @@ base pass itself executes. Several base tests -- `test-base-policy-env.sh` and
 pull-request code does run there, and it could rewrite a later base script on disk or leave a
 process behind to act later. The base pass is therefore isolated further:
 
-- **Its own job.** It runs as `base-policy`, separate from the checks in `policy`, so nothing the
-  pull request's own policy scripts export there reaches it. `policy` declares
-  `needs: [base-policy]` and fails unless that job succeeded.
+- **Its own job, in its own workflow.** It runs as `base-policy` in `base-policy.yml`, called by
+  the entrypoint, separate from the checks in `policy`, so nothing the pull request's own policy
+  scripts export there reaches it. `policy` declares `needs: [base-pass]`, the call, and fails
+  unless the whole workflow succeeded. Inside it, `base-policy-result` requires the fixtures job
+  to have passed on every event and the base-policy job on a pull request, so a skipped base pass
+  fails.
 - **No root.** Hosted runners give the job user passwordless sudo. The job runs the same
   `drop-root` composite the source-validation jobs run before project code, then the step
   asserts `sudo -n true` is refused. Without that, pull-request code run by a base test could
@@ -845,8 +848,19 @@ process behind to act later. The base pass is therefore isolated further:
   script that kills its own wrapper fails the step through the wrapper's status. An earlier version
   looked for a marker in each process's environment; an `exec` with a new environment drops it.
 - **Nothing started for later.** Before drop-root the job user is denied `cron` and `at`, the user systemd manager hosted ubuntu-24.04 runs for it is stopped, and the
-  step asserts that neither accepts a job and that nothing accepts connections on the user manager's bus or private socket, so
-  nothing outside the job's process tree can start work for it later.
+  step asserts that neither accepts a job, that nothing accepts connections on the user manager's bus or private socket, and
+  that no systemd user manager or message bus process (`systemd`, `(sd-pam)`, `dbus-daemon`, `dbus-broker`,
+  `dbus-broker-launch`) of the job user is running outside the step's own ancestry, so nothing outside the job's process
+  tree can start work for it later. The same assertions run again before every base script, because a script that
+  changed any of them would otherwise be believed by the next; the step logs the unix listeners of the job user and the
+  `kernel.yama.ptrace_scope` it found, here and in the root step.
+- **No sshd.** Pull-request code that wrote the job user's `authorized_keys` could `ssh localhost`
+  and start a process the subreaper never sees. The root step logs the state of `ssh.service` and
+  `ssh.socket`, masks them (so socket activation cannot revive them), and logs it again; the step, before every script, refuses any process
+  named `sshd`, `sshd-session` or `sshd-auth`, of any uid, and anything accepting connections on
+  loopback port 22. Locking `~/.ssh` was not used instead, because the job user owns its home and
+  can replace the directory. A script that starts an sshd of its own is a descendant, so the
+  subreaper kills it with the script.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
   test runs could leave a gem in `~/.gem` or a module in `~/.node_modules` for the next to load:
   a later check's `require "json"` would run it. `HOME` is deleted and recreated empty before
@@ -874,8 +888,9 @@ existing `/usr/bin/node` that is a link or not root's alone.
 What this does **not** do, plainly:
 
 - **It hardens the base pass as an honest workflow runs it. It does not defend against a pull
-  request that edits the workflow.** Under `pull_request`, the pull request's own copy of this
-  file defines every job here -- `policy`, `base-policy` and `base-policy-fixtures` alike. It can
+  request that edits the workflow.** Under `pull_request`, the pull request's own copy of these
+  files defines every job -- `policy` and the call in the entrypoint; `base-policy`,
+  `base-policy-fixtures` and `base-policy-result` in `base-policy.yml`. It can
   delete the pin, change `BASE_SHA` or the checkout `ref:`, add `if: false`, drop `needs`,
   replace the step outright, or empty `base-policy-fixtures` so that the tests of the step stop
   testing it, and no check that this workflow runs can stop that, because the pull request also
@@ -889,8 +904,17 @@ What this does **not** do, plainly:
   runs and change it back before it returns; only the scripts that come after it are protected.
   The same holds for the base files.
 - **Work handed to something outside the job's process tree.** `cron`, `at` and a user systemd
-  manager are shut out, but any other service that starts processes on the job user's behalf
-  would not be seen by the subreaper. None is known on the hosted image.
+  manager are shut out and re-checked before every script, but any other service that starts
+  processes on the job user's behalf would not be seen by the subreaper. None is known on the
+  hosted image. The process check is by name from `/proc`, so a manager started under another
+  name is missed; the bus and socket checks still catch one that listens where the user manager's
+  does. The uid test of the process check reads the real and effective uid from
+  `/proc/<pid>/status`; I could not build an input where that differs from the owner of
+  `/proc/<pid>` (the directory stays owned by the process's user even when it marks itself
+  non-dumpable), so it is not falsifiable by a fixture. Its filter has no container fixture either,
+  because that needs a root-owned `systemd`; the hosted runner has one (PID 1), so a green run there
+  is its test. The ssh port check is by connection on `127.0.0.1` and `::1`; only the first has a
+  fixture, because an IPv6 loopback is not a given in a container.
 - **A thread-group leader that exits while its other threads run** shows as a zombie; the wrapper
   counts it as running when more than one task remains, but no fixture can construct one without a
   compiler, so that case is reasoned, not tested. Every descendant, zombie or not, is sent SIGKILL.
@@ -913,6 +937,20 @@ What this does **not** do, plainly:
   Integrity Protection; on Linux the dynamic loader ignores them.
 - **The sudo assertion cannot be exercised off a runner.** It needs passwordless sudo to be present
   to prove it is gone, which a developer machine does not have.
+
+### Where the base-pass step lives
+
+The base-policy jobs are in `.github/workflows/base-policy.yml`, the reusable half of the public
+policy gate, which `validate-public-changes.yml` calls with one job (`base-pass`). They moved out
+only to keep the entrypoint under the file-size limit; what they do is unchanged. A pull request is
+judged by the base commit's checks, so the checks that govern a reusable public workflow had to be
+on the base first: `workflow-lists.sh` names the file, `check-dispatchers.sh` accepts it only if its
+sole trigger is `workflow_call`, with no other trigger, secret, artifact, cache or OIDC grant, and
+`check-actions.sh` allows the entrypoint to call it. The three tests that run the step
+(`test-base-policy-env.sh`, `-isolation.sh` and `-sudo.sh`) find it through
+`base-pass-workflow.sh`, in whichever of the two files holds it and only when exactly one does
+(`test-base-pass-locate.sh`). `test-base-policy-result.sh` holds the rules that keep the base pass on
+the required check: the guards pass only on success, and `policy` needs the call that needs both jobs.
 
 ## Accepted residual risks
 

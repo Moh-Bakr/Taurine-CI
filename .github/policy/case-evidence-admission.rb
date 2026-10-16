@@ -118,7 +118,7 @@ CONTRACT_ERROR_CLASSES = %w[
 ERROR_CLASSES = (CONTRACT_ERROR_CLASSES + %w[
   catalog_binding_invalid config_binding_invalid control_checkout_invalid control_sha_mismatch
   git_untrusted manifest_absent manifest_binding_invalid project_executed_nothing
-  reporter_binding_invalid runner_version_unpinned
+  report_encoding_invalid reporter_binding_invalid runner_version_unpinned
   source_checkout_dirty source_sha_mismatch suite_scope_mismatch
   arguments_invalid concern_unsupported contract_rejected discovery_failed
   execution_report_invalid identity_env_invalid lock_binding_invalid node_runtime_invalid
@@ -291,7 +291,7 @@ end
 # shape nothing has proven.
 def pinned_tool_version!(tool, app_root, source_root, source_sha, app)
   lock_bytes = tracked_bytes!(tool, source_root, source_sha, "#{app}/package-lock.json", 'lock_binding_invalid')
-  lock = JSON.parse(lock_bytes)
+  lock = utf8_json!(lock_bytes, 'lock_binding_invalid')
   packages = lock.fetch('packages')
   PINNED_RUNNER.fetch('packages').each do |name, integrity|
     entry = packages.fetch(name)
@@ -299,7 +299,7 @@ def pinned_tool_version!(tool, app_root, source_root, source_sha, app)
       entry['integrity'] == integrity
     installed = File.join(app_root, name, 'package.json')
     block!('tool_binding_invalid') unless File.file?(installed) && within?(installed, File.join(app_root, 'node_modules'))
-    block!('tool_binding_invalid') unless JSON.parse(File.binread(installed))['version'] == PINNED_RUNNER.fetch('version')
+    block!('tool_binding_invalid') unless utf8_json!(File.binread(installed), 'tool_binding_invalid')['version'] == PINNED_RUNNER.fetch('version')
   end
   PINNED_RUNNER.fetch('version')
 rescue JSON::ParserError, KeyError, SystemCallError
@@ -320,11 +320,35 @@ def canonical_digest(value)
   Digest::SHA256.hexdigest(JSON.generate(sort_json(value), ascii_only: true))
 end
 
+# Parse bytes as UTF-8 JSON, refusing anything that is not valid UTF-8 -- in the bytes, and in the
+# strings they parse to. The second matters: a lone-surrogate escape such as "alpha\udcff" (what
+# Node's JSON.stringify writes for one) is pure ASCII, so the bytes pass, but it parses to invalid
+# UTF-8. JSON.generate raises on such a string and quotes it in the exception message, which an
+# uncaught raise would print to the stderr the public log receives; the rescues at the bottom of
+# this file are the second line of defence if anything still gets through. Every read of report or
+# source bytes goes through here.
+def utf8_clean?(node)
+  case node
+  when String then node.valid_encoding?
+  when Array then node.all? { |item| utf8_clean?(item) }
+  when Hash then node.all? { |key, value| utf8_clean?(key) && utf8_clean?(value) }
+  else true
+  end
+end
+
+def utf8_json!(bytes, code)
+  text = bytes.dup.force_encoding(Encoding::UTF_8)
+  block!(code) unless text.valid_encoding?
+  value = JSON.parse(text)
+  block!(code) unless utf8_clean?(value)
+  value
+end
+
 def private_json!(path, root, limit)
   block!('report_path_invalid') unless File.exist?(path) && within?(path, root)
   stat = File.lstat(path)
   block!('report_path_invalid') unless stat.file? && (stat.mode & 0o077).zero? && stat.size <= limit
-  JSON.parse(File.binread(path))
+  utf8_json!(File.binread(path), 'report_encoding_invalid')
 rescue JSON::ParserError, SystemCallError
   block!('report_path_invalid')
 end
@@ -469,8 +493,12 @@ begin
   block!('concern_unsupported') unless scope
 
   source_root = File.realpath(source_argument)
-  block!('source_path_invalid') unless File.directory?(source_root) && !within?(source_root, CONTROL_ROOT) &&
-    !within?(CONTROL_ROOT, source_root)
+  # The hosted layout puts the source checkout at <workspace>/src, inside the control checkout that
+  # holds this producer, so a source root inside the control root is the normal case and must not
+  # be refused. What must never happen is the other direction -- the control root at or inside the
+  # source root -- which would let the source tree stand in for the control assets. Those are bound
+  # to the control commit below, and the source must be a work tree of its own (checked against git).
+  block!('source_path_invalid') unless File.directory?(source_root) && !within?(CONTROL_ROOT, source_root)
   work = File.realpath(work_argument)
   block!('work_dir_invalid') unless File.directory?(work) && !within?(work, source_root) &&
     !within?(work, CONTROL_ROOT) && (File.stat(work).mode & 0o077).zero?
@@ -495,6 +523,10 @@ begin
   # and the envelopes are built from one set of environment values and compared
   # against each other, which proves nothing.
   git = git_tool
+  # Nested under the control checkout, a source directory that is not its own work tree would be
+  # answered for by the control repository above it; require git's own top level to be this directory.
+  source_top = git_capture(git, source_root, ['rev-parse', '--show-toplevel'], 'source_path_invalid').strip
+  block!('source_path_invalid') unless File.directory?(source_top) && File.realpath(source_top) == source_root
   block!('source_sha_mismatch') unless git_head!(git, source_root, 'source_sha_mismatch') == source_sha
   block!('control_sha_mismatch') unless git_head!(git, CONTROL_ROOT, 'control_checkout_invalid') == control_sha
   require_clean!(git, source_root, 'source_checkout_dirty')
@@ -506,12 +538,12 @@ begin
   block!('identity_env_invalid') unless manifest_digest.match?(/\A[0-9a-f]{64}\z/)
 
   matrix_bytes = tracked_bytes!(git, CONTROL_ROOT, control_sha, MATRIX_RELATIVE, 'catalog_binding_invalid')
-  catalog = JSON.parse(matrix_bytes).fetch('suite_catalog')
+  catalog = utf8_json!(matrix_bytes, 'catalog_binding_invalid').fetch('suite_catalog')
   catalog_digest = sha256!('CI_EXPECTED_CATALOG_DIGEST')
   block!('catalog_binding_invalid') unless canonical_digest(catalog) == catalog_digest
 
   manifest_bytes = tracked_bytes!(git, source_root, source_sha, MANIFEST_RELATIVE, 'manifest_binding_invalid')
-  block!('manifest_binding_invalid') unless canonical_digest(JSON.parse(manifest_bytes)) == manifest_digest
+  block!('manifest_binding_invalid') unless canonical_digest(utf8_json!(manifest_bytes, 'manifest_binding_invalid')) == manifest_digest
 
   tracked_bytes!(git, source_root, source_sha, "#{scope.fetch('app')}/playwright.config.ts", 'config_binding_invalid')
   tool_version = pinned_tool_version!(git, app_root, source_root, source_sha, scope.fetch('app'))
@@ -546,7 +578,7 @@ begin
 
   execution_path = File.realpath(execution_argument)
   block!('execution_report_invalid') unless File.file?(execution_path) && File.size(execution_path) <= MAX_REPORT_BYTES
-  execution_report = JSON.parse(File.binread(execution_path))
+  execution_report = utf8_json!(File.binread(execution_path), 'report_encoding_invalid')
   block!('execution_report_invalid') unless execution_report.is_a?(Hash) && execution_report['suites'].is_a?(Array) &&
     !execution_report['suites'].empty?
 
@@ -618,7 +650,15 @@ rescue AdmissionError => error
 rescue ContractError => error
   puts JSON.generate(emit(status: 'blocked', concern: concern_name, error_class: 'contract_rejected'))
   exit 1
-rescue JSON::ParserError, KeyError, TypeError, SystemCallError, ArgumentError, NoMethodError
+rescue EncodingError, JSON::GeneratorError
+  puts JSON.generate(emit(status: 'blocked', concern: concern_name, error_class: 'report_encoding_invalid'))
+  exit 1
+rescue JSON::JSONError, KeyError, TypeError, SystemCallError, ArgumentError, NoMethodError
   puts JSON.generate(emit(status: 'blocked', concern: concern_name, error_class: 'execution_report_invalid'))
+  exit 1
+rescue StandardError
+  # Anything not named above still blocks with a fixed class and prints nothing of its own: the
+  # message of an uncaught exception can carry the text that raised it.
+  puts JSON.generate(emit(status: 'blocked', concern: concern_name, error_class: 'contract_rejected'))
   exit 1
 end

@@ -25,13 +25,25 @@ if /usr/bin/sudo -n true 2>/dev/null; then
   exit 1
 fi
 
-workflow="${1:-.github/workflows/validate-public-changes.yml}"
+# shellcheck source=base-pass-workflow.sh
+source "$(dirname "${BASH_SOURCE[0]}")/base-pass-workflow.sh"
 step="Run the base commit's policy against this pull request"
+workflow="${1:-}"
+[[ -n "${workflow}" ]] || workflow="$(locate_base_pass_workflow "${step}")"
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/base-policy-isolation-test.XXXXXX")"
-trap 'rm -rf "${work}"' EXIT
+# Background processes the fixtures start (a listener, a stand-in manager) must not outlive a
+# fixture that fails early, or the next run finds them.
+cleanup() {
+  local pid
+  for pid in $(jobs -p); do kill -KILL "${pid}" 2>/dev/null || true; done
+  rm -rf "${work}"
+}
+trap cleanup EXIT
 root="${PWD}"
 
 ruby "${root}/.github/policy/extract-step.rb" "${workflow}" "${step}" run > "${work}/step.sh"
+step_script="${work}/step.sh"
+step_prefix=()
 step_shell="$(ruby -ryaml -e '
   doc = YAML.safe_load(File.read(ARGV[0]), aliases: false)
   found = doc.fetch("jobs").values.flat_map { |job| job.fetch("steps").select { |s| s["name"] == ARGV[1] } }
@@ -84,9 +96,9 @@ run_step() {
   read -r -a shell_argv <<< "${step_shell}"
   local i
   for i in "${!shell_argv[@]}"; do
-    [[ "${shell_argv[i]}" != '{0}' ]] || shell_argv[i]="${work}/step.sh"
+    [[ "${shell_argv[i]}" != '{0}' ]] || shell_argv[i]="${step_script}"
   done
-  (cd "${tree}" && env "${environment[@]}" "${shell_argv[@]}")
+  (cd "${tree}" && "${step_prefix[@]+"${step_prefix[@]}"}" env "${environment[@]}" "${shell_argv[@]}")
 }
 
 expect_pass() {
@@ -574,7 +586,133 @@ if [[ "$(run_install kept /usr/bin/env)" -ne 0 ]] ||
   exit 1
 fi
 
-echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind -- in its session, daemonised, or out of its session with a cleared environment -- fails the step and is killed, even when the script plants a bogus group id, and a script that kills its own wrapper fails the step; the pull request tree changed by an earlier script fails the step; a rewrite by the last script, a tampered base checkout and a hidden file are caught; planted loader variables never reach a base script; a gem or node module planted in HOME by one base script is gone before the next, and a HOME replaced by a link is removed without following it; and an existing node is kept only when root alone can change it'
+# What a base script can leave for later -- cron, at, a systemd user manager or bus -- is asserted
+# gone before the first script and again before every script. The step names its tools and the
+# runtime directory on lines of their own, so each fixture runs a copy with those pointed at
+# stand-ins; it fails if a line is not there exactly once to replace.
+step_with() {
+  local label="$1" from="$2" to="$3" count
+  count="$(grep -cxF -- "${from}" "${work}/step.sh" || true)"
+  [[ "${count}" -eq 1 ]] || { echo "base-policy isolation: the step does not set '${from}' exactly once" >&2; exit 1; }
+  ruby -e 'text, from, to = File.read(ARGV[0]), ARGV[1], ARGV[2]; print text.sub(from) { to }' \
+    "${work}/step.sh" "${from}" "${to}" > "${work}/step-${label}.sh"
+  step_script="${work}/step-${label}.sh"
+}
+# A stand-in that accepts a job only once a base script has asked it to.
+open_when_flagged() {
+  printf '#!/bin/sh\n[ -e "%s" ] && exit 0\nexit 1\n' "$1" > "$2"
+  chmod 0755 "$2"
+}
+
+# Script N opens the door; script N+1 must never start. Asserted once at the start only, N+1 would
+# run and the step would pass.
+for kind in crontab at; do
+  recheck="$(fixture "${work}/recheck-${kind}")"
+  passing_scripts "${recheck}"
+  flag="${work}/recheck-${kind}.flag"
+  stub="${work}/recheck-${kind}-stub"
+  open_when_flagged "${flag}" "${stub}"
+  rm -f "${flag}"
+  printf 'touch %q\nexit 0\n' "${flag}" > "${recheck}/base-policy/.github/policy/check-a-open.sh"
+  printf 'exit 0\n' > "${recheck}/base-policy/.github/policy/check-b-judge.sh"
+  commit_base "${recheck}"
+  if [[ "${kind}" == crontab ]]; then
+    step_with "recheck-${kind}" 'crontab_bin=/usr/bin/crontab' "crontab_bin=${stub}"
+    reason='the job user can still install a crontab'
+  else
+    step_with "recheck-${kind}" 'at_bin=/usr/bin/at' "at_bin=${stub}"
+    reason='the job user can still queue an at job'
+  fi
+  expect_reject "recheck-${kind}" "${recheck}" "${reason}"
+  if grep -qF 'group::base policy: check-b-judge.sh' "${work}/recheck-${kind}.out"; then
+    echo "base-policy isolation: recheck-${kind}: a script ran after the door was opened" >&2; exit 1
+  fi
+done
+
+# A live listener on the user manager's bus, started outside the step. Refused before any script.
+bus="$(fixture "${work}/bus")"
+passing_scripts "${bus}"
+commit_base "${bus}"
+runtime="$(cd "${work}" && pwd -P)/runtime"
+mkdir -p "${runtime}"
+ruby -rsocket -e 'File.delete(ARGV[0]) if File.exist?(ARGV[0]); server = UNIXServer.new(ARGV[0]); sleep 120' "${runtime}/bus" &
+listener=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -S "${runtime}/bus" ]] && break; sleep 0.2; done
+step_with bus 'runtime_dir="/run/user/$(id -u)"' "runtime_dir=${runtime}"
+expect_reject bus "${bus}" "something accepts connections at ${runtime}/bus"
+kill "${listener}" 2>/dev/null || true
+wait "${listener}" 2>/dev/null || true
+# The same directory with nothing listening -- a stale socket file -- is not a holder.
+stale="$(fixture "${work}/bus-stale")"
+passing_scripts "${stale}"
+commit_base "${stale}"
+step_with bus-stale 'runtime_dir="/run/user/$(id -u)"' "runtime_dir=${runtime}"
+expect_pass bus-stale "${stale}"
+
+# A systemd user manager or bus process of the job user, outside the step. Started by this harness
+# under the name of the real thing: a process's name is that of the file it was started from.
+manager="$(fixture "${work}/manager")"
+passing_scripts "${manager}"
+commit_base "${manager}"
+mkdir -p "${work}/fake-bin"
+cp /bin/sleep "${work}/fake-bin/dbus-daemon"
+"${work}/fake-bin/dbus-daemon" 120 &
+fake_manager=$!
+step_script="${work}/step.sh"
+expect_reject manager "${manager}" "a systemd user manager or message bus is running for the job user (dbus-daemon(${fake_manager}))"
+kill "${fake_manager}" 2>/dev/null || true
+wait "${fake_manager}" 2>/dev/null || true
+
+# sshd, of any uid: ssh to localhost with a key a script wrote would start a process outside the
+# subreaper's reach, so a process named sshd or sshd-session -- as the real ones are named -- is refused.
+# Started as the job user here, which is the harder case for the check: it matches by name alone.
+for ssh_name in sshd sshd-session; do
+  sshd_fix="$(fixture "${work}/${ssh_name}")"
+  passing_scripts "${sshd_fix}"
+  commit_base "${sshd_fix}"
+  cp /bin/sleep "${work}/fake-bin/${ssh_name}"
+  "${work}/fake-bin/${ssh_name}" 120 &
+  fake_ssh=$!
+  expect_reject "${ssh_name}" "${sshd_fix}" "sshd is running (${ssh_name}(${fake_ssh}))"
+  kill "${fake_ssh}" 2>/dev/null || true
+  wait "${fake_ssh}" 2>/dev/null || true
+done
+
+# A listener on an ssh port. The step names its ports on a line of its own, so the fixture points it
+# at a port this harness listens on; a stale port with nothing listening is not a finding.
+ssh_port="$(ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", 0); puts server.addr[1]; server.close')"
+ssh_listening="$(fixture "${work}/ssh-port")"
+passing_scripts "${ssh_listening}"
+commit_base "${ssh_listening}"
+ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", ARGV[0].to_i); sleep 120' "${ssh_port}" &
+ssh_listener=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do ruby -rsocket -e 'TCPSocket.new("127.0.0.1", ARGV[0].to_i).close' "${ssh_port}" 2>/dev/null && break; sleep 0.2; done
+step_with ssh-port 'ssh_ports="22"' "ssh_ports=\"${ssh_port}\""
+expect_reject ssh-port "${ssh_listening}" "something accepts connections on an ssh port (${ssh_port})"
+kill "${ssh_listener}" 2>/dev/null || true
+wait "${ssh_listener}" 2>/dev/null || true
+ssh_stale="$(fixture "${work}/ssh-stale")"
+passing_scripts "${ssh_stale}"
+commit_base "${ssh_stale}"
+step_with ssh-stale 'ssh_ports="22"' "ssh_ports=\"${ssh_port}\""
+expect_pass ssh-stale "${ssh_stale}"
+step_script="${work}/step.sh"
+
+# The same name in the step's own ancestry is not a finding: the step runs beneath a process that
+# calls itself dbus-daemon, which is how the runner's own parents look from here.
+ancestor="$(fixture "${work}/ancestor")"
+passing_scripts "${ancestor}"
+commit_base "${ancestor}"
+step_prefix=(ruby -rfiddle -e '
+  prctl = Fiddle::Function.new(Fiddle.dlopen(nil)["prctl"], [Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT)
+  prctl.call(15, "dbus-daemon")
+  system(*ARGV)
+  exit($?.exitstatus || 1)
+')
+expect_pass ancestor "${ancestor}"
+step_prefix=()
+
+echo 'base-policy isolation fixtures: a checkout of any commit but the named base is refused; a rewritten, added or removed base file is caught by the commit pin, with ruby poisoned as well as clean, and a forged manifest on disk changes nothing; a process a base script leaves behind -- in its session, daemonised, or out of its session with a cleared environment -- fails the step and is killed, even when the script plants a bogus group id, and a script that kills its own wrapper fails the step; the pull request tree changed by an earlier script fails the step; a rewrite by the last script, a tampered base checkout and a hidden file are caught; planted loader variables never reach a base script; a gem or node module planted in HOME by one base script is gone before the next, and a HOME replaced by a link is removed without following it; an existing node is kept only when root alone can change it; and cron, at, the user manager bus and its processes are asserted gone before every script'
 if [[ "${home_node_skipped}" == yes ]]; then
   echo 'base-policy isolation: the node HOME case above was NOT exercised on this host: no node'
   [[ "${GITHUB_ACTIONS:-}" != true ]] || exit 1

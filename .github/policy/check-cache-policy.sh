@@ -11,6 +11,23 @@ cache_gated_to_protected_main() {
   cond_requires "$cond" "github.ref == 'refs/heads/main'" \
     && cond_requires "$cond" "steps.verified-source.outputs.protected-ancestor == 'true'"
 }
+# Read-only restore on the untrusted ref (docs/untrusted-readonly-cache.md, Stage 2). A restore
+# step may carry EITHER the protected-main gate OR this one, never both, never neither: the
+# untrusted gate is the exact top-level term github.ref == 'refs/heads/untrusted' and must not
+# also carry the main term. Saves, completion steps and strip-and-prove steps never take it.
+cache_gated_untrusted_restore() {
+  local cond="$1"
+  cond_requires "$cond" "github.ref == 'refs/heads/untrusted'" \
+    && ! cond_requires "$cond" "github.ref == 'refs/heads/main'"
+}
+cache_restore_gate_ok() {
+  if cache_gated_to_protected_main "$1"; then
+    [[ "$1" != *untrusted* ]]
+  else
+    cache_gated_untrusted_restore "$1"
+  fi
+}
+UNTRUSTED_WRITE_RULE="a cache save, completion or strip-and-prove step must never mention the untrusted ref: only restores may run there, read-only"
 GATE_RULE="runs only on main for a protected source SHA (ref isolation, finding H1): the step must have the top-level terms github.ref == 'refs/heads/main' and steps.verified-source.outputs.protected-ancestor == 'true', with no unparenthesised ||"
 
 # Built-in action caches (finding H1 extended, 2026-10-05). `setup-node` (v5 and later) and the
@@ -173,19 +190,44 @@ check_cache_policy() {
     # only the runner's runtime token, so an entry is only as trustworthy as whoever can write
     # main's scope. The restore, the completion step that only exists to feed the save, and the
     # save each run only on main for a protected source SHA (cache_gated_to_protected_main).
-    while IFS= read -r cond; do
-      if ! cache_gated_to_protected_main "$cond"; then
-        echo "The cargo source cache ${GATE_RULE}: $cond" >&2
-        exit 1
+    while IFS='|' read -r kind cond; do
+      if [[ "$kind" == restore ]]; then
+        if ! cache_restore_gate_ok "$cond"; then
+          echo "The cargo source cache ${GATE_RULE}: $cond" >&2
+          exit 1
+        fi
+      else
+        if ! cache_gated_to_protected_main "$cond"; then
+          echo "The cargo source cache ${GATE_RULE}: $cond" >&2
+          exit 1
+        fi
+        if [[ "$cond" == *untrusted* ]]; then
+          echo "The cargo source cache ${UNTRUSTED_WRITE_RULE}: $cond" >&2
+          exit 1
+        fi
       fi
     done < <(awk '
-      function flush() { if (home || completion) print (cond == "" ? "<no if>" : cond); home = 0; completion = 0; cond = "" }
+      function flush() { if (home || completion) print (kind == "" ? "completion" : kind) "|" (cond == "" ? "<no if>" : cond); home = 0; completion = 0; cond = ""; kind = "" }
       /^      - name:/ { flush() }
       /^      - name: Complete the third-party source set before saving/ { completion = 1 }
       /^[[:space:]]+if:/ { cond = $0 }
-      /uses:[[:space:]]*actions\/cache\/(restore|save)@/ { cache = 1 }
+      /uses:[[:space:]]*actions\/cache\/restore@/ { cache = 1; kind = "restore" }
+      /uses:[[:space:]]*actions\/cache\/save@/ { cache = 1; kind = "save" }
       /steps\.cargo-home\.outputs\.dir/ { if (cache) home = 1 }
       /^      - name:/ { cache = 0 }
+      END { flush() }
+    ' "$workflow")
+    # An untrusted-ref restore is exact-keyed: restore-keys would let a newer branch-scoped
+    # prefix match win over main's entry, and the prefix lookup is the shadowing path.
+    while IFS= read -r cond; do
+      echo "An untrusted-ref cache restore must have no restore-keys: $cond" >&2
+      exit 1
+    done < <(awk '
+      function flush() { if (restore && untrusted && rk) print cond; restore = 0; untrusted = 0; rk = 0; cond = "" }
+      /^      - name:/ { flush() }
+      /^[[:space:]]+if:/ { cond = $0; if ($0 ~ /github\.ref == .refs\/heads\/untrusted./) untrusted = 1 }
+      /uses:[[:space:]]*actions\/cache\/restore@/ { restore = 1 }
+      /^[[:space:]]+restore-keys:/ { rk = 1 }
       END { flush() }
     ' "$workflow")
     # The compiled-dependency cache: one exact key from the locate step and no
@@ -205,9 +247,20 @@ check_cache_policy() {
           echo "A compiled-dependency save must require the strip-and-prove step: $cond" >&2
           exit 1
         fi
-        if ! cache_gated_to_protected_main "$cond"; then
-          echo "The compiled-dependency cache ${GATE_RULE}: $cond" >&2
-          exit 1
+        if [[ "$kind" == restore ]]; then
+          if ! cache_restore_gate_ok "$cond"; then
+            echo "The compiled-dependency cache ${GATE_RULE}: $cond" >&2
+            exit 1
+          fi
+        else
+          if ! cache_gated_to_protected_main "$cond"; then
+            echo "The compiled-dependency cache ${GATE_RULE}: $cond" >&2
+            exit 1
+          fi
+          if [[ "$cond" == *untrusted* ]]; then
+            echo "The compiled-dependency cache ${UNTRUSTED_WRITE_RULE}: $cond" >&2
+            exit 1
+          fi
         fi
       done < <(awk '
         function flush() { if (cache && target) print kind "|" rk "|" key "|" cond; cache = 0; target = 0; rk = 0; key = ""; cond = ""; kind = "" }
@@ -220,14 +273,26 @@ check_cache_policy() {
         /^[[:space:]]+key:/ { key = $0 }
         END { flush() }
       ' "$workflow")
-      # The restore-time and save-time strips of the composite are gated off with them.
-      while IFS= read -r cond; do
-        if ! cache_gated_to_protected_main "$cond"; then
-          echo "The compiled-dependency strip step ${GATE_RULE}: $cond" >&2
-          exit 1
+      # The restore-time strip follows its restore (either gate); the save-time strip and proof
+      # are main-only and never mention the untrusted ref.
+      while IFS='|' read -r mode cond; do
+        if [[ "$mode" == restored ]]; then
+          if ! cache_restore_gate_ok "$cond"; then
+            echo "The compiled-dependency strip step ${GATE_RULE}: $cond" >&2
+            exit 1
+          fi
+        else
+          if ! cache_gated_to_protected_main "$cond"; then
+            echo "The compiled-dependency strip step ${GATE_RULE}: $cond" >&2
+            exit 1
+          fi
+          if [[ "$cond" == *untrusted* ]]; then
+            echo "The compiled-dependency strip step ${UNTRUSTED_WRITE_RULE}: $cond" >&2
+            exit 1
+          fi
         fi
       done < <(awk '
-        function flush() { if (composite && mode != "locate") print cond; composite = 0; mode = ""; cond = "" }
+        function flush() { if (composite && mode != "locate") print mode "|" cond; composite = 0; mode = ""; cond = "" }
         /^      - name:/ { flush() }
         /^[[:space:]]+if:/ { cond = $0 }
         /uses:[[:space:]]*\.\/\.github\/actions\/rust-target-cache/ { composite = 1 }
