@@ -1,83 +1,14 @@
 #!/usr/bin/env bash
-# Action references: every `uses:` is a full commit SHA and an exact reviewed reference (sourced).
+# Action references: every `uses` is a full commit SHA and an exact reviewed reference (sourced).
+#
+# The work is done by check-action-uses.rb on the parsed YAML (a text grep misses quoted keys, flow
+# mappings, a value on the next line and other valid spellings); the reviewed allow-list is data in
+# action-allowlist.rb, one line per entry.
 
 check_action_references() {
-  local workflow="$1" reference
-
-  # A step may also be written `- uses: ...` (no name first), so the list marker is allowed.
-  if grep -nE '^\s*(-\s+)?uses:\s*[^#[:space:]]+@(v[0-9]|main|master|stable|latest|[[:alnum:]_.-]+)$' "$workflow"; then
-    echo "Every Action reference must use a full 40-character commit SHA: $workflow" >&2
+  local here="${BASH_SOURCE[0]%/*}"
+  ruby "${here}/check-action-uses.rb" "$1" || {
+    echo "Action reference policy violated: $1" >&2
     exit 1
-  fi
-
-  while IFS= read -r reference; do
-    case "$reference" in
-      actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1) ;;
-      # The one reviewed cache exception (actions/cache v6.1.0), split
-      # into restore and save so each use is explicit. See the cache
-      # policy block below for the only paths either may touch.
-      actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9) ;;
-      actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9) ;;
-      actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1) ;;
-      actions/setup-node@820762786026740c76f36085b0efc47a31fe5020) ;;
-      ./.github/workflows/windows-validation-concern.yml) ;;
-      # Local composite actions are reviewed in this repository; each one is added
-      # here deliberately and held to the composite rules below.
-      ./.github/actions/source-checkout) ;;
-      ./.github/actions/environment-preflight) ;;
-      # Run in a job with no source, environment or secret: refuses a non-empty untrusted cache scope.
-      ./.github/actions/cache-scope-audit) ;;
-      ./.github/actions/sanitize) ;;
-      ./.github/actions/concern-report) ;;
-      ./.github/actions/timings) ;;
-      ./.github/actions/rust-toolchain) ;;
-      ./.github/actions/node-setup) ;;
-      ./.github/actions/run-result) ;;
-      ./.github/workflows/linux-validation-concern.yml) ;;
-      ./.github/workflows/select-concerns.yml) ;;
-      ./.github/actions/select-concerns) ;;
-      ./.github/actions/scan-concern) ;;
-      ./.github/actions/rust-lint-enforce) ;;
-      ./.github/actions/linux-concern-js) ;;
-      ./.github/actions/linux-concern-e2e) ;;
-      ./.github/actions/linux-concern-rust) ;;
-      ./.github/actions/windows-concern-rust) ;;
-      ./.github/actions/macos-concern-rust) ;;
-      ./.github/actions/macos-concern-js) ;;
-      ./.github/actions/vendor-fetch) ;;
-      ./.github/actions/verify-cargo-cache) ;;
-      ./.github/actions/linux-test-identities) ;;
-      ./.github/actions/rust-target-cache) ;;
-      ./.github/workflows/live-proof-arm.yml) ;;
-      ./.github/workflows/base-policy.yml) ;;
-      ./.github/workflows/pg8-measurement-arm.yml) ;;
-      ./.github/actions/mobile-report) ;;
-      ./.github/actions/android-sdk-setup) ;;
-      ./.github/actions/ios-project-init) ;;
-      ./.github/actions/android-emulator-tests) ;;
-      ./.github/actions/ios-simulator-tests) ;;
-      ./.github/actions/live-build) ;;
-      ./.github/actions/live-run) ;;
-      ./.github/actions/live-summary) ;;
-      ./.github/actions/live-start-ibm) ;;
-      ./.github/actions/live-start-iris) ;;
-      ./.github/actions/live-start-mpp) ;;
-      ./.github/actions/live-start-pg) ;;
-      ./.github/actions/pg8-measurement) ;;
-      ./.github/actions/live-start-rocketmq) ;;
-      ./.github/actions/live-start-sql) ;;
-      ./.github/actions/egress-audit) ;;
-      # Linux egress block mode, called only from the egress-audit composite's enforce phase.
-      ./.github/actions/egress-block) ;;
-      # Finding H2: root-needing setup, then the removal of root, before project code.
-      ./.github/actions/root-setup) ;;
-      ./.github/actions/drop-root) ;;
-      '') ;;
-      *)
-        echo "Unreviewed or mutable Action reference in $workflow: $reference" >&2
-        exit 1
-        ;;
-    esac
-  done < <(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^#[:space:]]+).*/\2/p' "$workflow")
-
+  }
 }
