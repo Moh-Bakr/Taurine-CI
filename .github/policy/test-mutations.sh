@@ -506,6 +506,33 @@ mutation '15. the classifier ignores a source-checkout step' .github/policy/clas
 mutation '15. the dispatcher secrets rule dropped' .github/policy/dispatcher-structure.rb '    unless job['"'"'secrets'"'"'] == KEY' '    unless job['"'"'secrets'"'"'] == KEY || true'
 mutation '15. the dispatcher may enter an environment' .github/policy/dispatcher-structure.rb "reusable workflow)\" if job.key?('environment')" "reusable workflow)\" if false"
 
+# 17. No cache restore may run on the untrusted ref (rule N): each of these passed once macOS joined
+# ENFORCED_WORKFLOWS, because rule M then refuses nothing.
+macos_concern=.github/workflows/macos-validation-concern.yml
+mutation '17. an untrusted-gated cargo-source restore, its Cargo.lock check left main-only' "${macos_concern}" "        id: cargo-sources
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}" "        id: cargo-sources
+        if: \${{ github.ref == 'refs/heads/untrusted' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}"
+mutation '17. an untrusted-gated compiled-cache restore, its strip left main-only' "${macos_concern}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && " "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/untrusted' && "
+mutation '17. a new untrusted restore of node_modules with no verification' "${macos_concern}" "      - name: Restore cached third-party crate sources
+" "      - name: Restore node modules
+        if: \${{ github.ref == 'refs/heads/untrusted' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: node_modules
+          key: nm
+
+      - name: Restore cached third-party crate sources
+"
+mutation '17. a restore with no ref gate, reachable on the untrusted ref' "${macos_concern}" "      - name: Restore cached third-party crate sources
+        id: cargo-sources
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}
+" "      - name: Restore cached third-party crate sources
+        id: cargo-sources
+"
+mutation '17. rule N dropped from the checker' .github/policy/check-cache-mode.rb "      next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')" "      next"
+
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
 # toJSON(secrets) read to that concern in the same change: its own policy passes, and the base

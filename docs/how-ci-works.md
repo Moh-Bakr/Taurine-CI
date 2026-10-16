@@ -263,8 +263,10 @@ not granted. The policy (`check-cache-mode.rb`) therefore holds these grants:
 
 Residuals, stated plainly. macOS joined the split when its matrix job became the reusable
 `macos-validation-concern.yml` (called by `macos-validation.yml` as `validate-main` and
-`validate-untrusted`, like Linux and Windows). The policy refuses any untrusted cache restore while any
-workflow that can run on `untrusted` is not enforced, so no restore can precede a complete split. A failed
+`validate-untrusted`, like Linux and Windows). The policy refuses every cache restore that is not
+main-only (rule N: the exact `github.ref == 'refs/heads/main'` term in the step's own `if`, nothing gated
+to `untrusted` or to neither ref) until the owner decides Stage 2, and separately refuses an untrusted
+restore while any workflow that can run on `untrusted` is not enforced (rule M). A failed
 audit also fails the Result verdict on every platform that has the split. On Windows administrator rights cannot be dropped, so any future untrusted restore
 there would extract as an administrator: it is out of scope until it has its own review. The audit is a
 detector, not a lock: `cache-mode: read` is the control.

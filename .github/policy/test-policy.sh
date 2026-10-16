@@ -455,7 +455,17 @@ printf 'split.yml\n' > "${mode_root}/enforced-split.txt"
 write_mode() { # file, content
   cat > "${mode_root}/.github/workflows/$1"
 }
-mode_run() { (cd "${mode_root}" && ruby "${policy}/check-cache-mode.rb" --enforced-file "${mode_root}/${ENFORCED:-enforced.txt}" ".github/workflows/$1") ; }
+# Rule N (no cache restore off main) refuses the untrusted restores that the staged rules F to M are
+# exercised with, so the fixtures for those rules drop N's line and judge the rest: they pass when
+# nothing but N objects, and fail on any other message.
+cm_filtered() {
+  local err kept rc=0
+  err="$(ruby "${policy}/check-cache-mode.rb" "$@" 2>&1 >/dev/null)" || rc=$?
+  kept="$(printf '%s\n' "${err}" | grep -vF "awaits the owner's Stage 2 decision" | grep . || true)"
+  [[ -n "${kept}" ]] && printf '%s\n' "${kept}" >&2
+  [[ -z "${kept}" && ( "${rc}" -eq 0 || -n "${err}" ) ]]
+}
+mode_run() { (cd "${mode_root}" && cm_filtered --enforced-file "${mode_root}/${ENFORCED:-enforced.txt}" ".github/workflows/$1") ; }
 mode_expect_pass() { mode_run "$1" >/dev/null 2>"${base}/err" || { echo "cache-mode fixture '$2' should pass but failed:" >&2; cat "${base}/err" >&2; exit 1; }; }
 mode_expect_fail() {
   local file="$1" label="$2" needle="$3"
@@ -655,7 +665,7 @@ mode_expect_fail split.yml 'an inline restore job with no cache-mode' 'must decl
 unset ENFORCED
 # F1: an untrusted-ref cache step fails closed: its workflow, and every caller of it, must already
 # be an enforced workflow, because without a cache-mode key a job keeps the default write grant.
-many_run() { (cd "${mode_root}" && ruby "${policy}/check-cache-mode.rb" --enforced-file "${mode_root}/${ENFORCED:-enforced.txt}" "$@"); }
+many_run() { (cd "${mode_root}" && cm_filtered --enforced-file "${mode_root}/${ENFORCED:-enforced.txt}" "$@"); }
 many_expect_fail() {
   local label="$1" needle="$2"; shift 2
   if many_run "$@" >/dev/null 2>"${base}/err"; then echo "cache-mode fixture '${label}' should fail but passed" >&2; exit 1; fi
@@ -773,7 +783,7 @@ for text in 'uses: actions/cache/restore@x' 'uses: actions/cache/save@x' 'uses: 
 done
 (source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action .github/actions/cache-scope-audit/action.yml) || { echo 'the cache-scope-audit composite should pass the composite rules' >&2; exit 1; }
 # The reviewed Linux and Windows dispatchers pass the enforced rules as shipped.
-ruby "${policy}/check-cache-mode.rb" .github/workflows/linux-validation.yml .github/workflows/windows-validation.yml .github/workflows/macos-validation.yml .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml .github/workflows/macos-validation-concern.yml >/dev/null || { echo 'the reviewed Linux and Windows dispatchers should pass the cache-mode rules' >&2; exit 1; }
+ruby "${policy}/check-cache-mode.rb" .github/workflows/linux-validation.yml .github/workflows/windows-validation.yml .github/workflows/macos-validation.yml .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml .github/workflows/macos-validation-concern.yml >/dev/null || { echo 'the reviewed Linux, Windows and macOS dispatchers should pass the cache-mode rules' >&2; exit 1; }
 real_mode_fail() { # label needle perl-expr file
   mkdir -p "${mode_root}/real/.github/workflows"
   cp .github/workflows/linux-validation-concern.yml .github/workflows/windows-validation-concern.yml .github/workflows/macos-validation-concern.yml "${mode_root}/real/.github/workflows/"
@@ -800,7 +810,13 @@ real_mode_fail 'base-pass loses its explicit none' 'must declare cache-mode: non
 real_mode_fail 'base-pass granted read' 'must declare cache-mode: none' 's/    cache-mode: none\n(    # Kept as \.\/ : the policy matches this exact form for protected reusable calls\.)/    cache-mode: read\n$1/' validate-public-changes.yml
 real_mode_fail 'base-pass granted write' 'must declare cache-mode: none' 's/    cache-mode: none\n(    # Kept as \.\/ : the policy matches this exact form for protected reusable calls\.)/    cache-mode: write\n$1/' validate-public-changes.yml
 real_mode_fail 'base-pass renamed' 'is missing or renamed' 's/\n  base-pass:\n/\n  base-gate:\n/' validate-public-changes.yml
-echo 'cache-mode real-tree fixtures: the reviewed Linux and Windows dispatchers pass; each weakening of the split, the audit or the explicit grants is refused'
+# Rule N: no cache restore may run on the untrusted ref (docs/untrusted-readonly-cache.md, section 6).
+real_mode_fail 'macOS crate-source restore gated to the untrusted ref' "awaits the owner's Stage 2 decision" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' macos-validation-concern.yml
+real_mode_fail 'macOS compiled-cache restore gated to the untrusted ref' "awaits the owner's Stage 2 decision" 's/(name: Restore compiled third-party dependencies\n        id: cargo-target-cache\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' macos-validation-concern.yml
+real_mode_fail 'a new untrusted restore of node_modules' "awaits the owner's Stage 2 decision" 's/(      - name: Restore cached third-party crate sources\n)/      - name: Restore node modules\n        if: \$\{\{ github.ref == \x27refs\/heads\/untrusted\x27 }}\n        uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n        with:\n          path: node_modules\n          key: nm\n\n$1/' macos-validation-concern.yml
+real_mode_fail 'a restore with no ref gate (reachable on the untrusted ref)' "awaits the owner's Stage 2 decision" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n)        if: [^\n]*\n/$1/' macos-validation-concern.yml
+real_mode_fail 'a Linux restore gated to the untrusted ref' "awaits the owner's Stage 2 decision" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' linux-validation-concern.yml
+echo 'cache-mode real-tree fixtures: the reviewed Linux, Windows and macOS dispatchers pass; each weakening of the split, the audit or the explicit grants is refused'
 printf 'name: p\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted"\n' > "${composite_probe}"
 (source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action "${composite_probe}") >/dev/null 2>&1 || { echo 'a composite that only reads the cache listing endpoint should pass the composite rules' >&2; exit 1; }
 

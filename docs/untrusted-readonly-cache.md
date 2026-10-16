@@ -439,11 +439,14 @@ relies on them (the base-commit pass would otherwise reject the workflow change)
 - **Precondition for Stage 2 (found in review of the workflow half): the macOS split comes first. Done:
   `macos-validation.yml` now calls the reusable `macos-validation-concern.yml` through the same
   validate-main / validate-untrusted pair, and is in `ENFORCED_WORKFLOWS`.**
-  `macos-validation.yml` keeps the default write grant on `untrusted` until its matrix job becomes a
-  reusable workflow and is split like Linux and Windows. With an untrusted restore enabled, a
-  concurrent macOS job could plant a shadow entry between Linux's before-audit and its restore, so
-  the policy (rule M in `check-cache-mode.rb`) refuses any untrusted-gated cache step while any
-  workflow that can run on the untrusted ref is outside `ENFORCED_WORKFLOWS`. The audits also reach
+  Before the split, an inline macOS job would have kept the default write grant on `untrusted`; with
+  it, macOS is enforced like Linux and Windows, so a concurrent macOS job can no longer plant a
+  shadow entry between Linux's before-audit and its restore. The policy keeps two rules for this
+  (both in `check-cache-mode.rb`): rule M refuses any untrusted-gated cache step while a workflow that
+  can run on the untrusted ref is outside `ENFORCED_WORKFLOWS` (nothing today), and rule N, the
+  standing refusal, refuses every cache restore that is not main-only, whether it is gated to the
+  untrusted ref or to neither ref, because untrusted restores await the owner's Stage 2 decision. The
+  audits also reach
   the verdict: the Result job needs both and passes `run-result` a blocking count, so a failed audit
   can never print PASS.
 - **Stage 3 (separate decision):** macOS, then Windows (administrator cannot be dropped;
