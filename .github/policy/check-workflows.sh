@@ -17,6 +17,19 @@ source "${policy}/check-dispatchers.sh"
 # needs its own group (github.run_id) or none, and cancel-in-progress false (check-concurrency.sh).
 bash "${policy}/check-concurrency.sh" >/dev/null || { bash "${policy}/check-concurrency.sh" >&2 || true; exit 1; }
 
+# The policy job must run the structure check in its strict form (check-structure.rb --strict), on
+# every pull request and without a skip (the job's own `if` may only be always()): the base pass runs main's copy of this check, so a later
+# pull request cannot drop --strict, or gate or soften the step, and still pass. Without --strict the
+# lingering-alternative warning could never become an error in the pull request's own copy.
+ruby -E UTF-8 -ryaml -e '
+  doc = YAML.safe_load(File.read(".github/workflows/validate-public-changes.yml", encoding: "UTF-8"), aliases: false)
+  job = doc.dig("jobs", "policy") || {}
+  step = (job["steps"] || []).find { |st| st["run"].to_s.lines.any? { |l| l.strip == "ruby .github/policy/check-structure.rb --strict" } }
+  job_if_ok = !job.key?("if") || job["if"].to_s.strip == "${{ always() }}"
+  ok = step && job_if_ok && !job.key?("continue-on-error") && !step.key?("if") && !step.key?("continue-on-error")
+  abort "The policy job must run check-structure.rb --strict unconditionally in validate-public-changes.yml" unless ok
+' || exit 1
+
 # Windows is intentionally app-only. The full skill verifier is
 # required in the protected Ubuntu lane, while macOS retains a
 # cross-platform smoke check; it must not be reintroduced as a

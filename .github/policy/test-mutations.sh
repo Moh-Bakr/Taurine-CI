@@ -274,6 +274,18 @@ mutation '12. a protected dispatcher widened to a push trigger' "${linux}" 'on:
   workflow_dispatch:' 'on:
   push:
   workflow_dispatch:'
+mutation '12. the policy job no longer runs the structure check with --strict' "${public}" 'check-structure.rb --strict' 'check-structure.rb'
+mutation '12. the policy job made conditional' "${public}" '    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    if: ${{ github.event_name == '"'"'push'"'"' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:'
+mutation '12. the strict structure step made conditional' "${public}" '      - name: Check the universal workflow rules, the control-plane structure and the Action references
+        shell: bash' "      - name: Check the universal workflow rules, the control-plane structure and the Action references
+        if: \${{ false }}
+        shell: bash"
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a

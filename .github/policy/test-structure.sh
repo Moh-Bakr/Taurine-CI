@@ -151,6 +151,28 @@ fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dis
   pull_request:'
 variant "${prune_old}" "[${prune_new}, ${prune_old}]"
 expect_reject 'a tree matching neither alternative' 'matches none of the 2 reviewed shapes'
+# A tree holding the job sets of BOTH alternatives (final jobs plus the old ones) matches neither shape:
+# each alternative is matched exactly, never as a union. The same case kills a union-matcher mutant.
+alt_a='{"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["p1", "prune"]}'
+alt_b='{"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["p2", "prune"]}'
+fresh; swap .github/workflows/cache-prune.yml '
+jobs:
+' '
+jobs:
+  p1:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo
+  p2:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo
+'
+variant "${prune_old}" "[${alt_a}, ${alt_b}]"
+expect_reject 'a tree holding the job sets of both alternatives' 'matches none of the 2 reviewed shapes'
+OLD='hit = alts.index(state)' NEW="hit = alts.index(state) || (state.is_a?(Hash) && state['jobs'].all? { |j| alts.any? { |a| a.is_a?(Hash) && a['jobs'].include?(j) } } ? 0 : nil)" \
+  ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${runner}"
+if ruby "${runner}" "${dir}/t" >/dev/null 2>&1; then echo 'bites     a union matcher accepts that tree, so the fixture kills it'; else echo 'MUTANT SURVIVED: the union matcher still refuses the both-alternatives tree' >&2; exit 1; fi
 # Absent as a transitional alternative: a deleted workflow, then a new one.
 fresh; rm "${dir}/t/.github/workflows/cache-prune.yml"
 variant "\".github/workflows/cache-prune.yml\" =>
