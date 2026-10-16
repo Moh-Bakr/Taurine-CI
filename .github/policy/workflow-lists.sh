@@ -17,6 +17,9 @@ protected_source_workflows=(
   # Reusable and source-bearing: selects concerns from the private diff.
   ".github/workflows/select-concerns.yml"
   ".github/workflows/macos-validation.yml"
+  # The macOS split (#336): the reusable concern workflow is named here, ahead of the file, like
+  # base-policy.yml, so the base commit's checks already know its tier when the split lands.
+  ".github/workflows/macos-validation-concern.yml"
   ".github/workflows/windows-validation-concern.yml"
   ".github/workflows/android-validation.yml"
   ".github/workflows/ios-validation.yml"
@@ -31,6 +34,7 @@ protected_source_workflows=(
   ".github/workflows/pg8-measurement-arm.yml"
 )
 reusable_protected_workflows=(
+  ".github/workflows/macos-validation-concern.yml"
   ".github/workflows/windows-validation-concern.yml"
   ".github/workflows/linux-validation-concern.yml"
   ".github/workflows/select-concerns.yml"

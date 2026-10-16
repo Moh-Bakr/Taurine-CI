@@ -44,6 +44,11 @@ ACTION_ALLOWLIST = [
   './.github/actions/rust-target-cache',
   './.github/workflows/live-proof-arm.yml',
   './.github/workflows/base-policy.yml',
+  # Named ahead of the files (the cache-mode, macOS-split and shell-toolchain changes): the base
+  # commit's allow-list already accepts them when the changes land.
+  './.github/workflows/macos-validation-concern.yml',
+  './.github/actions/shell-artefact',
+  './.github/actions/shell-config',
   './.github/workflows/pg8-measurement-arm.yml',
   './.github/actions/mobile-report',
   './.github/actions/android-sdk-setup',
