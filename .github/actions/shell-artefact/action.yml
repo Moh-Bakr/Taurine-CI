@@ -1,7 +1,7 @@
 name: Install the shell artefact checks
 description: >
   Writes the OpenSSL door gate and the shell artefact checks (size, linked OpenSSL version,
-  dynamic libssl/libcrypto dependencies, native size budget and the opt-in size probe) to the
+  dynamic libssl/libcrypto dependencies, native size budget, built graph and binding) to the
   runner temp directory, to be sourced after the shared sanitizers by the desktop packaging and
   mobile concern steps. Reads nothing from the private source itself and publishes nothing; the
   functions, run later from the checkout, publish fixed lines with crate names, versions and
@@ -559,43 +559,6 @@ runs:
           [[ "${bad}" -eq 0 ]]
         }
 
-        # artefact_size_probe <label> <with-door-bytes> <locate-function> <build command...>
-        # Opt-in (size_probe=true). On the runner only: remove the shells' `legacy-tls` line from
-        # taurine-app's manifest (exactly one match, or no delta), rebuild with the caller's own
-        # command (--locked builds; dropping a feature does not change the lock), measure the
-        # artefact the locate function names, and restore the manifest with git. Only numbers
-        # are published. A failed rebuild or restore fails the probe.
-        artefact_size_probe() {
-          local label="$1" with_bytes="$2" locate="$3"; shift 3
-          local manifest=taurine-backend/taurine-app/Cargo.toml lock_before lock_after file without rc=0
-          if [[ ! -f "${manifest}" || "$(grep -c '^    "legacy-tls",$' "${manifest}" || true)" != 1 ]]; then
-            echo 'size-probe: door line not found; no delta'
-            return 0
-          fi
-          lock_before="$(git hash-object Cargo.lock)"
-          grep -v '^    "legacy-tls",$' "${manifest}" >"${RUNNER_TEMP}/size-probe-manifest" || true
-          cat "${RUNNER_TEMP}/size-probe-manifest" >"${manifest}"
-          "$@" >"${RUNNER_TEMP}/${label}-size-probe.log" 2>&1 || rc=$?
-          git checkout -- "${manifest}"
-          lock_after="$(git hash-object Cargo.lock)"
-          if [[ "${rc}" -ne 0 ]]; then
-            echo "${label}: size-probe FAILED - the build without the door failed (exit ${rc}; detail withheld)" >&2
-            return 1
-          fi
-          if [[ "${lock_before}" != "${lock_after}" ]] || ! git diff --quiet -- "${manifest}"; then
-            echo "${label}: size-probe FAILED - the lock or manifest changed during the probe" >&2
-            return 1
-          fi
-          file="$("${locate}")" || true
-          if [[ -z "${file}" || ! -f "${file}" ]]; then
-            echo "${label}: size-probe FAILED - the artefact built without the door was not found" >&2
-            return 1
-          fi
-          without="$(artefact_bytes "${file}")"
-          echo "${label}: size-probe with-door ${with_bytes} bytes; without-door ${without} bytes; delta $((with_bytes - without)) bytes"
-          echo "- ${label} size probe: with-door ${with_bytes}; without-door ${without}; delta $((with_bytes - without)) bytes" >> "${GITHUB_STEP_SUMMARY}"
-        }
-
         # The desktop executable a `tauri build --debug` wrote: <target-dir>/debug/<bin>[.exe].
         desktop_executable() {
           local meta dir bin
@@ -607,11 +570,11 @@ runs:
           if [[ -f "${dir}/debug/${bin}.exe" ]]; then echo "${dir}/debug/${bin}.exe"; else echo "${dir}/debug/${bin}"; fi
         }
 
-        # desktop_artefact_check <os-label> <size-probe: true|false> <build command...>
+        # desktop_artefact_check <os-label>
         # The packaging concern's artefact proof: the door-only gate on the desktop graph, then
-        # the executable's size and linkage, then (opt-in) the size probe with the same build.
+        # the executable's size and linkage, the built graph, and the bundle bound to the build.
         desktop_artefact_check() {
-          local os="$1" probe="$2" door file bytes bundle root main; shift 2
+          local os="$1" door file bundle root main
           openssl_door_gate "${os}-desktop-openssl-door-only" taurine-desktop - || return 1
           door="$(door_in_graph taurine-desktop -)" || { echo "${os}-desktop-artefact: FAILED - the door query did not resolve" >&2; return 1; }
           file="$(desktop_executable)" || { echo "${os}-desktop-artefact: FAILED - the desktop binary could not be located" >&2; return 1; }
@@ -645,10 +608,6 @@ runs:
             # The bundle's main binary must be the build that was judged.
             bind_same_binary "${os}-desktop-binding" "${main}" "${file}" || return 1
             artefact_tree_check "${os}-desktop-bundle" "${root}" "${main}" debug "${door}" || return 1
-          fi
-          if [[ "${probe}" == true ]]; then
-            bytes="$(artefact_bytes "${file}")"
-            artefact_size_probe "${os}-desktop-executable" "${bytes}" desktop_executable "$@" || return 1
           fi
         }
         TCI_SHELL_ARTEFACT_LIBRARY

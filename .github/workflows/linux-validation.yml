@@ -48,11 +48,6 @@ on:
         required: false
         default: ''
         type: string
-      size_probe:
-        description: Also rebuild the desktop packaging smoke without the OpenSSL door (on the runner only) and report the size delta (rust-packaging)
-        required: false
-        default: false
-        type: boolean
 
 permissions: {}
 
@@ -150,7 +145,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/linux-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"base_sha":{0},"gitleaks_history":{1},"only":{2},"profile":{3},"size_probe":{4},"source_sha":{5},"suite_selection":{6},"visual":{7}}}', toJSON(inputs.base_sha), toJSON(inputs.gitleaks_history), toJSON(inputs.only), toJSON(inputs.profile), toJSON(inputs.size_probe), toJSON(inputs.source_sha), toJSON(inputs.suite_selection), toJSON(inputs.visual)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"base_sha":{0},"gitleaks_history":{1},"only":{2},"profile":{3},"source_sha":{4},"suite_selection":{5},"visual":{6}}}', toJSON(inputs.base_sha), toJSON(inputs.gitleaks_history), toJSON(inputs.only), toJSON(inputs.profile), toJSON(inputs.source_sha), toJSON(inputs.suite_selection), toJSON(inputs.visual)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -411,7 +406,6 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeouts)[matrix.concern] }}
-      size_probe: ${{ inputs.size_probe }}
       # The shadow review this concern's coverage group would run under a
       # partial selection (empty for unbound concerns and for complete-set
       # outcomes): the concern reports it in its summary while its full suite

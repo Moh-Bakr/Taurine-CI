@@ -706,6 +706,47 @@ fi
 grep -qF 'not an installed rustup toolchain' "${work}/out" || { cat "${work}/out" >&2; fail 'a sysroot outside rustup toolchains failed for the wrong reason'; }
 [[ ! -e "${tc}/dest/bin" ]] || fail 'a refused sysroot left a copy behind'
 
+# The copy and its TCI_REAL_CARGO hand-over live in base-policy.yml's base pass, before drop-root.
+ruby -ryaml -e '
+  doc = YAML.safe_load(File.read(".github/workflows/base-policy.yml"), aliases: false)
+  steps = doc.fetch("jobs").fetch("base-policy").fetch("steps").map { |st| st["name"] }
+  copy = steps.index("Install a Rust toolchain where only root can change it")
+  drop = steps.index("Remove root before the base policy runs")
+  abort "the toolchain copy is not before drop-root in the base-policy job" unless copy && drop && copy < drop
+  run = doc["jobs"]["base-policy"]["steps"].find { |st| st["name"] == "Run the base commit\x27s policy against this pull request" }.to_h["run"].to_s
+  abort "the base step does not hand TCI_REAL_CARGO to the base scripts" unless run.include?("scrub+=(TCI_REAL_CARGO=/opt/taurine-ci-rust/bin/cargo)")
+' || fail 'the base-policy job does not copy the toolchain before drop-root and pass TCI_REAL_CARGO'
+! grep -qF 'Install a Rust toolchain where only root can change it' .github/workflows/validate-public-changes.yml || fail 'the toolchain copy is still in validate-public-changes.yml'
+
+# The toolchain copy refuses any symlink (it could point back at a path the job user can write).
+ln -s /tmp "${tc}/home/.rustup/toolchains/stable-host/lib/escape"
+if run_toolchain_step .github/workflows/base-policy.yml "${tc}/dest"; then fail 'a toolchain copy with a symlink was accepted'; fi
+grep -qF 'the toolchain copy contains a symlink' "${work}/out" || { cat "${work}/out" >&2; fail 'a toolchain symlink failed for the wrong reason'; }
+[[ ! -e "${tc}/dest" ]] || fail 'a refused toolchain copy was left behind'
+rm "${tc}/home/.rustup/toolchains/stable-host/lib/escape"
+
+# ---- Windows: the vendored OpenSSL build tools, recorded and held to their major versions ------
+wt="${work}/wintools"; rm -rf "${wt}"; mkdir -p "${wt}"
+tools_step() { # tools_step <perl -e output> <nasm -v output | absent>
+  printf '#!/bin/sh\nprintf "%%s" "%s"\n' "$1" >"${wt}/perl.exe"; chmod +x "${wt}/perl.exe"
+  rm -f "${wt}/nasm.exe"
+  if [[ "$2" != absent ]]; then printf '#!/bin/sh\necho "%s"\n' "$2" >"${wt}/nasm.exe"; chmod +x "${wt}/nasm.exe"; fi
+  ruby .github/policy/extract-step.rb .github/workflows/windows-validation-concern.yml 'Put the vendored OpenSSL build tools in reach' run |
+    sed -e "s#^perl_exe=.*#perl_exe='${wt}/perl.exe'#" -e "s#^nasm_exe=.*#nasm_exe='${wt}/nasm.exe'#" >"${wt}/step.sh"
+  : >"${wt}/env"; : >"${wt}/path"; : >"${wt}/summary"
+  GITHUB_ENV="${wt}/env" GITHUB_PATH="${wt}/path" GITHUB_STEP_SUMMARY="${wt}/summary" bash "${wt}/step.sh" >"${work}/out" 2>&1
+}
+tools_step v5.38.2 'NASM version 2.16.03 compiled on Apr 17 2024' || { cat "${work}/out" >&2; fail 'Perl 5 and NASM 2: should pass'; }
+grep -qxF -- '- OpenSSL build tools: Strawberry Perl v5.38.2; NASM 2.16.03' "${wt}/summary" || fail 'the Windows summary does not record the Perl and NASM versions'
+grep -qF 'OPENSSL_SRC_PERL=' "${wt}/env" && grep -qF 'NASM' "${wt}/path" || fail 'the build tools were not put in reach'
+tools_step v5.40.0 absent || { cat "${work}/out" >&2; fail 'Perl 5 without NASM: should pass (no-asm)'; }
+grep -qF 'NASM absent' "${wt}/summary" && [[ ! -s "${wt}/path" ]] || fail 'a missing NASM was not recorded as no-asm'
+if tools_step v7.0.0 'NASM version 2.16.03'; then fail 'a Perl that is not Perl 5 was accepted'; fi
+grep -qF 'is not Perl 5' "${work}/out" || fail 'a non-5 Perl failed for the wrong reason'
+if tools_step v5.38.2 'NASM version 3.01 compiled'; then fail 'a NASM that is not version 2 was accepted'; fi
+grep -qF 'NASM is not version 2' "${work}/out" || fail 'a non-2 NASM failed for the wrong reason'
+if tools_step 'not a version' 'NASM version 2.16.03'; then fail 'an unreadable Perl version was accepted'; fi
+
 # ---- N8: the weekly release-line cadence fails closed --------------------------------------
 cadence="$(ruby -ryaml -e '
   doc = YAML.safe_load(File.read(".github/workflows/weekly-validation.yml"), aliases: false)

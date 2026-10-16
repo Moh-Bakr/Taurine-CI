@@ -20,11 +20,6 @@ on:
         required: false
         default: false
         type: boolean
-      size_probe:
-        description: Also rebuild the Android library without the OpenSSL door (on the runner only) and report the size delta
-        required: false
-        default: false
-        type: boolean
 
 permissions: {}
 
@@ -81,7 +76,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/android-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"rust":{0},"size_probe":{1},"source_sha":{2}}}', toJSON(inputs.rust), toJSON(inputs.size_probe), toJSON(inputs.source_sha)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"rust":{0},"source_sha":{1}}}', toJSON(inputs.rust), toJSON(inputs.source_sha)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -269,7 +264,6 @@ jobs:
         shell: bash
         env:
           CONCERN: ${{ matrix.concern }}
-          SIZE_PROBE: ${{ inputs.size_probe }}
         run: |
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
@@ -323,18 +317,6 @@ jobs:
                   bind_android_library "android-${abi}-binding" "${main}" "${depinfo%.d}.so" || exit 1
                 fi
               done <<<"${abi_dirs}"
-              if [[ "${SIZE_PROBE}" == true ]]; then
-                android_arm64_library() {
-                  local target_dir
-                  find -L taurine-mobile/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a -name 'libtaurine_mobile_lib.so' -type f 2>/dev/null | head -n 1 | grep . && return 0
-                  target_dir="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory' || true)"
-                  [[ -f "${target_dir}/aarch64-linux-android/debug/libtaurine_mobile_lib.so" ]] && echo "${target_dir}/aarch64-linux-android/debug/libtaurine_mobile_lib.so"
-                }
-                arm64="$(android_arm64_library || true)"
-                [[ -n "${arm64}" ]] || { echo 'android-artefact: FAILED - no arm64-v8a library for the size probe' >&2; exit 1; }
-                artefact_size_probe android-arm64-v8a-library "$(artefact_bytes "${arm64}")" android_arm64_library \
-                  tauri_cli taurine-mobile android build --apk --debug --target aarch64 || exit 1
-              fi
               ;;
             android-rust)
               # Gate S1's mobile arm, door-only form (plan 25; the shells ship the OpenSSL

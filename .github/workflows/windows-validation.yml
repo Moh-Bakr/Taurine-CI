@@ -54,11 +54,6 @@ on:
         required: false
         default: ''
         type: string
-      size_probe:
-        description: Also rebuild the desktop packaging smoke without the OpenSSL door (on the runner only) and report the size delta (rust-packaging)
-        required: false
-        default: false
-        type: boolean
 
 permissions: {}
 
@@ -115,7 +110,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/windows-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"only":{0},"rust":{1},"size_probe":{2},"source_sha":{3},"windows_image":{4}}}', toJSON(inputs.only), toJSON(inputs.rust), toJSON(inputs.size_probe), toJSON(inputs.source_sha), toJSON(inputs.windows_image)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"only":{0},"rust":{1},"source_sha":{2},"windows_image":{3}}}', toJSON(inputs.only), toJSON(inputs.rust), toJSON(inputs.source_sha), toJSON(inputs.windows_image)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -254,7 +249,6 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
       windows_image: ${{ inputs.windows_image }}
-      size_probe: ${{ inputs.size_probe }}
 
   # The Rust crate-test concerns, each its own reusable-workflow job so a slow
   # one cannot hold the others back. Scheduled only when `rust=true`; a skipped
@@ -287,7 +281,6 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       concern: ${{ matrix.concern }}
       windows_image: ${{ inputs.windows_image }}
-      size_probe: ${{ inputs.size_probe }}
 
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed

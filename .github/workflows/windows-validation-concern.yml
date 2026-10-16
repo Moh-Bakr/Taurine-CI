@@ -22,11 +22,6 @@ on:
         required: false
         default: windows-2022
         type: string
-      size_probe:
-        description: For rust-packaging, also rebuild without the OpenSSL door (on the runner only) and report the size delta
-        required: false
-        default: false
-        type: boolean
     secrets:
       SOURCE_READER_PRIVATE_KEY:
         description: The source-reader App private key, passed explicitly by the dispatcher (never inherited)
@@ -140,18 +135,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! -f /c/Strawberry/perl/bin/perl.exe ]]; then
+          # The two image tools, by fixed path; their versions are recorded and held to the major
+          # versions the vendored OpenSSL 3.5 build is reviewed with (Perl 5; NASM 2 when present).
+          perl_exe=/c/Strawberry/perl/bin/perl.exe
+          nasm_exe='/c/Program Files/NASM/nasm.exe'
+          if [[ ! -f "${perl_exe}" ]]; then
             echo 'openssl-build-tools: Strawberry Perl is not on this runner image; the vendored OpenSSL cannot be configured' >&2
             exit 1
           fi
+          perl_version="$("${perl_exe}" -e 'print $^V' 2>/dev/null | tr -d '\r' || true)"
+          [[ "${perl_version}" =~ ^v5\.[0-9]+\.[0-9]+$ ]] || { echo "openssl-build-tools: FAILED - Strawberry Perl is not Perl 5 (${perl_version:-unreadable})" >&2; exit 1; }
           printf '%s\n' 'OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe' >> "${GITHUB_ENV}"
-          echo 'openssl-build-tools: perl: Strawberry Perl (OPENSSL_SRC_PERL)'
-          if [[ -f '/c/Program Files/NASM/nasm.exe' ]]; then
+          nasm_version='absent (OpenSSL builds without assembly, no-asm)'
+          if [[ -f "${nasm_exe}" ]]; then
+            nasm_version="$("${nasm_exe}" -v 2>/dev/null | tr -d '\r' | sed -nE 's/^NASM version ([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p' | head -n 1 || true)"
+            [[ "${nasm_version}" =~ ^2\. ]] || { echo "openssl-build-tools: FAILED - NASM is not version 2 (${nasm_version:-unreadable})" >&2; exit 1; }
             printf '%s\n' 'C:\Program Files\NASM' >> "${GITHUB_PATH}"
-            echo 'openssl-build-tools: nasm: on the job PATH'
-          else
-            echo 'openssl-build-tools: nasm: not on this runner image; OpenSSL builds without assembly (no-asm)'
           fi
+          echo "openssl-build-tools: perl ${perl_version} (OPENSSL_SRC_PERL); nasm ${nasm_version}"
+          echo "- OpenSSL build tools: Strawberry Perl ${perl_version}; NASM ${nasm_version}" >> "${GITHUB_STEP_SUMMARY}"
 
       # Known gap, recorded on purpose: every Windows concern tests LF source. Git for
       # Windows checks the tree out with core.autocrlf=true by default, which is what a
@@ -412,7 +414,6 @@ jobs:
         uses: ./.github/actions/windows-concern-rust  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
-          size-probe: ${{ inputs.size_probe }}
 
       # Disabled with the restore above (finding H1). When re-enabled: only the build that
       # runs everything the key covers saves it, only on a miss, only for a protected source

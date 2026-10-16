@@ -42,11 +42,6 @@ on:
         required: false
         default: ''
         type: string
-      size_probe:
-        description: Also rebuild the desktop packaging smoke without the OpenSSL door (on the runner only) and report the size delta (rust-packaging)
-        required: false
-        default: false
-        type: boolean
 
 permissions: {}
 
@@ -102,7 +97,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/macos-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"flavor":{0},"only":{1},"rust":{2},"size_probe":{3},"source_sha":{4}}}', toJSON(inputs.flavor), toJSON(inputs.only), toJSON(inputs.rust), toJSON(inputs.size_probe), toJSON(inputs.source_sha)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"flavor":{0},"only":{1},"rust":{2},"source_sha":{3}}}', toJSON(inputs.flavor), toJSON(inputs.only), toJSON(inputs.rust), toJSON(inputs.source_sha)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -449,7 +444,6 @@ jobs:
         with:
           concern: ${{ matrix.concern }}
           flavor: ${{ inputs.flavor }}
-          size-probe: ${{ inputs.size_probe }}
 
       # Disabled with the restore above (finding H1). When re-enabled: only the build that
       # runs everything the key covers saves it, only on a miss, only for a protected source

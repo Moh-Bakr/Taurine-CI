@@ -12,10 +12,6 @@ inputs:
     description: Build flavour for the packaging smoke (prod, dev or uat)
     required: false
     default: prod
-  size-probe:
-    description: true to rebuild the packaging smoke without the OpenSSL door and report the size delta
-    required: false
-    default: 'false'
 
 runs:
   using: composite
@@ -25,7 +21,6 @@ runs:
       working-directory: ${{ github.workspace }}/src
       env:
         CONCERN: ${{ inputs.concern }}
-        SIZE_PROBE: ${{ inputs.size-probe }}
         FLAVOR: ${{ inputs.flavor }}
         OS_LABEL: macOS
       run: |
@@ -294,11 +289,9 @@ runs:
             run_deferred rust-packaging-identifier packaging_identifier_check
             # The artefact proof (shell-artefact): the door-only gate on the desktop graph, the
             # executable's size and build profile, no dynamic libssl/libcrypto, the linked OpenSSL 3.5
-            # string when the door is in the graph and, with size_probe=true, the same build again
-            # without the door (on the runner only) for the size delta. Fixed lines only.
+            # string when the door is in the graph. Fixed lines only.
             if [[ "${deferred_failed}" -eq 0 ]]; then
-              if desktop_artefact_check macOS "${SIZE_PROBE}" \
-                tauri_cli taurine-desktop build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}; then
+              if desktop_artefact_check macOS; then
                 deferred_results+=('rust-packaging-artefact|passed')
               else
                 deferred_results+=('rust-packaging-artefact|failed: see the fixed artefact lines in the log')

@@ -19,11 +19,6 @@ on:
         required: false
         default: false
         type: boolean
-      size_probe:
-        description: Also rebuild the iOS app without the OpenSSL door (on the runner only) and report the size delta
-        required: false
-        default: false
-        type: boolean
 
 permissions: {}
 
@@ -80,7 +75,7 @@ jobs:
           CI_WORKFLOW_PATH: .github/workflows/ios-validation.yml
           CI_SOURCE_SHA: ${{ inputs.source_sha }}
           CI_DISPATCH_KEY: ${{ inputs.dispatch_key }}
-          CI_NORMALIZED_INPUTS: ${{ format('{{"rust":{0},"size_probe":{1},"source_sha":{2}}}', toJSON(inputs.rust), toJSON(inputs.size_probe), toJSON(inputs.source_sha)) }}
+          CI_NORMALIZED_INPUTS: ${{ format('{{"rust":{0},"source_sha":{1}}}', toJSON(inputs.rust), toJSON(inputs.source_sha)) }}
           CI_DISPATCH_CONTRACT_JSON: ''
           CI_GENERATE_ONLY: 'false'
           CI_CONTROL_REPOSITORY: ${{ github.repository }}
@@ -304,7 +299,6 @@ jobs:
         shell: bash
         env:
           CONCERN: ${{ matrix.concern }}
-          SIZE_PROBE: ${{ inputs.size_probe }}
         run: |
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
@@ -380,10 +374,6 @@ jobs:
                 artefact_check ios-arm64-sim-app "${artefact}" release "${door}" taurine-mobile arm64-sim || exit 1
               else
                 artefact_tree_check ios-arm64-sim-app "$(dirname "${artefact}")" "${artefact}" release "${door}" taurine-mobile arm64-sim || exit 1
-              fi
-              if [[ "${SIZE_PROBE}" == true ]]; then
-                artefact_size_probe ios-arm64-sim-app "$(artefact_bytes "${artefact}")" ios_artefact \
-                  tauri_cli taurine-mobile ios build --ci --no-sign --target aarch64-sim || exit 1
               fi
               ;;
             ios-rust)

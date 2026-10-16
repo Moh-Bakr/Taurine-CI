@@ -18,11 +18,6 @@ on:
         required: false
         default: 60
         type: number
-      size_probe:
-        description: For rust-packaging, also rebuild without the OpenSSL door (on the runner only) and report the size delta
-        required: false
-        default: false
-        type: boolean
       suite_selection:
         description: Optional reviewed suite selection JSON ({selection_mode, selected_suite_ids, selection_digest}); empty means the full set
         required: false
@@ -460,7 +455,6 @@ jobs:
         uses: ./.github/actions/linux-concern-rust  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
-          size-probe: ${{ inputs.size_probe }}
 
       # A concern no family above handles must fail loudly, never pass by omission.
       - name: Reject an unsupported concern

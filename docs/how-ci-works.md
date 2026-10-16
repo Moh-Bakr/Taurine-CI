@@ -575,7 +575,6 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
 | `windows_image` | Windows | `windows-2022` (default) or `windows-2025` |
-| `size_probe` | Linux, macOS, Windows, Android, iOS | Off by default. The concern that builds the shell (desktop `rust-packaging`, `android-native`, `ios-native`) always prints the artefact's byte size and build profile; with `size_probe=true` it also removes taurine-app's `legacy-tls` line on the runner only, rebuilds with the same command, restores the manifest with `git checkout` and prints `with-door`, `without-door` and `delta` bytes (numbers only; the lock must not change). Part of the dispatch identity like every other input |
 
 ## The Result verdict
 
@@ -805,7 +804,12 @@ and the public OpenSSL version string only:
   source sets the number it is judged against, so this is evidence, not a security control.
 - **Windows toolchain**: every Windows Rust concern sets `OPENSSL_SRC_PERL` to the image's
   Strawberry Perl (fails closed when it is missing) and puts NASM on the job PATH before any
-  project code, because the vendored OpenSSL builds wherever taurine-app compiles.
+  project code, because the vendored OpenSSL builds wherever taurine-app compiles. Both versions
+  are printed in the summary and held to the majors the build is reviewed with: Perl 5, and NASM
+  2 when present (a missing NASM is allowed and means OpenSSL builds `no-asm`).
+- **Artefact size**: every shell-building concern prints the artefact's byte size and build
+  profile. A with/without-door size delta is not measured by CI: it needs a second full shell
+  build, and would need a reviewed dispatch input of its own.
 
 ## The live proofs
 
