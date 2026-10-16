@@ -72,10 +72,15 @@ jobs:
           done
           # Every ssh or sshd socket unit, not only the two the image ships today: systemd 256 and later
           # generate sshd-unix-local.socket and sshd-vsock.socket. `mask` takes names, not patterns, so
-          # the names come from the unit files and the loaded units.
-          ssh_units="$({ echo ssh.service; echo ssh.socket
-            systemctl list-unit-files --type=socket --no-legend --plain 'ssh*.socket' 'sshd*.socket' 2>/dev/null | awk '{print $1}'
-            systemctl list-units --all --type=socket --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null | awk '{print $1}'; } | sort -u | tr '\n' ' ')"
+          # the names come from the unit files and the loaded units. Each listing must exit cleanly: a
+          # systemctl whose list verbs fail while is-active works would read as "no more units".
+          # Names outside ssh* and sshd* (a distro variant) are not enumerated; the per-script check for
+          # an sshd process and the probe of port 22 in the base-policy step are the backstop for those.
+          unit_files="$(systemctl list-unit-files --type=socket --no-legend --plain 'ssh*.socket' 'sshd*.socket' 2>/dev/null)" \
+            || { echo "::error::could not list the ssh unit files, so ssh cannot be shown to be masked"; exit 1; }
+          loaded_units="$(systemctl list-units --all --type=socket --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null)" \
+            || { echo "::error::could not list the loaded ssh units, so ssh cannot be shown to be masked"; exit 1; }
+          ssh_units="$({ echo ssh.service; echo ssh.socket; awk '{print $1}' <<<"${unit_files}"; awk '{print $1}' <<<"${loaded_units}"; } | sort -u | tr '\n' ' ')"
           # shellcheck disable=SC2086
           echo "sshd before: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
           # shellcheck disable=SC2086
@@ -91,7 +96,11 @@ jobs:
               *) ssh_left+="${unit} " ;;
             esac
           done
-          ssh_left+="$(systemctl list-units --type=socket --state=active --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+          # Sockets and services both: an accepting socket spawns ssh@N.service or sshd-*@N.service per
+          # connection, and an instance already running would outlive the mask of its socket.
+          active_ssh="$(systemctl list-units --type=socket,service --state=active --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null)" \
+            || { echo "::error::could not list the active ssh units, so ssh cannot be shown to be stopped"; exit 1; }
+          ssh_left+="$(awk '{print $1}' <<<"${active_ssh}" | tr '\n' ' ')"
           if [[ -n "${ssh_left// /}" ]]; then
             echo "::error::ssh is still active after it was masked (${ssh_left% }), so a base script could ssh to localhost"
             exit 1
@@ -171,10 +180,15 @@ jobs:
           done
           # Every ssh or sshd socket unit, not only the two the image ships today: systemd 256 and later
           # generate sshd-unix-local.socket and sshd-vsock.socket. `mask` takes names, not patterns, so
-          # the names come from the unit files and the loaded units.
-          ssh_units="$({ echo ssh.service; echo ssh.socket
-            systemctl list-unit-files --type=socket --no-legend --plain 'ssh*.socket' 'sshd*.socket' 2>/dev/null | awk '{print $1}'
-            systemctl list-units --all --type=socket --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null | awk '{print $1}'; } | sort -u | tr '\n' ' ')"
+          # the names come from the unit files and the loaded units. Each listing must exit cleanly: a
+          # systemctl whose list verbs fail while is-active works would read as "no more units".
+          # Names outside ssh* and sshd* (a distro variant) are not enumerated; the per-script check for
+          # an sshd process and the probe of port 22 in the base-policy step are the backstop for those.
+          unit_files="$(systemctl list-unit-files --type=socket --no-legend --plain 'ssh*.socket' 'sshd*.socket' 2>/dev/null)" \
+            || { echo "::error::could not list the ssh unit files, so ssh cannot be shown to be masked"; exit 1; }
+          loaded_units="$(systemctl list-units --all --type=socket --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null)" \
+            || { echo "::error::could not list the loaded ssh units, so ssh cannot be shown to be masked"; exit 1; }
+          ssh_units="$({ echo ssh.service; echo ssh.socket; awk '{print $1}' <<<"${unit_files}"; awk '{print $1}' <<<"${loaded_units}"; } | sort -u | tr '\n' ' ')"
           # shellcheck disable=SC2086
           echo "sshd before: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
           # shellcheck disable=SC2086
@@ -190,7 +204,11 @@ jobs:
               *) ssh_left+="${unit} " ;;
             esac
           done
-          ssh_left+="$(systemctl list-units --type=socket --state=active --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+          # Sockets and services both: an accepting socket spawns ssh@N.service or sshd-*@N.service per
+          # connection, and an instance already running would outlive the mask of its socket.
+          active_ssh="$(systemctl list-units --type=socket,service --state=active --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null)" \
+            || { echo "::error::could not list the active ssh units, so ssh cannot be shown to be stopped"; exit 1; }
+          ssh_left+="$(awk '{print $1}' <<<"${active_ssh}" | tr '\n' ' ')"
           if [[ -n "${ssh_left// /}" ]]; then
             echo "::error::ssh is still active after it was masked (${ssh_left% }), so a base script could ssh to localhost"
             exit 1

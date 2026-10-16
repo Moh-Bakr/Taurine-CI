@@ -791,8 +791,12 @@ process behind to act later. The base pass is therefore isolated further:
   loopback port 22. The root step masks every `ssh*` and `sshd*` socket unit it finds
   (systemd 256 and later generate `sshd-unix-local.socket` and `sshd-vsock.socket`), taking the names
   from both the unit files and the loaded units because `mask` takes names, not patterns. It then
-  fails unless each unit is `inactive`, `failed` or `masked` and no ssh socket is active, so
-  `activating` and `reloading` fail too, and so does a socket that appears after the mask.
+  fails unless each unit is `inactive`, `failed` or `masked` and no ssh socket or service is active
+  (an `ssh@N.service` instance already running would outlive the mask of its socket), so
+  `activating` and `reloading` fail too, and so does a unit that appears after the mask. Each of the
+  three `systemctl` listings must exit cleanly: one that errors fails the step instead of reading as
+  "no more units". Names outside `ssh*` and `sshd*`, such as a distro variant, are not enumerated;
+  the per-script check for an `sshd` process and the probe of port 22 are the backstop for those.
   Separately, the process scan fails closed: it must exit cleanly and print its separator, or the
   check fails instead of reading "found nothing". `test-base-policy-root-step.sh` runs both jobs' root steps with
   stand-ins for what needs root, including a mask that leaves the service or the socket running.
