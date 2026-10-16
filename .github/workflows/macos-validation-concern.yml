@@ -123,6 +123,11 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
+      - name: Install the shell artefact checks
+        if: ${{ inputs.concern == 'rust-packaging' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
+
       - name: Set up Node.js and install the locked JavaScript dependencies
         if: ${{ !startsWith(inputs.concern, 'rust-') || inputs.concern == 'rust-packaging' }}
         # Kept as ./ : the policy matches this exact form for local actions.

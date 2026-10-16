@@ -10,6 +10,8 @@
 # older commit's) and MUTATION_REPORT=1 lists each verdict instead of stopping at the first
 # mutation that is not rejected.
 set -euo pipefail
+# Never inherit the skip from the caller's environment: only reject_file sets it, for one call.
+unset SKIP_STRUCTURE
 
 src="${PWD}"
 dir="$(mktemp -d)"
@@ -24,8 +26,11 @@ missed=0
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb check-structure.rb check-strict-structure.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
+    # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
+    # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
+    [[ "${check}" == check-structure.rb && -n "${SKIP_STRUCTURE:-}" ]] && continue
     case "${check}" in
       *.rb) ruby ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
       *) bash ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
@@ -195,6 +200,19 @@ mutation '12. the pg8 arm caller without an explicit none' .github/workflows/pg8
     uses: ./.github/workflows/pg8-measurement-arm.yml' '    uses: ./.github/workflows/pg8-measurement-arm.yml'
 mutation '12. the cache-scope audit accepts a non-empty scope' "${audit}" "if [[ \"\${total}\" != 0 ]]; then" 'if [[ "${total}" == never ]]; then'
 mutation '12. the cache-scope audit asks for the main scope' "${audit}" 'ref=refs/heads/untrusted&per_page=1' 'ref=refs/heads/main&per_page=1'
+mutation '12. the base-pass job loses its explicit none' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
+mutation '12. the base-pass job granted read' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    cache-mode: read
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
+mutation '12. the base-pass job granted write' .github/workflows/validate-public-changes.yml '    cache-mode: none
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.' '    cache-mode: write
+    # Kept as ./ : the policy matches this exact form for protected reusable calls.'
+mutation '12. the base-pass job renamed' .github/workflows/validate-public-changes.yml '
+  base-pass:
+' '
+  base-gate:
+'
 # 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
 # must be rejected, because the default grant for a job with no cache-mode is write.
 mutation '11. an untrusted-only cargo-source restore while its caller is not enforced' .github/policy/check-cache-mode.rb '  linux-validation.yml
@@ -213,6 +231,264 @@ mutation '13. the Windows result stops passing blocking-failures' "${windows}" "
 mutation '13. run-result ignores the blocking count' .github/actions/run-result/action.yml '        if [[ "${blocking}" -gt 0 ]]; then
           # A check outside' '        if [[ "${blocking}" == never ]]; then
           # A check outside'
+# 11. The reusable half of the public policy gate. The base-policy pass is meant to move into
+# .github/workflows/base-policy.yml, called by the entrypoint. The checks must accept that file as a
+# plain called workflow and refuse everything that would make it more: another trigger, a secret, or
+# the same shape at any other path. Run before the file exists, because a pull request is judged by
+# the base commit's checks.
+reusable=.github/workflows/base-policy.yml
+# The body has exactly the shape the structure manifest pins for this file (workflow_call, jobs
+# base-policy, base-policy-fixtures and base-policy-result), so each variant below differs from the
+# reviewed file only in the property under test.
+reusable_body() {
+  local id
+  printf '%s\n' 'name: Reusable public policy (fixture)' 'on:' '  workflow_call:' "$@" 'permissions: {}' 'jobs:'
+  for id in base-policy base-policy-fixtures base-policy-result; do
+    printf '%s\n' "  ${id}:" "    name: ${id}" '    permissions: {}' '    runs-on: ubuntu-24.04' '    steps:' "      - run: 'true'"
+  done
+}
+# with_file LABEL PATH BODY: the tree plus one new file.
+with_file() {
+  fresh_tree
+  mkdir -p "$(dirname "${dir}/tree/$2")"
+  printf '%s\n' "$3" > "${dir}/tree/$2"
+  : > "${dir}/log"
+}
+# reject_file LABEL PATH BODY CHECKER: refused, and by CHECKER. The structure check is skipped here so
+# it cannot refuse the file for being a different shape and let the rule under test pass vacuously;
+# the structure manifest has its own fixtures in test-structure.sh.
+reject_file() {
+  local by
+  with_file "$1" "$2" "$3"
+  by="$(cd "${dir}/tree" && SKIP_STRUCTURE=1 offline_policy)" || true
+  if [[ "${by}" != "$4" ]]; then
+    echo "WRONG CHECKER  $1  (wanted $4, got '${by}')" >&2
+    missed=$((missed + 1))
+    [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+    return 0
+  fi
+  verdict "$1" "${by}"
+}
+# accept_file LABEL PATH BODY: accepted by every check, the structure check included.
+accept_file() {
+  local label="$1" by
+  with_file "$@"
+  if by="$(cd "${dir}/tree" && offline_policy)"; then
+    echo "accepted  ${label}"
+  else
+    echo "REFUSED   ${label}  (by ${by})" >&2
+    missed=$((missed + 1))
+    [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+  fi
+}
+accept_file '11. the reusable public policy workflow as a plain called workflow' "${reusable}" "$(reusable_body)"
+reject_file '11. the same called workflow at a path no tier names' .github/workflows/other-public.yml "$(reusable_body)" check-workflows.sh
+reject_file '11. the reusable public policy workflow with a schedule trigger' "${reusable}" "$(reusable_body '  schedule:' "    - cron: '0 0 * * *'")" check-workflows.sh
+reject_file '11. the reusable public policy workflow with a pull_request_target trigger' "${reusable}" "$(reusable_body '  pull_request_target:')" check-universal.rb
+reject_file '11. the reusable public policy workflow that is not called' "${reusable}" "$(reusable_body | sed 's/workflow_call:/workflow_dispatch:/')" check-workflows.sh
+# A trigger on none of the refused lists: only the rule that it be workflow_call refuses this one.
+reject_file '11. the reusable public policy workflow triggered by something other than workflow_call' "${reusable}" "$(reusable_body | sed 's/  workflow_call:/  issues:/')" check-workflows.sh
+reject_file '11. the reusable public policy workflow declaring a secret' "${reusable}" "$(reusable_body '    secrets:' '      TOKEN:' '        required: false')" check-workflows.sh
+reject_file '11. the reusable public policy workflow with a deployment environment' "${reusable}" "$(reusable_body | ruby -e 'print STDIN.read.sub("    name: base-policy\n", "    name: base-policy\n    environment: prod\n")')" check-workflows.sh
+reject_file '11. the reusable public policy workflow reading a secret' "${reusable}" "$(reusable_body | sed "s/'true'/'echo \${{ secrets.TOKEN }}'/")" check-workflows.sh
+# A workflow calling it is accepted: the call is a reviewed local reusable workflow. The caller is a
+# small workflow of its own, so this tests the allow-list and not the size of the entrypoint.
+fresh_tree
+printf '%s\n' "$(reusable_body)" > "${dir}/tree/${reusable}"
+# The caller is new, so the fixture tree's manifest also lists it: a tree and its manifest changed
+# together, as a reviewed change does, and every check, the structure one included, accepts it.
+swap .github/policy/check-structure.rb '   ".github/workflows/cache-prune.yml" =>' '   ".github/workflows/call-fixture.yml" => {"tier" => "public", "triggers" => ["workflow_dispatch"], "jobs" => ["call"]},
+   ".github/workflows/cache-prune.yml" =>'
+printf '%s\n' 'name: Caller (fixture)' 'on:' '  workflow_dispatch:' 'permissions: {}' 'jobs:' '  call:' '    permissions:' \
+  '      contents: read' '    uses: ./.github/workflows/base-policy.yml' > "${dir}/tree/.github/workflows/call-fixture.yml"
+: > "${dir}/log"
+if by="$(cd "${dir}/tree" && offline_policy)"; then
+  echo 'accepted  11. a workflow calling the reusable public policy workflow'
+else
+  echo "REFUSED   11. a workflow calling the reusable public policy workflow  (by ${by})" >&2
+  missed=$((missed + 1))
+  [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+fi
+mutation '12. the required status check job renamed' "${public}" '    name: Validate workflow policy' '    name: Validate workflow policy (renamed)'
+mutation '12. the required status check job id renamed' "${public}" '  policy:
+' '  policy-renamed:
+'
+mutation '12. a protected dispatcher widened to a push trigger' "${linux}" 'on:
+  workflow_dispatch:' 'on:
+  push:
+  workflow_dispatch:'
+mutation '12. the policy job no longer runs the structure check with --strict' "${public}" 'check-structure.rb --strict' 'check-structure.rb'
+SC='        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. an exit 0 before the strict command' "${public}" "${SC}" '        run: |
+          exit 0
+          ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. set +e before the strict command' "${public}" "${SC}" '        run: |
+          set +e
+          ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict command made best-effort' "${public}" "${SC}" '        run: ruby .github/policy/check-structure.rb --strict || true
+'
+mutation '13. the strict step made if: false' "${public}" "${SC}" '        if: ${{ false }}
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict command inside a heredoc' "${public}" "${SC}" "        run: |
+          cat <<'EOF'
+          ruby .github/policy/check-structure.rb --strict
+          EOF
+"
+mutation '13. the strict command in a function that is never called' "${public}" "${SC}" '        run: |
+          strict() { ruby .github/policy/check-structure.rb --strict; }
+'
+mutation '13. an exit trap before the strict command' "${public}" "${SC}" "        run: |
+          trap 'exit 0' EXIT
+          ruby .github/policy/check-structure.rb --strict
+"
+mutation '13. the strict step given another shell invocation (the shell is replaced, not duplicated)' "${public}" '      - name: Check the control-plane structure, strictly
+        shell: bash
+        run: ruby' '      - name: Check the control-plane structure, strictly
+        shell: bash --noprofile --norc {0}
+        run: ruby'
+mutation '13. the strict step given an env block' "${public}" "${SC}" '        env:
+          BASH_ENV: /dev/null
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. the strict step made continue-on-error' "${public}" "${SC}" '        continue-on-error: true
+        run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. env at the workflow level of the policy workflow (BASH_ENV)' "${public}" 'cache-mode: none
+
+concurrency:' 'cache-mode: none
+
+env:
+  BASH_ENV: /dev/null
+
+concurrency:'
+mutation '13. defaults at the workflow level of the policy workflow' "${public}" 'cache-mode: none
+
+concurrency:' 'cache-mode: none
+
+defaults:
+  run:
+    working-directory: /tmp
+
+concurrency:'
+mutation '13. env on the policy job (RUBYOPT)' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    env:
+      RUBYOPT: -e0
+'
+mutation '13. defaults on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    defaults:
+      run:
+        working-directory: /tmp
+'
+mutation '13. a second YAML document appended to a workflow' .github/workflows/cache-prune.yml 'name: Prune stale caches (scheduled)
+' 'name: Prune stale caches (scheduled)
+---
+ignored: true
+---
+'
+mutation '13. a digest-pinned container on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    container: mcr.example/runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation '13. a service on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    services:
+      db:
+        image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation '13. the policy job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: self-hosted
+    timeout-minutes: 25
+    steps:'
+mutation '13. the policy job on another hosted label' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:'
+mutation '13. a command chained onto an exempt helper line in test-structure.sh' .github/policy/test-structure.sh 'NOT rejected under --strict: $1" >&2; exit 1; fi' 'NOT rejected under --strict: $1" >&2; exit 1; fi; ruby "${check}" --strict "${dir}/t" >/dev/null'
+mutation '13. --strict run on the real tree by another policy script (the base pass would run it)' .github/policy/test-policy.sh 'set -euo pipefail
+' 'set -euo pipefail
+ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. --strict run on the real tree inside test-structure.sh' .github/policy/test-structure.sh "echo 'accepted  the reviewed tree'" "ruby \"\${check}\" --strict \"\${dir}/t\" >/dev/null
+echo 'accepted  the reviewed tree'"
+mutation '12. the policy job made conditional' "${public}" '    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    if: ${{ github.event_name == '"'"'push'"'"' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:'
+mutation '12. the strict structure step made conditional' "${public}" '      - name: Check the control-plane structure, strictly
+        shell: bash' "      - name: Check the control-plane structure, strictly
+        if: \${{ false }}
+        shell: bash"
+
+# mutation_by CHECKER LABEL FILE OLD NEW: like mutation, but the named check alone must refuse the tree.
+# test-base-policy-result.sh pins the shape of base-policy.yml, which the reusable-workflow fixtures
+# (11.) deliberately replace, so it is not part of offline_policy.
+mutation_by() {
+  local checker="$1" label="$2"; shift 2
+  fresh_tree
+  while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
+  : > "${dir}/log"
+  if (cd "${dir}/tree" && bash ".github/policy/${checker}" >>"${dir}/log" 2>&1); then
+    verdict "${label}" ''
+  else
+    verdict "${label}" "${checker}"
+  fi
+}
+mutation_by test-base-policy-result.sh '14. a step ahead of the base-policy guard in the policy job' "${public}" '    steps:
+      # FIRST, before the checkout' '    steps:
+      - name: Early step
+        shell: bash
+        run: echo early
+      # FIRST, before the checkout'
+mutation_by test-base-policy-result.sh '14. the base-policy guard moved after the checkout' "${public}" '      - name: Require the base-policy workflow to have passed
+        if: ${{ always() }}' '      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Require the base-policy workflow to have passed
+        if: ${{ always() }}'
+
+mutation_by test-base-policy-result.sh '14. a digest-pinned container on the guard job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    container: mcr.example/runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation_by test-base-policy-result.sh '14. a service on the guard job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    services:
+      db:
+        image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation_by test-base-policy-result.sh '14. the guard job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: self-hosted
+    timeout-minutes: 25
+    steps:'
+
+mutation_by test-base-policy-result.sh '14. the guard step run as an argument to true (shell: true {0})' "${public}" '        shell: bash
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '        shell: true {0}
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
+mutation_by test-base-policy-result.sh '14. the guard step reading a constant (BASE_PASS_RESULT: success)' "${public}" '          BASE_PASS_RESULT: ${{ needs.base-pass.result }}
+        run: |' '          BASE_PASS_RESULT: success
+        run: |'
+mutation_by test-base-policy-result.sh '14. an extra key on the guard step (working-directory)' "${public}" '        shell: bash
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '        shell: bash
+        working-directory: /tmp
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
 
 # 14. An untrusted restore waits for every untrusted-running workflow to be enforced (rule M).
 mutation '14. an untrusted cargo-source restore while macOS is not enforced' .github/policy/check-cache-mode.rb '  macos-validation.yml

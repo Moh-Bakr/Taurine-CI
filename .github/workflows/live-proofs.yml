@@ -143,7 +143,7 @@ jobs:
           # Dbx before the flip decision (PG2), but does not flip anything.
           # The `pgtls` arm also runs the DBX provider's ordinary TLS cases
           # against those same generated certificate fixtures. The dedicated
-          # `tls-legacy` arm selects only the two DBX legacy-peer tests and
+          # `tls-legacy` arm selects only the three DBX legacy-peer tests and
           # enables the one reviewed OpenSSL feature; SKIPPED=fail makes any
           # missing selector, target or fixture a failed proof.
           # Keep this commentary outside the JSON heredoc.

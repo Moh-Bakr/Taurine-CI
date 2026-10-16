@@ -258,8 +258,35 @@ runs:
             # Packaging smoke: an unsigned debug build of the desktop app through the Tauri
             # CLI, to prove the app still bundles on this OS. Nothing is signed, notarised
             # or uploaded; the output stays on the runner.
+            # Before the build: no Tauri config may add cargo features or a runner the door
+            # gate cannot see, no OpenSSL override may bypass the vendored build, and the
+            # door-only gate (which needs no build) runs on the desktop graph. The build itself
+            # runs the Tauri CLI directly with CI's own arguments (tauri_cli), never a source
+            # npm script; the gate repeats on the same graph after the build.
+            source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
+            run_deferred rust-packaging-build-overrides refuse_build_feature_overrides
+            run_deferred rust-packaging-openssl-overrides refuse_openssl_overrides
+            run_deferred rust-packaging-door-gate openssl_door_gate Linux-desktop-openssl-door-only-prebuild taurine-desktop -
+            run_deferred rust-packaging-door-crate-sources verify_door_crate_sources
             run_deferred rust-packaging-smoke \
-              npm --prefix taurine-desktop run tauri -- build --debug --bundles deb --ci
+              tauri_cli taurine-desktop build --debug --bundles deb --ci
+            # beforeBuildCommand ran in between: the refusals run again on what the build left.
+            run_deferred rust-packaging-build-overrides-post refuse_build_feature_overrides
+            run_deferred rust-packaging-openssl-overrides-post refuse_openssl_overrides
+            run_deferred rust-packaging-door-crate-inputs verify_door_crate_build_inputs
+            # The artefact proof (shell-artefact): the door-only gate on the desktop graph, the
+            # executable's size and build profile, no dynamic libssl/libcrypto, the linked OpenSSL 3.5
+            # string when the door is in the graph. Fixed lines only.
+            if [[ "${deferred_failed}" -eq 0 ]]; then
+              if desktop_artefact_check Linux; then
+                deferred_results+=('rust-packaging-artefact|passed')
+              else
+                deferred_results+=('rust-packaging-artefact|failed: see the fixed artefact lines in the log')
+                deferred_failed=1
+              fi
+            else
+              deferred_results+=('rust-packaging-artefact|not run (an earlier packaging sub-step failed)')
+            fi
             ;;
           rust-tls-openssl)
             # The OpenSSL door crate — a workspace member since Stage 1 task 1.5,
@@ -280,11 +307,15 @@ runs:
             # dbx-core's engine tests recurse deeply enough that the default
             # main-thread stack is not enough — the retired `npm run
             # test:dbx-core` script carried the same value, and the workspace
-            # run keeps it. The two-pass shape is deliberate: pass 1 is every
-            # default-feature test; the legacy-tls pass runs dbx-core again
-            # with `--features legacy-tls`, so both the `legacy_tls=true`
-            # refusal test (compiled only without the feature) and the OpenSSL
-            # TLS-server tests (compiled only with it) run. dbx-core's
+            # run keeps it. The `legacy-tls` pass runs dbx-core again with
+            # `--features legacy-tls` only for a source whose dbx-core still
+            # declares a live (non-empty) feature of that name: older branches
+            # carry the OpenSSL-gated tests that pass exists for. A source whose
+            # dbx-core declares it empty or not at all (the OpenSSL path was
+            # retired; the door is `taurine-tls-openssl`, tested by
+            # `rust-tls-openssl`) records a visible skipped row instead, and an
+            # unreadable manifest fails the concern
+            # (`dbx_core_legacy_tls_pass`). dbx-core's
             # Postgres-backed tests start a disposable container when Docker
             # answers, which it does on this runner. `vendor/boringtun`'s
             # standalone run stays outside every concern (its lock is
@@ -309,8 +340,12 @@ runs:
               if grep -qx 'dbx-core' <<<"${dbx_members}"; then
                 run_deferred rust-dbx-core-tests \
                   env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core
-                run_deferred rust-dbx-core-legacy-tls-tests \
-                  env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core --features legacy-tls
+                if dbx_meta="$(cargo metadata --no-deps --offline --format-version 1)"; then
+                  dbx_core_legacy_tls_pass "${dbx_meta}"
+                else
+                  deferred_results+=('rust-dbx-core-legacy-tls-tests|failed: not run (the workspace manifest could not be read)')
+                  deferred_failed=1
+                fi
                 # The Linux Secret Service half of dbx-core's `os-keyring` feature
                 # (`all(feature = "os-keyring", target_os = "linux", not(test))`) is
                 # compiled by no other job: the tests above run without the feature and

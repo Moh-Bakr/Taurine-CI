@@ -211,6 +211,11 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
+      - name: Install the shell artefact checks
+        if: ${{ inputs.concern == 'rust-packaging' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
+
       # Trusted suite-contract snapshot, taken after the exact-SHA checkout and
       # token revocation but BEFORE any dependency installation or project
       # command: the catalog digest from this control-plane revision and the
@@ -643,7 +648,7 @@ jobs:
           chmod 700 "${work}"
           status=0
           result="$(ruby .github/policy/case-evidence-admission.rb \
-            "${CONCERN}" "${GITHUB_WORKSPACE}/src" "${report}" "${work}")" || status=$?
+            "${CONCERN}" "${GITHUB_WORKSPACE}/src" "${report}" "${work}" 2>/dev/null)" || status=$?
           # Raw reports, titles and case identities stay in that directory; only
           # the aggregate the producer printed is published.
           rm -rf "${work}"
@@ -654,8 +659,15 @@ jobs:
             echo "${result}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+          # The producer prints only the fixed aggregate -- status, concern, counts and a fixed error
+          # class -- never a title or a path, so it goes to the log as well as the summary.
+          echo "case evidence: ${result}"
           if [[ "${status}" -ne 0 ]]; then
-            echo 'case evidence: discovery and execution did not reconcile' >&2
+            error_class="$(jq -r '.error_class // "unknown"' <<<"${result}" 2>/dev/null || echo unknown)"
+            [[ "${error_class}" =~ ^[a-z_]+$ ]] || error_class=unknown
+            # No result at all means the producer died before it could print one.
+            [[ -n "${result}" ]] || error_class=producer_crashed
+            echo "::error::case evidence: discovery and execution did not reconcile (${error_class})"
             exit "${status}"
           fi
 

@@ -94,27 +94,53 @@ revoke_run() {
 # expect LABEL RC(0|fail) OUTPUT(exact text, or - to skip) CALL...: the exit status, the output
 # file and the exact call sequence; the revoke must carry the source token, and the token never
 # reaches a log.
-expect() {
+# expect_mismatch LABEL RC OUTPUT CALL...: prints why the last run does not match one exact expected
+# shape (nothing when it does). expect fails on a mismatch; expect_any accepts any of several shapes.
+expect_mismatch() {
   local label="$1" want_rc="$2" want_output="$3"; shift 3
   if [[ "${want_rc}" == 0 ]]; then
-    [[ "${rc}" -eq 0 ]] || fail "${label}: should pass, exited ${rc}"
+    [[ "${rc}" -eq 0 ]] || { echo "${label}: should pass, exited ${rc}"; return; }
   else
-    [[ "${rc}" -ne 0 ]] || fail "${label}: should fail, passed"
+    [[ "${rc}" -ne 0 ]] || { echo "${label}: should fail, passed"; return; }
   fi
   local want; want="$(printf '%s\n' "$@")"
-  [[ "$(cut -d'|' -f1 "${dir}/calls")" == "${want}" ]] \
-    || fail "${label}: calls were
-$(cut -d'|' -f1 "${dir}/calls")
-wanted
-${want}"
+  [[ "$(cut -d'|' -f1 "${dir}/calls")" == "${want}" ]] || { printf '%s: calls were\n%s\nwanted\n%s\n' "${label}" "$(cut -d'|' -f1 "${dir}/calls")" "${want}"; return; }
+  if [[ "${want_output}" != - && "$(cat "${output}")" != "${want_output}" ]]; then
+    echo "${label}: output was '$(cat "${output}")', wanted '${want_output}'"
+  fi
+}
+# The checks that hold whichever shape is expected.
+expect_common() {
+  local label="$1"
   if grep -q '^DELETE ' "${dir}/calls"; then
     [[ "$(grep '^DELETE ' "${dir}/calls" | cut -d'|' -f2)" == "Authorization: Bearer ${token}" ]] || fail "${label}: the revoke did not carry the source token"
   fi
-  if [[ "${want_output}" != - ]]; then
-    [[ "$(cat "${output}")" == "${want_output}" ]] || fail "${label}: output was '$(cat "${output}")', wanted '${want_output}'"
-  fi
   if grep -qF "${token}" "${dir}/stdout"; then fail "${label}: the token reached the log"; fi
   return 0
+}
+expect() {
+  local why
+  why="$(expect_mismatch "$@")"
+  [[ -z "${why}" ]] || fail "${why}"
+  expect_common "$1"
+}
+# expect_any LABEL RC -- OUTPUT CALL... [-- OUTPUT CALL...]: the run matches exactly one of the listed
+# shapes (each an exact output and an exact, ordered call list; no subsets, supersets or patterns).
+expect_any() {
+  local label="$1" want_rc="$2" why reasons='' shape=()
+  shift 2
+  [[ "${1:-}" == -- ]] || fail "${label}: expect_any needs -- before each shape"
+  shift
+  while (( $# )); do
+    shape=()
+    while (( $# )) && [[ "$1" != -- ]]; do shape+=("$1"); shift; done
+    (( $# )) && shift
+    why="$(expect_mismatch "${label}" "${want_rc}" "${shape[@]}")"
+    if [[ -z "${why}" ]]; then expect_common "${label}"; return 0; fi
+    reasons+="${why}"$'\n'
+  done
+  fail "${label}: matches none of the reviewed shapes:
+${reasons}"
 }
 compare_call() { printf 'GET %s/repos/%s/%s/compare/%s...%s?per_page=1' "${api}" "${owner}" "${name}" "$1" "${sha}"; }
 
@@ -177,7 +203,8 @@ revoke_run refs/heads/main CHECK_PROTECTED_ANCESTRY=false FAKE_COMPARE_develop=i
 expect 'main always asks the ancestry question' 0 protected-ancestor=true "GET ${api}/repositories/${repo_id}" "GET ${api}/repos/${owner}/${name}/commits/${sha}" "$(compare_call develop)" "DELETE ${api}/installation/token"
 
 # The weekly resolver: identity, the develop and main tips, last week's develop tip, the three
-# lock files, revoke;
+# lock files at develop, the uat tip, the three lock files at the uat and main tips (the release
+# line's openssl-src patch cadence), revoke;
 # outputs only after every check passed.
 target=weekly-resolver
 repo_id=1330267721 owner=Moh-Bakr name=Taurine
@@ -187,17 +214,28 @@ load .github/workflows/weekly-validation.yml 'Resolve the develop tip and revoke
 identity="GET ${api}/repositories/${repo_id}"
 tip="GET ${api}/repos/${owner}/${name}/commits/develop"
 main_tip="GET ${api}/repos/${owner}/${name}/commits/main"
+uat_tip="GET ${api}/repos/${owner}/${name}/commits/uat"
 week="GET ${api}/repos/${owner}/${name}/commits?sha=develop&until=2026-09-29T00:00:00Z&per_page=1"
 locks=()
 for lock in Cargo.lock taurine-backend/dbx-core/Cargo.lock taurine-backend/dbx-mongo-shell/Cargo.lock; do
   locks+=("GET ${api}/repos/${owner}/${name}/contents/${lock}?ref=${sha}")
 done
 revoke="DELETE ${api}/installation/token"
-revoke_run refs/heads/main
-expect 'resolved' 0 "sha=${sha}
+# One exact shape is reviewed (step B of the two-step rule): the openssl-src release-line cadence
+# resolver, which also resolves the uat tip, reads the three locks at the uat and main tips, and writes
+# their versions as two more outputs. The previous call list is kept below as a refused fixture.
+locked='300.5.0+3.5.0,300.5.0+3.5.0,300.5.0+3.5.0'
+current_outputs="sha=${sha}
 base=${other}
 main_sha=${sha}
-openssl_locked=300.5.0+3.5.0,300.5.0+3.5.0,300.5.0+3.5.0" "${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${revoke}"
+openssl_locked=${locked}"
+cadence_outputs="${current_outputs}
+openssl_locked_uat=${locked}
+openssl_locked_main=${locked}"
+current_calls=("${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${revoke}")
+cadence_calls=("${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${uat_tip}" "${locks[@]}" "${locks[@]}" "${revoke}")
+revoke_run refs/heads/main
+expect_any 'resolved' 0 -- "${cadence_outputs}" "${cadence_calls[@]}"
 for bad in FAKE_IDENTITY=fail FAKE_ID=1 FAKE_OWNER=someone-else FAKE_NAME=other-repo; do
   revoke_run refs/heads/main "${bad}"
   expect "identity check (${bad})" fail '' "${identity}" "${revoke}"
@@ -207,7 +245,33 @@ expect 'develop tip unreadable' fail '' "${identity}" "${tip}" "${revoke}"
 revoke_run refs/heads/main FAKE_API_SHA=not-a-sha
 expect 'develop tip malformed' fail '' "${identity}" "${tip}" "${revoke}"
 revoke_run refs/heads/main FAKE_REVOKE_RC=22
-expect 'revoke failed' fail '' "${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${revoke}"
+expect_any 'revoke failed' fail -- '' "${cadence_calls[@]}"
 revoke_run refs/heads/main SOURCE_TOKEN=
 expect 'no token minted' fail -
+# The two weekly shapes, judged on recorded calls rather than a resolver run, so each is exercised
+# whichever resolver the tree carries: both exact lists pass; an extra call, a missing call and a
+# reordered list each match neither and are refused.
+shape_run() { # shape_run OUTPUT CALL...: record a finished resolver run with these calls and outputs
+  local want="$1"; shift
+  rc=0
+  printf '%s\n' "$@" | sed 's/$/|/' > "${dir}/calls"
+  sed -i.bak "s#^DELETE .*|\$#&Authorization: Bearer ${token}#" "${dir}/calls" && rm -f "${dir}/calls.bak"
+  printf '%s' "${want}" > "${output}"
+  : > "${dir}/stdout"
+}
+shape_refused() { # shape_refused LABEL OUTPUT CALL...: expect_any must refuse this recorded run
+  local label="$1"; shift
+  shape_run "$@"
+  if ( expect_any "${label}" 0 -- "${cadence_outputs}" "${cadence_calls[@]}" ) 2>/dev/null; then
+    fail "${label}: an unreviewed weekly resolver shape was accepted"
+  fi
+}
+shape_run "${current_outputs}" "${current_calls[@]}"
+shape_refused 'weekly shape: the current call list, no longer reviewed' "${current_outputs}" "${current_calls[@]}"
+shape_run "${cadence_outputs}" "${cadence_calls[@]}"
+expect_any 'weekly shape: the cadence call list' 0 -- "${cadence_outputs}" "${cadence_calls[@]}"
+shape_refused 'weekly shape: one extra call' "${current_outputs}" "${current_calls[@]:0:${#current_calls[@]}-1}" "${uat_tip}" "${revoke}"
+shape_refused 'weekly shape: one missing call' "${cadence_outputs}" "${cadence_calls[@]:0:4}" "${cadence_calls[@]:5}"
+shape_refused 'weekly shape: a reordered list' "${current_outputs}" "${tip}" "${identity}" "${current_calls[@]:2}"
+shape_refused 'weekly shape: the cadence calls with the current outputs' "${current_outputs}" "${cadence_calls[@]}"
 echo 'revoke fixtures: source-checkout and the weekly resolver revoke on every path with the source token, call only the reviewed endpoints, and main refuses an unprotected SHA'

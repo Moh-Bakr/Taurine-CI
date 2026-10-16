@@ -376,10 +376,30 @@ begin
   [expected_path, discovery_path, execution_path].each do |path|
     reject!('input_size_limit') unless File.file?(path) && File.size(path) <= MAX_EVIDENCE_BYTES
   end
-  expected = JSON.parse(File.read(expected_path))
+  # Read as UTF-8 whatever the locale: the producer starts this validator with an empty
+  # environment, where the default external encoding is US-ASCII and the first non-ASCII byte in a
+  # real test title would make JSON.parse raise.
+  clean = lambda do |node|
+    case node
+    when String then node.valid_encoding?
+    when Array then node.all? { |item| clean.call(item) }
+    when Hash then node.all? { |key, value| clean.call(key) && clean.call(value) }
+    else true
+    end
+  end
+  utf8_json = lambda do |path|
+    text = File.read(path, encoding: Encoding::UTF_8)
+    # JSON.generate raises on invalid UTF-8 and quotes the string in its message, so refuse it
+    # here: in the bytes, and in the strings a lone-surrogate escape such as "\udcff" parses to.
+    reject!('input_encoding_invalid') unless text.valid_encoding?
+    value = JSON.parse(text)
+    reject!('input_encoding_invalid') unless clean.call(value)
+    value
+  end
+  expected = utf8_json.call(expected_path)
   validate_expected(expected)
-  discovery_envelope = JSON.parse(File.read(discovery_path))
-  execution_envelope = JSON.parse(File.read(execution_path))
+  discovery_envelope = utf8_json.call(discovery_path)
+  execution_envelope = utf8_json.call(execution_path)
   discovery = validate_envelope(discovery_envelope, expected, 'discovery')
   execution = validate_envelope(execution_envelope, expected, 'execution')
   discovery_ids = discovery.map { |item| item.fetch('case_id') }.sort
@@ -391,7 +411,9 @@ begin
 rescue ContractError => error
   puts JSON.generate({ 'schema_version' => 1, 'status' => 'shadow_blocked', 'error_class' => error.code })
   exit 1
-rescue JSON::ParserError, KeyError, TypeError, SystemCallError, ArgumentError, NoMethodError
+rescue StandardError
+  # Every other failure -- a parse error, an encoding error, a missing key -- is one fixed class: the
+  # message of an uncaught exception can carry the text that raised it.
   puts JSON.generate({ 'schema_version' => 1, 'status' => 'shadow_blocked', 'error_class' => 'invalid_input' })
   exit 1
 end

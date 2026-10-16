@@ -523,7 +523,8 @@ then `scripts/vendor-openvpn3.sh fetch`, which verifies the vendored sources aga
 ## How the files are split
 
 The policy warns on any workflow or composite above 400 lines and fails above 800. Every file is under
-400 except the `concern-report` composite, which is one cohesive reporting library and is kept whole. Files are
+400 except the `concern-report` and `shell-artefact` composites, each one cohesive library kept whole
+(`shell-artefact` installs its build-input half, `shell-config`, as its first step). Files are
 split by responsibility: a workflow keeps everything that must run before project code (input
 validation, the token mint, the exact-SHA checkout and the revoke) plus the job wiring, and the work
 that runs after the revoke lives in composites under `.github/actions/`.
@@ -531,11 +532,11 @@ that runs after the revoke lives in composites under `.github/actions/`.
 | Area | Workflow (entry point) | Composites it calls |
 | --- | --- | --- |
 | Shared | every protected workflow | `source-checkout` (mint, exact checkout, verify, revoke), `sanitize`, `timings`, `node-setup`, `rust-toolchain`, `vendor-fetch`, `verify-cargo-cache`, `concern-report`, `run-result` |
-| Linux | `linux-validation.yml` calls `linux-validation-concern.yml`; `select-concerns.yml` plans | `linux-concern-js`, `linux-concern-e2e`, `linux-concern-rust`, `scan-concern`, `select-concerns`, `linux-test-identities` |
-| macOS | `macos-validation.yml` calls `macos-validation-concern.yml` | `macos-concern-js`, `macos-concern-rust` |
-| Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust` |
-| Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report` |
-| iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report` |
+| Linux | `linux-validation.yml` calls `linux-validation-concern.yml`; `select-concerns.yml` plans | `linux-concern-js`, `linux-concern-e2e`, `linux-concern-rust`, `scan-concern`, `select-concerns`, `linux-test-identities`, `shell-artefact` |
+| macOS | `macos-validation.yml` calls `macos-validation-concern.yml` | `macos-concern-js`, `macos-concern-rust`, `shell-artefact` |
+| Windows | `windows-validation.yml` calls `windows-validation-concern.yml` | `windows-concern-rust`, `shell-artefact` |
+| Android | `android-validation.yml` | `android-sdk-setup`, `mobile-report`, `shell-artefact`, `android-emulator-tests` |
+| iOS | `ios-validation.yml` | `ios-project-init`, `mobile-report`, `shell-artefact`, `ios-simulator-tests` |
 | Live proofs | `live-proofs.yml` calls `live-proof-arm.yml` once per arm | `live-build`, `live-run`, `live-summary`, `live-start-mpp`, `live-start-ibm`, `live-start-rocketmq`, `live-start-iris`, `live-start-pg`, `live-start-sql` |
 | Policy | `validate-public-changes.yml` | the scripts under `.github/policy/` |
 
@@ -639,7 +640,209 @@ days earlier, and `macos-validation` and `windows-validation` with `rust=true` (
 are not part of the weekly run; dispatch them by hand. The base_sha run is the drift check:
 a concern that fails in the full run but is "not selected" in the selective run reveals a gap
 in the `ci-matrix.json` rules. The summary also reports how far the locked `openssl-src` is
-behind the newest 300.5.x release.
+behind the newest 300.5.x release, for the develop, uat and main tips. That patch cadence is a
+warning for develop and **fails the run** for a uat or main tip that is behind, off the 300.5
+line, or still on 3.5 after OpenSSL 3.5 LTS ends (2030-04-08): the release line ships the
+OpenSSL it locks. The release line fails closed: an unresolved tip, a failed root-lock fetch,
+a lock without `openssl-src` or an empty crates.io answer is an error, not a pass
+(`test-weekly-cadence.sh`).
+
+## The OpenSSL door in the shells
+
+Both shells ship the OpenSSL door (`taurine-tls-openssl`, vendored OpenSSL 3.5 LTS). The
+`shell-artefact` composite holds the checks, which publish crate names, versions, byte counts
+and the public OpenSSL version string only:
+
+- **CI owns the build's argv.** Every shell build (desktop `rust-packaging`, `android-native`,
+  `ios-native`, and the Android/iOS project `init`) runs `npm run --ignore-scripts tauri -- <CI
+  arguments>` from the shell directory with every `TAURI_*` and `npm_config_*` variable removed,
+  and never a source-chosen `--features` or `--config` (the macOS flavour `--config` is CI's
+  closed set). The npm form is needed because the CLI records how it was started as the
+  callback of the generated mobile build phases (started as `node <script>`, it records an
+  unrunnable `node tauri`); so the shell's `tauri` script must be exactly `tauri`, with no
+  `pretauri`/`posttauri` script, no `.npmrc` anywhere in the checkout and no `~/.npmrc` for the
+  job user, and npm's user and global config point at empty CI-owned files (the generated
+  phases inherit that environment when they call back). The CLI's provenance
+  is proven first:
+  `node_modules/.bin/tauri` must resolve to that `tauri.js`, and the shell's `package-lock.json`
+  entries for `@tauri-apps/cli` and every installed `@tauri-apps/cli-<platform>` must be
+  resolved from `https://registry.npmjs.org/` with an `integrity`. The Android bindgen
+  environment the source's scripts used to set is set by CI. Tauri's own `beforeBuildCommand`
+  (the frontend build) still runs from the checked config, so every refusal below runs again
+  after the build.
+- **Generated mobile build phases.** The Gradle Rust plugin (`gen/android/buildSrc`) and the
+  Xcode "Build Rust Code" phase (`gen/apple`) call back into the CLI with a command recorded at
+  `init`. A source-committed copy would hand the Rust build to source-chosen arguments, so CI
+  regenerates them: it removes `gen/android/buildSrc` (and the generated `tauri.settings.gradle`)
+  and all of `gen/apple` (refused if committed) before its own `init`, and after `init` the
+  regenerated callback must exist and call the CLI's `tauri.js` with node, never a package
+  manager script beyond that exact `npm run -- tauri` callback. For iOS the regenerated
+  `project.yml` is also checked structurally: its only script phase is "Build Rust Code", it
+  sets no `OTHER_LDFLAGS`, `FRAMEWORK_SEARCH_PATHS` or `LD_RUNPATH_SEARCH_PATHS`, its
+  `LIBRARY_SEARCH_PATHS` are the template's, and its only dependencies are the Rust `libapp.a`
+  and SDK frameworks from the template's set plus `SystemConfiguration` (no `carthage`,
+  `package`, `bundle` or `target` dependency). The rest of a committed `gen/android` (app sources, manifest, the app and root
+  Gradle files, `gradle.properties`) is source build logic like a `build.rs`, and can reach the
+  Rust build, for example running cargo with extra `--features`. It is accepted as source build
+  logic, and what it builds is judged instead: see **Built graph** below. Its Gradle
+  wrapper is checked: the wrapper jar must be Gradle's published wrapper jar for the version
+  `distributionUrl` names, `gradlew` and `gradlew.bat` must equal the start scripts pinned for
+  that version (Gradle publishes no checksums for them, so the scripts the source committed for
+  8.14.3 were pinned by sha256; any other version fails until its scripts are reviewed and
+  pinned). **Upgrading Gradle**: review the new version's start scripts (as generated by that
+  version's `gradle wrapper`), re-hash `gradlew` and `gradlew.bat`, and pin them in
+  `shell-config` in the same change as that version's published wrapper-jar and distribution
+  checksums (fetched from `services.gradle.org`); the source then commits the new wrapper, jar,
+  scripts and `distributionSha256Sum` together,
+  `distributionUrl` an official `https://services.gradle.org/distributions/gradle-<v>-bin.zip`,
+  and `distributionSha256Sum` present and equal to Gradle's published checksum for that version
+  (both pinned in `shell-config`).
+- **Gate S1, door-only** (`android-rust`, `ios-rust` for the mobile graph per target, every
+  built Android ABI and the iOS simulator build before and after the build, and every desktop
+  `rust-packaging` before and after the build): an older source without `openssl-sys` passes
+  as "absent"; otherwise every direct dependent of `openssl-sys`, `openssl`, `tokio-openssl` and
+  the door must be inside the door path (`openssl`, `tokio-openssl`, `taurine-tls-openssl`,
+  `taurine-db-dbx`), the door must be present and the single resolved `openssl-src` must be
+  300.5.x. A resolve error fails. The gate queries the shell crate's manifest default features,
+  which is exactly the built set because CI owns the argv and refuses any Tauri config that could
+  change it: a shell without `src-tauri`; any Tauri config other than a lower-case `tauri*.json`
+  directly in a shell's `src-tauri` (every `tauri*.toml` and `tauri*.json5`, the CLI's platform
+  overlays such as `Tauri.linux.toml` included); and a config that sets `build.features`,
+  `build.runner`, `bundle.externalBin`, any `files` of deb, rpm, AppImage or macOS, any
+  `bundle.macOS.frameworks` (the bundler resolves even a bare name from `~/Library`, `/Library`
+  or `/Network/Library/Frameworks`, never `/System`, so it always copies a framework),
+  `bundle.iOS.template`, a `bundle.iOS.frameworks` entry outside `{SystemConfiguration}`, the
+  installer hooks and templates (WiX `template`, `fragmentPaths` and component/feature/merge
+  refs; NSIS `template` and `installerHooks`; deb and rpm maintainer scripts) and
+  `bundle.windows.signCommand` (refused for now; release signing will need its own reviewed
+  path later).
+  `bundle.resources` (array or object form) must be data, by a content allow-list: every
+  source, relative to `src-tauri`, must exist and resolve (symlinks included) inside the
+  checkout; globs (`*`, `**`, dotfiles included, as Tauri expands them) and directories are
+  expanded and every file checked; a pattern that matches nothing fails; and each file must be
+  a PNG, JPEG, ICO or ICNS image by magic, or UTF-8 text with no control byte other than tab,
+  newline, form feed and carriage return (so `../../THIRD-PARTY-NOTICES` and SVG pass, and
+  archives, jar/dex, WASM and any executable fail). `pg8-measurement` still builds through `npm run tauri`;
+  no door or artefact verdict reads its output.
+- **Built graph**: after each shell build, the graph cargo actually compiled is judged, whatever
+  features Gradle code or a build phase passed. Units are identified by identity, not by where
+  their sources live: every `.fingerprint/<package>-<hash>` and `deps/<crate>-<hash>.d` of the
+  artefact's profile directory (mapped through `cargo metadata --locked --all-features` package
+  and target names), plus the paths in the artefact's own dep-info (relative ones resolved
+  against the workspace root). `build.dep-info-basedir` in any cargo config and
+  `CARGO_BUILD_DEP_INFO_BASEDIR` are refused, and so is a path package whose target sources lie
+  outside its own manifest directory. A `--target` build compiles build-dependencies (`openssl-src`)
+  for the host, so the host profile `<target>/<profile>/` is read too. Any `.fingerprint` or
+  `deps/*.d` entry that is not a
+  `<name>-<16 hex>` unit (or the unhashed `<target>.d` cargo writes) or maps to no package fails,
+  and the door state sets a floor: with the door in the graph the built set must contain
+  `taurine-tls-openssl`, `openssl`, `openssl-sys` and `openssl-src`, without it none of them.
+  Edges come from the all-features resolve; `openssl-src` may be a (build) dependency of
+  `openssl-sys` only, in the gate and here. Every built crate that depends directly
+  on `openssl`, `openssl-sys` or `tokio-openssl` must be on the door path (the S1 parent rules)
+  and `native-tls` must not be built. A missing or unparseable dep-info, or one without the
+  shell crate, fails. Dep-info read: desktop `<target>/debug/taurine-desktop.d` (Linux, macOS,
+  Windows) with `<target>/debug/deps/*.d`; Android `<target>/<triple>/debug/libtaurine_mobile_lib.d`
+  per built ABI; iOS `<target>/aarch64-apple-ios-sim/release/libtaurine_mobile_lib.d`; each
+  with its own `deps/*.d`. A restored compiled-dependency cache (main, protected SHAs only)
+  adds its units to the set, which can only make the check stricter.
+- **The shipped artefact is the judged build**: Android always requires each APK `lib/<abi>/`
+  library to equal the judged `<target>/<triple>/debug/libtaurine_mobile_lib.so` after the
+  NDK's `llvm-strip --strip-all` of both (a GNU build-id can be chosen at link time, so an equal
+  build-id is only an extra check). That AGP's packaged copy matches after the strip is
+  unproven until a hosted run confirms it; iOS requires every `libapp.a` in the project's `Externals` to equal the
+  judged `libtaurine_mobile_lib.a`; desktop requires the bundled main binary (the `.deb`'s
+  `usr/bin`, the `.app`'s executable) to equal `target/debug/<bin>`, or to equal it once both
+  are stripped and unsigned. Windows bundles nothing, so the executable judged is the one built.
+- **The fixtures in the base-policy pass**: `test-shell-artefact.sh` builds a toy workspace with
+  real cargo. The base pass runs every base test with `PATH` fixed to the system directories and
+  an empty `HOME`, where rustup's proxies cannot work, so the base-policy job copies the image's
+  stable toolchain (`bin/` and `lib/` of its real `cargo` and `rustc`) to `/opt/taurine-ci-rust`,
+  owned by root, before root is removed, and the base step passes it as `TCI_REAL_CARGO`. That
+  step runs from `RUNNER_TEMP`, outside both checkouts, resolves the sysroot with the image's own
+  `~/.cargo/bin/rustup run stable` (`RUSTUP_TOOLCHAIN=stable`, `RUSTUP_HOME`/`CARGO_HOME`
+  unset), and refuses a sysroot outside `~/.rustup/toolchains/`, so a `rust-toolchain.toml` in the
+  pull request or base tree cannot make rustup run its own `rustc` while sudo is still available.
+- **What CI judges, and what it does not**: CI builds and judges the iOS **simulator release**
+  artefact and the **desktop debug** artefacts (and the Android debug APK). iOS device builds,
+  App Store archives, desktop release installers and any signed or store artefact are built
+  outside CI and are not judged by these checks.
+- **Door crates fetched afresh and compared after the build**: before each shell build, every
+  cached `.crate` and every extracted `registry/src` copy of the four door crates is deleted in
+  every registry directory, `cargo fetch --locked` downloads them again, and every resulting
+  cached copy must hash to its `Cargo.lock` checksum (at least one per crate). After the build,
+  before anything is deleted, each extracted copy cargo built from is compared file by file with
+  a fresh extraction of its verified archive (`.cargo-ok` aside); any difference fails.
+- **Door crates from crates.io**: `openssl-src`, `openssl-sys`, `openssl` and `tokio-openssl`
+  must each have the crates.io registry `source` and a `checksum` (and no `replace`) in the root
+  `Cargo.lock`, and resolve in `cargo metadata` to that source with the manifest under
+  `CARGO_HOME/registry/src`. A `[patch]` path or git fork, `[replace]`, or a directory/vendored
+  source replacement fails.
+- **What the gate cannot see.** It is name- and graph-based: it knows `openssl-sys`, `openssl`,
+  `tokio-openssl`, `taurine-tls-openssl` and `openssl-src` by name. A renamed or forked crate, a
+  `build.rs` that links a library itself, or a libcrypto compiled inside another `-sys` crate is
+  invisible to it; the artefact proof below is the backstop. Its `openssl-src` count reads the
+  root `Cargo.lock` only, because both shells build from the root workspace (`dbx-core` and
+  `dbx-mongo-shell` keep their own locks, which no shell build reads); revisit that if a shell
+  ever builds from another lock.
+- **No OpenSSL override**: `OPENSSL_NO_VENDOR`, `OPENSSL_DIR`, `OPENSSL_STATIC`,
+  `OPENSSL_LIB_DIR` and `OPENSSL_INCLUDE_DIR` (bare or with a `<TARGET>_` prefix) make
+  `openssl-sys` skip the vendored build. They are refused in the job environment and in every
+  `.cargo/config.toml`/`.cargo/config` cargo can read (nested in the checkout, every parent of
+  the shells up to `/`, and `CARGO_HOME`), before each build and in every gate. Names compare
+  case-insensitively and config keys after TOML decoding (Python `tomllib`; an unparseable
+  config or a missing `tomllib` fails). This is hygiene: the control is the artefact's
+  lock-bound version proof below.
+- **Door tests on the device**: the emulator (x86_64) and simulator run the door crate's library
+  and integration tests through the same runner as the mobile tests, surfacing the fixed
+  `door-roots:` line and, when the source has it, the ignored `public_peer` verify-full
+  handshake (`door-public-peer:` line; a resolve/connect failure is classified as "public peer
+  unreachable from device" and still fails). Only whole lines of the fixed shapes
+  `door-roots: (Os|MozillaFallback), N anchors` and `door-public-peer: roots
+  (Os|MozillaFallback), N anchors` are published, one per key; any other door line is dropped,
+  reported only as `door lines dropped: yes|no`. `lockfile_policy` is excluded on the device (it
+  reads the host `Cargo.lock`); the host `rust-tls-openssl` concern covers it. The aarch64
+  Android door tests are built and linked compile-only.
+- **Artefact linkage** (the desktop executable, plus everything in the Linux `.deb` and the macOS
+  `.app`; the whole Android APK, every ABI in `lib/` and every other binary such as `assets/`;
+  the whole iOS `.app`, its `Frameworks` included; on Windows, which builds no installer, every
+  PE beside the executable in the target directory, the shell's own library judged like the
+  executable; a PE in a subdirectory of the target directory is not scanned because nothing CI
+  builds ships it: there is no installer, `externalBin` is refused and resources must be text
+  or images): the shell's main binary must carry no
+  dynamic `libssl`/`libcrypto` dependency (`readelf -d`, `otool -L`, `dumpbin /dependents`),
+  and the distinct set of `OpenSSL X.Y.Z` strings in the binary must be empty when the door is
+  not in that target's graph, and exactly `OpenSSL 3.5.M` when it is, where `3.5.M` is the
+  build metadata of the single locked `openssl-src` 300.5.x. A second copy, another version
+  or another patch fails. Every other shipped binary must carry no OpenSSL string and no dynamic
+  `libssl`/`libcrypto`. Android judges each built ABI on its own target graph. **Residual:** the
+  proof sees only copies whose version text survived linking. A library deliberately built with
+  the version string stripped (and with `no-filenames`) evades it: the proof catches accidental
+  OpenSSL consumers, not a deliberately disguised one.
+- **Same-user tampering (residual)**: the checks call `grep`, `jq`, `cargo` and the binary
+  readers through `PATH` after project code has run as the same user, and build scripts can
+  write `GITHUB_ENV`/`GITHUB_PATH`, so a hostile build could shadow them. Likewise
+  `CARGO_*`, `RUSTFLAGS`, a cargo `rustc-wrapper`, `linker` or link arguments cannot change the
+  resolved graph but can link extra code; a `beforeBuildCommand` can edit and restore inputs.
+  These are same-user residuals, backstopped by the artefact proof. The gate therefore also runs
+  before each build, where no build script has run yet; the post-build artefact proof shares
+  the job's trust in its own tools.
+- **Scope**: the rule covers native OpenSSL. An OpenSSL compiled to WASM in the frontend, or a
+  JVM/JS TLS stack, is outside it; a native BoringSSL in an Android `.so` is caught as an extra
+  through its `OpenSSL 1.1.1 (compatible; BoringSSL)` text.
+- **Native size budget (advisory)**: a ceiling in the source's `bundle-budget.json`
+  (`<app>.native.<abi>` or `<app>.nativeBytes`) is compared when the source sets one. The
+  source sets the number it is judged against, so this is evidence, not a security control.
+- **Windows toolchain**: every Windows Rust concern sets `OPENSSL_SRC_PERL` to the image's
+  Strawberry Perl (fails closed when it is missing) and puts NASM on the job PATH before any
+  project code, because the vendored OpenSSL builds wherever taurine-app compiles. Both versions
+  are printed in the summary and held to the majors the build is reviewed with: Perl 5, and NASM
+  2 when present (a missing NASM is allowed and means OpenSSL builds `no-asm`).
+- **Artefact size (known limitation)**: CI reports the with-door artefact sizes only (every
+  shell-building concern prints the artefact's byte size and build profile); it does not measure
+  the size the door adds (the with/without-door delta). The owner deferred that comparison
+  (2026-10-16): the door ships with sizes reported with OpenSSL only. Measuring the delta later
+  needs a second full shell build and its own reviewed opt-in dispatch input.
 
 ## The live proofs
 
@@ -733,6 +936,107 @@ Source-bearing output is public, so it is treated as hostile:
   commit SHA on the policy allow-list; protected concurrency groups set `cancel-in-progress:
   false` so a cancel cannot skip token revocation.
 
+## Control-plane structure manifest
+
+The ruleset "Protect CI control plane" requires the status check "Validate workflow policy"
+because GitHub's `workflows` rule is Enterprise-only. That check proves each workflow is
+well-formed, not that the set of workflows is unchanged, so `check-structure.rb` compares the
+tree with the reviewed manifest, the frozen `CONTROL_PLANE_MANIFEST` constant in that script
+(ordinary reviewed Ruby: no data file, no read-back): every workflow with its trust tier,
+triggers and job ids, every local composite, and the required check's workflow, job id and name.
+The two must match in both directions, so deleting or renaming a workflow, adding one with no
+entry, adding or renaming a job (including the required "Validate workflow policy" job, which
+would silently drop the required check), or adding a trigger fails until the constant is edited
+in the same pull request, where review sees it. `pull_request_target` and `workflow_run` are
+refused outright, whatever the manifest says. A tier must also agree with `workflow-lists.sh`.
+
+### The two-step rule for a structural change
+
+The base pass runs main's copy of `check-structure.rb`, with main's pinned manifest, against the
+pull request's tree; a manifest edited inside the pull request changes nothing there. So a pull
+request that changes the structure (adds, removes or renames a job, a workflow or a composite, or
+changes a trigger) fails the base pass on its own, however correct its own manifest is. The change
+lands in two pull requests:
+
+1. **Precursor, to main.** It leaves the tree alone and edits the manifest so each affected entry
+   lists both shapes: the new one first (the final shape) and the current one second (transitional).
+   A workflow entry becomes an array of exact `{tier, triggers, jobs}` shapes (or `'absent'`); a
+   composite entry becomes `['present', 'absent']` or `['absent', 'present']`. Main's policy then
+   accepts the tree as it is and the new shape.
+2. **The change itself.** It changes the tree and deletes the transitional alternatives in its own
+   manifest, so the pull request's own copy passes with the exact final shape, and the base pass
+   (main's copy from step 1) accepts the new tree through the alternative.
+
+Alternatives are exact: a job list is spelled out, never a wildcard, a prefix or a superset, and the
+manifest is refused when an entry has an unknown key, an unsorted or non-plain name, a forbidden
+trigger, or (for the policy workflow) no `policy` job. The forbidden-trigger denial and the
+required-check pin apply to every alternative, and a tree that matches none of them is an error, so
+an alternative cannot admit more than the two shapes it lists. When the tree matches only the final
+shape while alternatives remain, the run prints a warning annotation and does not fail, because the base
+copy sees step 2's tree in exactly that state. The policy job runs the pull request's own copy with
+`--strict`, where the same state is an error, so step 2 cannot merge with its transitional
+alternatives still listed. `--strict` runs there and nowhere else: the base pass runs main's scripts
+against the pull request's real tree, where step 2's tree matches only the final shape while main's
+manifest still lists the transitional one, so any script it reaches that ran `--strict` on that
+tree would block every step 2. `check-strict-structure.rb` therefore requires the policy job to run
+`check-structure.rb --strict` as ONE dedicated step: its `run` is exactly
+`ruby .github/policy/check-structure.rb --strict`, its keys are only `name`, `shell` and `run`, its
+shell is exactly `bash`, and the job's `if` is exactly `${{ always() }}`, so no `exit 0`, `set +e`,
+`|| true`, heredoc, uncalled function, trap, `if`, `env` or alternative shell can dodge it. It refuses
+`--strict` in any other policy script except on the synthetic tree `test-structure.sh` builds for its
+strict fixtures. Residual: a pull request can neuter the strict block inside its own
+`check-structure.rb`, and an earlier step of the policy job (which runs the pull request's own
+scripts) could export `BASH_ENV` through `GITHUB_ENV`; main's base pass cannot see either, and review
+holds them.
+
+Other checks of the same file: the check also unions the `on` and `true` keys (YAML 1.1 reads a
+bare `on` as true), refuses a file with both, and refuses any duplicate mapping key. It does not
+catch `if: ${{ false }}` or `continue-on-error` on the required job, which drops the check like a
+rename; review, or an Enterprise-only ruleset-required workflow, is the control for that.
+
+
+After a reviewed structural change, run `ruby .github/policy/check-structure.rb --print`, paste
+the literal over the constant and read the diff. `test-structure.sh` holds the falsifying
+fixtures and `test-mutations.sh` the mutations. This guards against accidental or unreviewed
+drift; as with the rest of the policy, a pull request that edits the manifest and the tree together is caught only by review.
+
+## Action reference check
+
+`check-action-uses.rb` holds every `uses` to a full commit SHA (remote actions) and to the exact
+reviewed list in `action-allowlist.rb` (one line per entry, so adding a reviewed local action is a
+one-line change). It reads the parsed YAML, not its text: it collects `jobs.<id>.uses`,
+`jobs.<id>.steps[*].uses` and a composite's `runs.steps[*].uses`, so quoted or escaped keys, flow
+mappings, a value on the next line, a space before the colon and a complex key are all read as the
+`uses` they are. It refuses aliases, duplicate mapping keys (`yaml-guard.rb`, shared with
+`check-structure.rb`), a load error, a non-mapping job or step and a non-string value, and a textual
+tripwire fails the file when more lines look like a `uses` key than the walk found.
+The same walk holds containers and services to a closed shape. The runner puts a container's
+`options` before its image in `docker create` (`DockerCommandManager.DockerCreate` in
+`actions/runner`, and `ports` are not quoted either), so a positional token in `options` would
+become the image that runs. Therefore the only keys are `image` and `options`; `options` is exact
+reviewed text (`CONTAINER_OPTIONS_ALLOWLIST`), never free text; the image is a single token pinned
+by `@sha256:<64 hex>`; and an expression is accepted only as the exact reviewed text in
+`action-allowlist.rb` or exactly `${{ fromJSON('<one JSON literal>') }}`, where the literal obeys
+the same rules and may not repeat a key (even by escape), use a case variant or add a key. Any other
+expression can fall back to an unpinned image through `vars`, `env`, `inputs`, `matrix` or `needs`.
+A leading `-`, an uppercase letter or a second token in an image is refused (it could read as a docker
+flag or another image), `fromJSON` is accepted only as the container value itself and never as a
+mapping's `image`, JSON nesting beyond 64 levels is refused, and a YAML merge key (`<<`) is refused
+wherever `yaml-guard.rb` walks, because Psych and GitHub may resolve it differently.
+
+Residual: this check sees only the references a workflow or composite itself writes. What a reviewed
+remote action, a remote reusable workflow or a docker action does inside (its own nested `uses`,
+images and options) is not visible to it; pinning the exact SHA, and the review that put it on the
+allow-list, are the controls for that.
+Run with
+no arguments it walks the tree itself (the same `.yml` and `.yaml` files `check-workflows.sh`
+checks) and exits non-zero when it checked no file, so a direct run never passes having checked
+nothing. The tripwire fails closed, so any non-comment line holding the text `uses:` (a trailing
+comment, a `run:` script, a description) counts and fails the file when the walk found fewer
+references than such lines: reword the text rather than weaken the guard.
+`test-action-uses.sh` carries the fixtures (the spellings a grep missed, each refused, plus the
+container and no-argument cases) and mutates every guard in a copy, failing if a mutant survives.
+
 ## Changing the policy
 
 A pull request carries its own `.github/policy/`, so on its own the policy run would let a
@@ -776,9 +1080,12 @@ base pass itself executes. Several base tests -- `test-base-policy-env.sh` and
 pull-request code does run there, and it could rewrite a later base script on disk or leave a
 process behind to act later. The base pass is therefore isolated further:
 
-- **Its own job.** It runs as `base-policy`, separate from the checks in `policy`, so nothing the
-  pull request's own policy scripts export there reaches it. `policy` declares
-  `needs: [base-policy]` and fails unless that job succeeded.
+- **Its own job, in its own workflow.** It runs as `base-policy` in `base-policy.yml`, called by
+  the entrypoint, separate from the checks in `policy`, so nothing the pull request's own policy
+  scripts export there reaches it. `policy` declares `needs: [base-pass]`, the call, and fails
+  unless the whole workflow succeeded. Inside it, `base-policy-result` requires the fixtures job
+  to have passed on every event and the base-policy job on a pull request, so a skipped base pass
+  fails.
 - **No root.** Hosted runners give the job user passwordless sudo. The job runs the same
   `drop-root` composite the source-validation jobs run before project code, then the step
   asserts `sudo -n true` is refused. Without that, pull-request code run by a base test could
@@ -805,8 +1112,31 @@ process behind to act later. The base pass is therefore isolated further:
   script that kills its own wrapper fails the step through the wrapper's status. An earlier version
   looked for a marker in each process's environment; an `exec` with a new environment drops it.
 - **Nothing started for later.** Before drop-root the job user is denied `cron` and `at`, the user systemd manager hosted ubuntu-24.04 runs for it is stopped, and the
-  step asserts that neither accepts a job and that nothing accepts connections on the user manager's bus or private socket, so
-  nothing outside the job's process tree can start work for it later.
+  step asserts that neither accepts a job, that nothing accepts connections on the user manager's bus or private socket, and
+  that no systemd user manager or message bus process (`systemd`, `(sd-pam)`, `dbus-daemon`, `dbus-broker`,
+  `dbus-broker-launch`) of the job user is running outside the step's own ancestry, so nothing outside the job's process
+  tree can start work for it later. The same assertions run again before every base script, because a script that
+  changed any of them would otherwise be believed by the next; the step logs the unix listeners of the job user and the
+  `kernel.yama.ptrace_scope` it found, here and in the root step.
+- **No sshd.** Pull-request code that wrote the job user's `authorized_keys` could `ssh localhost`
+  and start a process the subreaper never sees. The root step logs the state of `ssh.service` and
+  `ssh.socket`, masks them (so socket activation cannot revive them), and logs it again; the step, before every script, refuses any process
+  named `sshd`, `sshd-session` or `sshd-auth`, of any uid, and anything accepting connections on
+  loopback port 22. The root step masks every `ssh*` and `sshd*` socket unit it finds
+  (systemd 256 and later generate `sshd-unix-local.socket` and `sshd-vsock.socket`), taking the names
+  from both the unit files and the loaded units because `mask` takes names, not patterns. It then
+  fails unless each unit is `inactive`, `failed` or `masked` and no ssh socket or service is active
+  (an `ssh@N.service` instance already running would outlive the mask of its socket), so
+  `activating` and `reloading` fail too, and so does a unit that appears after the mask. Each of the
+  three `systemctl` listings must exit cleanly: one that errors fails the step instead of reading as
+  "no more units". Names outside `ssh*` and `sshd*`, such as a distro variant, are not enumerated;
+  the per-script check for an `sshd` process and the probe of port 22 are the backstop for those.
+  Separately, the process scan fails closed: it must exit cleanly and print its separator, or the
+  check fails instead of reading "found nothing". `test-base-policy-root-step.sh` runs both jobs' root steps with
+  stand-ins for what needs root, including a mask that leaves the service or the socket running.
+  Locking `~/.ssh` was not used instead, because the job user owns its home and
+  can replace the directory. A script that starts an sshd of its own is a descendant, so the
+  subreaper kills it with the script.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
   test runs could leave a gem in `~/.gem` or a module in `~/.node_modules` for the next to load:
   a later check's `require "json"` would run it. `HOME` is deleted and recreated empty before
@@ -834,8 +1164,9 @@ existing `/usr/bin/node` that is a link or not root's alone.
 What this does **not** do, plainly:
 
 - **It hardens the base pass as an honest workflow runs it. It does not defend against a pull
-  request that edits the workflow.** Under `pull_request`, the pull request's own copy of this
-  file defines every job here -- `policy`, `base-policy` and `base-policy-fixtures` alike. It can
+  request that edits the workflow.** Under `pull_request`, the pull request's own copy of these
+  files defines every job -- `policy` and the call in the entrypoint; `base-policy`,
+  `base-policy-fixtures` and `base-policy-result` in `base-policy.yml`. It can
   delete the pin, change `BASE_SHA` or the checkout `ref:`, add `if: false`, drop `needs`,
   replace the step outright, or empty `base-policy-fixtures` so that the tests of the step stop
   testing it, and no check that this workflow runs can stop that, because the pull request also
@@ -849,8 +1180,17 @@ What this does **not** do, plainly:
   runs and change it back before it returns; only the scripts that come after it are protected.
   The same holds for the base files.
 - **Work handed to something outside the job's process tree.** `cron`, `at` and a user systemd
-  manager are shut out, but any other service that starts processes on the job user's behalf
-  would not be seen by the subreaper. None is known on the hosted image.
+  manager are shut out and re-checked before every script, but any other service that starts
+  processes on the job user's behalf would not be seen by the subreaper. None is known on the
+  hosted image. The process check is by name from `/proc`, so a manager started under another
+  name is missed; the bus and socket checks still catch one that listens where the user manager's
+  does. The uid test of the process check reads the real and effective uid from
+  `/proc/<pid>/status`; I could not build an input where that differs from the owner of
+  `/proc/<pid>` (the directory stays owned by the process's user even when it marks itself
+  non-dumpable), so it is not falsifiable by a fixture. Its filter has no container fixture either,
+  because that needs a root-owned `systemd`; the hosted runner has one (PID 1), so a green run there
+  is its test. The ssh port check is by connection on `127.0.0.1` and `::1`; only the first has a
+  fixture, because an IPv6 loopback is not a given in a container.
 - **A thread-group leader that exits while its other threads run** shows as a zombie; the wrapper
   counts it as running when more than one task remains, but no fixture can construct one without a
   compiler, so that case is reasoned, not tested. Every descendant, zombie or not, is sent SIGKILL.
@@ -873,6 +1213,20 @@ What this does **not** do, plainly:
   Integrity Protection; on Linux the dynamic loader ignores them.
 - **The sudo assertion cannot be exercised off a runner.** It needs passwordless sudo to be present
   to prove it is gone, which a developer machine does not have.
+
+### Where the base-pass step lives
+
+The base-policy jobs are in `.github/workflows/base-policy.yml`, the reusable half of the public
+policy gate, which `validate-public-changes.yml` calls with one job (`base-pass`). They moved out
+only to keep the entrypoint under the file-size limit; what they do is unchanged. A pull request is
+judged by the base commit's checks, so the checks that govern a reusable public workflow had to be
+on the base first: `workflow-lists.sh` names the file, `check-dispatchers.sh` accepts it only if its
+sole trigger is `workflow_call`, with no other trigger, secret, artifact, cache or OIDC grant, and
+`check-actions.sh` allows the entrypoint to call it. The three tests that run the step
+(`test-base-policy-env.sh`, `-isolation.sh` and `-sudo.sh`) find it through
+`base-pass-workflow.sh`, in whichever of the two files holds it and only when exactly one does
+(`test-base-pass-locate.sh`). `test-base-policy-result.sh` holds the rules that keep the base pass on
+the required check: the guards pass only on success, and `policy` needs the call that needs both jobs.
 
 ## Accepted residual risks
 

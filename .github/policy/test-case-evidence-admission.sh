@@ -30,6 +30,16 @@ git -C "$control" commit -qm 'synthetic control'
 control_sha="$(git -C "$control" rev-parse HEAD)"
 admission="$control/.github/policy/case-evidence-admission.rb"
 
+# The hosted layout: the workspace is the control checkout and the source checkout is its src/
+# directory, inside it. Every fixture below runs that way, because the first real run did not --
+# the harness had used sibling directories, and a producer that refused any source inside the
+# control tree passed here and then blocked every hosted run. $tmp/source is a link to it, so the
+# fixtures keep their paths while the producer sees the real nested one.
+mkdir -p "$control/src"
+ln -s "$control/src" "$tmp/source"
+# The fake runner looks for its mode file beside the source checkout, which is now the control tree.
+ln -s "$tmp/mode" "$control/mode"
+
 ruby -rjson -rfileutils -rrbconfig -rdigest -e '
   tmp, assets, root = ARGV
   source = File.join(tmp, "source")
@@ -49,7 +59,12 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
     File.write(File.join(app, name, "package.json"), JSON.generate({"version" => "1.62.0"}))
   end
   File.write(File.join(app, "package-lock.json"), JSON.generate({"packages" => packages}))
-  File.write(File.join(app, "playwright.config.ts"), %q{export default { testDir: "./tests/e2e" };} + "\n")
+  # The real config carries non-ASCII text (punctuation in its comments), and so do real test
+  # titles. The recorded reports below are pure ASCII, so without this the harness could not see a
+  # producer or validator that reads such bytes in the wrong encoding -- which is exactly how the
+  # first real run failed.
+  File.write(File.join(app, "playwright.config.ts"),
+    "// reviewed config \u2014 non-ASCII on purpose\n" + %q{export default { testDir: "./tests/e2e" };} + "\n")
   File.write(File.join(app, "node_modules/playwright/cli.js"), "// synthetic CLI placeholder\n")
   File.write(File.join(app, "tests/e2e/flows.spec.ts"), "// synthetic spec placeholder\n")
   File.write(File.join(app, "tests/e2e/deep/inner.spec.ts"), "// synthetic spec placeholder\n")
@@ -62,7 +77,8 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
   app_real = File.realpath(app)
   %w[real-list-smoke.json real-list-critical.json real-list-shell-browser.json
      real-list-outcomes.json real-execution-feedback.json real-execution-outcomes.json].each do |name|
-    text = File.read(File.join(assets, name)).gsub("__APP_ROOT__", app_real)
+    text = File.read(File.join(assets, name), encoding: Encoding::UTF_8).gsub("__APP_ROOT__", app_real)
+      .gsub("shared title across projects", "shared title \u2014 across projects")
     File.write(File.join(replay, name), JSON.generate(JSON.parse(text)))
   end
 
@@ -82,7 +98,9 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
     mode_file = File.join(File.dirname(File.dirname(app)), "mode")
     mode = File.exist?(mode_file) ? File.read(mode_file).strip : ""
     source_name = mode.start_with?("outcomes") ? "real-list-outcomes.json" : "real-list-\#{project}.json"
-    report = JSON.parse(File.read(File.join(replay, source_name)))
+    # UTF-8 whatever the locale, as node itself reads it: the producer gives this runner an empty
+    # environment, and the replayed titles are no longer pure ASCII.
+    report = JSON.parse(File.read(File.join(replay, source_name), encoding: Encoding::UTF_8))
     specs = report.fetch("suites").flat_map { |suite| suite.fetch("specs") }
     case mode
     when "discovery-extra"
@@ -100,7 +118,12 @@ ruby -rjson -rfileutils -rrbconfig -rdigest -e '
       report["suites"] = []
     end
     count = report.fetch("suites").sum { |suite| suite.fetch("specs").length }
-    File.write(ENV.fetch("TAURINE_CASE_EVIDENCE_REPORT_PATH"), JSON.generate(report))
+    json = JSON.generate(report).b
+    # Not valid UTF-8, which JSON.generate itself refuses to write: spliced in as raw bytes.
+    json = json.sub("alpha".b, "\\xFF\\xFE".b) if mode == "discovery-invalid-title"
+    # A lone-surrogate escape is pure ASCII -- what Node writes for one -- yet parses to invalid UTF-8.
+    json = json.sub("alpha".b, "alpha\\\\udcff".b) if mode == "discovery-lone-surrogate"
+    File.binwrite(ENV.fetch("TAURINE_CASE_EVIDENCE_REPORT_PATH"), json)
     unless mode == "marker-failed"
       File.write(ENV.fetch("TAURINE_CASE_EVIDENCE_COMPLETION_PATH"),
         JSON.generate({"schema_version" => 1, "status" => "complete", "error_class" => nil, "count" => count}))
@@ -143,7 +166,8 @@ set -a; . "$tmp/identity.env"; set +a
 execution_fixture() {
   ruby -rjson -e '
     target, source, mode = ARGV
-    report = JSON.parse(File.read(source))
+    # The same non-ASCII title as the replayed discovery reports, so the two still agree.
+    report = JSON.parse(File.read(source, encoding: Encoding::UTF_8).gsub("shared title across projects", "shared title \u2014 across projects"))
     w = lambda do |suites, &block|
       suites.each do |suite|
         (suite["specs"] || []).each { |spec| block.call(suite, spec) }
@@ -190,7 +214,10 @@ execution_fixture() {
     when "empty"
       report["suites"] = []
     end
-    File.write(target, JSON.generate(report))
+    json = JSON.generate(report).b
+    json = json.sub("alpha".b, "\xFF\xFE".b) if mode == "execution-invalid-title"
+    json = json.sub("alpha".b, "alpha\\udcff".b) if mode == "execution-lone-surrogate"
+    File.binwrite(target, json)
   ' "$tmp/execution.json" "$1" "${2:-}"
 }
 
@@ -210,7 +237,7 @@ run_admission() {
     CI_EXPECTED_SELECTION_MODE=full \
     CI_EXPECTED_SELECTED_SUITE_IDS="$selected" \
     CI_PLATFORM=linux \
-    ruby "$admission" "$concern" "$tmp/source" "$tmp/execution.json" "$tmp/work"
+    ruby "${ADMISSION:-$admission}" "$concern" "${SOURCE_DIR:-$tmp/source}" "$tmp/execution.json" "$tmp/work" 2> "$tmp/producer.stderr"
 }
 
 expect_blocked() {
@@ -225,6 +252,14 @@ expect_blocked() {
     abort "wrong disposition for #{ARGV.fetch(2)}: #{result.inspect}" unless
       result["status"] == "case_evidence_blocked" && result["error_class"] == ARGV.fetch(1)
   ' "$out" "$want" "$label"
+  # Whatever the reason, neither stream may carry a case title: the producer's stderr goes to the
+  # public job log, and its stdout to the step summary.
+  for leaked in "$out" "$(cat "$tmp/producer.stderr")"; do
+    if LC_ALL=C grep -Fq -e 'alpha' -e "$(printf '\377\376')" -e "$(printf '\355\263\277')" -e 'udcff' <<<"$leaked"; then
+      echo "a case title escaped the admission output (${label})" >&2
+      exit 1
+    fi
+  done
 }
 
 : > "$tmp/mode"
@@ -245,6 +280,47 @@ ruby -rjson -e '
   abort "wrong totals" unless result.fetch("counts") ==
     {"discovered" => 5, "executed" => 5, "passed" => 5, "retried_pass" => 0, "skipped" => 0}
 ' "$positive"
+# The validator, run on its own: an envelope with a title that is not valid UTF-8 is one fixed class
+# and prints nothing on stderr. The producer runs the validator as a child and discards what it
+# says, but the validator is also a program of its own.
+contract="$control/.github/policy/case-evidence-contract.rb"
+for part in expected discovery-envelope execution-envelope; do
+  cp "$tmp/work/${part}-smoke.json" "$tmp/contract-${part}.json"
+done
+ruby -e 'path = ARGV[0]; File.binwrite(path, File.binread(path).sub("alpha".b, "\xFF\xFE".b))' "$tmp/contract-discovery-envelope.json"
+contract_status=0
+contract_out="$(env -i PATH="$(dirname "$(command -v ruby)"):/usr/bin:/bin" ruby "$contract" "$tmp/contract-expected.json" \
+  "$tmp/contract-discovery-envelope.json" "$tmp/contract-execution-envelope.json" 2> "$tmp/contract.stderr")" || contract_status=$?
+[[ "$contract_status" -eq 1 ]] || { echo 'the validator accepted an envelope that is not valid UTF-8' >&2; exit 1; }
+grep -Fq '"error_class":"input_encoding_invalid"' <<<"$contract_out" || {
+  echo "the validator did not name the encoding class: ${contract_out}" >&2; exit 1;
+}
+if [[ -s "$tmp/contract.stderr" ]] || LC_ALL=C grep -Fq 'alpha' <<<"$contract_out"; then
+  echo 'the validator printed a case title for an envelope that is not valid UTF-8' >&2; exit 1
+fi
+# The same through a lone-surrogate escape, which is ASCII.
+cp "$tmp/work/discovery-envelope-smoke.json" "$tmp/contract-discovery-envelope.json"
+ruby -e 'path = ARGV[0]; File.binwrite(path, File.binread(path).sub("alpha".b, "alpha\\udcff".b))' "$tmp/contract-discovery-envelope.json"
+contract_status=0
+contract_out="$(env -i PATH="$(dirname "$(command -v ruby)"):/usr/bin:/bin" ruby "$contract" "$tmp/contract-expected.json" \
+  "$tmp/contract-discovery-envelope.json" "$tmp/contract-execution-envelope.json" 2> "$tmp/contract.stderr")" || contract_status=$?
+[[ "$contract_status" -eq 1 ]] && grep -Fq '"error_class":"input_encoding_invalid"' <<<"$contract_out" || {
+  echo "the validator did not refuse a lone-surrogate envelope with the encoding class: ${contract_out}" >&2; exit 1;
+}
+if [[ -s "$tmp/contract.stderr" ]] || LC_ALL=C grep -Fq 'alpha' <<<"$contract_out"; then
+  echo 'the validator printed a case title for a lone-surrogate envelope' >&2; exit 1
+fi
+# The workflow step must keep the producer's stderr out of the public job log.
+ruby "$root/.github/policy/extract-step.rb" "$root/.github/workflows/linux-validation-concern.yml" \
+  'Reconcile case evidence for the browser concern' run > "$tmp/reconcile-step.sh"
+grep -Eq 'case-evidence-admission\.rb.*\\$' "$tmp/reconcile-step.sh" &&
+  grep -Fq '"${work}" 2>/dev/null)" || status=$?' "$tmp/reconcile-step.sh" || {
+  echo 'the reconcile step does not discard the producer stderr' >&2; exit 1;
+}
+# A producer that dies before printing anything is a fixed class in the log, not "unknown".
+grep -Fq '[[ -n "${result}" ]] || error_class=producer_crashed' "$tmp/reconcile-step.sh" || {
+  echo 'the reconcile step does not name a producer that printed nothing' >&2; exit 1;
+}
 for leaked in 'parameterized value' 'inner.spec.ts' 'tests/e2e' 'outer group'; do
   if grep -Fq "$leaked" <<<"$positive"; then
     echo "private case detail escaped the admission output: ${leaked}" >&2
@@ -295,11 +371,70 @@ echo empty > "$tmp/mode"
 expect_blocked 'an unexpectedly empty discovered suite' reporter_failed
 echo marker-failed > "$tmp/mode"
 expect_blocked 'a reporter that wrote no completion marker' report_path_invalid
+# A title that is not valid UTF-8 -- from the discovery reporter, or in the execution report -- is
+# a fixed class and prints nothing. JSON.generate raises on it, and an uncaught raise puts the
+# exception text, which on newer json carries the title, on the stderr the public log receives.
+echo discovery-invalid-title > "$tmp/mode"
+expect_blocked 'a discovery report with a title that is not valid UTF-8' report_encoding_invalid
+: > "$tmp/mode"
+execution_fixture "$assets/real-execution-feedback.json" execution-invalid-title
+expect_blocked 'an execution report with a title that is not valid UTF-8' report_encoding_invalid
+if [[ -s "$tmp/producer.stderr" ]]; then
+  echo 'the producer wrote to stderr on a blocked run' >&2
+  exit 1
+fi
+# The realistic vector: a lone-surrogate escape. The bytes are ASCII and valid, so only a check of the
+# parsed strings sees it.
+execution_fixture "$assets/real-execution-feedback.json"
+echo discovery-lone-surrogate > "$tmp/mode"
+expect_blocked 'a discovery report with a lone-surrogate title' report_encoding_invalid
+[[ ! -s "$tmp/producer.stderr" ]] || { echo 'the producer wrote to stderr for a lone surrogate (discovery)' >&2; exit 1; }
+: > "$tmp/mode"
+execution_fixture "$assets/real-execution-feedback.json" execution-lone-surrogate
+expect_blocked 'an execution report with a lone-surrogate title' report_encoding_invalid
+[[ ! -s "$tmp/producer.stderr" ]] || { echo 'the producer wrote to stderr for a lone surrogate (execution)' >&2; exit 1; }
+execution_fixture "$assets/real-execution-feedback.json"
 
 : > "$tmp/mode"
 # The source repository must not be able to switch this gate off by removing
 # the ownership manifest it owns.
 MANIFEST_DIGEST_OVERRIDE='' expect_blocked 'a missing ownership manifest' manifest_absent
+
+# A lone-surrogate escape in a tracked source file, as a value, a key and an array element. The walk
+# of parsed strings blocks each with the file's own binding class; without it the manifest parses, and
+# canonical_digest raises in JSON.generate, which only the last-resort rescue turns into
+# report_encoding_invalid -- a different class, which is what tells the two layers apart.
+for placement in value key array; do
+  case "${placement}" in
+    value) manifest='{"version":1,"suites":[],"note":"alpha\udcff"}' ;;
+    key) manifest='{"version":1,"suites":[],"alpha\udcff":"x"}' ;;
+    array) manifest='{"version":1,"suites":["alpha\udcff"]}' ;;
+  esac
+  printf '%s' "${manifest}" > "$tmp/source/scripts/ci/suite-ownership.json"
+  git -C "$tmp/source" add scripts/ci/suite-ownership.json
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME='Synthetic admission' GIT_AUTHOR_EMAIL='admission@example.invalid' \
+  GIT_COMMITTER_NAME='Synthetic admission' GIT_COMMITTER_EMAIL='admission@example.invalid' \
+    git -C "$tmp/source" commit -qm "synthetic manifest with a lone surrogate (${placement})"
+  source_sha="$(git -C "$tmp/source" rev-parse HEAD)"
+  expect_blocked "a manifest with a lone-surrogate ${placement}" manifest_binding_invalid
+  git -C "$tmp/source" revert --no-edit HEAD >/dev/null
+  source_sha="$(git -C "$tmp/source" rev-parse HEAD)"
+done
+
+# The path boundary, in the hosted layout. A source inside the control tree is the normal case (every
+# fixture above); what is refused is the control tree being the source, or inside it, or a source
+# directory that is not a work tree of its own and so would be answered for by the control
+# repository above it.
+SOURCE_DIR="$control" expect_blocked 'the control checkout given as the source' source_path_invalid
+mkdir -p "$tmp/source/ctl"
+cp -R "$control/.github" "$tmp/source/ctl/.github"
+ADMISSION="$tmp/source/ctl/.github/policy/case-evidence-admission.rb" expect_blocked 'a control checkout inside the source checkout' source_path_invalid
+rm -rf "$tmp/source/ctl"
+mkdir "$control/src-nogit"
+cp -R "$control/src/." "$control/src-nogit/"
+rm -rf "$control/src-nogit/.git"
+SOURCE_DIR="$control/src-nogit" expect_blocked 'a source directory that is not a work tree of its own' source_path_invalid
+rm -rf "$control/src-nogit"
 
 # The runner is pinned, not merely read: a lockfile bump blocks.
 ruby -rjson -e '

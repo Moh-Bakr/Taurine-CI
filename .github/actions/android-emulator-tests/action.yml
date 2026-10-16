@@ -4,8 +4,9 @@ description: >
   (opened by root-setup), installs the pinned emulator and system image and starts the emulator
   in the background; phase
   `run` builds the x86_64-linux-android test binaries, waits for the boot, pushes each binary with
-  adb, executes it and publishes counts only. A test failure, a binary that ends without a result
-  or zero executed tests fails the step. Runs from the private source after the token is revoked.
+  adb, executes it and publishes counts only; then, when the OpenSSL door is in the mobile graph,
+  builds and runs the door crate's own tests the same way (see mobile_door_tests). A test failure,
+  a binary that ends without a result or zero executed tests fails the step. Runs from the private source after the token is revoked.
 
 inputs:
   phase:
@@ -52,6 +53,7 @@ runs:
         set -euo pipefail
         source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
         source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+        source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
         # The same pinned NDK as the aarch64 build (android-sdk-setup), targeting x86_64: a
         # runner-local linker wrapper and the target-prefixed binutils aliases the build
         # scripts ask PATH for. Exported for this step only.
@@ -95,9 +97,13 @@ runs:
         device="$("${adb}" shell getprop ro.product.model | tr -d '\r')"
         api="$("${adb}" shell getprop ro.build.version.sdk | tr -d '\r')"
 
+        # Extra arguments are fixed libtest flags from this file (no spaces, nothing from the
+        # source), appended to the device command line.
         android_run() {
-          local remote="/data/local/tmp/$(basename "$1")"
-          "${adb}" push "$1" "${remote}" >/dev/null
-          "${adb}" shell "chmod 755 ${remote} && cd /data/local/tmp && ${remote}"
+          local local_bin="$1" remote="/data/local/tmp/$(basename "$1")"; shift
+          "${adb}" push "${local_bin}" "${remote}" >/dev/null
+          "${adb}" shell "chmod 755 ${remote} && cd /data/local/tmp && ${remote}${*:+ $*}"
         }
         mobile_test_execute android-tests "Android emulator (${device}, API ${api}, x86_64)" android_run "${binaries[@]}"
+        # The OpenSSL door's own tests on the same emulator (absent door: one line, pass).
+        mobile_door_tests android-door-tests "Android emulator (${device}, API ${api}, x86_64)" "${target}" android_run

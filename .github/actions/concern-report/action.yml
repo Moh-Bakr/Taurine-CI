@@ -599,4 +599,92 @@ runs:
             --package=taurine-db-engine --features=dbx-pg,engine-override,taurine-db-dbx/legacy-tls \
             --test=dbx_route_dial
         }
+
+        # dbx-core's `legacy-tls` test pass is conditional on what the source declares.
+        # Older source revisions (branches cut before the retirement of dbx-core's direct
+        # OpenSSL path) still declare a live feature, with OpenSSL dependencies and gated
+        # tests, and a full validation of one must keep running them. A revision whose dbx-core
+        # declares the feature empty (the retired no-op alias) or not at all has nothing extra
+        # to run, and says so in a visible row instead of silently dropping the pass.
+        #
+        # `dbx_core_legacy_tls_state` reads `cargo metadata --no-deps --format-version 1` on
+        # stdin (cargo parses the manifest, so no text matching on Cargo.toml) and prints
+        # live (the feature has dependencies), empty, or absent. It returns non-zero, printing
+        # nothing, when the metadata is unreadable, has no single dbx-core package, or has an
+        # unexpected feature shape, so the caller fails closed.
+        dbx_core_legacy_tls_state() {
+          jq -er '[.packages[] | select(.name == "dbx-core")] as $p
+            | if ($p | length) != 1 then error("expected exactly one dbx-core package")
+              else ($p[0].features["legacy-tls"]) as $f
+                | if $f == null then "absent"
+                  elif ($f | type) != "array" then error("unexpected legacy-tls shape")
+                  elif ($f | length) == 0 then "empty"
+                  else "live" end
+              end'
+        }
+        # An empty feature still enables whatever code is gated on it, so an empty or absent
+        # feature is not enough to skip the pass: this searches everything under dbx-core's
+        # manifest directory (from the same metadata on stdin) for a gate on the feature.
+        # Prints gated or clean; returns non-zero, printing nothing, when the metadata, the
+        # directory or the search itself cannot be trusted.
+        #
+        # Every file is searched, not only `*.rs`: a build script, an `include!`d fragment or a
+        # generated module can carry the gate under any name. Two spellings count: the cfg
+        # `feature = "legacy-tls"` and the build-script variable CARGO_FEATURE_LEGACY_TLS. All
+        # file contents are joined with runs of whitespace collapsed to one space first, so an
+        # attribute split across lines (`feature` / `= "legacy-tls"`) is still found. A symlink
+        # anywhere under the directory fails closed: it can point outside the tree or at a
+        # module directory the search would not otherwise follow. Not covered, and said so: a
+        # gate assembled from pieces (a macro, a comment between the tokens).
+        dbx_core_legacy_tls_gated_code() {
+          local manifest dir link flat rc=0
+          manifest="$(jq -er '[.packages[] | select(.name == "dbx-core")]
+            | if length == 1 then .[0].manifest_path else error("expected exactly one dbx-core package") end')" || return 1
+          dir="$(dirname "${manifest}")"
+          [[ -d "${dir}" ]] || return 1
+          link="$(find "${dir}" -type l -print -quit)" || return 1
+          [[ -z "${link}" ]] || return 1
+          flat="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dbx-core-gate-search.XXXXXX")" || return 1
+          if ! find "${dir}" -type f -exec cat {} + | LC_ALL=C tr -s '[:space:]' ' ' > "${flat}"; then
+            rm -f "${flat}"
+            return 1
+          fi
+          grep -qE 'feature ?= ?"legacy-tls"|CARGO_FEATURE_LEGACY_TLS' "${flat}" || rc=$?
+          rm -f "${flat}"
+          case "${rc}" in
+            0) echo gated ;;
+            1) echo clean ;;
+            *) return 1 ;;
+          esac
+        }
+        # Argument: the same metadata JSON. Records exactly one row for the pass.
+        dbx_core_legacy_tls_pass() {
+          local metadata="$1" state gated
+          if ! state="$(dbx_core_legacy_tls_state <<<"${metadata}")" || [[ -z "${state}" ]]; then
+            deferred_results+=('rust-dbx-core-legacy-tls-tests|failed: not run (the dbx-core manifest could not be read)')
+            deferred_failed=1
+            return 0
+          fi
+          if [[ "${state}" != live ]]; then
+            if ! gated="$(dbx_core_legacy_tls_gated_code <<<"${metadata}")" || [[ -z "${gated}" ]]; then
+              deferred_results+=('rust-dbx-core-legacy-tls-tests|failed: not run (the dbx-core sources could not be searched for legacy-tls gates)')
+              deferred_failed=1
+              return 0
+            fi
+            if [[ "${gated}" == clean ]]; then
+              deferred_results+=('rust-dbx-core-legacy-tls-tests|skipped: dbx-core declares no legacy-tls feature (retired)')
+              return 0
+            fi
+            if [[ "${state}" == absent ]]; then
+              # Code gated on a feature the package does not declare can never be enabled:
+              # the manifest and the sources disagree, which this will not paper over.
+              deferred_results+=('rust-dbx-core-legacy-tls-tests|failed: not run (dbx-core sources gate code on a legacy-tls feature it does not declare)')
+              deferred_failed=1
+              return 0
+            fi
+            # An empty feature that still gates code is enabled by the flag: run the pass.
+          fi
+          run_deferred rust-dbx-core-legacy-tls-tests \
+            env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core --features legacy-tls
+        }
         TCI_REPORT_LIBRARY

@@ -379,6 +379,18 @@ docs.each do |path, doc|
   end
 end
 
+# The policy gate never restores or saves a cache: base-pass runs the base commit's policy over a
+# pull request's tree, so it holds exactly cache-mode: none (not read, and never write).
+docs.each do |path, doc|
+  next unless File.basename(path) == 'validate-public-changes.yml'
+  job = doc['jobs'].is_a?(Hash) ? doc['jobs']['base-pass'] : nil
+  unless job.is_a?(Hash)
+    failures << "#{path}: job base-pass is missing or renamed; the policy gate's job must exist and declare cache-mode: none"
+    next
+  end
+  failures << "#{path}: job base-pass must declare cache-mode: none; the policy gate never restores or saves a cache" unless job['cache-mode'] == 'none'
+end
+
 if failures.empty?
   puts "cache-mode policy: #{docs.size} workflows checked"
 else

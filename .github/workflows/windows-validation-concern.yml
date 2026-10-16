@@ -117,6 +117,44 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
+      - name: Install the shell artefact checks
+        if: ${{ inputs.concern == 'rust-packaging' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
+
+      # The shells carry the OpenSSL door, so every Rust concern that compiles taurine-app
+      # (rust-app-1/2, rust-packaging) and the door's own concerns build the vendored OpenSSL
+      # 3.5 from source. openssl-src runs `perl Configure` with OPENSSL_SRC_PERL first: Git's
+      # msys perl (first on the bash PATH) lacks the Win32 modules OpenSSL's MSVC build needs,
+      # so the image's Strawberry Perl is named explicitly, job-wide, before any project code.
+      # NASM enables the assembly; openssl-src finds it with `where nasm`, so its directory
+      # goes on the job PATH (without it openssl-src builds `no-asm`, slower but correct). Both
+      # ship on the hosted image but are not on PATH. Nothing here reads the private source.
+      - name: Put the vendored OpenSSL build tools in reach
+        if: ${{ startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The two image tools, by fixed path; their versions are recorded and held to the major
+          # versions the vendored OpenSSL 3.5 build is reviewed with (Perl 5; NASM 2 when present).
+          perl_exe=/c/Strawberry/perl/bin/perl.exe
+          nasm_exe='/c/Program Files/NASM/nasm.exe'
+          if [[ ! -f "${perl_exe}" ]]; then
+            echo 'openssl-build-tools: Strawberry Perl is not on this runner image; the vendored OpenSSL cannot be configured' >&2
+            exit 1
+          fi
+          perl_version="$("${perl_exe}" -e 'print $^V' 2>/dev/null | tr -d '\r' || true)"
+          [[ "${perl_version}" =~ ^v5\.[0-9]+\.[0-9]+$ ]] || { echo "openssl-build-tools: FAILED - Strawberry Perl is not Perl 5 (${perl_version:-unreadable})" >&2; exit 1; }
+          printf '%s\n' 'OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe' >> "${GITHUB_ENV}"
+          nasm_version='absent (OpenSSL builds without assembly, no-asm)'
+          if [[ -f "${nasm_exe}" ]]; then
+            nasm_version="$("${nasm_exe}" -v 2>/dev/null | tr -d '\r' | sed -nE 's/^NASM version ([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p' | head -n 1 || true)"
+            [[ "${nasm_version}" =~ ^2\. ]] || { echo "openssl-build-tools: FAILED - NASM is not version 2 (${nasm_version:-unreadable})" >&2; exit 1; }
+            printf '%s\n' 'C:\Program Files\NASM' >> "${GITHUB_PATH}"
+          fi
+          echo "openssl-build-tools: perl ${perl_version} (OPENSSL_SRC_PERL); nasm ${nasm_version}"
+          echo "- OpenSSL build tools: Strawberry Perl ${perl_version}; NASM ${nasm_version}" >> "${GITHUB_STEP_SUMMARY}"
+
       # Known gap, recorded on purpose: every Windows concern tests LF source. Git for
       # Windows checks the tree out with core.autocrlf=true by default, which is what a
       # developer on Windows has; this step forces LF so a test that compares file bytes,
