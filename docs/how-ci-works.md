@@ -788,7 +788,11 @@ process behind to act later. The base pass is therefore isolated further:
   and start a process the subreaper never sees. The root step logs the state of `ssh.service` and
   `ssh.socket`, masks them (so socket activation cannot revive them), and logs it again; the step, before every script, refuses any process
   named `sshd`, `sshd-session` or `sshd-auth`, of any uid, and anything accepting connections on
-  loopback port 22. Locking `~/.ssh` was not used instead, because the job user owns its home and
+  loopback port 22. The root step then fails if either unit is still active after the mask, and the
+  process scan fails closed: it must exit cleanly and print its separator, or the check fails
+  instead of reading "found nothing". `test-base-policy-root-step.sh` runs both jobs' root steps with
+  stand-ins for what needs root, including a mask that leaves the service or the socket running.
+  Locking `~/.ssh` was not used instead, because the job user owns its home and
   can replace the directory. A script that starts an sshd of its own is a descendant, so the
   subreaper kills it with the script.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base

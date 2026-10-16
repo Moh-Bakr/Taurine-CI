@@ -73,6 +73,10 @@ jobs:
           echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
           sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
           echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
+          if systemctl is-active --quiet ssh.service || systemctl is-active --quiet ssh.socket; then
+            echo "::error::ssh is still active after it was masked, so a base script could ssh to localhost"
+            exit 1
+          fi
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
@@ -103,6 +107,11 @@ jobs:
       - name: Test the base-policy job's pin, process containment and loader scrub
         shell: bash
         run: bash .github/policy/test-base-policy-isolation.sh
+
+      # The root steps above, run with stand-ins for what needs root: ssh still active after the mask fails them.
+      - name: Test that the root steps fail if ssh is still active after the mask
+        shell: bash
+        run: bash .github/policy/test-base-policy-root-step.sh
 
   base-policy:
     permissions:
@@ -144,6 +153,10 @@ jobs:
           echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
           sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
           echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
+          if systemctl is-active --quiet ssh.service || systemctl is-active --quiet ssh.socket; then
+            echo "::error::ssh is still active after it was masked, so a base script could ssh to localhost"
+            exit 1
+          fi
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
@@ -310,7 +323,13 @@ jobs:
                 return 1
               fi
             done
-            scan="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")"
+            # errexit is off in here (the caller runs this under `||`), so a scan that dies prints
+            # nothing and would read as "found nothing". It must exit cleanly AND print its separator.
+            scan="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")" || scan=''
+            if [[ "${scan}" != *$'\t'* ]]; then
+              echo "::error::the process scan did not complete, so nothing can be said about what is running"
+              return 1
+            fi
             left="${scan%%$'\t'*}"
             ssh_left="${scan#*$'\t'}"
             if [[ -n "${left}" ]]; then
