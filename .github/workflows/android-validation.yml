@@ -215,6 +215,10 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/mobile-report  # zizmor: ignore[self-repository]
 
+      - name: Install the shell artefact checks
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
+
       - name: Prepare Android SDK, JDK, and Rust targets
         if: matrix.concern == 'android-native' || matrix.concern == 'android-rust'
         # Kept as ./ : the policy matches this exact form for local actions.
@@ -248,7 +252,13 @@ jobs:
           rm -f src-tauri/gen/android/tauri.settings.gradle
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
-          mobile_run android-init npm run android:init -- --ci --skip-targets-install
+          source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
+          # The Tauri CLI with CI's own arguments, as for the build (never a source npm script).
+          # The Rust build phase (gen/android/buildSrc) is removed first and must come back from
+          # CI's init calling the CLI's tauri.js directly (shell-config, mobile_build_phase_*).
+          (cd .. && mobile_build_phase_reset android)
+          mobile_run android-init tauri_cli . android init --ci --skip-targets-install
+          (cd .. && mobile_build_phase_check android)
           if grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle; then
             echo 'Android metadata contains a developer-local path' >&2
             exit 1
@@ -262,33 +272,79 @@ jobs:
           set -euo pipefail
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
           source "${RUNNER_TEMP}/taurine-ci/mobile-report.sh"
+          source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
           case "${CONCERN}" in
             android-native)
-              mobile_run android-debug-build npm --prefix taurine-mobile run android:build:debug -- --target aarch64
+              # Before the build: no Tauri config may add features or a runner the door gate
+              # cannot see, no OpenSSL override may bypass the vendored build, and the door-only
+              # gate runs on the built ABI's graph. The build runs the Tauri CLI directly with
+              # CI's own arguments and bindgen environment (never the source's npm scripts).
+              refuse_build_feature_overrides || exit 1
+              refuse_openssl_overrides || exit 1
+              openssl_door_gate android-arm64-v8a-openssl-door-only-prebuild taurine-mobile aarch64-linux-android || exit 1
+              verify_door_crate_sources || exit 1
+              gradle_wrapper_check || exit 1
+              android_bindgen_env
+              mobile_run android-debug-build tauri_cli taurine-mobile android build --apk --debug --target aarch64
+              # beforeBuildCommand ran in between: the refusals run again on what the build left,
+              # and the door crates cargo built from must still equal their verified archives.
+              refuse_build_feature_overrides || exit 1
+              refuse_openssl_overrides || exit 1
+              verify_door_crate_build_inputs || exit 1
+              # What ships: every ABI directory of the APK's lib/ (else the Gradle jniLibs). Per
+              # ABI, on that ABI's own target graph: the door-only gate, then the main library
+              # (size, no dynamic libssl/libcrypto, exactly the locked OpenSSL or none when the
+              # door is not in that graph, the advisory `taurine-mobile.native.<abi>` budget) and
+              # every other .so in that ABI, which must carry no OpenSSL at all.
+              # The whole APK is unpacked: lib/<abi> is judged per ABI below, and every other
+              # binary anywhere else in it (assets/ included) must carry no OpenSSL.
+              apk="$(find taurine-mobile/src-tauri/gen/android -path '*/outputs/apk/*' -name '*.apk' -type f 2>/dev/null | sort | head -n 1 || true)"
+              apk_root="${RUNNER_TEMP}/android-apk"; libs_root="${RUNNER_TEMP}/android-apk-lib"; rm -rf "${apk_root}" "${libs_root}"
+              [[ -n "${apk}" ]] && unzip -q "${apk}" -d "${apk_root}" && [[ -d "${apk_root}/lib" ]] || { echo 'android-artefact: FAILED - no APK with a lib/ directory was built' >&2; exit 1; }
+              mv "${apk_root}/lib" "${libs_root}"
+              artefact_tree_check android-apk-other "${apk_root}" - debug absent || exit 1
+              abi_dirs="$(find -L "${libs_root}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)"
+              [[ -n "${abi_dirs}" ]] || { echo 'android-artefact: FAILED - no built ABI library directory was found' >&2; exit 1; }
+              while IFS= read -r abi_dir; do
+                abi="$(basename "${abi_dir}")"
+                triple="$(android_abi_triple "${abi}")" || { echo "android-artefact: FAILED - unknown Android ABI ${abi}" >&2; exit 1; }
+                openssl_door_gate "android-${abi}-openssl-door-only" taurine-mobile "${triple}" || exit 1
+                door="$(door_in_graph taurine-mobile "${triple}")" || { echo 'android-artefact: the door graph query did not resolve' >&2; exit 1; }
+                main="${abi_dir}/libtaurine_mobile_lib.so"
+                [[ -f "${main}" ]] || main=-
+                artefact_tree_check "android-${abi}" "${abi_dir}" "${main}" debug "${door}" taurine-mobile "${abi}" || exit 1
+                # The graph cargo actually built for this ABI (Gradle may pass its own features).
+                if [[ "${main}" != - ]]; then
+                  depinfo="$(artefact_depinfo "${triple}" debug libtaurine_mobile_lib)"
+                  built_graph_check "android-${abi}-built-graph" "${depinfo}" taurine-mobile "${door}" || exit 1
+                  # The shipped library must be the one that was judged (Gradle may ship another).
+                  bind_android_library "android-${abi}-binding" "${main}" "${depinfo%.d}.so" || exit 1
+                fi
+              done <<<"${abi_dirs}"
               ;;
             android-rust)
-              # Gate S1's mobile arm (plan 25): the phone links no OpenSSL.
-              # `cargo tree --invert openssl-sys` exits non-zero exactly when
-              # nothing in the graph depends on it, so the check inverts the
-              # exit: a clean run of the invert query IS the failure. The
-              # error text is pinned so a broken resolve cannot masquerade as
-              # a pass. Cheap, so it runs before the expensive test-target
-              # build and fails the concern first.
-              gate_log="${RUNNER_TEMP}/android-openssl-absent.log"
-              if cargo tree --locked --package taurine-mobile --invert openssl-sys >"${gate_log}" 2>&1; then
-                echo "android-openssl-absent: FAILED — openssl-sys is reachable from taurine-mobile (Gate S1, plan 25)" >&2
-                exit 1
-              fi
-              if ! grep -q "did not match any packages" "${gate_log}"; then
-                echo "android-openssl-absent: the invert query failed for a reason other than absence (detail withheld)" >&2
-                exit 1
-              fi
-              echo "android-openssl-absent: passed — openssl-sys is not resolvable from taurine-mobile"
+              # Gate S1's mobile arm, door-only form (plan 25; the shells ship the OpenSSL
+              # door since the owner's decision of 2026-10-15). An older source with no
+              # openssl-sys in the mobile graph passes as "absent"; a source with it passes only
+              # when OpenSSL enters through taurine-tls-openssl alone and the single openssl-src
+              # is on 300.5.x. A resolve error fails. Cheap, so it runs before the expensive
+              # test-target build and fails the concern first.
+              openssl_door_gate android-openssl-door-only taurine-mobile aarch64-linux-android || exit 1
+              openssl_door_gate android-x86_64-openssl-door-only taurine-mobile x86_64-linux-android || exit 1
+              verify_door_crate_sources || exit 1
               # Compile-only: build and link every test target of the mobile crate for
               # the Android triple, so the `cfg(target_os = "android")` code and its
               # tests are type-checked and linked on a hosted runner. They are executed
               # on the emulator in the next step, for x86_64.
               mobile_run android-test-targets cargo test --locked --no-run --package taurine-mobile --target aarch64-linux-android
+              # The door's tests built and linked for the device architecture (they run on the
+              # x86_64 emulator in the next step); an older source records the absence.
+              door="$(door_in_graph taurine-mobile aarch64-linux-android)" || { echo 'android-door-test-targets: the door graph query did not resolve' >&2; exit 1; }
+              if [[ "${door}" == present ]]; then
+                mobile_run android-door-test-targets cargo test --locked --no-run --package taurine-tls-openssl --target aarch64-linux-android
+              else
+                echo 'android-door-test-targets: taurine-tls-openssl is not in the mobile graph; nothing to build'
+              fi
               ;;
             *)
               echo "Unknown Android validation concern: ${CONCERN}" >&2

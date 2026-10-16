@@ -253,6 +253,34 @@ jobs:
             sudo install -o root -g root -m 0755 "${node_bin}" "${node_dest}"
           fi
 
+      # Base fixtures that build with cargo run with the system PATH and an empty HOME, where rustup's
+      # proxies cannot work: copy the image's stable toolchain (its real cargo and rustc) to a
+      # directory only root can change, while root is still available; the base step passes
+      # TCI_REAL_CARGO. Run outside every checkout with the toolchain named explicitly, so no
+      # rust-toolchain file in the pull request or base tree can make rustup run its own rustc here,
+      # and refuse any symlink in the copy, so nothing in it can point back at a writable path.
+      - name: Install a Rust toolchain where only root can change it
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}"
+          dest=/opt/taurine-ci-rust
+          [[ ! -e "${dest}" && ! -L "${dest}" ]] || { echo "::error::${dest} already exists"; exit 1; }
+          rustup_home="${HOME}/.rustup"
+          rustup_bin="${HOME}/.cargo/bin/rustup"
+          sysroot="$(env -u RUSTUP_HOME -u CARGO_HOME RUSTUP_TOOLCHAIN=stable "${rustup_bin}" run stable rustc --print sysroot)"
+          sysroot="$(realpath "${sysroot}")"
+          [[ "${sysroot}" == "$(realpath "${rustup_home}/toolchains")"/* ]] || { echo '::error::the stable sysroot is not an installed rustup toolchain'; exit 1; }
+          [[ -x "${sysroot}/bin/cargo" && -x "${sysroot}/bin/rustc" ]] || { echo '::error::the toolchain has no cargo or rustc'; exit 1; }
+          sudo mkdir "${dest}" && sudo cp -a "${sysroot}/bin" "${sysroot}/lib" "${dest}/"
+          if [[ -n "$(find "${dest}" -type l -print -quit)" ]]; then
+            sudo rm -rf "${dest}"
+            echo '::error::the toolchain copy contains a symlink'; exit 1
+          fi
+          sudo chown -R root:root "${dest}" && sudo chmod -R go-w "${dest}"
+          echo "toolchain: $("${dest}/bin/rustc" --version)"
+
       # Base tests execute steps from this pull request's copy of the workflow, so its code runs
       # here. Drop sudo and Docker first, with the composite the source jobs use; the step below
       # asserts sudo is gone.
@@ -312,6 +340,7 @@ jobs:
           for name in CI GITHUB_ACTIONS GITHUB_API_URL GITHUB_EVENT_NAME GITHUB_REF GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_SHA GITHUB_WORKSPACE RUNNER_ARCH RUNNER_OS RUNNER_TEMP; do
             [[ -z "${!name+x}" ]] || scrub+=("${name}=${!name}")
           done
+          if [[ -x /opt/taurine-ci-rust/bin/cargo ]]; then scrub+=(TCI_REAL_CARGO=/opt/taurine-ci-rust/bin/cargo); fi
           # Root was removed by the drop-root step before this one. Hosted runners give the job
           # user passwordless sudo, and PR code that a base test executes could otherwise use it to
           # write /etc/ld.so.preload or replace ruby. Fail closed if it is still there.

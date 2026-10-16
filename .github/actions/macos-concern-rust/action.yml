@@ -246,9 +246,23 @@ runs:
                 ;;
               *) echo "Unsupported packaging flavor: ${FLAVOR}" >&2; exit 2 ;;
             esac
+            # Before the build: no Tauri config may add cargo features or a runner the door
+            # gate cannot see, no OpenSSL override may bypass the vendored build, and the
+            # door-only gate (which needs no build) runs on the desktop graph. The build itself
+            # runs the Tauri CLI directly with CI's own arguments (tauri_cli), never a source
+            # npm script; the gate repeats on the same graph after the build.
+            source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
+            run_deferred rust-packaging-build-overrides refuse_build_feature_overrides
+            run_deferred rust-packaging-openssl-overrides refuse_openssl_overrides
+            run_deferred rust-packaging-door-gate openssl_door_gate macOS-desktop-openssl-door-only-prebuild taurine-desktop -
+            run_deferred rust-packaging-door-crate-sources verify_door_crate_sources
+            export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"
             run_deferred rust-packaging-smoke \
-              env NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096" \
-              npm --prefix taurine-desktop run tauri -- build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
+              tauri_cli taurine-desktop build --debug --bundles app --ci ${flavor_args[@]+"${flavor_args[@]}"}
+            # beforeBuildCommand ran in between: the refusals run again on what the build left.
+            run_deferred rust-packaging-build-overrides-post refuse_build_feature_overrides
+            run_deferred rust-packaging-openssl-overrides-post refuse_openssl_overrides
+            run_deferred rust-packaging-door-crate-inputs verify_door_crate_build_inputs
             packaging_identifier_check() {
               local plist found=''
               # The bundle is written to the build's cargo target directory: the
@@ -273,6 +287,19 @@ runs:
               [[ "${found}" == "${expected_identifier}" ]]
             }
             run_deferred rust-packaging-identifier packaging_identifier_check
+            # The artefact proof (shell-artefact): the door-only gate on the desktop graph, the
+            # executable's size and build profile, no dynamic libssl/libcrypto, the linked OpenSSL 3.5
+            # string when the door is in the graph. Fixed lines only.
+            if [[ "${deferred_failed}" -eq 0 ]]; then
+              if desktop_artefact_check macOS; then
+                deferred_results+=('rust-packaging-artefact|passed')
+              else
+                deferred_results+=('rust-packaging-artefact|failed: see the fixed artefact lines in the log')
+                deferred_failed=1
+              fi
+            else
+              deferred_results+=('rust-packaging-artefact|not run (an earlier packaging sub-step failed)')
+            fi
             ;;
           rust-tls-openssl)
             # The OpenSSL door crate — a workspace member since Stage 1 task 1.5,

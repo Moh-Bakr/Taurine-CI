@@ -211,6 +211,11 @@ jobs:
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/concern-report  # zizmor: ignore[self-repository]
 
+      - name: Install the shell artefact checks
+        if: ${{ inputs.concern == 'rust-packaging' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
+
       # Trusted suite-contract snapshot, taken after the exact-SHA checkout and
       # token revocation but BEFORE any dependency installation or project
       # command: the catalog digest from this control-plane revision and the
