@@ -105,10 +105,17 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
     {"tier" => "protected-dispatch",
      "triggers" => ["workflow_dispatch"],
      "jobs" => ["plan", "prove", "timings"]},
+   # Step A of the macOS split (#336): the new reusable concern workflow may be absent (now) or
+   # present, and the entrypoint's job set is the final shape with the current one transitional.
+   ".github/workflows/macos-validation-concern.yml" =>
+    [{"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]}, "absent"],
    ".github/workflows/macos-validation.yml" =>
-    {"tier" => "protected-source",
-     "triggers" => ["workflow_dispatch"],
-     "jobs" => ["plan", "result", "timings", "validate"]},
+    [{"tier" => "protected-source",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "timings", "validate-main", "validate-untrusted"]},
+     {"tier" => "protected-source",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["plan", "result", "timings", "validate"]}],
    ".github/workflows/orchestrate-validation.yml" =>
     {"tier" => "protected-source",
      "triggers" => ["workflow_dispatch"],
@@ -186,6 +193,9 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/actions/sanitize/action.yml" => "present",
    ".github/actions/scan-concern/action.yml" => "present",
    ".github/actions/select-concerns/action.yml" => "present",
+   # Step A of the shell-toolchain change (#340): both composites may be absent (now) or present.
+   ".github/actions/shell-artefact/action.yml" => ["present", "absent"],
+   ".github/actions/shell-config/action.yml" => ["present", "absent"],
    ".github/actions/source-checkout/action.yml" => "present",
    ".github/actions/timings/action.yml" => "present",
    ".github/actions/vendor-fetch/action.yml" => "present",
