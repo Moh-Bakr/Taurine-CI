@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Fixtures for the shell-artefact library (the OpenSSL door gate and the artefact proof), the
-# fixed-schema door lines in mobile-report, the per-ABI Android wiring and the weekly
-# openssl-src cadence. Every case is a weakening that must be refused (or a control that must
-# pass). Offline: `cargo`, `readelf` and the binaries are stand-ins. Run from the repository root.
+# fixed-schema door lines in mobile-report and the per-ABI Android wiring. Every case is a
+# weakening that must be refused (or a control that must pass). Offline: `cargo`, `readelf` and the binaries are stand-ins. Run from the repository root.
 # shellcheck disable=SC1091,SC2016,SC2015,SC2059 # literal snippets and byte fixtures are evaluated later; libraries are extracted at run time
 set -euo pipefail
 
@@ -747,28 +746,5 @@ if tools_step v5.38.2 'NASM version 3.01 compiled'; then fail 'a NASM that is no
 grep -qF 'NASM is not version 2' "${work}/out" || fail 'a non-2 NASM failed for the wrong reason'
 if tools_step 'not a version' 'NASM version 2.16.03'; then fail 'an unreadable Perl version was accepted'; fi
 
-# ---- N8: the weekly release-line cadence fails closed --------------------------------------
-cadence="$(ruby -ryaml -e '
-  doc = YAML.safe_load(File.read(".github/workflows/weekly-validation.yml"), aliases: false)
-  run = doc["jobs"]["dispatch"]["steps"].map { |s| s["run"].to_s }.join("\n")
-  puts run[/^openssl_cadence\(\) \{\n.*?^\}\n/m] || abort("openssl_cadence not found")')"
-check_cadence() {
-  local want="$1" latest="$2" list="$3" fail_flag="$4" note
-  note="$(OPENSSL_LTS_END=2030-04-08 latest="${latest}" bash -c "${cadence}"$'\n''openssl_cadence uat "$1" "$2"' _ "${list}" "${fail_flag}" 2>/dev/null)"
-  case "${want}" in
-    fails) [[ "${note}" == *'fails this run'* ]] || fail "cadence passed: latest='${latest}' list='${list}' fail=${fail_flag}: ${note}" ;;
-    passes) [[ "${note}" != *'fails this run'* ]] || fail "cadence failed: latest='${latest}' list='${list}' fail=${fail_flag}: ${note}" ;;
-  esac
-}
-check_cadence passes 300.5.5+3.5.5 300.5.5+3.5.5 true
-check_cadence fails 300.5.6+3.5.6 300.5.5+3.5.5 true
-check_cadence fails '' 300.5.5+3.5.5 true
-check_cadence fails 300.5.5+3.5.5 '' true
-check_cadence fails 300.5.5+3.5.5 tip-unresolved true
-check_cadence fails 300.5.5+3.5.5 fetch-failed,300.5.5+3.5.5 true
-check_cadence fails 300.5.5+3.5.5 300.3.1+3.3.1 true
-check_cadence passes '' '' false
-check_cadence passes 300.5.6+3.5.6 300.5.5+3.5.5 false
-
 [[ "${failures}" -eq 0 ]] || { echo "shell-artefact fixtures: ${failures} case(s) failed" >&2; exit 1; }
-echo 'shell-artefact fixtures: lock-bound artefact proof, build-feature and OpenSSL-override refusals, per-ABI gating, fixed door lines and the fail-closed release cadence hold'
+echo 'shell-artefact fixtures: lock-bound artefact proof, build-feature and OpenSSL-override refusals, per-ABI gating, fixed door lines, the built graph, the shipped-artefact binding and the base-policy toolchain copy hold'

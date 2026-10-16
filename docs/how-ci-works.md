@@ -610,11 +610,9 @@ days earlier, and `macos-validation` and `windows-validation` with `rust=true` (
 are not part of the weekly run; dispatch them by hand. The base_sha run is the drift check:
 a concern that fails in the full run but is "not selected" in the selective run reveals a gap
 in the `ci-matrix.json` rules. The summary also reports how far the locked `openssl-src` is
-behind the newest 300.5.x release, for the develop, uat and main tips. That patch cadence is a
-warning for develop and **fails the run** for a uat or main tip that is behind, off the 300.5
-line, or still on 3.5 after OpenSSL 3.5 LTS ends (2030-04-08): the release line ships the
-OpenSSL it locks. The release line fails closed: an unresolved tip, a failed root-lock fetch,
-a lock without `openssl-src` or an empty crates.io answer is an error, not a pass.
+behind the newest 300.5.x release. A release-line patch cadence (failing the run when a uat or
+main tip lags 300.5.x or passes the OpenSSL 3.5 LTS end, 2030-04-08) lands in its own later
+change.
 
 ## The OpenSSL door in the shells
 
