@@ -157,9 +157,13 @@ runs:
             # needs its bundled SQLite to build on Windows) plus `os-keyring`, without the
             # default MQ admin and system-fonts features. It covers those two
             # modules' Windows paths and their dependency closure, not the dropped
-            # features. No OpenSSL builds here: `legacy-tls` is off (the OpenSSL edge has
-            # been feature-gated since task 1.2, and the crate is a workspace member since
-            # task 1.5, so this is an ordinary package selection on the root lock).
+            # features. This check never enables `legacy-tls` (its feature set is
+            # `sqlite-bundled` plus `os-keyring`), so it builds no OpenSSL itself. The
+            # `legacy-tls` cases are not here: they are the registered DBX feature cases of
+            # the `rust-db` concern below, which run only for a source that registers the DBX
+            # adapter. The OpenSSL edge has been feature-gated since task 1.2, and the crate
+            # is a workspace member since task 1.5, so this is an ordinary package selection
+            # on the root lock.
             # The Perl/NASM PATH below is kept from the days the vendored OpenSSL did
             # build here: if a future feature set re-enters `openssl-sys`'s build script,
             # the first hosted run fails there, and this one command still finds a Perl
@@ -209,9 +213,14 @@ runs:
               db_packages+=("--package=${db_package}")
             done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | grep '^taurine-db' | sort -u)
             rust_tests rust-db-tests "${db_packages[@]}"
-            # The registered legacy-tls feature cases can enter openssl-sys' vendored
-            # build. Match the fixed Strawberry Perl/NASM PATH used by the Windows
-            # OpenSSL and keyring concerns, scoped to these feature-only sub-steps.
+            # The registered `legacy-tls` feature cases (`dbx_registered_feature_tests`,
+            # shared with the Linux and macOS concerns) run only for a source that registers
+            # the DBX adapter (`taurine-db-dbx`); an older source records an explicit
+            # uncovered row instead. Once registered they are mandatory, and they can enter
+            # openssl-sys' vendored build, so match the fixed Strawberry Perl/NASM PATH used
+            # by the Windows OpenSSL and keyring concerns, scoped to these feature-only
+            # sub-steps. dbx-core's own `legacy-tls` pass, which depends on what the source
+            # declares, is a Linux-only concern (`rust-dbx`); it does not run here.
             dbx_feature_path="/c/Strawberry/perl/bin:/c/Program Files/NASM:${PATH}"
             PATH="${dbx_feature_path}" dbx_registered_feature_tests "${db_packages[@]}"
             ;;

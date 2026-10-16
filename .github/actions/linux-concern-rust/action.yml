@@ -347,7 +347,7 @@ runs:
               if grep -qx 'dbx-core' <<<"${dbx_members}"; then
                 run_deferred rust-dbx-core-tests \
                   env RUST_MIN_STACK=33554432 cargo test --locked --no-fail-fast --package dbx-core
-                if dbx_meta="$(cargo metadata --no-deps --format-version 1)"; then
+                if dbx_meta="$(cargo metadata --no-deps --offline --format-version 1)"; then
                   dbx_core_legacy_tls_pass "${dbx_meta}"
                 else
                   deferred_results+=('rust-dbx-core-legacy-tls-tests|failed: not run (the workspace manifest could not be read)')

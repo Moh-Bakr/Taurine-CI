@@ -695,12 +695,12 @@ run_toolchain_step() { # run_toolchain_step <workflow> <dest> [env...]
   ( cd "${tc}/ws" && env -i PATH="${tc}/bin:/usr/bin:/bin" HOME="${tc}/home" RUNNER_TEMP="${tc}/tmp" "$@" /bin/bash "${tc}/step.sh" ) >"${work}/out" 2>&1
 }
 rm -f "${tc}/evil-ran"
-run_toolchain_step .github/workflows/validate-public-changes.yml "${tc}/dest" || { cat "${work}/out" >&2; fail 'the toolchain copy: should pass'; }
+run_toolchain_step .github/workflows/base-policy.yml "${tc}/dest" || { cat "${work}/out" >&2; fail 'the toolchain copy: should pass'; }
 [[ ! -e "${tc}/evil-ran" ]] || fail 'a planted rust-toolchain.toml made the toolchain step run its rustc'
 [[ "$("${tc}/dest/bin/rustc")" == 'stable rustc 1.0.0' && -f "${tc}/dest/lib/libstd.rlib" && ! -e "${tc}/dest/share" ]] ||
   fail 'the toolchain copy is not the stable toolchain bin/ and lib/ only'
 rm -rf "${tc}/dest"
-if run_toolchain_step .github/workflows/validate-public-changes.yml "${tc}/dest" FAKE_SYSROOT="${tc}/ws/evil"; then
+if run_toolchain_step .github/workflows/base-policy.yml "${tc}/dest" FAKE_SYSROOT="${tc}/ws/evil"; then
   fail 'a sysroot outside rustup toolchains was copied'
 fi
 grep -qF 'not an installed rustup toolchain' "${work}/out" || { cat "${work}/out" >&2; fail 'a sysroot outside rustup toolchains failed for the wrong reason'; }

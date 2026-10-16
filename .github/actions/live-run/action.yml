@@ -67,7 +67,9 @@ runs:
             ignored="$(grep -E '^test result: (ok|FAILED)\. ' "${suite_log}" | awk '{s+=$8} END{print s+0}')"
             filtered="$(grep -E '^test result: (ok|FAILED)\. ' "${suite_log}" | awk '{s+=$12} END{print s+0}')"
             required_count=0
-            if [[ "${pkg}" == taurine-db-conformance && "${targets}" == dbx_pg_tls_live && ("${name:-}" == dbx_tls_ || "${name:-}" == legacy) ]]; then required_count=2; fi
+            if [[ "${pkg}" == taurine-db-conformance && "${targets}" == dbx_pg_tls_live && "${name:-}" == dbx_tls_ ]]; then required_count=2; fi
+            # The tls-legacy arm: two legacy-peer proofs plus the cancel first-bytes proof.
+            if [[ "${pkg}" == taurine-db-conformance && "${targets}" == dbx_pg_tls_live && "${name:-}" == legacy ]]; then required_count=3; fi
             if [[ "${pkg}" == taurine-db-conformance && "${targets}" == dbx_pg_mtls_live && "${name:-}" == dbx_pg_mtls_ ]]; then required_count=8; fi
             verdict=pass
             if (( code != 0 )); then verdict="FAIL(exit ${code})"; overall=1; fi

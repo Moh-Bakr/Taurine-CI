@@ -421,7 +421,9 @@ jobs:
   # Tabulates every concern's duration and conclusion for this run and warns when a
   # concern took more than 25% (and more than two minutes) longer than the committed
   # baseline below, in seconds: the median of the last several successful jobs (re-based
-  # 2026-10-05, before the compiled-dependency cache; re-base again once it lands). Warning only: it never
+  # 2026-10-05, before the compiled-dependency cache; re-base again once it lands; rust-dbx
+  # kept at 603: the recent runs include a dbx-core legacy-tls second pass that is being
+  # skipped). Warning only: it never
   # fails the run, calls no service beyond this repository's own run API with the
   # run's read-only token, and publishes no artifact. A concern with no baseline is
   # listed without a comparison; update the table when a run is a new normal.
