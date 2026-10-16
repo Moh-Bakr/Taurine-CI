@@ -108,13 +108,11 @@ make_synth() { # builds the synthetic tree ${dir}/s and the check copy ${dir}/v/
   cp "${src}/.github/policy/workflow-lists.sh" "${dir}/s/.github/policy/"
   : > "${dir}/s/.synthetic"
 }
-synth_runner() { # prints nothing; sets the check copy's manifest to the synthetic tree's printed structure
+synth_runner() { # [PRUNE_JSON]: the check copy's manifest becomes the synthetic tree's structure, optionally with its cache-prune entry replaced
   cp "${check}" "${dir}/v/synth.rb"; cp "${check%/*}/yaml-guard.rb" "${dir}/v/"
-  ruby "${check}" --print "${dir}/s" > "${dir}/v/manifest.txt"
-  ruby -e 's = File.read(ARGV[0]); m = File.read(ARGV[1]).strip; re = /^CONTROL_PLANE_MANIFEST = \{.*?\}\.freeze$/m; abort("manifest not found") unless s.match?(re); File.write(ARGV[0], s.sub(re) { m })' "${dir}/v/synth.rb" "${dir}/v/manifest.txt"
-}
-synth_prune() { # NEW: the synthetic manifest's cache-prune entry becomes NEW (a shape or an array of shapes)
-  NEW="$1" ruby -e 's = File.read(ARGV[0]); re = /(".github\/workflows\/cache-prune\.yml" =>\s*)\{[^}]*\}/m; abort("prune entry not found") unless s.match?(re); File.write(ARGV[0], s.sub(re) { "#{$1}#{ENV["NEW"]}" })' "${dir}/v/synth.rb"
+  ruby "${check}" --json-actual "${dir}/s" > "${dir}/v/actual.json"
+  # The literal is built from JSON with inspect, not read from --print, whose formatting differs between Ruby versions.
+  PRUNE="${1:-}" ruby -rjson -e 's = File.read(ARGV[0]); m = JSON.parse(File.read(ARGV[1])); m["workflows"][".github/workflows/cache-prune.yml"] = JSON.parse(ENV["PRUNE"]) unless ENV["PRUNE"].to_s.empty?; re = /^CONTROL_PLANE_MANIFEST = \{.*?\}\.freeze$/m; abort("manifest not found") unless s.match?(re); File.write(ARGV[0], s.sub(re) { "CONTROL_PLANE_MANIFEST = #{m.inspect}.freeze" })' "${dir}/v/synth.rb" "${dir}/v/actual.json"
 }
 strict_root() { [[ -f "${dir}/s/.synthetic" && ! -e "${dir}/s/.github/policy/check-structure.rb" ]] || { echo 'a --strict case must run on the synthetic tree only' >&2; exit 1; }; }
 expect_strict_reject() { # LABEL MESSAGE
@@ -145,16 +143,18 @@ expect_accept 'step B under the base copy: the new tree matches the first altern
 # Step B under its own copy (the old alternative deleted).
 variant "${prune_old}" "${prune_new}"
 expect_accept 'step B under its own copy: the new shape alone'
+prune_old_json='{"tier":"public","triggers":["schedule","workflow_dispatch"],"jobs":["prune"]}'
+prune_new_json='{"tier":"public","triggers":["push","schedule","workflow_dispatch"],"jobs":["prune"]}'
 # --strict (the policy job's own copy) turns the lingering-alternative warning into an error, so step B
 # must have deleted its transitional alternatives; step A (tree on a non-final shape) is unaffected.
 make_synth; swap_s() { OLD="$1" NEW="$2" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("text not found"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/s/.github/workflows/cache-prune.yml"; }
 swap_s 'workflow_dispatch:' 'workflow_dispatch:
   push:'
-synth_runner; synth_prune "[${prune_new}, ${prune_old}]"
+synth_runner "[${prune_new_json}, ${prune_old_json}]"
 expect_strict_reject 'strict: step B left its transitional alternative behind' 'transitional alternative(s) remain'
 synth_runner
 expect_strict_accept 'strict: step B with the alternative deleted'
-make_synth; synth_runner; synth_prune "[${prune_new}, ${prune_old}]"
+make_synth; synth_runner "[${prune_new_json}, ${prune_old_json}]"
 expect_strict_accept 'strict: step A (tree still on the transitional shape)'
 # The strict helpers refuse a root that is not the synthetic tree, so no strict case can run on the real tree.
 fresh; mkdir -p "${dir}/s"; rm -f "${dir}/s/.synthetic"
