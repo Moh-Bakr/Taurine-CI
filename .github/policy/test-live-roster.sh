@@ -124,16 +124,18 @@ if [[ "$*" != *dbx_pg_tls_live* && "$*" != *dbx_pg_mtls_live* ]]; then
   printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n'
   exit 0
 fi
-if [[ "$*" == *dbx_pg_mtls_live* && "${FAKE_CARGO_MODE:-pass2}" == pass8 ]]; then
-  printf 'test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n'
+if [[ "${FAKE_CARGO_MODE:-}" == counts:* ]]; then
+  # counts:<ordinary>,<legacy>,<mtls> — the passed count each filter's suite reports.
+  IFS=, read -r fake_ordinary fake_legacy fake_mtls <<< "${FAKE_CARGO_MODE#counts:}"
+  if [[ "$*" == *dbx_pg_mtls_live* ]]; then fake_count="${fake_mtls}"
+  elif [[ "$*" == *" legacy "* ]]; then fake_count="${fake_legacy}"
+  else fake_count="${fake_ordinary}"; fi
+  printf 'test result: ok. %s passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' "${fake_count}"
   exit 0
 fi
 case "${FAKE_CARGO_MODE:-pass2}" in
-  pass8) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
   pass2) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
-  pass3) printf 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
   filtered3) printf 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\n' ;;
-  filtered2) printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\n' ;;
   pass1) printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
   pass0) printf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' ;;
   ignored) printf 'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n' ;;
@@ -162,6 +164,14 @@ grep -Fq 'ssl_min_protocol_version=TLSv1 -c ssl_max_protocol_version=TLSv1' "${w
 grep -Fq '[[ "${got}" == "TLSv1" && -z "${refused}" ]] && tls10_ok=1' "${work}/start-pg.sh" || {
   echo 'live roster fixture: TLS10 readiness does not require a TLSv1 handshake' >&2; exit 1;
 }
+# The live-run action's required counts, written out here on purpose. Reading them back from the
+# action under test would make a silently changed count (or a loosened comparison) pass its own
+# check; this table changes only by a reviewed edit of this file, and the N-1 / N+1 runs below fail
+# unless the action requires exactly these numbers.
+ordinary_count=2 # dbx_pg_tls_live dbx_tls_
+legacy_count=3   # dbx_pg_tls_live legacy: two legacy-peer proofs and the cancel first-bytes proof
+mtls_count=8     # dbx_pg_mtls_live dbx_pg_mtls_
+counts_mode() { echo "counts:$1,$2,$3"; }
 run_fake_actions() {
   local engine="$1" config="$2" label="$3" mode="$4" expected="$5"
   local runner="${work}/runner-${label}" log="${work}/cargo-${label}.log" command_status=0
@@ -184,7 +194,7 @@ run_fake_actions() {
     exit 1
   fi
 }
-run_fake_actions pgtls "${pgtls_config}" pgtls pass8 pass
+run_fake_actions pgtls "${pgtls_config}" pgtls "$(counts_mode "${ordinary_count}" "${legacy_count}" "${mtls_count}")" pass
 grep -Fq -- '-p taurine-db-conformance --test dbx_pg_tls_live dbx_tls_ -- --nocapture' "${work}/cargo-pgtls.log" || {
   echo 'live roster fixture: pgtls did not pass the exact ordinary DBX filter to cargo' >&2; exit 1;
 }
@@ -200,14 +210,7 @@ fi
 grep -Fq 'taurine-db-conformance [dbx_pg_mtls_live] dbx_pg_mtls_ passed=8 skipped=0' "${work}/runner-pgtls/suite-results.txt" || {
   echo 'live roster fixture: mTLS suite did not produce the required eight executed cases' >&2; exit 1;
 }
-# The tls-legacy arm requires two legacy-peer proofs, or three once the cancel first-bytes proof is
-# selected by the same filter. The fixture follows whichever count the live-run action under test
-# requires, so this script passes the action both before and after that count changes.
-legacy_pass=pass2
-if grep -Eq '"\$\{name:-\}" == legacy \]\]; then required_count=3' .github/actions/live-run/action.yml; then
-  legacy_pass=pass3
-fi
-run_fake_actions tls-legacy "${legacy_config}" tls-legacy "${legacy_pass}" pass
+run_fake_actions tls-legacy "${legacy_config}" tls-legacy "$(counts_mode "${ordinary_count}" "${legacy_count}" "${mtls_count}")" pass
 run_fake_actions tls-legacy "${legacy_config}" compiler-heavy compiler-heavy reject
 grep -Fq 'proof-build: compiler diagnostics target=dbx_pg_tls_live codes=E0046=1' "${work}/fake-compiler-heavy.err" || {
   echo 'live roster fixture: an early Rust compiler code was hidden by warning-heavy output' >&2; exit 1;
@@ -250,10 +253,22 @@ fi
 grep -Fq -- '-p taurine-db-conformance --features taurine-db-dbx/legacy-tls --test dbx_pg_tls_live legacy -- --nocapture' "${work}/cargo-tls-legacy.log" || {
   echo 'live roster fixture: tls-legacy did not pass the fixed feature and filter to cargo' >&2; exit 1;
 }
-grep -Fq 'taurine-db-conformance [dbx_pg_tls_live] legacy passed='"${legacy_pass#pass}"' skipped=0' "${work}/runner-tls-legacy/suite-results.txt" || {
-  echo 'live roster fixture: legacy DBX TLS suite did not produce the required two executed tests' >&2; exit 1;
+grep -Fq 'taurine-db-conformance [dbx_pg_tls_live] legacy passed='"${legacy_count}"' skipped=0' "${work}/runner-tls-legacy/suite-results.txt" || {
+  echo 'live roster fixture: legacy DBX TLS suite did not produce the required three executed tests' >&2; exit 1;
 }
-run_fake_actions tls-legacy "${legacy_config}" filtered-legacy "filtered${legacy_pass#pass}" pass
+run_fake_actions tls-legacy "${legacy_config}" filtered-legacy filtered3 pass
+# One count off in either direction, per filter, must be refused: a loosened comparison or a silently
+# changed required count passes the positive runs above and fails here.
+negative_counts() {
+  local label="$1" config="$2" engine="$3" ordinary="$4" legacy="$5" mtls="$6"
+  run_fake_actions "${engine}" "${config}" "negative-count-${label}" "$(counts_mode "${ordinary}" "${legacy}" "${mtls}")" reject
+}
+negative_counts ordinary-minus "${pgtls_config}" pgtls "$((ordinary_count - 1))" "${legacy_count}" "${mtls_count}"
+negative_counts ordinary-plus "${pgtls_config}" pgtls "$((ordinary_count + 1))" "${legacy_count}" "${mtls_count}"
+negative_counts mtls-minus "${pgtls_config}" pgtls "${ordinary_count}" "${legacy_count}" "$((mtls_count - 1))"
+negative_counts mtls-plus "${pgtls_config}" pgtls "${ordinary_count}" "${legacy_count}" "$((mtls_count + 1))"
+negative_counts legacy-minus "${legacy_config}" tls-legacy "${ordinary_count}" "$((legacy_count - 1))" "${mtls_count}"
+negative_counts legacy-plus "${legacy_config}" tls-legacy "${ordinary_count}" "$((legacy_count + 1))" "${mtls_count}"
 for suite in pgtls tls-legacy; do
   if [[ "${suite}" == pgtls ]]; then config="${pgtls_config}"; else config="${legacy_config}"; fi
   for mode in pass0 pass1 ignored filtered skipped failed; do
