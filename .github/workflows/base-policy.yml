@@ -70,9 +70,41 @@ jobs:
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
-          echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
-          sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
-          echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
+          # Every ssh or sshd socket unit, not only the two the image ships today: systemd 256 and later
+          # generate sshd-unix-local.socket and sshd-vsock.socket. `mask` takes names, not patterns, so
+          # the names come from the unit files and the loaded units. Each listing must exit cleanly: a
+          # systemctl whose list verbs fail while is-active works would read as "no more units".
+          # Names outside ssh* and sshd* (a distro variant) are not enumerated; the per-script check for
+          # an sshd process and the probe of port 22 in the base-policy step are the backstop for those.
+          unit_files="$(systemctl list-unit-files --type=socket --no-legend --plain 'ssh*.socket' 'sshd*.socket' 2>/dev/null)" \
+            || { echo "::error::could not list the ssh unit files, so ssh cannot be shown to be masked"; exit 1; }
+          loaded_units="$(systemctl list-units --all --type=socket --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null)" \
+            || { echo "::error::could not list the loaded ssh units, so ssh cannot be shown to be masked"; exit 1; }
+          ssh_units="$({ echo ssh.service; echo ssh.socket; awk '{print $1}' <<<"${unit_files}"; awk '{print $1}' <<<"${loaded_units}"; } | sort -u | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          echo "sshd before: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          sudo systemctl mask --now ${ssh_units} 2>/dev/null || true
+          # shellcheck disable=SC2086
+          echo "sshd after: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
+          # Each unit must be in a state that serves no connection: inactive, failed or masked. Anything
+          # else, `activating` and `reloading` included, fails; `is-active --quiet` let those through.
+          ssh_left=''
+          for unit in ${ssh_units}; do
+            case "$(systemctl is-active "${unit}" 2>/dev/null || true)" in
+              inactive | failed | masked) ;;
+              *) ssh_left+="${unit} " ;;
+            esac
+          done
+          # Sockets and services both: an accepting socket spawns ssh@N.service or sshd-*@N.service per
+          # connection, and an instance already running would outlive the mask of its socket.
+          active_ssh="$(systemctl list-units --type=socket,service --state=active --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null)" \
+            || { echo "::error::could not list the active ssh units, so ssh cannot be shown to be stopped"; exit 1; }
+          ssh_left+="$(awk '{print $1}' <<<"${active_ssh}" | tr '\n' ' ')"
+          if [[ -n "${ssh_left// /}" ]]; then
+            echo "::error::ssh is still active after it was masked (${ssh_left% }), so a base script could ssh to localhost"
+            exit 1
+          fi
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
@@ -103,6 +135,11 @@ jobs:
       - name: Test the base-policy job's pin, process containment and loader scrub
         shell: bash
         run: bash .github/policy/test-base-policy-isolation.sh
+
+      # The root steps above, run with stand-ins for what needs root: ssh still active after the mask fails them.
+      - name: Test that the root steps fail if ssh is still active after the mask
+        shell: bash
+        run: bash .github/policy/test-base-policy-root-step.sh
 
   base-policy:
     permissions:
@@ -141,9 +178,41 @@ jobs:
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
-          echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
-          sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
-          echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
+          # Every ssh or sshd socket unit, not only the two the image ships today: systemd 256 and later
+          # generate sshd-unix-local.socket and sshd-vsock.socket. `mask` takes names, not patterns, so
+          # the names come from the unit files and the loaded units. Each listing must exit cleanly: a
+          # systemctl whose list verbs fail while is-active works would read as "no more units".
+          # Names outside ssh* and sshd* (a distro variant) are not enumerated; the per-script check for
+          # an sshd process and the probe of port 22 in the base-policy step are the backstop for those.
+          unit_files="$(systemctl list-unit-files --type=socket --no-legend --plain 'ssh*.socket' 'sshd*.socket' 2>/dev/null)" \
+            || { echo "::error::could not list the ssh unit files, so ssh cannot be shown to be masked"; exit 1; }
+          loaded_units="$(systemctl list-units --all --type=socket --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null)" \
+            || { echo "::error::could not list the loaded ssh units, so ssh cannot be shown to be masked"; exit 1; }
+          ssh_units="$({ echo ssh.service; echo ssh.socket; awk '{print $1}' <<<"${unit_files}"; awk '{print $1}' <<<"${loaded_units}"; } | sort -u | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          echo "sshd before: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          sudo systemctl mask --now ${ssh_units} 2>/dev/null || true
+          # shellcheck disable=SC2086
+          echo "sshd after: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
+          # Each unit must be in a state that serves no connection: inactive, failed or masked. Anything
+          # else, `activating` and `reloading` included, fails; `is-active --quiet` let those through.
+          ssh_left=''
+          for unit in ${ssh_units}; do
+            case "$(systemctl is-active "${unit}" 2>/dev/null || true)" in
+              inactive | failed | masked) ;;
+              *) ssh_left+="${unit} " ;;
+            esac
+          done
+          # Sockets and services both: an accepting socket spawns ssh@N.service or sshd-*@N.service per
+          # connection, and an instance already running would outlive the mask of its socket.
+          active_ssh="$(systemctl list-units --type=socket,service --state=active --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null)" \
+            || { echo "::error::could not list the active ssh units, so ssh cannot be shown to be stopped"; exit 1; }
+          ssh_left+="$(awk '{print $1}' <<<"${active_ssh}" | tr '\n' ' ')"
+          if [[ -n "${ssh_left// /}" ]]; then
+            echo "::error::ssh is still active after it was masked (${ssh_left% }), so a base script could ssh to localhost"
+            exit 1
+          fi
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
@@ -310,7 +379,13 @@ jobs:
                 return 1
               fi
             done
-            scan="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")"
+            # errexit is off in here (the caller runs this under `||`), so a scan that dies prints
+            # nothing and would read as "found nothing". It must exit cleanly AND print its separator.
+            scan="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")" || scan=''
+            if [[ "${scan}" != *$'\t'* ]]; then
+              echo "::error::the process scan did not complete, so nothing can be said about what is running"
+              return 1
+            fi
             left="${scan%%$'\t'*}"
             ssh_left="${scan#*$'\t'}"
             if [[ -n "${left}" ]]; then

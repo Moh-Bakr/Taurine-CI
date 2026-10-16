@@ -858,7 +858,19 @@ process behind to act later. The base pass is therefore isolated further:
   and start a process the subreaper never sees. The root step logs the state of `ssh.service` and
   `ssh.socket`, masks them (so socket activation cannot revive them), and logs it again; the step, before every script, refuses any process
   named `sshd`, `sshd-session` or `sshd-auth`, of any uid, and anything accepting connections on
-  loopback port 22. Locking `~/.ssh` was not used instead, because the job user owns its home and
+  loopback port 22. The root step masks every `ssh*` and `sshd*` socket unit it finds
+  (systemd 256 and later generate `sshd-unix-local.socket` and `sshd-vsock.socket`), taking the names
+  from both the unit files and the loaded units because `mask` takes names, not patterns. It then
+  fails unless each unit is `inactive`, `failed` or `masked` and no ssh socket or service is active
+  (an `ssh@N.service` instance already running would outlive the mask of its socket), so
+  `activating` and `reloading` fail too, and so does a unit that appears after the mask. Each of the
+  three `systemctl` listings must exit cleanly: one that errors fails the step instead of reading as
+  "no more units". Names outside `ssh*` and `sshd*`, such as a distro variant, are not enumerated;
+  the per-script check for an `sshd` process and the probe of port 22 are the backstop for those.
+  Separately, the process scan fails closed: it must exit cleanly and print its separator, or the
+  check fails instead of reading "found nothing". `test-base-policy-root-step.sh` runs both jobs' root steps with
+  stand-ins for what needs root, including a mask that leaves the service or the socket running.
+  Locking `~/.ssh` was not used instead, because the job user owns its home and
   can replace the directory. A script that starts an sshd of its own is a descendant, so the
   subreaper kills it with the script.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base
