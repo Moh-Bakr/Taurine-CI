@@ -55,9 +55,11 @@ jobs:
         shell: bash
         run: bash .github/policy/test-base-policy-sudo.sh --require
 
-      # cron, at and a user systemd manager (hosted ubuntu-24.04 runs one) start work for the job
-      # user outside this job's process tree. Deny the first two and stop the third while root is
-      # still available; the base-policy step asserts all three before every script.
+      # cron, at, a user systemd manager (hosted ubuntu-24.04 runs one) and sshd start work for the
+      # job user outside this job's process tree. Deny the first two and stop the others while root
+      # is still available; the base-policy step asserts all of it before every script. sshd is
+      # masked so socket activation cannot revive it. Locking ~/.ssh would not do instead: the job
+      # user owns its home and could replace the directory.
       - name: Deny the job user cron, at and a user systemd manager
         shell: bash
         run: |
@@ -68,6 +70,9 @@ jobs:
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
+          echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
+          sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
+          echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
@@ -121,9 +126,11 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # cron, at and a user systemd manager (hosted ubuntu-24.04 runs one) start work for the job
-      # user outside this job's process tree. Deny the first two and stop the third while root is
-      # still available; the base-policy step asserts all three before every script.
+      # cron, at, a user systemd manager (hosted ubuntu-24.04 runs one) and sshd start work for the
+      # job user outside this job's process tree. Deny the first two and stop the others while root
+      # is still available; the base-policy step asserts all of it before every script. sshd is
+      # masked so socket activation cannot revive it. Locking ~/.ssh would not do instead: the job
+      # user owns its home and could replace the directory.
       - name: Deny the job user cron, at and a user systemd manager
         shell: bash
         run: |
@@ -134,6 +141,9 @@ jobs:
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
+          echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
+          sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
+          echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
           sudo loginctl disable-linger "${user}" || true
           sudo systemctl stop "user@${uid}.service" || true
           echo "user@${uid}.service after: $(systemctl is-active "user@${uid}.service" || true)"
@@ -247,10 +257,14 @@ jobs:
           crontab_bin=/usr/bin/crontab
           at_bin=/usr/bin/at
           runtime_dir="/run/user/$(id -u)"
+          ssh_ports="22"
           ptrace_scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo missing)"
           echo "kernel.yama.ptrace_scope=${ptrace_scope}"
           [[ "${ptrace_scope}" =~ ^[1-3]$ ]] || { echo "::error::kernel.yama.ptrace_scope is ${ptrace_scope}, so a base script could attach to the step"; exit 1; }
-          # Job-user systemd manager or bus processes outside this step's ancestry; names from /proc.
+          # Processes that could start work outside this job: a job-user systemd manager or bus outside
+          # this step's ancestry, and sshd of any uid, since ssh to localhost with a key a script wrote
+          # would start a process the subreaper never sees. Names and the real or effective uid are
+          # read from /proc.
           deferred_processes='
             ancestry = []
             pid = Process.pid
@@ -260,22 +274,25 @@ jobs:
               pid = stat[(stat.rindex(")") + 2)..].split(" ")[1].to_i
             end
             names = ["systemd", "(sd-pam)", "dbus-daemon", "dbus-broker", "dbus-broker-launch"]
+            sshd = ["sshd", "sshd-session", "sshd-auth"]
             found = Dir.glob("/proc/[0-9]*").filter_map do |dir|
               pid = dir[/\d+/].to_i
               next if ancestry.include?(pid)
-              next unless (File.stat(dir).uid == Process.uid rescue false)
               stat = File.read("#{dir}/stat") rescue next
               next if stat[(stat.rindex(")") + 2)..].split(" ")[0] == "Z"
               comm = File.read("#{dir}/comm").chomp rescue next
-              "#{comm}(#{pid})" if names.include?(comm)
+              next "ssh:#{comm}(#{pid})" if sshd.include?(comm)
+              uids = File.read("#{dir}/status")[/^Uid:\s+(\d+)\s+(\d+)/, 0].to_s.scan(/\d+/).map(&:to_i) rescue next
+              "#{comm}(#{pid})" if uids.include?(Process.uid) && names.include?(comm)
             end
-            puts found.join(" ")
+            ssh, managers = found.partition { |entry| entry.start_with?("ssh:") }
+            puts "#{managers.join(" ")}\t#{ssh.map { |entry| entry.delete_prefix("ssh:") }.join(" ")}"
           '
           log_listeners() {
             [[ ! -x /usr/bin/ss ]] || echo "unix listeners of uid $(id -u): $("${scrub[@]}" /usr/bin/ss -xlne 2>/dev/null | grep -F "uid:$(id -u) " || echo none)"
           }
           assert_nothing_deferred() {
-            local left socket
+            local scan left ssh_left socket
             if [[ -x "${crontab_bin}" ]] && printf '' | "${crontab_bin}" - 2>/dev/null; then
               "${crontab_bin}" -r 2>/dev/null || true
               echo "::error::the job user can still install a crontab, so a base script could leave work for later"
@@ -293,10 +310,21 @@ jobs:
                 return 1
               fi
             done
-            left="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")"
+            scan="$("${scrub[@]}" "${ruby_bin}" --disable-gems -e "${deferred_processes}")"
+            left="${scan%%$'\t'*}"
+            ssh_left="${scan#*$'\t'}"
             if [[ -n "${left}" ]]; then
               log_listeners
               echo "::error::a systemd user manager or message bus is running for the job user (${left}), so a base script could start work outside this job"
+              return 1
+            fi
+            if [[ -n "${ssh_left}" ]]; then
+              echo "::error::sshd is running (${ssh_left}), so a base script could ssh to localhost and start work outside this job"
+              return 1
+            fi
+            # shellcheck disable=SC2086
+            if "${scrub[@]}" "${ruby_bin}" --disable-gems -rsocket -e 'ARGV.each { |port| ["127.0.0.1", "::1"].each { |host| begin; Socket.tcp(host, port.to_i, connect_timeout: 2) { exit 0 }; rescue SystemCallError, SocketError; end } }; exit 1' ${ssh_ports}; then
+              echo "::error::something accepts connections on an ssh port (${ssh_ports}), so a base script could ssh to localhost and start work outside this job"
               return 1
             fi
           }

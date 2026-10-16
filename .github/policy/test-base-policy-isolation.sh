@@ -663,6 +663,41 @@ expect_reject manager "${manager}" "a systemd user manager or message bus is run
 kill "${fake_manager}" 2>/dev/null || true
 wait "${fake_manager}" 2>/dev/null || true
 
+# sshd, of any uid: ssh to localhost with a key a script wrote would start a process outside the
+# subreaper's reach, so a process named sshd or sshd-session -- as the real ones are named -- is refused.
+# Started as the job user here, which is the harder case for the check: it matches by name alone.
+for ssh_name in sshd sshd-session; do
+  sshd_fix="$(fixture "${work}/${ssh_name}")"
+  passing_scripts "${sshd_fix}"
+  commit_base "${sshd_fix}"
+  cp /bin/sleep "${work}/fake-bin/${ssh_name}"
+  "${work}/fake-bin/${ssh_name}" 120 &
+  fake_ssh=$!
+  expect_reject "${ssh_name}" "${sshd_fix}" "sshd is running (${ssh_name}(${fake_ssh}))"
+  kill "${fake_ssh}" 2>/dev/null || true
+  wait "${fake_ssh}" 2>/dev/null || true
+done
+
+# A listener on an ssh port. The step names its ports on a line of its own, so the fixture points it
+# at a port this harness listens on; a stale port with nothing listening is not a finding.
+ssh_port="$(ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", 0); puts server.addr[1]; server.close')"
+ssh_listening="$(fixture "${work}/ssh-port")"
+passing_scripts "${ssh_listening}"
+commit_base "${ssh_listening}"
+ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", ARGV[0].to_i); sleep 120' "${ssh_port}" &
+ssh_listener=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do ruby -rsocket -e 'TCPSocket.new("127.0.0.1", ARGV[0].to_i).close' "${ssh_port}" 2>/dev/null && break; sleep 0.2; done
+step_with ssh-port 'ssh_ports="22"' "ssh_ports=\"${ssh_port}\""
+expect_reject ssh-port "${ssh_listening}" "something accepts connections on an ssh port (${ssh_port})"
+kill "${ssh_listener}" 2>/dev/null || true
+wait "${ssh_listener}" 2>/dev/null || true
+ssh_stale="$(fixture "${work}/ssh-stale")"
+passing_scripts "${ssh_stale}"
+commit_base "${ssh_stale}"
+step_with ssh-stale 'ssh_ports="22"' "ssh_ports=\"${ssh_port}\""
+expect_pass ssh-stale "${ssh_stale}"
+step_script="${work}/step.sh"
+
 # The same name in the step's own ancestry is not a finding: the step runs beneath a process that
 # calls itself dbus-daemon, which is how the runner's own parents look from here.
 ancestor="$(fixture "${work}/ancestor")"
