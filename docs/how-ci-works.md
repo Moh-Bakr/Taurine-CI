@@ -739,8 +739,10 @@ manifest is refused when an entry has an unknown key, an unsorted or non-plain n
 trigger, or (for the policy workflow) no `policy` job. The forbidden-trigger denial and the
 required-check pin apply to every alternative, and a tree that matches none of them is an error, so
 an alternative cannot admit more than the two shapes it lists. When the tree matches only the final
-shape while alternatives remain, the run prints a warning annotation (not a failure: the base copy
-sees the change's tree in exactly that state); removing them is part of step 2 and held by review.
+shape while alternatives remain, the run prints a warning annotation and does not fail, because the base
+copy sees step 2's tree in exactly that state. The policy job runs the pull request's own copy with
+`--strict`, where the same state is an error, so step 2 cannot merge with its transitional
+alternatives still listed.
 
 Other checks of the same file: the check also unions the `on` and `true` keys (YAML 1.1 reads a
 bare `on` as true), refuses a file with both, and refuses any duplicate mapping key. It does not

@@ -97,6 +97,18 @@ fresh; swap .github/policy/workflow-lists.sh '  ".github/workflows/ios-validatio
 ' ''
 expect_reject 'a protected workflow dropped from its trust tier' 'tier changed'
 
+expect_strict_reject() { # LABEL MESSAGE
+  local out
+  if out="$(ruby "${runner:-${check}}" --strict "${dir}/t" 2>&1)"; then echo "NOT rejected under --strict: $1" >&2; exit 1; fi
+  grep -qF -- "$2" <<<"${out}" || { echo "rejected $1 for the wrong reason ($2):" >&2; echo "${out}" >&2; exit 1; }
+  echo "rejected  $1"
+}
+expect_strict_accept() { # LABEL
+  local out
+  out="$(ruby "${runner:-${check}}" --strict "${dir}/t" 2>&1)" || { echo "rejected under --strict, expected accepted: $1" >&2; echo "${out}" >&2; exit 1; }
+  echo "accepted  $1"
+}
+
 # --- Changing the shape in two steps (alternatives) ---
 prune_old='{"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["prune"]}'
 prune_new='{"tier" => "public", "triggers" => ["push", "schedule", "workflow_dispatch"], "jobs" => ["prune"]}'
@@ -113,6 +125,27 @@ expect_accept 'step B under the base copy: the new tree matches the first altern
 # Step B under its own copy (the old alternative deleted).
 variant "${prune_old}" "${prune_new}"
 expect_accept 'step B under its own copy: the new shape alone'
+# --strict (the policy job's own copy) turns the lingering-alternative warning into an error, so step B
+# must have deleted its transitional alternatives; step A (tree on a non-final shape) is unaffected.
+fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dispatch:
+  push:'
+variant "${prune_old}" "[${prune_new}, ${prune_old}]"
+expect_strict_reject 'strict: step B left its transitional alternative behind' 'transitional alternative(s) remain'
+variant "${prune_old}" "${prune_new}"
+expect_strict_accept 'strict: step B with the alternative deleted'
+fresh; variant "${prune_old}" "[${prune_new}, ${prune_old}]"
+expect_strict_accept 'strict: step A (tree still on the transitional shape)'
+# A job added that is in neither alternative (linux-validation.yml, whatever its alternatives are).
+fresh; swap .github/workflows/linux-validation.yml '
+jobs:
+' '
+jobs:
+  surprise:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo
+'
+expect_reject 'a job added that is in neither alternative' 'linux-validation.yml'
 # A tree that matches neither shape, and a changed field outside both.
 fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dispatch:
   pull_request:'

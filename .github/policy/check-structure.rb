@@ -39,9 +39,10 @@
 # exact keys and plain names is refused when the manifest is validated, the forbidden-trigger
 # denial and the required-check pin apply to every alternative, and the tree must match one of
 # them. When it matches only the final one while others remain, the run prints a warning
-# annotation: it cannot fail, because the base's copy (step A's manifest) judges step B's tree
-# in exactly that state, so a failing rule would deadlock the transition it exists to allow.
-# Removing the transitional alternative is part of step B and is held by review.
+# annotation: the base pass (main's copy, step A's manifest) judges step B's tree in exactly that
+# state, so there it can only warn or the transition it exists to allow would deadlock. The policy
+# job runs the pull request's OWN copy with --strict, where the same state is an error: step B must
+# have removed its transitional alternatives, so a transition cannot linger.
 #
 # YAML 1.1 reads a bare `on` key as true, so the `on` and `true` keys are unioned, a file with
 # both is refused, and so is any duplicate mapping key (a Psych AST walk), which the loader
@@ -51,6 +52,7 @@
 # like a rename does, and a pull request that edits the constant and the tree together passes
 # this check. The controls for those are review, or an Enterprise-only ruleset-required workflow.
 #
+# `ruby check-structure.rb --strict` is the policy job's own-copy run (see above).
 # `ruby check-structure.rb --print` prints the current structure as a Ruby literal to paste over
 # the constant after a reviewed change. Run from the repository root; an optional first argument
 # names another root (fixtures).
@@ -61,6 +63,7 @@ require_relative 'yaml-guard'
 print_mode = ARGV.delete('--print')
 json_actual = ARGV.delete('--json-actual')
 json_manifest = ARGV.delete('--json-manifest')
+strict = ARGV.delete('--strict')
 root = ARGV.first || '.'
 FORBIDDEN_TRIGGERS = %w[pull_request_target workflow_run].freeze
 TIERS = %w[policy policy-reusable protected-source protected-reusable protected-dispatch public].freeze
@@ -384,6 +387,10 @@ reviewed_actions = manifest['actions'] || {}
   match_entry(rel, reviewed_actions[rel], actual['actions'][rel] || 'absent', problems, warnings, 'composite action')
 end
 
+if strict
+  warnings.each { |w| problems << w.sub(/\A::warning title=[^:]*::/, '') }
+  warnings.clear
+end
 warnings.each { |w| puts w }
 if problems.empty?
   puts "control-plane structure: #{actual['workflows'].size} workflows and #{actual['actions'].size} composites match the reviewed manifest"
