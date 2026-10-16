@@ -805,9 +805,10 @@ and the public OpenSSL version string only:
   project code, because the vendored OpenSSL builds wherever taurine-app compiles. Both versions
   are printed in the summary and held to the majors the build is reviewed with: Perl 5, and NASM
   2 when present (a missing NASM is allowed and means OpenSSL builds `no-asm`).
-- **Artefact size**: every shell-building concern prints the artefact's byte size and build
-  profile. A with/without-door size delta is not measured by CI: it needs a second full shell
-  build, and would need a reviewed dispatch input of its own.
+- **Artefact size (known limitation)**: CI reports the with-door artefact sizes only (every
+  shell-building concern prints the artefact's byte size and build profile); it does not measure
+  the size the door adds (the with/without-door delta). A one-off measurement needs a second full
+  shell build and its own reviewed opt-in dispatch input, so it is deferred to an owner decision.
 
 ## The live proofs
 
