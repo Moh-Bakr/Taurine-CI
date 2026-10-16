@@ -70,11 +70,30 @@ jobs:
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
-          echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
-          sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
-          echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
-          if systemctl is-active --quiet ssh.service || systemctl is-active --quiet ssh.socket; then
-            echo "::error::ssh is still active after it was masked, so a base script could ssh to localhost"
+          # Every ssh or sshd socket unit, not only the two the image ships today: systemd 256 and later
+          # generate sshd-unix-local.socket and sshd-vsock.socket. `mask` takes names, not patterns, so
+          # the names come from the unit files and the loaded units.
+          ssh_units="$({ echo ssh.service; echo ssh.socket
+            systemctl list-unit-files --type=socket --no-legend --plain 'ssh*.socket' 'sshd*.socket' 2>/dev/null | awk '{print $1}'
+            systemctl list-units --all --type=socket --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null | awk '{print $1}'; } | sort -u | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          echo "sshd before: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          sudo systemctl mask --now ${ssh_units} 2>/dev/null || true
+          # shellcheck disable=SC2086
+          echo "sshd after: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
+          # Each unit must be in a state that serves no connection: inactive, failed or masked. Anything
+          # else, `activating` and `reloading` included, fails; `is-active --quiet` let those through.
+          ssh_left=''
+          for unit in ${ssh_units}; do
+            case "$(systemctl is-active "${unit}" 2>/dev/null || true)" in
+              inactive | failed | masked) ;;
+              *) ssh_left+="${unit} " ;;
+            esac
+          done
+          ssh_left+="$(systemctl list-units --type=socket --state=active --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+          if [[ -n "${ssh_left// /}" ]]; then
+            echo "::error::ssh is still active after it was masked (${ssh_left% }), so a base script could ssh to localhost"
             exit 1
           fi
           sudo loginctl disable-linger "${user}" || true
@@ -150,11 +169,30 @@ jobs:
             sudo rm -f "/etc/${tool}.allow"
             printf '%s\n' "${user}" | sudo tee -a "/etc/${tool}.deny" > /dev/null
           done
-          echo "sshd before: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
-          sudo systemctl mask --now ssh.service ssh.socket 2>/dev/null || true
-          echo "sshd after: $(systemctl is-active ssh.service ssh.socket 2>&1 | tr '\n' ' ')"
-          if systemctl is-active --quiet ssh.service || systemctl is-active --quiet ssh.socket; then
-            echo "::error::ssh is still active after it was masked, so a base script could ssh to localhost"
+          # Every ssh or sshd socket unit, not only the two the image ships today: systemd 256 and later
+          # generate sshd-unix-local.socket and sshd-vsock.socket. `mask` takes names, not patterns, so
+          # the names come from the unit files and the loaded units.
+          ssh_units="$({ echo ssh.service; echo ssh.socket
+            systemctl list-unit-files --type=socket --no-legend --plain 'ssh*.socket' 'sshd*.socket' 2>/dev/null | awk '{print $1}'
+            systemctl list-units --all --type=socket --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null | awk '{print $1}'; } | sort -u | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          echo "sshd before: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          sudo systemctl mask --now ${ssh_units} 2>/dev/null || true
+          # shellcheck disable=SC2086
+          echo "sshd after: $(systemctl is-active ${ssh_units} 2>&1 | tr '\n' ' ')"
+          # Each unit must be in a state that serves no connection: inactive, failed or masked. Anything
+          # else, `activating` and `reloading` included, fails; `is-active --quiet` let those through.
+          ssh_left=''
+          for unit in ${ssh_units}; do
+            case "$(systemctl is-active "${unit}" 2>/dev/null || true)" in
+              inactive | failed | masked) ;;
+              *) ssh_left+="${unit} " ;;
+            esac
+          done
+          ssh_left+="$(systemctl list-units --type=socket --state=active --no-legend --plain 'ssh*' 'sshd*' 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+          if [[ -n "${ssh_left// /}" ]]; then
+            echo "::error::ssh is still active after it was masked (${ssh_left% }), so a base script could ssh to localhost"
             exit 1
           fi
           sudo loginctl disable-linger "${user}" || true
