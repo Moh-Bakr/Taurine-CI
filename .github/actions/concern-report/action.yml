@@ -623,17 +623,34 @@ runs:
               end'
         }
         # An empty feature still enables whatever code is gated on it, so an empty or absent
-        # feature is not enough to skip the pass: this searches dbx-core's own sources (the
-        # directory of its manifest, from the same metadata on stdin) for a gate on the
-        # feature. Prints gated or clean; returns non-zero, printing nothing, when the
-        # metadata, the directory or the search itself cannot be trusted.
+        # feature is not enough to skip the pass: this searches everything under dbx-core's
+        # manifest directory (from the same metadata on stdin) for a gate on the feature.
+        # Prints gated or clean; returns non-zero, printing nothing, when the metadata, the
+        # directory or the search itself cannot be trusted.
+        #
+        # Every file is searched, not only `*.rs`: a build script, an `include!`d fragment or a
+        # generated module can carry the gate under any name. Two spellings count: the cfg
+        # `feature = "legacy-tls"` and the build-script variable CARGO_FEATURE_LEGACY_TLS. All
+        # file contents are joined with runs of whitespace collapsed to one space first, so an
+        # attribute split across lines (`feature` / `= "legacy-tls"`) is still found. A symlink
+        # anywhere under the directory fails closed: it can point outside the tree or at a
+        # module directory the search would not otherwise follow. Not covered, and said so: a
+        # gate assembled from pieces (a macro, a comment between the tokens).
         dbx_core_legacy_tls_gated_code() {
-          local manifest dir rc=0
+          local manifest dir link flat rc=0
           manifest="$(jq -er '[.packages[] | select(.name == "dbx-core")]
             | if length == 1 then .[0].manifest_path else error("expected exactly one dbx-core package") end')" || return 1
           dir="$(dirname "${manifest}")"
           [[ -d "${dir}" ]] || return 1
-          grep -rqE --include='*.rs' 'feature[[:space:]]*=[[:space:]]*"legacy-tls"' "${dir}" || rc=$?
+          link="$(find "${dir}" -type l -print -quit)" || return 1
+          [[ -z "${link}" ]] || return 1
+          flat="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dbx-core-gate-search.XXXXXX")" || return 1
+          if ! find "${dir}" -type f -exec cat {} + | LC_ALL=C tr -s '[:space:]' ' ' > "${flat}"; then
+            rm -f "${flat}"
+            return 1
+          fi
+          grep -qE 'feature ?= ?"legacy-tls"|CARGO_FEATURE_LEGACY_TLS' "${flat}" || rc=$?
+          rm -f "${flat}"
           case "${rc}" in
             0) echo gated ;;
             1) echo clean ;;
