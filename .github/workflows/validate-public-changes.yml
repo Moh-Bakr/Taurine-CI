@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           ruby .github/policy/check-universal.rb
-          ruby .github/policy/check-structure.rb
+          ruby .github/policy/check-structure.rb --strict
           bash .github/policy/test-structure.sh
           bash .github/policy/test-action-uses.sh
 

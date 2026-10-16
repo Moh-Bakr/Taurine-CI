@@ -915,19 +915,38 @@ would silently drop the required check), or adding a trigger fails until the con
 in the same pull request, where review sees it. `pull_request_target` and `workflow_run` are
 refused outright, whatever the manifest says. A tier must also agree with `workflow-lists.sh`.
 
-Because the base's copy of the policy also judges every pull request, an exact manifest would
-deadlock a structural change (tree plus manifest fails the base's copy; manifest alone fails the
-PR's own). A manifest entry may therefore be an array of exact alternatives, the first being the
-final shape: step A adds the new shape first and keeps the old one second (tree unchanged); step
-B changes the tree and deletes the old alternative, which the base's copy (step A's) accepts
-through its alternative. Alternatives are exact (tier, triggers, jobs, or `absent`/`present`), the
-forbidden-trigger denial and the required-check job pin apply to every one, and wildcards or extra
-keys are refused when the manifest is validated. A tree matching only the final shape while
-alternatives remain prints a warning annotation, not a failure, because the base's copy sees step
-B's tree in exactly that state. The check also unions the `on` and `true` keys (YAML 1.1 reads a
+### The two-step rule for a structural change
+
+The base pass runs main's copy of `check-structure.rb`, with main's pinned manifest, against the
+pull request's tree; a manifest edited inside the pull request changes nothing there. So a pull
+request that changes the structure (adds, removes or renames a job, a workflow or a composite, or
+changes a trigger) fails the base pass on its own, however correct its own manifest is. The change
+lands in two pull requests:
+
+1. **Precursor, to main.** It leaves the tree alone and edits the manifest so each affected entry
+   lists both shapes: the new one first (the final shape) and the current one second (transitional).
+   A workflow entry becomes an array of exact `{tier, triggers, jobs}` shapes (or `'absent'`); a
+   composite entry becomes `['present', 'absent']` or `['absent', 'present']`. Main's policy then
+   accepts the tree as it is and the new shape.
+2. **The change itself.** It changes the tree and deletes the transitional alternatives in its own
+   manifest, so the pull request's own copy passes with the exact final shape, and the base pass
+   (main's copy from step 1) accepts the new tree through the alternative.
+
+Alternatives are exact: a job list is spelled out, never a wildcard, a prefix or a superset, and the
+manifest is refused when an entry has an unknown key, an unsorted or non-plain name, a forbidden
+trigger, or (for the policy workflow) no `policy` job. The forbidden-trigger denial and the
+required-check pin apply to every alternative, and a tree that matches none of them is an error, so
+an alternative cannot admit more than the two shapes it lists. When the tree matches only the final
+shape while alternatives remain, the run prints a warning annotation and does not fail, because the base
+copy sees step 2's tree in exactly that state. The policy job runs the pull request's own copy with
+`--strict`, where the same state is an error, so step 2 cannot merge with its transitional
+alternatives still listed.
+
+Other checks of the same file: the check also unions the `on` and `true` keys (YAML 1.1 reads a
 bare `on` as true), refuses a file with both, and refuses any duplicate mapping key. It does not
 catch `if: ${{ false }}` or `continue-on-error` on the required job, which drops the check like a
 rename; review, or an Enterprise-only ruleset-required workflow, is the control for that.
+
 
 After a reviewed structural change, run `ruby .github/policy/check-structure.rb --print`, paste
 the literal over the constant and read the diff. `test-structure.sh` holds the falsifying

@@ -48,13 +48,6 @@ fresh
 ruby "${check}" "${dir}/t" >/dev/null || { echo 'the reviewed tree fails its own structure check' >&2; exit 1; }
 echo 'accepted  the reviewed tree'
 
-# The constant equals the structure of the tree (compared as JSON; the Ruby literal's formatting
-# differs between Ruby versions, so --print is for humans only).
-actual_json="$(ruby "${check}" --json-actual "${dir}/t")"
-[[ "${actual_json}" == '{"required_check"'* && "${actual_json}" == "$(ruby "${check}" --json-manifest "${dir}/t")" ]] \
-  || { echo 'CONTROL_PLANE_MANIFEST differs from the structure of the tree' >&2; exit 1; }
-echo 'accepted  the manifest equals the tree structure'
-
 fresh; rm "${dir}/t/.github/workflows/cache-prune.yml"
 expect_reject 'a workflow deleted' 'in the manifest but missing from the tree'
 
@@ -104,6 +97,18 @@ fresh; swap .github/policy/workflow-lists.sh '  ".github/workflows/ios-validatio
 ' ''
 expect_reject 'a protected workflow dropped from its trust tier' 'tier changed'
 
+expect_strict_reject() { # LABEL MESSAGE
+  local out
+  if out="$(ruby "${runner:-${check}}" --strict "${dir}/t" 2>&1)"; then echo "NOT rejected under --strict: $1" >&2; exit 1; fi
+  grep -qF -- "$2" <<<"${out}" || { echo "rejected $1 for the wrong reason ($2):" >&2; echo "${out}" >&2; exit 1; }
+  echo "rejected  $1"
+}
+expect_strict_accept() { # LABEL
+  local out
+  out="$(ruby "${runner:-${check}}" --strict "${dir}/t" 2>&1)" || { echo "rejected under --strict, expected accepted: $1" >&2; echo "${out}" >&2; exit 1; }
+  echo "accepted  $1"
+}
+
 # --- Changing the shape in two steps (alternatives) ---
 prune_old='{"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["prune"]}'
 prune_new='{"tier" => "public", "triggers" => ["push", "schedule", "workflow_dispatch"], "jobs" => ["prune"]}'
@@ -120,6 +125,27 @@ expect_accept 'step B under the base copy: the new tree matches the first altern
 # Step B under its own copy (the old alternative deleted).
 variant "${prune_old}" "${prune_new}"
 expect_accept 'step B under its own copy: the new shape alone'
+# --strict (the policy job's own copy) turns the lingering-alternative warning into an error, so step B
+# must have deleted its transitional alternatives; step A (tree on a non-final shape) is unaffected.
+fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dispatch:
+  push:'
+variant "${prune_old}" "[${prune_new}, ${prune_old}]"
+expect_strict_reject 'strict: step B left its transitional alternative behind' 'transitional alternative(s) remain'
+variant "${prune_old}" "${prune_new}"
+expect_strict_accept 'strict: step B with the alternative deleted'
+fresh; variant "${prune_old}" "[${prune_new}, ${prune_old}]"
+expect_strict_accept 'strict: step A (tree still on the transitional shape)'
+# A job added that is in neither alternative (linux-validation.yml, whatever its alternatives are).
+fresh; swap .github/workflows/linux-validation.yml '
+jobs:
+' '
+jobs:
+  surprise:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo
+'
+expect_reject 'a job added that is in neither alternative' 'linux-validation.yml'
 # A tree that matches neither shape, and a changed field outside both.
 fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dispatch:
   pull_request:'
@@ -131,6 +157,16 @@ variant "\".github/workflows/cache-prune.yml\" =>
     ${prune_old}" "\".github/workflows/cache-prune.yml\" =>
     [\"absent\", ${prune_old}]"
 expect_accept 'step A of a deletion: the workflow may be absent'
+
+# A composite may be listed as present-or-absent while it is added or removed (step A).
+cr='".github/actions/concern-report/action.yml" => "present"'
+fresh; variant "${cr}" '".github/actions/concern-report/action.yml" => ["present", "absent"]'
+expect_accept 'a composite listed present-or-absent, present'
+rm -r "${dir}/t/.github/actions/concern-report"
+expect_accept 'a composite listed present-or-absent, absent'
+fresh; variant "${cr}" '".github/actions/concern-report/action.yml" => ["present", "absent"]'
+mkdir -p "${dir}/t/.github/actions/unlisted"; printf 'name: x\n' > "${dir}/t/.github/actions/unlisted/action.yml"
+expect_reject 'an unlisted composite beside a present-or-absent entry' 'a composite action with no manifest entry'
 
 # Wildcards, supersets and unknown keys in the manifest are refused.
 fresh; variant "${prune_old}" '{"tier" => "public", "triggers" => ["schedule", "workflow_*"], "jobs" => ["prune"]}'

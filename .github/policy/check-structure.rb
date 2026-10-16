@@ -39,9 +39,10 @@
 # exact keys and plain names is refused when the manifest is validated, the forbidden-trigger
 # denial and the required-check pin apply to every alternative, and the tree must match one of
 # them. When it matches only the final one while others remain, the run prints a warning
-# annotation: it cannot fail, because the base's copy (step A's manifest) judges step B's tree
-# in exactly that state, so a failing rule would deadlock the transition it exists to allow.
-# Removing the transitional alternative is part of step B and is held by review.
+# annotation: the base pass (main's copy, step A's manifest) judges step B's tree in exactly that
+# state, so there it can only warn or the transition it exists to allow would deadlock. The policy
+# job runs the pull request's OWN copy with --strict, where the same state is an error: step B must
+# have removed its transitional alternatives, so a transition cannot linger.
 #
 # YAML 1.1 reads a bare `on` key as true, so the `on` and `true` keys are unioned, a file with
 # both is refused, and so is any duplicate mapping key (a Psych AST walk), which the loader
@@ -51,6 +52,7 @@
 # like a rename does, and a pull request that edits the constant and the tree together passes
 # this check. The controls for those are review, or an Enterprise-only ruleset-required workflow.
 #
+# `ruby check-structure.rb --strict` is the policy job's own-copy run (see above).
 # `ruby check-structure.rb --print` prints the current structure as a Ruby literal to paste over
 # the constant after a reviewed change. Run from the repository root; an optional first argument
 # names another root (fixtures).
@@ -61,6 +63,7 @@ require_relative 'yaml-guard'
 print_mode = ARGV.delete('--print')
 json_actual = ARGV.delete('--json-actual')
 json_manifest = ARGV.delete('--json-manifest')
+strict = ARGV.delete('--strict')
 root = ARGV.first || '.'
 FORBIDDEN_TRIGGERS = %w[pull_request_target workflow_run].freeze
 TIERS = %w[policy policy-reusable protected-source protected-reusable protected-dispatch public].freeze
@@ -90,20 +93,32 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
      "jobs" => ["plan", "result", "timings", "validate"]},
    ".github/workflows/linux-validation-concern.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
+   # Step A of the cache-mode change (#328): its job set is the final shape, the current one stays
+   # as the transitional alternative until #328 lands and removes it.
    ".github/workflows/linux-validation.yml" =>
-    {"tier" => "protected-dispatch",
-     "triggers" => ["workflow_dispatch"],
-     "jobs" => ["plan", "result", "select", "timings", "validate", "validate-input"]},
+    [{"tier" => "protected-dispatch",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "select", "timings", "validate-input", "validate-main", "validate-untrusted"]},
+     {"tier" => "protected-dispatch",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["plan", "result", "select", "timings", "validate", "validate-input"]}],
    ".github/workflows/live-proof-arm.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["prove"]},
    ".github/workflows/live-proofs.yml" =>
     {"tier" => "protected-dispatch",
      "triggers" => ["workflow_dispatch"],
      "jobs" => ["plan", "prove", "timings"]},
+   # Step A of the macOS split (#336): the new reusable concern workflow may be absent (now) or
+   # present, and the entrypoint's job set is the final shape with the current one transitional.
+   ".github/workflows/macos-validation-concern.yml" =>
+    [{"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]}, "absent"],
    ".github/workflows/macos-validation.yml" =>
-    {"tier" => "protected-source",
-     "triggers" => ["workflow_dispatch"],
-     "jobs" => ["plan", "result", "timings", "validate"]},
+    [{"tier" => "protected-source",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "timings", "validate-main", "validate-untrusted"]},
+     {"tier" => "protected-source",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["plan", "result", "timings", "validate"]}],
    ".github/workflows/orchestrate-validation.yml" =>
     {"tier" => "protected-source",
      "triggers" => ["workflow_dispatch"],
@@ -137,12 +152,17 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/workflows/windows-validation-concern.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
    ".github/workflows/windows-validation.yml" =>
-    {"tier" => "protected-dispatch",
-     "triggers" => ["workflow_dispatch"],
-     "jobs" => ["plan", "result", "timings", "validate", "validate-input", "validate-rust"]}},
+    [{"tier" => "protected-dispatch",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "timings", "validate-input", "validate-main", "validate-rust-main", "validate-rust-untrusted", "validate-untrusted"]},
+     {"tier" => "protected-dispatch",
+      "triggers" => ["workflow_dispatch"],
+      "jobs" => ["plan", "result", "timings", "validate", "validate-input", "validate-rust"]}]},
  "actions" =>
   {".github/actions/android-emulator-tests/action.yml" => "present",
    ".github/actions/android-sdk-setup/action.yml" => "present",
+   # Step A of #328: the new composite may be present (final) or still absent.
+   ".github/actions/cache-scope-audit/action.yml" => ["present", "absent"],
    ".github/actions/concern-report/action.yml" => "present",
    ".github/actions/drop-root/action.yml" => "present",
    ".github/actions/egress-audit/action.yml" => "present",
@@ -176,6 +196,9 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/actions/sanitize/action.yml" => "present",
    ".github/actions/scan-concern/action.yml" => "present",
    ".github/actions/select-concerns/action.yml" => "present",
+   # Step A of the shell-toolchain change (#340): both composites may be absent (now) or present.
+   ".github/actions/shell-artefact/action.yml" => ["present", "absent"],
+   ".github/actions/shell-config/action.yml" => ["present", "absent"],
    ".github/actions/source-checkout/action.yml" => "present",
    ".github/actions/timings/action.yml" => "present",
    ".github/actions/vendor-fetch/action.yml" => "present",
@@ -364,6 +387,10 @@ reviewed_actions = manifest['actions'] || {}
   match_entry(rel, reviewed_actions[rel], actual['actions'][rel] || 'absent', problems, warnings, 'composite action')
 end
 
+if strict
+  warnings.each { |w| problems << w.sub(/\A::warning title=[^:]*::/, '') }
+  warnings.clear
+end
 warnings.each { |w| puts w }
 if problems.empty?
   puts "control-plane structure: #{actual['workflows'].size} workflows and #{actual['actions'].size} composites match the reviewed manifest"
