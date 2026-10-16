@@ -753,6 +753,43 @@ the literal over the constant and read the diff. `test-structure.sh` holds the f
 fixtures and `test-mutations.sh` the mutations. This guards against accidental or unreviewed
 drift; as with the rest of the policy, a pull request that edits the manifest and the tree together is caught only by review.
 
+## Action reference check
+
+`check-action-uses.rb` holds every `uses` to a full commit SHA (remote actions) and to the exact
+reviewed list in `action-allowlist.rb` (one line per entry, so adding a reviewed local action is a
+one-line change). It reads the parsed YAML, not its text: it collects `jobs.<id>.uses`,
+`jobs.<id>.steps[*].uses` and a composite's `runs.steps[*].uses`, so quoted or escaped keys, flow
+mappings, a value on the next line, a space before the colon and a complex key are all read as the
+`uses` they are. It refuses aliases, duplicate mapping keys (`yaml-guard.rb`, shared with
+`check-structure.rb`), a load error, a non-mapping job or step and a non-string value, and a textual
+tripwire fails the file when more lines look like a `uses` key than the walk found.
+The same walk holds containers and services to a closed shape. The runner puts a container's
+`options` before its image in `docker create` (`DockerCommandManager.DockerCreate` in
+`actions/runner`, and `ports` are not quoted either), so a positional token in `options` would
+become the image that runs. Therefore the only keys are `image` and `options`; `options` is exact
+reviewed text (`CONTAINER_OPTIONS_ALLOWLIST`), never free text; the image is a single token pinned
+by `@sha256:<64 hex>`; and an expression is accepted only as the exact reviewed text in
+`action-allowlist.rb` or exactly `${{ fromJSON('<one JSON literal>') }}`, where the literal obeys
+the same rules and may not repeat a key (even by escape), use a case variant or add a key. Any other
+expression can fall back to an unpinned image through `vars`, `env`, `inputs`, `matrix` or `needs`.
+A leading `-`, an uppercase letter or a second token in an image is refused (it could read as a docker
+flag or another image), `fromJSON` is accepted only as the container value itself and never as a
+mapping's `image`, JSON nesting beyond 64 levels is refused, and a YAML merge key (`<<`) is refused
+wherever `yaml-guard.rb` walks, because Psych and GitHub may resolve it differently.
+
+Residual: this check sees only the references a workflow or composite itself writes. What a reviewed
+remote action, a remote reusable workflow or a docker action does inside (its own nested `uses`,
+images and options) is not visible to it; pinning the exact SHA, and the review that put it on the
+allow-list, are the controls for that.
+Run with
+no arguments it walks the tree itself (the same `.yml` and `.yaml` files `check-workflows.sh`
+checks) and exits non-zero when it checked no file, so a direct run never passes having checked
+nothing. The tripwire fails closed, so any non-comment line holding the text `uses:` (a trailing
+comment, a `run:` script, a description) counts and fails the file when the walk found fewer
+references than such lines: reword the text rather than weaken the guard.
+`test-action-uses.sh` carries the fixtures (the spellings a grep missed, each refused, plus the
+container and no-argument cases) and mutates every guard in a copy, failing if a mutant survives.
+
 ## Changing the policy
 
 A pull request carries its own `.github/policy/`, so on its own the policy run would let a

@@ -29,9 +29,9 @@ expect_reject() {
 # variant OLD NEW: a copy of the check whose manifest text has OLD replaced by NEW (the manifest is
 # a constant in the script, so a manifest case is a script variant). Sets runner to the copy.
 variant() {
-  cp "${check}" "${dir}/variant.rb"
-  OLD="$1" NEW="$2" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("manifest text not found: #{ENV["OLD"][0, 60]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/variant.rb"
-  runner="${dir}/variant.rb"
+  mkdir -p "${dir}/v"; cp "${check}" "${dir}/v/variant.rb"; cp "${check%/*}/yaml-guard.rb" "${dir}/v/"
+  OLD="$1" NEW="$2" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("manifest text not found: #{ENV["OLD"][0, 60]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/v/variant.rb"
+  runner="${dir}/v/variant.rb"
 }
 # expect_accept LABEL [MESSAGE]: the (variant) check passes, optionally printing MESSAGE.
 expect_accept() {

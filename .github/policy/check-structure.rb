@@ -56,6 +56,7 @@
 # names another root (fixtures).
 require 'json'
 require 'yaml'
+require_relative 'yaml-guard'
 
 print_mode = ARGV.delete('--print')
 json_actual = ARGV.delete('--json-actual')
@@ -191,44 +192,8 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/actions/verify-cargo-cache/action.yml" => "present",
    ".github/actions/windows-concern-rust/action.yml" => "present"}}.freeze
 
-# One YAML key as the loader resolves it: a plain scalar by its YAML 1.1 type (so a bare `on` is
-# true), a quoted one as its string.
-def key_of(node)
-  return node.value unless node.plain
-
-  YAML.safe_load(node.value)
-rescue StandardError
-  node.value
-end
-
-# Every duplicate mapping key in a document, by resolved key, and `on` next to true.
-def duplicate_keys(node, path, found)
-  if node.is_a?(Psych::Nodes::Mapping)
-    seen = {}
-    node.children.each_slice(2) do |k, v|
-      if k.is_a?(Psych::Nodes::Scalar)
-        key = key_of(k)
-        found << "#{path.join('.')}: the key #{k.value.inspect} appears twice" if seen.key?(key)
-        seen[key] = true
-      end
-      duplicate_keys(v, path + [k.respond_to?(:value) ? k.value : '?'], found)
-    end
-    found << "#{path.join('.')}: both `on` and a bare on (read as true) are keys" if seen.key?(true) && seen.key?('on')
-  elsif node.respond_to?(:children) && node.children
-    node.children.each { |c| duplicate_keys(c, path, found) }
-  end
-end
-
 def read_yaml(path)
   YAML.safe_load(File.read(path, encoding: 'UTF-8'), aliases: false) || {}
-end
-
-def yaml_duplicates(path)
-  found = []
-  Psych.parse_stream(File.read(path, encoding: 'UTF-8')).children.each do |doc|
-    duplicate_keys(doc.root, [], found) if doc.root
-  end
-  found
 end
 
 # The tier arrays in workflow-lists.sh, read as text (the file is bash).
@@ -268,7 +233,7 @@ def actual_structure(root, problems)
   workflows = {}
   Dir.glob(File.join(root, '.github/workflows/*.{yml,yaml}')).sort.each do |file|
     rel = file.delete_prefix("#{root}/")
-    yaml_duplicates(file).each { |d| problems << "#{rel}: #{d}" }
+    YamlGuard.yaml_duplicates(file).each { |d| problems << "#{rel}: #{d}" }
     doc = read_yaml(file)
     problems << "#{rel}: both the `on` key and a bare on (true) key are present" if doc.key?('on') && doc.key?(true)
     workflows[rel] = { 'tier' => tier_of(rel, lists, policy, policy_reusable), 'triggers' => triggers_of(doc), 'jobs' => (doc['jobs'] || {}).keys.sort }
@@ -276,7 +241,7 @@ def actual_structure(root, problems)
   actions = {}
   Dir.glob(File.join(root, '.github/actions/*/action.{yml,yaml}')).sort.each do |f|
     rel = f.delete_prefix("#{root}/")
-    yaml_duplicates(f).each { |d| problems << "#{rel}: #{d}" }
+    YamlGuard.yaml_duplicates(f).each { |d| problems << "#{rel}: #{d}" }
     actions[rel] = 'present'
   end
   { 'workflows' => workflows, 'actions' => actions }
