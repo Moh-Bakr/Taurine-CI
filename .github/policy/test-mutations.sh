@@ -135,11 +135,115 @@ mutation '9. exit 0 at the start of the environment pre-flight' "${preflight}" '
 mutation '9. protected branches only accepted' "${preflight}" "!= \$'false\\ttrue' ]]; then" "== never ]]; then"
 mutation '9. any branch-policy list accepted' "${preflight}" "!= 'branch:main,branch:untrusted' ]]; then" "== never ]]; then"
 
-mutation '11. the required status check job renamed' "${public}" '    name: Validate workflow policy' '    name: Validate workflow policy (renamed)'
-mutation '11. the required status check job id renamed' "${public}" '  policy:
+# 11. Read-only untrusted cache restore, cache-mode and actions: write (docs/untrusted-readonly-cache.md).
+cache_prune=.github/workflows/cache-prune.yml
+scorecard=.github/workflows/scorecard.yml
+mutation '11. cache-mode write-only on the Linux caller' "${linux}" '    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]' '    cache-mode: write-only
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
+mutation '11. an ungated cache-mode write on the Linux caller' "${linux}" '    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]' '    cache-mode: write
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
+mutation '11. a workflow-level cache-mode write in the Linux dispatcher' "${linux}" 'permissions: {}
+' 'permissions: {}
+cache-mode: write
+'
+mutation '11. cache-mode inside the called Linux concern' "${linux_concern}" '  validate:
+    permissions:
+      contents: read
+    name: Linux ${{ inputs.concern }}' '  validate:
+    cache-mode: read
+    permissions:
+      contents: read
+    name: Linux ${{ inputs.concern }}'
+mutation '11. a cache restore between the revoke and root removal' "${linux_concern}" '      - name: Remove root before project code' '      - name: Early cache restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/early
+          key: early
+
+      - name: Remove root before project code'
+mutation '11. the compiled save gated to untrusted' "${linux_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' &&" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/untrusted' &&"
+mutation '11. actions: write on the scorecard job' "${scorecard}" '      actions: read' '      actions: write'
+mutation '11. cache-prune no longer main-only' "${cache_prune}" " && github.ref == 'refs/heads/main'" ''
+mutation '11. cache-prune given the source-read environment' "${cache_prune}" '    runs-on: ubuntu-24.04
+' '    environment: source-read
+    runs-on: ubuntu-24.04
+'
+mutation '11. lint.sh ignores every unknown key' .github/policy/lint.sh "-ignore '^unexpected key \"cache-mode\" for \"(job|workflow)\" section\. '" "-ignore 'unexpected key'"
+
+# 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
+# must be rejected, because the default grant for a job with no cache-mode is write.
+mutation '11. an untrusted-only cargo-source restore with no cache-mode' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
+            cargo-sources-v3-${{ runner.os }}-
+' ''
+mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]' '    cache-mode: read
+    cache-mode: write
+    uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
+
+# 11. The reusable half of the public policy gate. The base-policy pass is meant to move into
+# .github/workflows/base-policy.yml, called by the entrypoint. The checks must accept that file as a
+# plain called workflow and refuse everything that would make it more: another trigger, a secret, or
+# the same shape at any other path. Run before the file exists, because a pull request is judged by
+# the base commit's checks.
+reusable=.github/workflows/base-policy.yml
+reusable_body() {
+  printf '%s\n' 'name: Reusable public policy (fixture)' 'on:' '  workflow_call:' "$@" 'permissions: {}' 'jobs:' '  noop:' \
+    '    name: noop' '    permissions: {}' '    runs-on: ubuntu-24.04' '    steps:' "      - run: 'true'"
+}
+# with_file LABEL PATH BODY: the tree plus one new file.
+with_file() {
+  fresh_tree
+  mkdir -p "$(dirname "${dir}/tree/$2")"
+  printf '%s\n' "$3" > "${dir}/tree/$2"
+  : > "${dir}/log"
+}
+reject_file() {
+  with_file "$1" "$2" "$3"
+  verdict "$1" "$(cd "${dir}/tree" && offline_policy)" || true
+}
+accept_file() {
+  local label="$1" by
+  with_file "$@"
+  if by="$(cd "${dir}/tree" && offline_policy)"; then
+    echo "accepted  ${label}"
+  else
+    echo "REFUSED   ${label}  (by ${by})" >&2
+    missed=$((missed + 1))
+    [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+  fi
+}
+accept_file '11. the reusable public policy workflow as a plain called workflow' "${reusable}" "$(reusable_body)"
+reject_file '11. the same called workflow at a path no tier names' .github/workflows/other-public.yml "$(reusable_body)"
+reject_file '11. the reusable public policy workflow with a schedule trigger' "${reusable}" "$(reusable_body '  schedule:' "    - cron: '0 0 * * *'")"
+reject_file '11. the reusable public policy workflow with a pull_request_target trigger' "${reusable}" "$(reusable_body '  pull_request_target:')"
+reject_file '11. the reusable public policy workflow that is not called' "${reusable}" "$(reusable_body | sed 's/workflow_call:/workflow_dispatch:/')"
+# A trigger on none of the refused lists: only the rule that it be workflow_call refuses this one.
+reject_file '11. the reusable public policy workflow triggered by something other than workflow_call' "${reusable}" "$(reusable_body | sed 's/  workflow_call:/  issues:/')"
+reject_file '11. the reusable public policy workflow declaring a secret' "${reusable}" "$(reusable_body '    secrets:' '      TOKEN:' '        required: false')"
+reject_file '11. the reusable public policy workflow with a deployment environment' "${reusable}" "$(reusable_body | ruby -e 'print STDIN.read.sub("    name: noop\n", "    name: noop\n    environment: prod\n")')"
+reject_file '11. the reusable public policy workflow reading a secret' "${reusable}" "$(reusable_body | sed "s/'true'/'echo \${{ secrets.TOKEN }}'/")"
+# A workflow calling it is accepted: the call is a reviewed local reusable workflow. The caller is a
+# small workflow of its own, so this tests the allow-list and not the size of the entrypoint.
+fresh_tree
+printf '%s\n' "$(reusable_body)" > "${dir}/tree/${reusable}"
+printf '%s\n' 'name: Caller (fixture)' 'on:' '  workflow_dispatch:' 'permissions: {}' 'jobs:' '  call:' '    permissions:' \
+  '      contents: read' '    uses: ./.github/workflows/base-policy.yml' > "${dir}/tree/.github/workflows/call-fixture.yml"
+: > "${dir}/log"
+if by="$(cd "${dir}/tree" && offline_policy)"; then
+  echo 'accepted  11. a workflow calling the reusable public policy workflow'
+else
+  echo "REFUSED   11. a workflow calling the reusable public policy workflow  (by ${by})" >&2
+  missed=$((missed + 1))
+  [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+fi
+mutation '12. the required status check job renamed' "${public}" '    name: Validate workflow policy' '    name: Validate workflow policy (renamed)'
+mutation '12. the required status check job id renamed' "${public}" '  policy:
 ' '  policy-renamed:
 '
-mutation '11. a protected dispatcher widened to a push trigger' "${linux}" 'on:
+mutation '12. a protected dispatcher widened to a push trigger' "${linux}" 'on:
   workflow_dispatch:' 'on:
   push:
   workflow_dispatch:'

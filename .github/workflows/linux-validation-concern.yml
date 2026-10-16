@@ -643,7 +643,7 @@ jobs:
           chmod 700 "${work}"
           status=0
           result="$(ruby .github/policy/case-evidence-admission.rb \
-            "${CONCERN}" "${GITHUB_WORKSPACE}/src" "${report}" "${work}")" || status=$?
+            "${CONCERN}" "${GITHUB_WORKSPACE}/src" "${report}" "${work}" 2>/dev/null)" || status=$?
           # Raw reports, titles and case identities stay in that directory; only
           # the aggregate the producer printed is published.
           rm -rf "${work}"
@@ -660,6 +660,8 @@ jobs:
           if [[ "${status}" -ne 0 ]]; then
             error_class="$(jq -r '.error_class // "unknown"' <<<"${result}" 2>/dev/null || echo unknown)"
             [[ "${error_class}" =~ ^[a-z_]+$ ]] || error_class=unknown
+            # No result at all means the producer died before it could print one.
+            [[ -n "${result}" ]] || error_class=producer_crashed
             echo "::error::case evidence: discovery and execution did not reconcile (${error_class})"
             exit "${status}"
           fi

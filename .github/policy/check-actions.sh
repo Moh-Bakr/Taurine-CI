@@ -4,7 +4,8 @@
 check_action_references() {
   local workflow="$1" reference
 
-  if grep -nE '^\s*uses:\s*[^#[:space:]]+@(v[0-9]|main|master|stable|latest|[[:alnum:]_.-]+)$' "$workflow"; then
+  # A step may also be written `- uses: ...` (no name first), so the list marker is allowed.
+  if grep -nE '^\s*(-\s+)?uses:\s*[^#[:space:]]+@(v[0-9]|main|master|stable|latest|[[:alnum:]_.-]+)$' "$workflow"; then
     echo "Every Action reference must use a full 40-character commit SHA: $workflow" >&2
     exit 1
   fi
@@ -24,6 +25,8 @@ check_action_references() {
       # here deliberately and held to the composite rules below.
       ./.github/actions/source-checkout) ;;
       ./.github/actions/environment-preflight) ;;
+      # Run in a job with no source, environment or secret: refuses a non-empty untrusted cache scope.
+      ./.github/actions/cache-scope-audit) ;;
       ./.github/actions/sanitize) ;;
       ./.github/actions/concern-report) ;;
       ./.github/actions/timings) ;;
@@ -46,6 +49,7 @@ check_action_references() {
       ./.github/actions/linux-test-identities) ;;
       ./.github/actions/rust-target-cache) ;;
       ./.github/workflows/live-proof-arm.yml) ;;
+      ./.github/workflows/base-policy.yml) ;;
       ./.github/workflows/pg8-measurement-arm.yml) ;;
       ./.github/actions/mobile-report) ;;
       ./.github/actions/android-sdk-setup) ;;
@@ -74,6 +78,6 @@ check_action_references() {
         exit 1
         ;;
     esac
-  done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^#[:space:]]+).*/\1/p' "$workflow")
+  done < <(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^#[:space:]]+).*/\2/p' "$workflow")
 
 }

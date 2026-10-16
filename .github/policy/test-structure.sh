@@ -78,10 +78,16 @@ expect_reject 'the required job id renamed' 'would be dropped'
 fresh; swap "${public}" '    name: Validate workflow policy' '    name: Validate workflow policy (renamed)'
 expect_reject 'the required check renamed' 'not "Validate workflow policy"'
 
-fresh; swap "${public}" '  base-policy:
-' '  base-policy-moved:
+fresh; swap "${public}" '  base-pass:
+' '  base-pass-moved:
 '
 expect_reject 'another job renamed in the policy workflow' 'jobs changed'
+
+fresh; mv "${dir}/t/.github/workflows/base-policy.yml" "${dir}/t/.github/workflows/base-policy-moved.yml"
+expect_reject 'the reusable base-policy workflow renamed' 'in the manifest but missing from the tree'
+
+fresh; swap .github/policy/workflow-lists.sh 'public_policy_reusable_workflow=".github/workflows/base-policy.yml"' 'public_policy_reusable_workflow=".github/workflows/elsewhere.yml"'
+expect_reject 'the reusable base-policy workflow dropped from its tier' 'tier changed'
 
 fresh; swap .github/workflows/cache-prune.yml 'workflow_dispatch:' 'workflow_dispatch:
   push:'
@@ -139,8 +145,8 @@ expect_reject 'a forbidden trigger in a transitional alternative' 'lists the for
 # The required-check pin applies to every alternative.
 pol_old='{"tier" => "policy",
      "triggers" => ["pull_request", "push", "workflow_dispatch"],
-     "jobs" => ["base-policy", "base-policy-fixtures", "policy"]}'
-fresh; variant "${pol_old}" "[${pol_old}, {\"tier\" => \"policy\", \"triggers\" => [\"pull_request\", \"push\", \"workflow_dispatch\"], \"jobs\" => [\"base-policy\", \"base-policy-fixtures\"]}]"
+     "jobs" => ["base-pass", "policy"]}'
+fresh; variant "${pol_old}" "[${pol_old}, {\"tier\" => \"policy\", \"triggers\" => [\"pull_request\", \"push\", \"workflow_dispatch\"], \"jobs\" => [\"base-pass\"]}]"
 expect_reject 'an alternative without the required check job' 'lacks the required check job policy'
 fresh; variant "${pol_old}" "[${pol_old}, \"absent\"]"
 expect_reject 'an alternative that lets the policy workflow be absent' 'required status check would be dropped'

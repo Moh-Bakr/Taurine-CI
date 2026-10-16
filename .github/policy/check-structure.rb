@@ -62,7 +62,7 @@ json_actual = ARGV.delete('--json-actual')
 json_manifest = ARGV.delete('--json-manifest')
 root = ARGV.first || '.'
 FORBIDDEN_TRIGGERS = %w[pull_request_target workflow_run].freeze
-TIERS = %w[policy protected-source protected-reusable protected-dispatch public].freeze
+TIERS = %w[policy policy-reusable protected-source protected-reusable protected-dispatch public].freeze
 REQUIRED_WORKFLOW = '.github/workflows/validate-public-changes.yml'
 problems = []
 warnings = []
@@ -77,6 +77,10 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
     {"tier" => "protected-source",
      "triggers" => ["workflow_dispatch"],
      "jobs" => ["plan", "result", "timings", "validate"]},
+   ".github/workflows/base-policy.yml" =>
+    {"tier" => "policy-reusable",
+     "triggers" => ["workflow_call"],
+     "jobs" => ["base-policy", "base-policy-fixtures", "base-policy-result"]},
    ".github/workflows/cache-prune.yml" =>
     {"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["prune"]},
    ".github/workflows/ios-validation.yml" =>
@@ -124,7 +128,7 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/workflows/validate-public-changes.yml" =>
     {"tier" => "policy",
      "triggers" => ["pull_request", "push", "workflow_dispatch"],
-     "jobs" => ["base-policy", "base-policy-fixtures", "policy"]},
+     "jobs" => ["base-pass", "policy"]},
    ".github/workflows/weekly-validation.yml" =>
     {"tier" => "public",
      "triggers" => ["schedule", "workflow_dispatch"],
@@ -224,7 +228,7 @@ def tier_lists(root)
   text.scan(/^(\w+)=\(\n(.*?)^\)/m) do |name, body|
     arrays[name] = body.lines.reject { |l| l.strip.start_with?('#') }.flat_map { |l| l.scan(/"([^"]+)"/).flatten }
   end
-  [arrays, text[/^public_policy_workflow="([^"]+)"/, 1]]
+  [arrays, text[/^public_policy_workflow="([^"]+)"/, 1], text[/^public_policy_reusable_workflow="([^"]+)"/, 1]]
 end
 
 # The `on` and `true` keys unioned: a trigger behind the other spelling still counts.
@@ -239,8 +243,9 @@ def triggers_of(doc)
   end.uniq.sort
 end
 
-def tier_of(rel, lists, policy)
+def tier_of(rel, lists, policy, policy_reusable)
   if rel == policy then 'policy'
+  elsif rel == policy_reusable then 'policy-reusable'
   elsif lists['reusable_protected_workflows'].to_a.include?(rel) then 'protected-reusable'
   elsif lists['protected_source_workflows'].to_a.include?(rel) then 'protected-source'
   elsif lists['protected_dispatch_workflows'].to_a.include?(rel) then 'protected-dispatch'
@@ -249,14 +254,14 @@ def tier_of(rel, lists, policy)
 end
 
 def actual_structure(root, problems)
-  lists, policy = tier_lists(root)
+  lists, policy, policy_reusable = tier_lists(root)
   workflows = {}
   Dir.glob(File.join(root, '.github/workflows/*.{yml,yaml}')).sort.each do |file|
     rel = file.delete_prefix("#{root}/")
     yaml_duplicates(file).each { |d| problems << "#{rel}: #{d}" }
     doc = read_yaml(file)
     problems << "#{rel}: both the `on` key and a bare on (true) key are present" if doc.key?('on') && doc.key?(true)
-    workflows[rel] = { 'tier' => tier_of(rel, lists, policy), 'triggers' => triggers_of(doc), 'jobs' => (doc['jobs'] || {}).keys.sort }
+    workflows[rel] = { 'tier' => tier_of(rel, lists, policy, policy_reusable), 'triggers' => triggers_of(doc), 'jobs' => (doc['jobs'] || {}).keys.sort }
   end
   actions = {}
   Dir.glob(File.join(root, '.github/actions/*/action.{yml,yaml}')).sort.each do |f|
