@@ -93,15 +93,19 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
      "jobs" => ["plan", "result", "timings", "validate"]},
    ".github/workflows/linux-validation-concern.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
-   # Step A of the cache-mode change (#328): its job set is the final shape, the current one stays
-   # as the transitional alternative until #328 lands and removes it.
    ".github/workflows/linux-validation.yml" =>
-    [{"tier" => "protected-dispatch",
-      "triggers" => ["workflow_dispatch"],
-      "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "select", "timings", "validate-input", "validate-main", "validate-untrusted"]},
-     {"tier" => "protected-dispatch",
-      "triggers" => ["workflow_dispatch"],
-      "jobs" => ["plan", "result", "select", "timings", "validate", "validate-input"]}],
+    {"tier" => "protected-dispatch",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" =>
+      ["cache-audit",
+       "cache-audit-after",
+       "plan",
+       "result",
+       "select",
+       "timings",
+       "validate-input",
+       "validate-main",
+       "validate-untrusted"]},
    ".github/workflows/live-proof-arm.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["prove"]},
    ".github/workflows/live-proofs.yml" =>
@@ -152,17 +156,23 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/workflows/windows-validation-concern.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
    ".github/workflows/windows-validation.yml" =>
-    [{"tier" => "protected-dispatch",
-      "triggers" => ["workflow_dispatch"],
-      "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "timings", "validate-input", "validate-main", "validate-rust-main", "validate-rust-untrusted", "validate-untrusted"]},
-     {"tier" => "protected-dispatch",
-      "triggers" => ["workflow_dispatch"],
-      "jobs" => ["plan", "result", "timings", "validate", "validate-input", "validate-rust"]}]},
+    {"tier" => "protected-dispatch",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" =>
+      ["cache-audit",
+       "cache-audit-after",
+       "plan",
+       "result",
+       "timings",
+       "validate-input",
+       "validate-main",
+       "validate-rust-main",
+       "validate-rust-untrusted",
+       "validate-untrusted"]}},
  "actions" =>
   {".github/actions/android-emulator-tests/action.yml" => "present",
    ".github/actions/android-sdk-setup/action.yml" => "present",
-   # Step A of #328: the new composite may be present (final) or still absent.
-   ".github/actions/cache-scope-audit/action.yml" => ["present", "absent"],
+   ".github/actions/cache-scope-audit/action.yml" => "present",
    ".github/actions/concern-report/action.yml" => "present",
    ".github/actions/drop-root/action.yml" => "present",
    ".github/actions/egress-audit/action.yml" => "present",
