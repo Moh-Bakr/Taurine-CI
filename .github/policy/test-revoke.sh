@@ -203,7 +203,8 @@ revoke_run refs/heads/main CHECK_PROTECTED_ANCESTRY=false FAKE_COMPARE_develop=i
 expect 'main always asks the ancestry question' 0 protected-ancestor=true "GET ${api}/repositories/${repo_id}" "GET ${api}/repos/${owner}/${name}/commits/${sha}" "$(compare_call develop)" "DELETE ${api}/installation/token"
 
 # The weekly resolver: identity, the develop and main tips, last week's develop tip, the three
-# lock files, revoke;
+# lock files at develop, the uat tip, the three lock files at the uat and main tips (the release
+# line's openssl-src patch cadence), revoke;
 # outputs only after every check passed.
 target=weekly-resolver
 repo_id=1330267721 owner=Moh-Bakr name=Taurine
@@ -220,10 +221,9 @@ for lock in Cargo.lock taurine-backend/dbx-core/Cargo.lock taurine-backend/dbx-m
   locks+=("GET ${api}/repos/${owner}/${name}/contents/${lock}?ref=${sha}")
 done
 revoke="DELETE ${api}/installation/token"
-# Two exact shapes are reviewed (step A of the two-step rule). The first is today's resolver. The
-# second exists for the openssl-src release-line cadence change (ship-openssl-cadence): it also
-# resolves the uat tip and reads the three locks at the uat and main tips, and writes their versions
-# as two more outputs. That change narrows this back to its own shape alone once it lands.
+# One exact shape is reviewed (step B of the two-step rule): the openssl-src release-line cadence
+# resolver, which also resolves the uat tip, reads the three locks at the uat and main tips, and writes
+# their versions as two more outputs. The previous call list is kept below as a refused fixture.
 locked='300.5.0+3.5.0,300.5.0+3.5.0,300.5.0+3.5.0'
 current_outputs="sha=${sha}
 base=${other}
@@ -235,7 +235,7 @@ openssl_locked_main=${locked}"
 current_calls=("${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${revoke}")
 cadence_calls=("${identity}" "${tip}" "${main_tip}" "${week}" "${locks[@]}" "${uat_tip}" "${locks[@]}" "${locks[@]}" "${revoke}")
 revoke_run refs/heads/main
-expect_any 'resolved' 0 -- "${current_outputs}" "${current_calls[@]}" -- "${cadence_outputs}" "${cadence_calls[@]}"
+expect_any 'resolved' 0 -- "${cadence_outputs}" "${cadence_calls[@]}"
 for bad in FAKE_IDENTITY=fail FAKE_ID=1 FAKE_OWNER=someone-else FAKE_NAME=other-repo; do
   revoke_run refs/heads/main "${bad}"
   expect "identity check (${bad})" fail '' "${identity}" "${revoke}"
@@ -245,7 +245,7 @@ expect 'develop tip unreadable' fail '' "${identity}" "${tip}" "${revoke}"
 revoke_run refs/heads/main FAKE_API_SHA=not-a-sha
 expect 'develop tip malformed' fail '' "${identity}" "${tip}" "${revoke}"
 revoke_run refs/heads/main FAKE_REVOKE_RC=22
-expect_any 'revoke failed' fail -- '' "${current_calls[@]}" -- '' "${cadence_calls[@]}"
+expect_any 'revoke failed' fail -- '' "${cadence_calls[@]}"
 revoke_run refs/heads/main SOURCE_TOKEN=
 expect 'no token minted' fail -
 # The two weekly shapes, judged on recorded calls rather than a resolver run, so each is exercised
@@ -262,14 +262,14 @@ shape_run() { # shape_run OUTPUT CALL...: record a finished resolver run with th
 shape_refused() { # shape_refused LABEL OUTPUT CALL...: expect_any must refuse this recorded run
   local label="$1"; shift
   shape_run "$@"
-  if ( expect_any "${label}" 0 -- "${current_outputs}" "${current_calls[@]}" -- "${cadence_outputs}" "${cadence_calls[@]}" ) 2>/dev/null; then
+  if ( expect_any "${label}" 0 -- "${cadence_outputs}" "${cadence_calls[@]}" ) 2>/dev/null; then
     fail "${label}: an unreviewed weekly resolver shape was accepted"
   fi
 }
 shape_run "${current_outputs}" "${current_calls[@]}"
-expect_any 'weekly shape: the current call list' 0 -- "${current_outputs}" "${current_calls[@]}" -- "${cadence_outputs}" "${cadence_calls[@]}"
+shape_refused 'weekly shape: the current call list, no longer reviewed' "${current_outputs}" "${current_calls[@]}"
 shape_run "${cadence_outputs}" "${cadence_calls[@]}"
-expect_any 'weekly shape: the cadence call list' 0 -- "${current_outputs}" "${current_calls[@]}" -- "${cadence_outputs}" "${cadence_calls[@]}"
+expect_any 'weekly shape: the cadence call list' 0 -- "${cadence_outputs}" "${cadence_calls[@]}"
 shape_refused 'weekly shape: one extra call' "${current_outputs}" "${current_calls[@]:0:${#current_calls[@]}-1}" "${uat_tip}" "${revoke}"
 shape_refused 'weekly shape: one missing call' "${cadence_outputs}" "${cadence_calls[@]:0:4}" "${cadence_calls[@]:5}"
 shape_refused 'weekly shape: a reordered list' "${current_outputs}" "${tip}" "${identity}" "${current_calls[@]:2}"
