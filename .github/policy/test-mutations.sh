@@ -26,6 +26,9 @@ offline_policy() {
   local check
   for check in check-universal.rb check-structure.rb test-preflight.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
+    # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
+    # rule (accept_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
+    [[ "${check}" == check-structure.rb && -n "${SKIP_STRUCTURE:-}" ]] && continue
     case "${check}" in
       *.rb) ruby ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
       *) bash ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
@@ -189,9 +192,15 @@ mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    us
 # the same shape at any other path. Run before the file exists, because a pull request is judged by
 # the base commit's checks.
 reusable=.github/workflows/base-policy.yml
+# The body has exactly the shape the structure manifest pins for this file (workflow_call, jobs
+# base-policy, base-policy-fixtures and base-policy-result), so each variant below differs from the
+# reviewed file only in the property under test.
 reusable_body() {
-  printf '%s\n' 'name: Reusable public policy (fixture)' 'on:' '  workflow_call:' "$@" 'permissions: {}' 'jobs:' '  noop:' \
-    '    name: noop' '    permissions: {}' '    runs-on: ubuntu-24.04' '    steps:' "      - run: 'true'"
+  local id
+  printf '%s\n' 'name: Reusable public policy (fixture)' 'on:' '  workflow_call:' "$@" 'permissions: {}' 'jobs:'
+  for id in base-policy base-policy-fixtures base-policy-result; do
+    printf '%s\n' "  ${id}:" "    name: ${id}" '    permissions: {}' '    runs-on: ubuntu-24.04' '    steps:' "      - run: 'true'"
+  done
 }
 # with_file LABEL PATH BODY: the tree plus one new file.
 with_file() {
@@ -200,10 +209,22 @@ with_file() {
   printf '%s\n' "$3" > "${dir}/tree/$2"
   : > "${dir}/log"
 }
+# reject_file LABEL PATH BODY CHECKER: refused, and by CHECKER. The structure check is skipped here so
+# it cannot refuse the file for being a different shape and let the rule under test pass vacuously;
+# the structure manifest has its own fixtures in test-structure.sh.
 reject_file() {
+  local by
   with_file "$1" "$2" "$3"
-  verdict "$1" "$(cd "${dir}/tree" && offline_policy)" || true
+  by="$(cd "${dir}/tree" && SKIP_STRUCTURE=1 offline_policy)" || true
+  if [[ "${by}" != "$4" ]]; then
+    echo "WRONG CHECKER  $1  (wanted $4, got '${by}')" >&2
+    missed=$((missed + 1))
+    [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+    return 0
+  fi
+  verdict "$1" "${by}"
 }
+# accept_file LABEL PATH BODY: accepted by every check, the structure check included.
 accept_file() {
   local label="$1" by
   with_file "$@"
@@ -216,19 +237,23 @@ accept_file() {
   fi
 }
 accept_file '11. the reusable public policy workflow as a plain called workflow' "${reusable}" "$(reusable_body)"
-reject_file '11. the same called workflow at a path no tier names' .github/workflows/other-public.yml "$(reusable_body)"
-reject_file '11. the reusable public policy workflow with a schedule trigger' "${reusable}" "$(reusable_body '  schedule:' "    - cron: '0 0 * * *'")"
-reject_file '11. the reusable public policy workflow with a pull_request_target trigger' "${reusable}" "$(reusable_body '  pull_request_target:')"
-reject_file '11. the reusable public policy workflow that is not called' "${reusable}" "$(reusable_body | sed 's/workflow_call:/workflow_dispatch:/')"
+reject_file '11. the same called workflow at a path no tier names' .github/workflows/other-public.yml "$(reusable_body)" check-workflows.sh
+reject_file '11. the reusable public policy workflow with a schedule trigger' "${reusable}" "$(reusable_body '  schedule:' "    - cron: '0 0 * * *'")" check-workflows.sh
+reject_file '11. the reusable public policy workflow with a pull_request_target trigger' "${reusable}" "$(reusable_body '  pull_request_target:')" check-universal.rb
+reject_file '11. the reusable public policy workflow that is not called' "${reusable}" "$(reusable_body | sed 's/workflow_call:/workflow_dispatch:/')" check-workflows.sh
 # A trigger on none of the refused lists: only the rule that it be workflow_call refuses this one.
-reject_file '11. the reusable public policy workflow triggered by something other than workflow_call' "${reusable}" "$(reusable_body | sed 's/  workflow_call:/  issues:/')"
-reject_file '11. the reusable public policy workflow declaring a secret' "${reusable}" "$(reusable_body '    secrets:' '      TOKEN:' '        required: false')"
-reject_file '11. the reusable public policy workflow with a deployment environment' "${reusable}" "$(reusable_body | ruby -e 'print STDIN.read.sub("    name: noop\n", "    name: noop\n    environment: prod\n")')"
-reject_file '11. the reusable public policy workflow reading a secret' "${reusable}" "$(reusable_body | sed "s/'true'/'echo \${{ secrets.TOKEN }}'/")"
+reject_file '11. the reusable public policy workflow triggered by something other than workflow_call' "${reusable}" "$(reusable_body | sed 's/  workflow_call:/  issues:/')" check-workflows.sh
+reject_file '11. the reusable public policy workflow declaring a secret' "${reusable}" "$(reusable_body '    secrets:' '      TOKEN:' '        required: false')" check-workflows.sh
+reject_file '11. the reusable public policy workflow with a deployment environment' "${reusable}" "$(reusable_body | ruby -e 'print STDIN.read.sub("    name: base-policy\n", "    name: base-policy\n    environment: prod\n")')" check-workflows.sh
+reject_file '11. the reusable public policy workflow reading a secret' "${reusable}" "$(reusable_body | sed "s/'true'/'echo \${{ secrets.TOKEN }}'/")" check-workflows.sh
 # A workflow calling it is accepted: the call is a reviewed local reusable workflow. The caller is a
 # small workflow of its own, so this tests the allow-list and not the size of the entrypoint.
 fresh_tree
 printf '%s\n' "$(reusable_body)" > "${dir}/tree/${reusable}"
+# The caller is new, so the fixture tree's manifest also lists it: a tree and its manifest changed
+# together, as a reviewed change does, and every check, the structure one included, accepts it.
+swap .github/policy/check-structure.rb '   ".github/workflows/cache-prune.yml" =>' '   ".github/workflows/call-fixture.yml" => {"tier" => "public", "triggers" => ["workflow_dispatch"], "jobs" => ["call"]},
+   ".github/workflows/cache-prune.yml" =>'
 printf '%s\n' 'name: Caller (fixture)' 'on:' '  workflow_dispatch:' 'permissions: {}' 'jobs:' '  call:' '    permissions:' \
   '      contents: read' '    uses: ./.github/workflows/base-policy.yml' > "${dir}/tree/.github/workflows/call-fixture.yml"
 : > "${dir}/log"
