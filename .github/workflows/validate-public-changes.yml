@@ -62,9 +62,12 @@ jobs:
 
       # Rules for every workflow and composite: SHA pins, permissions: {}, no
       # pull_request_target, no secrets: inherit, source-checkout first in protected jobs.
-      - name: Check the universal workflow rules
+      - name: Check the universal workflow rules and the control-plane structure
         shell: bash
-        run: ruby .github/policy/check-universal.rb
+        run: |
+          ruby .github/policy/check-universal.rb
+          ruby .github/policy/check-structure.rb
+          bash .github/policy/test-structure.sh
 
       # Trust tiers: reviewed Actions, token revocation order, cache, secrets, dispatchers.
       - name: Enforce immutable reviewed Actions and safe workflow features

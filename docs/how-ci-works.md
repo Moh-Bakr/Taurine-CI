@@ -734,6 +734,39 @@ Source-bearing output is public, so it is treated as hostile:
   commit SHA on the policy allow-list; protected concurrency groups set `cancel-in-progress:
   false` so a cancel cannot skip token revocation.
 
+## Control-plane structure manifest
+
+The ruleset "Protect CI control plane" requires the status check "Validate workflow policy"
+because GitHub's `workflows` rule is Enterprise-only. That check proves each workflow is
+well-formed, not that the set of workflows is unchanged, so `check-structure.rb` compares the
+tree with the reviewed manifest, the frozen `CONTROL_PLANE_MANIFEST` constant in that script
+(ordinary reviewed Ruby: no data file, no read-back): every workflow with its trust tier,
+triggers and job ids, every local composite, and the required check's workflow, job id and name.
+The two must match in both directions, so deleting or renaming a workflow, adding one with no
+entry, adding or renaming a job (including the required "Validate workflow policy" job, which
+would silently drop the required check), or adding a trigger fails until the constant is edited
+in the same pull request, where review sees it. `pull_request_target` and `workflow_run` are
+refused outright, whatever the manifest says. A tier must also agree with `workflow-lists.sh`.
+
+Because the base's copy of the policy also judges every pull request, an exact manifest would
+deadlock a structural change (tree plus manifest fails the base's copy; manifest alone fails the
+PR's own). A manifest entry may therefore be an array of exact alternatives, the first being the
+final shape: step A adds the new shape first and keeps the old one second (tree unchanged); step
+B changes the tree and deletes the old alternative, which the base's copy (step A's) accepts
+through its alternative. Alternatives are exact (tier, triggers, jobs, or `absent`/`present`), the
+forbidden-trigger denial and the required-check job pin apply to every one, and wildcards or extra
+keys are refused when the manifest is validated. A tree matching only the final shape while
+alternatives remain prints a warning annotation, not a failure, because the base's copy sees step
+B's tree in exactly that state. The check also unions the `on` and `true` keys (YAML 1.1 reads a
+bare `on` as true), refuses a file with both, and refuses any duplicate mapping key. It does not
+catch `if: ${{ false }}` or `continue-on-error` on the required job, which drops the check like a
+rename; review, or an Enterprise-only ruleset-required workflow, is the control for that.
+
+After a reviewed structural change, run `ruby .github/policy/check-structure.rb --print`, paste
+the literal over the constant and read the diff. `test-structure.sh` holds the falsifying
+fixtures and `test-mutations.sh` the mutations. This guards against accidental or unreviewed
+drift; as with the rest of the policy, a pull request that edits the manifest and the tree together is caught only by review.
+
 ## Changing the policy
 
 A pull request carries its own `.github/policy/`, so on its own the policy run would let a
@@ -819,7 +852,19 @@ process behind to act later. The base pass is therefore isolated further:
   and start a process the subreaper never sees. The root step logs the state of `ssh.service` and
   `ssh.socket`, masks them (so socket activation cannot revive them), and logs it again; the step, before every script, refuses any process
   named `sshd`, `sshd-session` or `sshd-auth`, of any uid, and anything accepting connections on
-  loopback port 22. Locking `~/.ssh` was not used instead, because the job user owns its home and
+  loopback port 22. The root step masks every `ssh*` and `sshd*` socket unit it finds
+  (systemd 256 and later generate `sshd-unix-local.socket` and `sshd-vsock.socket`), taking the names
+  from both the unit files and the loaded units because `mask` takes names, not patterns. It then
+  fails unless each unit is `inactive`, `failed` or `masked` and no ssh socket or service is active
+  (an `ssh@N.service` instance already running would outlive the mask of its socket), so
+  `activating` and `reloading` fail too, and so does a unit that appears after the mask. Each of the
+  three `systemctl` listings must exit cleanly: one that errors fails the step instead of reading as
+  "no more units". Names outside `ssh*` and `sshd*`, such as a distro variant, are not enumerated;
+  the per-script check for an `sshd` process and the probe of port 22 are the backstop for those.
+  Separately, the process scan fails closed: it must exit cleanly and print its separator, or the
+  check fails instead of reading "found nothing". `test-base-policy-root-step.sh` runs both jobs' root steps with
+  stand-ins for what needs root, including a mask that leaves the service or the socket running.
+  Locking `~/.ssh` was not used instead, because the job user owns its home and
   can replace the directory. A script that starts an sshd of its own is a descendant, so the
   subreaper kills it with the script.
 - **Nothing left in HOME.** Every base script gets the same `HOME`, and pull-request code one base

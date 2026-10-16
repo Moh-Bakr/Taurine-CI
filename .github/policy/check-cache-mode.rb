@@ -384,7 +384,10 @@ end
 docs.each do |path, doc|
   next unless File.basename(path) == 'validate-public-changes.yml'
   job = doc['jobs'].is_a?(Hash) ? doc['jobs']['base-pass'] : nil
-  next unless job.is_a?(Hash)
+  unless job.is_a?(Hash)
+    failures << "#{path}: job base-pass is missing or renamed; the policy gate's job must exist and declare cache-mode: none"
+    next
+  end
   failures << "#{path}: job base-pass must declare cache-mode: none; the policy gate never restores or saves a cache" unless job['cache-mode'] == 'none'
 end
 
