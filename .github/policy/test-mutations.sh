@@ -491,6 +491,13 @@ mutation_by test-base-policy-result.sh '14. an extra key on the guard step (work
         env:
           BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
 
+# 15. The macOS classification and the dispatcher rules read the parsed structure, not indentation.
+mutation '15. classification falls back to an indentation grep' .github/policy/workflow-lists.sh '[[ "$(ruby "${workflow_lists_dir}/classify-workflow.rb" "${file}")" == dispatcher ]]' '! grep -qE '"'"'^    environment:'"'"' "${file}"'
+mutation '15. the classifier ignores a job environment' .github/policy/classify-workflow.rb "  source = true if job.key?('environment')" "  source = true if job.key?('environment') && false"
+mutation '15. the classifier ignores a source-checkout step' .github/policy/classify-workflow.rb "uses == './.github/actions/source-checkout' || " ''
+mutation '15. the dispatcher secrets rule dropped' .github/policy/dispatcher-structure.rb '    unless job['"'"'secrets'"'"'] == KEY' '    unless job['"'"'secrets'"'"'] == KEY || true'
+mutation '15. the dispatcher may enter an environment' .github/policy/dispatcher-structure.rb "reusable workflow)\" if job.key?('environment')" "reusable workflow)\" if false"
+
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
 # toJSON(secrets) read to that concern in the same change: its own policy passes, and the base
