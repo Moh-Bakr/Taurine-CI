@@ -112,17 +112,19 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
     {"tier" => "protected-dispatch",
      "triggers" => ["workflow_dispatch"],
      "jobs" => ["plan", "prove", "timings"]},
-   # Step A of the macOS split (#336): the new reusable concern workflow may be absent (now) or
-   # present, and the entrypoint's job set is the final shape with the current one transitional.
    ".github/workflows/macos-validation-concern.yml" =>
-    [{"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]}, "absent"],
+    {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
    ".github/workflows/macos-validation.yml" =>
-    [{"tier" => "protected-source",
-      "triggers" => ["workflow_dispatch"],
-      "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "timings", "validate-main", "validate-untrusted"]},
-     {"tier" => "protected-source",
-      "triggers" => ["workflow_dispatch"],
-      "jobs" => ["plan", "result", "timings", "validate"]}],
+    {"tier" => "protected-source",
+     "triggers" => ["workflow_dispatch"],
+     "jobs" =>
+      ["cache-audit",
+       "cache-audit-after",
+       "plan",
+       "result",
+       "timings",
+       "validate-main",
+       "validate-untrusted"]},
    ".github/workflows/orchestrate-validation.yml" =>
     {"tier" => "protected-source",
      "triggers" => ["workflow_dispatch"],
