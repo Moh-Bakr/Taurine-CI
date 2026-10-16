@@ -196,9 +196,8 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/actions/sanitize/action.yml" => "present",
    ".github/actions/scan-concern/action.yml" => "present",
    ".github/actions/select-concerns/action.yml" => "present",
-   # Step A of the shell-toolchain change (#340): both composites may be absent (now) or present.
-   ".github/actions/shell-artefact/action.yml" => ["present", "absent"],
-   ".github/actions/shell-config/action.yml" => ["present", "absent"],
+   ".github/actions/shell-artefact/action.yml" => "present",
+   ".github/actions/shell-config/action.yml" => "present",
    ".github/actions/source-checkout/action.yml" => "present",
    ".github/actions/timings/action.yml" => "present",
    ".github/actions/vendor-fetch/action.yml" => "present",
