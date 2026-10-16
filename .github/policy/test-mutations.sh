@@ -357,23 +357,19 @@ mutation '13. the strict step given an env block' "${public}" "${SC}" '        e
 mutation '13. the strict step made continue-on-error' "${public}" "${SC}" '        continue-on-error: true
         run: ruby .github/policy/check-structure.rb --strict
 '
-mutation '13. env at the workflow level of the policy workflow (BASH_ENV)' "${public}" 'cache-mode: none
-
-concurrency:' 'cache-mode: none
-
-env:
+mutation '13. env at the workflow level of the policy workflow (BASH_ENV)' "${public}" 'concurrency:
+  group: public-policy-' 'env:
   BASH_ENV: /dev/null
 
-concurrency:'
-mutation '13. defaults at the workflow level of the policy workflow' "${public}" 'cache-mode: none
-
-concurrency:' 'cache-mode: none
-
-defaults:
+concurrency:
+  group: public-policy-'
+mutation '13. defaults at the workflow level of the policy workflow' "${public}" 'concurrency:
+  group: public-policy-' 'defaults:
   run:
     working-directory: /tmp
 
-concurrency:'
+concurrency:
+  group: public-policy-'
 mutation '13. env on the policy job (RUBYOPT)' "${public}" '    name: Validate workflow policy
 ' '    name: Validate workflow policy
     env:

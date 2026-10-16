@@ -300,7 +300,10 @@ jobs:
               # binary anywhere else in it (assets/ included) must carry no OpenSSL.
               apk="$(find taurine-mobile/src-tauri/gen/android -path '*/outputs/apk/*' -name '*.apk' -type f 2>/dev/null | sort | head -n 1 || true)"
               apk_root="${RUNNER_TEMP}/android-apk"; libs_root="${RUNNER_TEMP}/android-apk-lib"; rm -rf "${apk_root}" "${libs_root}"
-              [[ -n "${apk}" ]] && unzip -q "${apk}" -d "${apk_root}" && [[ -d "${apk_root}/lib" ]] || { echo 'android-artefact: FAILED - no APK with a lib/ directory was built' >&2; exit 1; }
+              if ! { [[ -n "${apk}" ]] && unzip -q "${apk}" -d "${apk_root}" && [[ -d "${apk_root}/lib" ]]; }; then
+                echo 'android-artefact: FAILED - no APK with a lib/ directory was built' >&2
+                exit 1
+              fi
               mv "${apk_root}/lib" "${libs_root}"
               artefact_tree_check android-apk-other "${apk_root}" - debug absent || exit 1
               abi_dirs="$(find -L "${libs_root}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)"
