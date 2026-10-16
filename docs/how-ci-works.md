@@ -742,7 +742,19 @@ an alternative cannot admit more than the two shapes it lists. When the tree mat
 shape while alternatives remain, the run prints a warning annotation and does not fail, because the base
 copy sees step 2's tree in exactly that state. The policy job runs the pull request's own copy with
 `--strict`, where the same state is an error, so step 2 cannot merge with its transitional
-alternatives still listed.
+alternatives still listed. `--strict` runs there and nowhere else: the base pass runs main's scripts
+against the pull request's real tree, where step 2's tree matches only the final shape while main's
+manifest still lists the transitional one, so any script it reaches that ran `--strict` on that
+tree would block every step 2. `check-strict-structure.rb` therefore requires the policy job to run
+`check-structure.rb --strict` as ONE dedicated step: its `run` is exactly
+`ruby .github/policy/check-structure.rb --strict`, its keys are only `name`, `shell` and `run`, its
+shell is exactly `bash`, and the job's `if` is exactly `${{ always() }}`, so no `exit 0`, `set +e`,
+`|| true`, heredoc, uncalled function, trap, `if`, `env` or alternative shell can dodge it. It refuses
+`--strict` in any other policy script except on the synthetic tree `test-structure.sh` builds for its
+strict fixtures. Residual: a pull request can neuter the strict block inside its own
+`check-structure.rb`, and an earlier step of the policy job (which runs the pull request's own
+scripts) could export `BASH_ENV` through `GITHUB_ENV`; main's base pass cannot see either, and review
+holds them.
 
 Other checks of the same file: the check also unions the `on` and `true` keys (YAML 1.1 reads a
 bare `on` as true), refuses a file with both, and refuses any duplicate mapping key. It does not

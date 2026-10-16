@@ -41,9 +41,10 @@ module YamlGuard
   # The duplicate-key findings of one file; a load error is itself a finding.
   def yaml_duplicates(path)
     found = []
-    Psych.parse_stream(File.read(path, encoding: 'UTF-8')).children.each do |doc|
-      duplicate_keys(doc.root, [], found) if doc.root
-    end
+    docs = Psych.parse_stream(File.read(path, encoding: 'UTF-8')).children
+    # A second document is ignored by one reader and not by another; no policy file has one.
+    found << "contains #{docs.size} YAML documents, not one" if docs.size > 1
+    docs.each { |doc| duplicate_keys(doc.root, [], found) if doc.root }
     found
   rescue Psych::Exception => e
     ["cannot be parsed as YAML: #{e.class}"]
