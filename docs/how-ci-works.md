@@ -703,6 +703,39 @@ Source-bearing output is public, so it is treated as hostile:
   commit SHA on the policy allow-list; protected concurrency groups set `cancel-in-progress:
   false` so a cancel cannot skip token revocation.
 
+## Control-plane structure manifest
+
+The ruleset "Protect CI control plane" requires the status check "Validate workflow policy"
+because GitHub's `workflows` rule is Enterprise-only. That check proves each workflow is
+well-formed, not that the set of workflows is unchanged, so `check-structure.rb` compares the
+tree with the reviewed manifest, the frozen `CONTROL_PLANE_MANIFEST` constant in that script
+(ordinary reviewed Ruby: no data file, no read-back): every workflow with its trust tier,
+triggers and job ids, every local composite, and the required check's workflow, job id and name.
+The two must match in both directions, so deleting or renaming a workflow, adding one with no
+entry, adding or renaming a job (including the required "Validate workflow policy" job, which
+would silently drop the required check), or adding a trigger fails until the constant is edited
+in the same pull request, where review sees it. `pull_request_target` and `workflow_run` are
+refused outright, whatever the manifest says. A tier must also agree with `workflow-lists.sh`.
+
+Because the base's copy of the policy also judges every pull request, an exact manifest would
+deadlock a structural change (tree plus manifest fails the base's copy; manifest alone fails the
+PR's own). A manifest entry may therefore be an array of exact alternatives, the first being the
+final shape: step A adds the new shape first and keeps the old one second (tree unchanged); step
+B changes the tree and deletes the old alternative, which the base's copy (step A's) accepts
+through its alternative. Alternatives are exact (tier, triggers, jobs, or `absent`/`present`), the
+forbidden-trigger denial and the required-check job pin apply to every one, and wildcards or extra
+keys are refused when the manifest is validated. A tree matching only the final shape while
+alternatives remain prints a warning annotation, not a failure, because the base's copy sees step
+B's tree in exactly that state. The check also unions the `on` and `true` keys (YAML 1.1 reads a
+bare `on` as true), refuses a file with both, and refuses any duplicate mapping key. It does not
+catch `if: ${{ false }}` or `continue-on-error` on the required job, which drops the check like a
+rename; review, or an Enterprise-only ruleset-required workflow, is the control for that.
+
+After a reviewed structural change, run `ruby .github/policy/check-structure.rb --print`, paste
+the literal over the constant and read the diff. `test-structure.sh` holds the falsifying
+fixtures and `test-mutations.sh` the mutations. This guards against accidental or unreviewed
+drift; as with the rest of the policy, a pull request that edits the manifest and the tree together is caught only by review.
+
 ## Changing the policy
 
 A pull request carries its own `.github/policy/`, so on its own the policy run would let a
