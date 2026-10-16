@@ -807,8 +807,9 @@ and the public OpenSSL version string only:
   2 when present (a missing NASM is allowed and means OpenSSL builds `no-asm`).
 - **Artefact size (known limitation)**: CI reports the with-door artefact sizes only (every
   shell-building concern prints the artefact's byte size and build profile); it does not measure
-  the size the door adds (the with/without-door delta). A one-off measurement needs a second full
-  shell build and its own reviewed opt-in dispatch input, so it is deferred to an owner decision.
+  the size the door adds (the with/without-door delta). The owner deferred that comparison
+  (2026-10-16): the door ships with sizes reported with OpenSSL only. Measuring the delta later
+  needs a second full shell build and its own reviewed opt-in dispatch input.
 
 ## The live proofs
 
