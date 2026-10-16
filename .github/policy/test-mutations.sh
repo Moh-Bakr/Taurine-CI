@@ -304,6 +304,37 @@ mutation_by test-base-policy-result.sh '14. the base-policy guard moved after th
       - name: Require the base-policy workflow to have passed
         if: ${{ always() }}'
 
+mutation_by test-base-policy-result.sh '14. a digest-pinned container on the guard job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    container: mcr.example/runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation_by test-base-policy-result.sh '14. a service on the guard job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    services:
+      db:
+        image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+'
+mutation_by test-base-policy-result.sh '14. the guard job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:' '    runs-on: self-hosted
+    timeout-minutes: 25
+    steps:'
+
+mutation_by test-base-policy-result.sh '14. the guard step run as an argument to true (shell: true {0})' "${public}" '        shell: bash
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '        shell: true {0}
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
+mutation_by test-base-policy-result.sh '14. the guard step reading a constant (BASE_PASS_RESULT: success)' "${public}" '          BASE_PASS_RESULT: ${{ needs.base-pass.result }}
+        run: |' '          BASE_PASS_RESULT: success
+        run: |'
+mutation_by test-base-policy-result.sh '14. an extra key on the guard step (working-directory)' "${public}" '        shell: bash
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '        shell: bash
+        working-directory: /tmp
+        env:
+          BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
+
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
 # toJSON(secrets) read to that concern in the same change: its own policy passes, and the base
