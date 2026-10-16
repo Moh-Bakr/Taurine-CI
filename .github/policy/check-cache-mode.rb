@@ -142,7 +142,7 @@ def uses_of(steps, pattern)
   steps.any? { |s| s['uses'].to_s.match?(pattern) }
 end
 
-# Workflows (basename) held to the staged rules F to J (every workflow with a dispatch trigger but macOS); the
+# Workflows (basename) held to the staged rules F to J (every workflow with a dispatch trigger); the
 # workflow pull request that adds `cache-mode` to a workflow adds its name here in the same change
 # (docs/untrusted-readonly-cache.md, section 4.1). The always-on rules A to D and the
 # actions: write rule need no entry. Fixtures pass their own list with --enforced-file.
@@ -152,6 +152,7 @@ ENFORCED_WORKFLOWS = %w[
   ios-validation.yml
   linux-validation.yml
   live-proofs.yml
+  macos-validation.yml
   orchestrate-validation.yml
   pg8-measurement.yml
   scorecard.yml
@@ -160,9 +161,8 @@ ENFORCED_WORKFLOWS = %w[
   weekly-validation.yml
   windows-validation.yml
 ].freeze
-# macos-validation.yml is deliberately absent: its matrix job runs inline and saves caches, so it
-# cannot be split into validate-main / validate-untrusted until it becomes a reusable workflow
-# (docs/untrusted-readonly-cache.md, section 6). Until then macOS keeps today's default grant.
+# macos-validation.yml joined the set when its matrix job became the reusable macos-validation-concern.yml
+# and was split like Linux and Windows, which clears rule M's macOS refusal.
 
 enforced_file = nil
 args = ARGV.dup
@@ -333,10 +333,10 @@ end
 
 # M (hard precondition for any untrusted restore): while any workflow that can run on the untrusted
 # ref has no cache-mode enforcement, it keeps the default write grant, so one of its jobs could plant a
-# shadow entry between another workflow's scope audit and its restore. Today that is
-# macos-validation.yml, whose matrix job is inline and must become a reusable workflow first. So an
-# untrusted-gated cache step is refused while any non-called workflow with a job gated to the untrusted
-# ref is outside ENFORCED_WORKFLOWS.
+# shadow entry between another workflow's scope audit and its restore. So an untrusted-gated cache
+# step is refused while any non-called workflow with a job gated to the untrusted ref is outside
+# ENFORCED_WORKFLOWS. Every workflow is enforced today, so M refuses nothing by itself; rule N below
+# is the standing refusal.
 if any_untrusted_cache
   docs.each do |path, doc|
     next if path.include?('/actions/') || triggers(doc).include?('workflow_call')
@@ -344,6 +344,24 @@ if any_untrusted_cache
     next unless runs_untrusted
     next if enforced.include?(File.basename(path))
     failures << "#{path}: can run on the untrusted ref without cache-mode enforcement, so an untrusted cache restore is refused while it keeps the default write grant (split and enforce it first)"
+  end
+end
+
+# N (standing, no staging): no cache restore may run on the untrusted ref. Stage 2 (the read-only
+# untrusted restore) needs the owner's decision, so until then every restore step, whether it uses
+# actions/cache/restore, the combined actions/cache or reaches one through a local composite, must
+# carry the exact top-level term github.ref == 'refs/heads/main' in its own if and never mention the
+# untrusted ref. A restore gated to the untrusted ref, or gated to neither ref (so reachable on it),
+# is refused, with no dependence on which workflows are enforced.
+docs.each do |path, doc|
+  (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).each do |name, job|
+    next unless job.is_a?(Hash)
+    steps_of(job).each do |st|
+      kinds = cache_kinds([st])
+      next unless kinds.include?(:restore) || kinds.include?(:combined)
+      next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')
+      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref); an untrusted cache restore awaits the owner's Stage 2 decision"
+    end
   end
 end
 

@@ -215,7 +215,8 @@ mutation '12. the base-pass job renamed' .github/workflows/validate-public-chang
 '
 # 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
 # must be rejected, because the default grant for a job with no cache-mode is write.
-mutation '11. an untrusted-only cargo-source restore with no cache-mode' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+mutation '11. an untrusted-only cargo-source restore while its caller is not enforced' .github/policy/check-cache-mode.rb '  linux-validation.yml
+' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
             cargo-sources-v3-${{ runner.os }}-
@@ -485,12 +486,52 @@ mutation_by test-base-policy-result.sh '14. an extra key on the guard step (work
         env:
           BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
 
+# 14. An untrusted restore waits for every untrusted-running workflow to be enforced (rule M).
+mutation '14. an untrusted cargo-source restore while macOS is not enforced' .github/policy/check-cache-mode.rb '  macos-validation.yml
+' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
+            cargo-sources-v3-${{ runner.os }}-
+' ''
+mutation '14. the macOS untrusted half granted write' .github/workflows/macos-validation.yml '    cache-mode: read
+    # Kept as ./' '    cache-mode: write
+    # Kept as ./'
+mutation '14. the macOS concern called without the split' .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"'
+    needs: [plan, cache-audit]' '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"'
+    needs: [plan]'
 # 15. The macOS classification and the dispatcher rules read the parsed structure, not indentation.
 mutation '15. classification falls back to an indentation grep' .github/policy/workflow-lists.sh '[[ "$(ruby "${workflow_lists_dir}/classify-workflow.rb" "${file}")" == dispatcher ]]' '! grep -qE '"'"'^    environment:'"'"' "${file}"'
 mutation '15. the classifier ignores a job environment' .github/policy/classify-workflow.rb "  source = true if job.key?('environment')" "  source = true if job.key?('environment') && false"
 mutation '15. the classifier ignores a source-checkout step' .github/policy/classify-workflow.rb "uses == './.github/actions/source-checkout' || " ''
 mutation '15. the dispatcher secrets rule dropped' .github/policy/dispatcher-structure.rb '    unless job['"'"'secrets'"'"'] == KEY' '    unless job['"'"'secrets'"'"'] == KEY || true'
 mutation '15. the dispatcher may enter an environment' .github/policy/dispatcher-structure.rb "reusable workflow)\" if job.key?('environment')" "reusable workflow)\" if false"
+
+# 17. No cache restore may run on the untrusted ref (rule N): each of these passed once macOS joined
+# ENFORCED_WORKFLOWS, because rule M then refuses nothing.
+macos_concern=.github/workflows/macos-validation-concern.yml
+mutation '17. an untrusted-gated cargo-source restore, its Cargo.lock check left main-only' "${macos_concern}" "        id: cargo-sources
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}" "        id: cargo-sources
+        if: \${{ github.ref == 'refs/heads/untrusted' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}"
+mutation '17. an untrusted-gated compiled-cache restore, its strip left main-only' "${macos_concern}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && " "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/untrusted' && "
+mutation '17. a new untrusted restore of node_modules with no verification' "${macos_concern}" "      - name: Restore cached third-party crate sources
+" "      - name: Restore node modules
+        if: \${{ github.ref == 'refs/heads/untrusted' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: node_modules
+          key: nm
+
+      - name: Restore cached third-party crate sources
+"
+mutation '17. a restore with no ref gate, reachable on the untrusted ref' "${macos_concern}" "      - name: Restore cached third-party crate sources
+        id: cargo-sources
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}
+" "      - name: Restore cached third-party crate sources
+        id: cargo-sources
+"
+mutation '17. rule N dropped from the checker' .github/policy/check-cache-mode.rb "      next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')" "      next"
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
