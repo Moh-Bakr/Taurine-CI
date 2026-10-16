@@ -114,7 +114,7 @@ synth_runner() { # [PRUNE_JSON]: the check copy's manifest becomes the synthetic
   # The literal is built from JSON with inspect, not read from --print, whose formatting differs between Ruby versions.
   PRUNE="${1:-}" ruby -rjson -e 's = File.read(ARGV[0]); m = JSON.parse(File.read(ARGV[1])); m["workflows"][".github/workflows/cache-prune.yml"] = JSON.parse(ENV["PRUNE"]) unless ENV["PRUNE"].to_s.empty?; re = /^CONTROL_PLANE_MANIFEST = \{.*?\}\.freeze$/m; abort("manifest not found") unless s.match?(re); File.write(ARGV[0], s.sub(re) { "CONTROL_PLANE_MANIFEST = #{m.inspect}.freeze" })' "${dir}/v/synth.rb" "${dir}/v/actual.json"
 }
-strict_root() { [[ -f "${dir}/s/.synthetic" && ! -e "${dir}/s/.github/policy/check-structure.rb" ]] || { echo 'a --strict case must run on the synthetic tree only' >&2; exit 1; }; }
+strict_root() { [[ -f "${dir}/s/.synthetic" && ! -e "${dir}/s/.github/policy/check-structure.rb" ]] || { echo 'a strict-mode case must run on the synthetic tree only' >&2; exit 1; }; }
 expect_strict_reject() { # LABEL MESSAGE
   local out; strict_root
   if out="$(ruby "${dir}/v/synth.rb" --strict "${dir}/s" 2>&1)"; then echo "NOT rejected under --strict: $1" >&2; exit 1; fi
@@ -159,7 +159,7 @@ expect_strict_accept 'strict: step A (tree still on the transitional shape)'
 # The strict helpers refuse a root that is not the synthetic tree, so no strict case can run on the real tree.
 fresh; mkdir -p "${dir}/s"; rm -f "${dir}/s/.synthetic"
 if (strict_root) 2>/dev/null; then echo 'strict_root accepted a tree that is not synthetic' >&2; exit 1; fi
-echo 'refused   a --strict case on a tree that is not the synthetic one'
+echo 'refused   a strict-mode case on a tree that is not the synthetic one'
 # A job added that is in neither alternative (linux-validation.yml, whatever its alternatives are).
 fresh; swap .github/workflows/linux-validation.yml '
 jobs:
@@ -234,6 +234,9 @@ expect_reject 'an alternative without the required check job' 'lacks the require
 fresh; variant "${pol_old}" "[${pol_old}, \"absent\"]"
 expect_reject 'an alternative that lets the policy workflow be absent' 'required status check would be dropped'
 
+# A second YAML document is read by one parser and ignored by another: refused.
+fresh; printf '\n---\nextra: true\n' >> "${dir}/t/.github/workflows/cache-prune.yml"
+expect_reject 'a second YAML document in a workflow' 'YAML documents, not one'
 # --- YAML 1.1 spellings and duplicate keys ---
 # The quoted "on" beside a bare on (read as true) hides a trigger from a one-key reader.
 fresh; printf '\n"on":\n  push:\n' >> "${dir}/t/.github/workflows/cache-prune.yml"

@@ -16,9 +16,9 @@
 #      heredoc, uncalled function or trap to dodge it, no `if`, `env` or `working-directory` to steer
 #      it, and a pull request cannot drop or soften it and still pass main's copy of this check.
 #   2. No other script under .github/policy runs --strict on a real tree. check-structure.rb defines
-#      it and this file names it; test-structure.sh may use it only on its synthetic tree (a line
-#      that names synth.rb or the synthetic marker). Any other non-comment line that could run it with
-#      `--strict` is refused.
+#      it and this file names it; test-structure.sh may use it only through its two helper lines on the
+#      synthetic tree (the exact `"${dir}/v/synth.rb" --strict "${dir}/s"` invocation). Any other
+#      non-comment line that could run it with `--strict` is refused.
 #
 # Run from the repository root.
 require 'yaml'
@@ -39,6 +39,13 @@ else
   problems << "the strict step may only have name, shell and run (found #{extra.inspect})" unless extra.empty?
 end
 problems << 'the policy job may not carry continue-on-error' if job.key?('continue-on-error')
+# env and defaults at the workflow or policy-job level reach every step's shell: BASH_ENV, RUBYOPT,
+# PATH or a defaults.run.working-directory would steer or neutralise the strict step. (A step's own env
+# is refused for the strict step above, and other steps may carry theirs.)
+%w[env defaults].each do |key|
+  problems << "validate-public-changes.yml may not carry #{key} at the workflow level" if doc.key?(key)
+  problems << "the policy job may not carry #{key}" if job.key?(key)
+end
 problems << "the policy job's if must be exactly ${{ always() }}" unless job['if'].to_s.strip == '${{ always() }}'
 
 # Not covered: a pull request can neuter the strict block inside its own check-structure.rb, and an
@@ -54,7 +61,7 @@ Dir.glob('.github/policy/*.{sh,rb}').sort.each do |file|
     next if line.lstrip.start_with?('#')
     # Only a line that could run it counts: a message that names the flag is a string, not an invocation.
     next unless line.match?(/ruby|\$\{check\}|\$\{runner|check-structure/)
-    next if base == 'test-structure.sh' && (line.include?('synth.rb') || line.include?('synthetic'))
+    next if base == 'test-structure.sh' && line.include?('"${dir}/v/synth.rb" --strict "${dir}/s"')
 
     problems << "#{file}:#{i + 1}: --strict outside the policy job and the synthetic tree: #{line.strip[0, 120]}"
   end

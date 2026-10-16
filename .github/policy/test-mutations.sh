@@ -302,15 +302,51 @@ mutation '13. an exit trap before the strict command' "${public}" "${SC}" "     
           trap 'exit 0' EXIT
           ruby .github/policy/check-structure.rb --strict
 "
-mutation '13. the strict step given another shell invocation' "${public}" "${SC}" '        shell: bash --noprofile --norc {0}
-        run: ruby .github/policy/check-structure.rb --strict
-'
+mutation '13. the strict step given another shell invocation (the shell is replaced, not duplicated)' "${public}" '      - name: Check the control-plane structure, strictly
+        shell: bash
+        run: ruby' '      - name: Check the control-plane structure, strictly
+        shell: bash --noprofile --norc {0}
+        run: ruby'
 mutation '13. the strict step given an env block' "${public}" "${SC}" '        env:
           BASH_ENV: /dev/null
         run: ruby .github/policy/check-structure.rb --strict
 '
 mutation '13. the strict step made continue-on-error' "${public}" "${SC}" '        continue-on-error: true
         run: ruby .github/policy/check-structure.rb --strict
+'
+mutation '13. env at the workflow level of the policy workflow (BASH_ENV)' "${public}" 'permissions: {}
+
+concurrency:' 'permissions: {}
+
+env:
+  BASH_ENV: /dev/null
+
+concurrency:'
+mutation '13. defaults at the workflow level of the policy workflow' "${public}" 'permissions: {}
+
+concurrency:' 'permissions: {}
+
+defaults:
+  run:
+    working-directory: /tmp
+
+concurrency:'
+mutation '13. env on the policy job (RUBYOPT)' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    env:
+      RUBYOPT: -e0
+'
+mutation '13. defaults on the policy job' "${public}" '    name: Validate workflow policy
+' '    name: Validate workflow policy
+    defaults:
+      run:
+        working-directory: /tmp
+'
+mutation '13. a second YAML document appended to a workflow' .github/workflows/cache-prune.yml 'name: Prune stale caches (scheduled)
+' 'name: Prune stale caches (scheduled)
+---
+ignored: true
+---
 '
 mutation '13. --strict run on the real tree by another policy script (the base pass would run it)' .github/policy/test-policy.sh 'set -euo pipefail
 ' 'set -euo pipefail

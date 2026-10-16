@@ -133,6 +133,18 @@ fixture service-not-mapping reject:'is not a mapping' 'jobs:
 fixture_file() { # NAME EXPECTATION: the body comes from stdin
   cat > "${dir}/fx/$1.yml"; printf '%s\t%s\n' "$1" "$2" >> "${dir}/fx/index.tsv"
 }
+# A second document (read by one parser, ignored by another) holds an escaped-key uses the text guard cannot see.
+fixture_file multi-document reject:'YAML documents, not one' <<'FXEND'
+jobs:
+  j:
+    steps:
+      - run: echo
+---
+jobs:
+  j:
+    steps:
+      - "u\u0073es": actions/checkout@v4
+FXEND
 fixture_file ok-container-fromjson pass <<'FXEND'
 jobs:
   j:
@@ -363,6 +375,7 @@ mutant 'a leading-dash or uppercase image accepted' '%r{\A[a-z0-9][a-z0-9._/:-]*
 mutant 'the JSON nesting cap removed' 'if @depth > MAX_JSON_DEPTH' 'if false'
 mutant 'an expression accepted as a mapping image' 'if in_mapping' 'if false'
 mutant 'merge keys accepted' "if k.value == '<<'" 'if false' yaml-guard.rb
+mutant 'multi-document files accepted' 'if docs.size > 1' 'if false' yaml-guard.rb
 mutant 'container options accepted as free text' 'return if options.is_a?(String) && CONTAINER_OPTIONS_ALLOWLIST.include?(options)' 'return'
 mutant 'extra container keys accepted' '(spec.keys - CONTAINER_KEYS).each' '[].each'
 mutant 'duplicate literal keys accepted' 'duplicates.each { |k|' '[].each { |k|'
