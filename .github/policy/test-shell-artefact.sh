@@ -6,7 +6,7 @@
 set -euo pipefail
 
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/shell-artefact-test.XXXXXX")"
-trap 'rm -rf "${work}"' EXIT
+trap 'if [[ -n "${unreadable:-}" ]]; then chmod u+rwx "${unreadable}" 2>/dev/null || true; fi; rm -rf "${work}"' EXIT
 # KEEP_GOING=1 reports every refused case instead of stopping at the first (used to show
 # that each case fails against the tree before its fix).
 failures=0
@@ -26,6 +26,7 @@ extract_library() {
 }
 extract_library .github/actions/sanitize/action.yml >"${work}/sanitize.sh"
 extract_library .github/actions/mobile-report/action.yml >"${work}/mobile-report.sh"
+extract_library .github/actions/concern-report/action.yml >"${work}/concern-report.sh"
 extract_library .github/actions/shell-artefact/action.yml >"${work}/shell-artefact.sh"
 mkdir -p "${work}/rt/taurine-ci"
 extract_library .github/actions/shell-config/action.yml >"${work}/rt/taurine-ci/shell-config.sh"
@@ -165,7 +166,18 @@ real_python="$(command -v python3)"
 mkdir -p "${work}/winbin"
 cat >"${work}/winbin/cygpath" <<'STUB'
 #!/usr/bin/env bash
-case "$1" in -m) printf 'NATIVE:%s\n' "$2" ;; *) printf '%s\n' "$2" ;; esac
+case "$1" in
+  -m)
+    if [[ "$2" == *"${FAKE_CYGPATH_SUFFIX:-}" ]]; then
+      case "${FAKE_CYGPATH_MODE:-}" in
+        fail) exit 1 ;;
+        empty) exit 0 ;;
+        fail-output) printf 'NATIVE:%s\n' "$2"; exit 1 ;;
+      esac
+    fi
+    printf 'NATIVE:%s\n' "$2" ;;
+  *) printf '%s\n' "$2" ;;
+esac
 STUB
 cat >"${work}/winbin/python3" <<STUB
 #!/usr/bin/env bash
@@ -264,9 +276,42 @@ rm "${work}/cargo-home/config.toml"
 # conversion every Windows run refused a clean config as "does not parse".
 printf '[env]\nLIBSQLITE3_FLAGS = { value = "SQLITE_ENABLE_MATH_FUNCTIONS", force = false }\n' >"${src}/.cargo/config.toml"
 expect_pass 'a clean root cargo config read by a native Windows Python' "${windows}; refuse_openssl_overrides"
-mutant 'the cargo config paths handed to Python unconverted' config 'configs="$(tci_cargo_configs | while IFS= read -r file; do tci_native_path "${file}"; done | sort -u)"' 'configs="$(tci_cargo_configs | sort -u)"' pass "${windows}; refuse_openssl_overrides"
+mutant 'the cargo config paths handed to Python unconverted' config 'converted="$(tci_native_path "${file}")"' 'converted="${file}"' pass "${windows}; refuse_openssl_overrides"
 printf '[env]\nOPENSSL_DIR = "/x"\n' >"${src}/.cargo/config.toml"
 expect_fail 'an override in the root cargo config, on Windows' "${windows}; refuse_openssl_overrides" 'sets an OpenSSL override'
+# Exercise the real reporting wrapper: its || rc=$? suppresses errexit inside the refusal.
+# The mixed case deliberately converts a clean config first, then loses the override-bearing one.
+expect_conversion_failure() {
+  expect_fail "$1" "$2"
+  grep -qF 'openssl-overrides: FAILED - a cargo config path could not be converted' "${work}/rt/path-conversion.log" ||
+    fail "$1: refused for a reason other than the failed conversion"
+  if grep -qF 'openssl-overrides: none' "${work}/rt/path-conversion.log"; then
+    fail "$1: published a successful override check"
+  fi
+}
+conversion_loop="$(cat <<'GUARD'
+while IFS= read -r file; do
+    if ! converted="$(tci_native_path "${file}")" || [[ -z "${converted}" ]]; then
+      echo 'openssl-overrides: FAILED - a cargo config path could not be converted' >&2
+      return 1
+    fi
+    configs+="${converted}"$'\n'
+  done < <(tci_cargo_configs)
+GUARD
+)"
+conversion_pipeline='configs="$(tci_cargo_configs | while IFS= read -r file; do tci_native_path "${file}"; done | sort -u)"'
+for mode in fail empty fail-output; do
+  conversion_setup="${windows}; export FAKE_CYGPATH_MODE='${mode}' FAKE_CYGPATH_SUFFIX='/.cargo/config.toml'; source '${work}/concern-report.sh';"
+  conversion_only="${conversion_setup} tci_cargo_configs() { printf '%s\\n' '${src}/.cargo/config.toml'; }; run_quiet path-conversion refuse_openssl_overrides"
+  expect_conversion_failure "${mode}: the only config conversion fails under run_quiet" "${conversion_only}"
+  mutant "${mode}: the original pipeline loses the only config" config "${conversion_loop}" "${conversion_pipeline}" fail "${conversion_only}"
+  printf '[env]\nLIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"\n' >"${src}/taurine-mobile/.cargo/config"
+  conversion_mixed="${conversion_setup} tci_cargo_configs() { printf '%s\\n' '${src}/taurine-mobile/.cargo/config' '${src}/.cargo/config.toml'; }; run_quiet path-conversion refuse_openssl_overrides"
+  expect_conversion_failure "${mode}: a clean conversion before a failed one under run_quiet" "${conversion_mixed}"
+  mutant "${mode}: the original pipeline checks only the surviving clean config" config "${conversion_loop}" "${conversion_pipeline}" fail "${conversion_mixed}"
+  rm "${src}/taurine-mobile/.cargo/config"
+done
+echo 'shell-artefact fixtures: failed, empty and failing-with-output conversions refused under run_quiet; failed-only and mixed-path mutants caught'
 rm "${src}/.cargo/config.toml"
 
 # ---- C1: the door crates must be the crates.io packages -----------------------------------
@@ -462,7 +507,7 @@ grep -qF 'TCI_TREE_MAXDEPTH=1 TCI_TREE_DOOR_NAMES=' .github/actions/shell-artefa
 reg="${work}/cargo-home/registry"
 upstream="${work}/upstream"; mkdir -p "${upstream}"
 for crate in openssl-0.10.81 openssl-src-300.5.5+3.5.5 openssl-sys-0.9.117 tokio-openssl-0.6.5; do
-  mkdir -p "${work}/pkg/${crate}/src"; printf 'fn main() {}\n' >"${work}/pkg/${crate}/src/lib.rs"
+  mkdir -p "${work}/pkg/${crate}/src" "${work}/pkg/${crate}/empty"; printf 'fn main() {}\n' >"${work}/pkg/${crate}/src/lib.rs"
   COPYFILE_DISABLE=1 tar -czf "${upstream}/${crate}.crate" -C "${work}/pkg" "${crate}"
 done
 lock_with_real_sums() {
@@ -500,6 +545,28 @@ ln -s lib.rs "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/src/link
 expect_fail 'a link in a registry/src copy' 'verify_door_crate_build_inputs' 'differs from its verified archive'
 rm "${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/src/link.rs"
 expect_pass 'the registry/src copies restored' 'verify_door_crate_build_inputs'
+# An explicit empty archive directory can hide an extra file when descent fails. Prove that
+# the kernel actually denies this unprivileged process enumeration; root cannot prove the case.
+fixture_uid="$(id -u)"
+[[ "${fixture_uid}" -ne 0 ]] || fail 'the unreadable-directory fixture requires an unprivileged user'
+unreadable="${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/empty"
+printf 'planted\n' >"${unreadable}/hidden.rs"
+chmod 000 "${unreadable}"
+"${real_python}" -c '
+import os, sys
+try:
+    list(os.scandir(sys.argv[1]))
+except PermissionError:
+    sys.exit(0)
+sys.exit(1)
+' "${unreadable}" || fail 'the unreadable-directory fixture did not deny enumeration'
+expect_fail 'an unreadable archive directory hiding an extra file' 'verify_door_crate_build_inputs' 'differs from its verified archive'
+mutant 'directory traversal errors ignored' config 'os.walk(root, onerror=walk_error)' 'os.walk(root)' fail 'verify_door_crate_build_inputs'
+chmod 700 "${unreadable}"
+rm "${unreadable}/hidden.rs"
+unreadable=''
+expect_pass 'the readable empty archive directory restored' 'verify_door_crate_build_inputs'
+echo "shell-artefact fixtures: unreadable-directory refusal and no-onerror mutant exercised as uid ${fixture_uid}"
 printf '// planted\n' >>"${reg}/src/index.crates.io-0000/openssl-src-300.5.5+3.5.5/src/lib.rs"
 expect_fail 'a registry/src copy modified after verification' 'verify_door_crate_build_inputs' 'differs from its verified archive'
 rm -rf "${reg}"
@@ -738,11 +805,13 @@ expect_fail 'a marked copy where no bundle marker is expected (real cargo)' "${b
 expect_fail 'a marked copy under a marker the bundler never writes' "TCI_BUNDLE_TYPE=XYZ ${bind_marked}" 'not one the Tauri bundler writes'
 mark "${marked}" "${work}/shipped-marked" RPM
 expect_fail 'an RPM marker where the .deb copy carries DEB (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}" 'not the build that was judged'
-mark "${marked}" "${work}/shipped-marked" DEB -1
+# ELF64 e_entry is retained by strip. A midpoint byte may live in discarded debug data,
+# which is deliberately permitted by the existing stripped-binary binding fallback.
+mark "${marked}" "${work}/shipped-marked" DEB 24
 expect_fail 'a DEB marker plus one other changed byte (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}" 'not the build that was judged'
 mutant 'the marker comparison that ignores every other byte' artefact 'if shipped[:start] != built[:start] or shipped[end:] != built[end:]:' 'if False:' fail "TCI_BUNDLE_TYPE=DEB ${bind_marked}"
 mark "${work}/t-bin/debug/taurine-desktop" "${work}/shipped-marked" DEB 2>/dev/null && fail 'the unmarked toy binary carries a marker'
-cp "${work}/t-bin/debug/taurine-desktop" "${work}/shipped-unmarked"; ruby -e 'b = File.binread(ARGV[0]); b.setbyte(b.bytesize / 2, b.getbyte(b.bytesize / 2) ^ 1); File.binwrite(ARGV[0], b)' "${work}/shipped-unmarked"
+cp "${work}/t-bin/debug/taurine-desktop" "${work}/shipped-unmarked"; ruby -e 'b = File.binread(ARGV[0]); b.setbyte(24, b.getbyte(24) ^ 1); File.binwrite(ARGV[0], b)' "${work}/shipped-unmarked"
 expect_fail 'a changed copy of a build that carries no marker (real cargo)' "TCI_BUNDLE_TYPE=DEB bind_same_binary b '${work}/shipped-unmarked' '${work}/t-bin/debug/taurine-desktop'" 'not the build that was judged'
 expect_fail 'no marker in the built binary' "tci_bundle_marker_only '${work}/shipped-unmarked' '${work}/t-bin/debug/taurine-desktop' DEB" 'carries no bundle-type marker'
 printf 'head __TAURI_BUNDLE_TYPE_VAR_UNK mid __TAURI_BUNDLE_TYPE_VAR_UNK tail\n' >"${work}/built-two"
@@ -755,7 +824,7 @@ run_lib "cp \"\$(tci_stripped_copy '${marked}' '')\" '${work}/stripped-marked'" 
 mark "${work}/stripped-marked" "${work}/shipped-marked" DEB
 expect_pass 'a stripped .deb copy differing only in its DEB marker (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}"
 grep -qF 'equal once stripped, apart from the DEB bundle-type marker' "${work}/out" || { cat "${work}/out" >&2; fail 'the stripped marker-only binding was not reported as such'; }
-mark "${work}/stripped-marked" "${work}/shipped-marked" DEB -1
+mark "${work}/stripped-marked" "${work}/shipped-marked" DEB 24
 expect_fail 'a stripped DEB copy plus one other changed byte (real cargo)' "TCI_BUNDLE_TYPE=DEB ${bind_marked}" 'not the build that was judged'
 # Without the marker normalisation the .deb binding refuses the bundler's own copy: the defect.
 mark "${marked}" "${work}/shipped-marked" DEB

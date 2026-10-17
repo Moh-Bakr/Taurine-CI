@@ -316,7 +316,11 @@ runs:
                 dirs.add(parent)
                 parent = posixpath.dirname(parent)
         seen_files, seen_dirs = {}, set()
-        for current, subdirs, names in os.walk(root):
+        # os.walk otherwise ignores failed descent, so an unreadable empty archive directory
+        # could conceal extra files without changing either set above.
+        def walk_error(_error):
+            sys.exit(1)
+        for current, subdirs, names in os.walk(root, onerror=walk_error):
             base = os.path.relpath(current, root).replace(os.sep, "/")
             base = "" if base == "." else base
             for entry in subdirs + names:
@@ -512,7 +516,12 @@ runs:
         # (`/d/a/...` would be read as `\d\a\...` on the current drive); cygpath -m gives the
         # `D:/a/...` form instead. Elsewhere there is no cygpath and the path is unchanged.
         tci_native_path() {
-          if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
+          local native="$1"
+          if command -v cygpath >/dev/null 2>&1; then
+            native="$(cygpath -m "$1")" || return 1
+          fi
+          [[ -n "${native}" ]] || return 1
+          printf '%s\n' "${native}"
         }
         tci_cargo_configs() {
           local dir file start
@@ -529,13 +538,23 @@ runs:
           for file in "${CARGO_HOME:-${HOME}/.cargo}/config.toml" "${CARGO_HOME:-${HOME}/.cargo}/config"; do [[ -f "${file}" ]] && echo "${file}"; done
         }
         refuse_openssl_overrides() {
-          local bad=0 names python configs
+          local bad=0 names python configs='' file converted
           names="$(compgen -e | grep -ixE "${TCI_OPENSSL_OVERRIDE}|CARGO_BUILD_DEP_INFO_BASEDIR" || true)"
           if [[ -n "${names}" ]]; then
             echo "openssl-overrides: FAILED - the job environment sets an OpenSSL override that bypasses the vendored build: $(printf '%s' "${names}" | tr '\n' ' ')" >&2
             bad=1
           fi
-          configs="$(tci_cargo_configs | while IFS= read -r file; do tci_native_path "${file}"; done | sort -u)"
+          # run_quiet invokes this function on the left of ||, where errexit is disabled.
+          # Keep the loop in this shell and explicitly refuse every failed or empty conversion;
+          # a pipeline could lose a failed path and let Python check only the surviving configs.
+          while IFS= read -r file; do
+            if ! converted="$(tci_native_path "${file}")" || [[ -z "${converted}" ]]; then
+              echo 'openssl-overrides: FAILED - a cargo config path could not be converted' >&2
+              return 1
+            fi
+            configs+="${converted}"$'\n'
+          done < <(tci_cargo_configs)
+          configs="$(printf '%s' "${configs}" | sort -u)" || return 1
           if [[ -n "${configs}" ]]; then
             if ! python="$(tci_python)"; then
               echo 'openssl-overrides: FAILED - no Python with tomllib to read the cargo configs' >&2
