@@ -40,7 +40,10 @@ safe = [
   "#{gate} && format('{0}', join(needs.plan.outputs, ',')) != ''",
   "#{gate} && toJSON(github) != '' && endsWith(inputs.concern, '-db')",
   "#{gate} && hashFiles('Cargo.lock', '**/Cargo.toml') != ''",
-  "#{gate} && ALWAYS() && !FAILURE() && TRUE == true",
+  "#{gate} && true && false == false && null == null",
+  "#{gate} && ALWAYS() && !FAILURE() && sUcCeSs() && CoNtAiNs('x', 'x')",
+  "#{gate} && GITHUB.ref == 'refs/heads/main' && InPuTs.concern == 'rust-db'",
+  "#{gate} && inputs.TRUE == inputs['true'] && inputs.False == inputs['false'] && inputs.nUlL == inputs['null']",
   "#{gate} && inputs['true'] == 'yes' && needs['plan']['result'] == 'success'",
   "#{gate} && ('}}' == '}}')"
 ]
@@ -51,6 +54,9 @@ unsupported = [
   "#{gate} && success(,)", "#{gate} && true # )", "#{gate} && ${{ true }}",
   "#{gate} && 'line\n#{main}\nstring'", "#{gate} && (#{'(' * 70}true#{')' * 70})",
   "#{gate} && '#{'x' * 8192}'",
+  # Nonlowercase spellings are named values, not literals; none is a known context.
+  *%w[TRUE True tRuE FALSE False fAlSe NULL Null nUlL].map { |name| "#{gate} && #{name} == #{name.downcase}" },
+  "#{gate} && contains('x', TRUE)", "#{gate} && needs[False].result", "#{gate} && !nUlL",
   *%w[true.ref false.ref null.ref TRUE.ref 42.ref 0xff.ref 'x'.ref true[0] null['ref'] 'x'[0]
       success(true) always(1) failure(false) cancelled(null) contains() contains('x')
       contains('x','y','z') startsWith('x') endsWith() fromJSON() fromJSON('1','2')
@@ -61,7 +67,8 @@ unsupported = [
   "#{gate} && format(#{(["'x'"] * 256).join(',')})",
   "#{gate} && hashFiles(#{(["'x'"] * 256).join(',')})",
   # Valid Actions forms intentionally outside this bounded subset (documented compatibility).
-  "#{gate} && inputs.true", "#{gate} && needs[*].result", "#{gate} && needs.*.result",
+  "#{gate} && inputs.true", "#{gate} && inputs.false", "#{gate} && inputs.null",
+  "#{gate} && needs[*].result", "#{gate} && needs.*.result",
   "#{gate} && case(true, 'a', 'b')"
 ]
 
@@ -147,7 +154,8 @@ Dir.mktmpdir('cache-expression-fixtures-') do |dir|
   # by this attack, and still accept its reviewed condition and safe nested alternatives.
   source = File.read('.github/workflows/linux-validation-concern.yml', encoding: 'UTF-8')
   [nil, " && '(' || true || ')'", " && ('(' == '(' || ')' == ')')",
-   " && true.ref", " && success(true)", " && contains()"].each do |suffix|
+   " && true.ref", " && success(true)", " && contains()",
+   " && TRUE == true", " && fAlSe == false", " && Null == null"].each do |suffix|
     text = suffix ? source.gsub(/(if: \$\{\{ github\.ref == 'refs\/heads\/main'[^\n]*)( \}\})/) { "#{$1}#{suffix}#{$2}" } : source
     abort 'workflow fixture changed nothing' if suffix && text == source
     file = File.join(dir, 'concern.yml')

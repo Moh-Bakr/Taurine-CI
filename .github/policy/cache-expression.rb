@@ -60,7 +60,8 @@ module CacheExpression
                elsif scan.scan(/(?:0[xX][0-9a-fA-F]+|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/)
                  :literal
                elsif scan.scan(/[A-Za-z_][A-Za-z0-9_-]*/)
-                 %w[true false null].include?(scan.matched.downcase) ? :literal : :name
+                 # Runner literals are case-sensitive; context/function lookup is not.
+                 %w[true false null].include?(scan.matched) ? :literal : :name
                elsif scan.scan(/&&|\|\||==|!=|<=|>=|[!<>()\[\].,]/)
                  scan.matched
                else
