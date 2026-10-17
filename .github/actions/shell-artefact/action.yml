@@ -359,27 +359,92 @@ runs:
         # signature-free copies of both; bind_android_library always requires equal sha256 after
         # the NDK's llvm-strip --strip-all of both, and, when the built library has a GNU build-id
         # (NDK llvm-readelf), an equal build-id too. A mismatch, or a missing tool or file, fails.
-        tci_stripped_sha256() {
+        # tci_stripped_copy prints the path of a stripped, signature-free copy of the file.
+        tci_stripped_copy() {
           local file="$1" tool="$2" out
           out="${RUNNER_TEMP}/bind-${RANDOM}-$(basename "$1")"
-          cp "${file}" "${out}" && chmod u+w "${out}"
+          cp "${file}" "${out}" && chmod u+w "${out}" || return 1
           if [[ "$(tci_binary_kind "${out}")" == macho ]]; then
             codesign --remove-signature "${out}" >/dev/null 2>&1 || true
             "${tool:-strip}" -S -x "${out}" >/dev/null 2>&1 || return 1
           else
             "${tool:-strip}" --strip-all "${out}" >/dev/null 2>&1 || return 1
           fi
+          echo "${out}"
+        }
+        tci_stripped_sha256() {
+          local out
+          out="$(tci_stripped_copy "$1" "$2")" || return 1
           tci_sha256 "${out}"
         }
+
+        # The Tauri bundle-type marker. tauri-utils (src/platform.rs) compiles
+        # `static mut __TAURI_BUNDLE_TYPE: &str = "__TAURI_BUNDLE_TYPE_VAR_UNK"` into the
+        # executable. When the Tauri bundler packages a .deb, .rpm, AppImage, MSI or NSIS
+        # installer, it overwrites the last three bytes of that string, in the copy it ships, with
+        # DEB, RPM, APP, MSI or NSS: the same length, and nothing else is touched. A macOS .app is
+        # not patched, and a Windows `--no-bundle` build ships nothing.
+        # tci_bundle_marker_only <shipped> <built> <value> succeeds only when both files have the
+        # same length, the built one holds exactly one `__TAURI_BUNDLE_TYPE_VAR_UNK`, the shipped
+        # one holds `__TAURI_BUNDLE_TYPE_VAR_<value>` at that offset, and every other byte is
+        # equal. The shipped file is then the built one with only the marker's value changed.
+        # Any other difference, a missing marker or a second marker fails. Fixed reason lines only.
+        TCI_BUNDLE_MARKER_VALUES='DEB RPM APP MSI NSS'
+        tci_bundle_marker_only() {
+          local python
+          python="$(tci_python)" || { echo 'bundle-marker: FAILED - no Python 3.11+ to compare the binaries' >&2; return 1; }
+          "${python}" -c '
+        import sys
+        shipped_path, built_path, value = sys.argv[1:4]
+        prefix, unknown = b"__TAURI_BUNDLE_TYPE_VAR_", b"UNK"
+        def fail(reason):
+            print("bundle-marker: FAILED - " + reason, file=sys.stderr)
+            sys.exit(1)
+        with open(shipped_path, "rb") as handle:
+            shipped = handle.read()
+        with open(built_path, "rb") as handle:
+            built = handle.read()
+        if len(shipped) != len(built):
+            fail("the shipped and the built binary differ in length")
+        marker = prefix + unknown
+        at = built.find(marker)
+        if at < 0:
+            fail("the built binary carries no bundle-type marker")
+        if built.find(marker, at + 1) >= 0:
+            fail("the built binary carries more than one bundle-type marker")
+        start, end = at + len(prefix), at + len(marker)
+        if shipped[at:start] != prefix or shipped[start:end] != value.encode("ascii"):
+            fail("the shipped binary does not carry the expected bundle-type marker where the built one carries its marker")
+        if shipped[:start] != built[:start] or shipped[end:] != built[end:]:
+            fail("the shipped binary differs from the built one outside the bundle-type marker")
+        ' "$(tci_native_path "$1")" "$(tci_native_path "$2")" "$3"
+        }
+        # bind_same_binary <label> <shipped> <built> [<strip tool>]. TCI_BUNDLE_TYPE=<value> (one of
+        # TCI_BUNDLE_MARKER_VALUES) names the marker the bundler writes into this bundle's copy.
+        # Only then is a marker-only difference accepted, and only for that value.
         bind_same_binary() {
-          local label="$1" shipped="$2" built="$3" a b
+          local label="$1" shipped="$2" built="$3" marker="${TCI_BUNDLE_TYPE:-}" a b sa sb
           [[ -f "${shipped}" && -f "${built}" ]] || { echo "${label}: FAILED - the shipped or the built binary is missing" >&2; return 1; }
+          if [[ -n "${marker}" && " ${TCI_BUNDLE_MARKER_VALUES} " != *" ${marker} "* ]]; then
+            echo "${label}: FAILED - the bundle-type marker is not one the Tauri bundler writes" >&2; return 1
+          fi
           if [[ "$(tci_sha256 "${shipped}")" == "$(tci_sha256 "${built}")" ]]; then
             echo "${label}: the shipped binary is the judged build (identical)"; return 0
           fi
-          a="$(tci_stripped_sha256 "${shipped}" "${4:-}")" && b="$(tci_stripped_sha256 "${built}" "${4:-}")" && [[ -n "${a}" && "${a}" == "${b}" ]] ||
+          if [[ -n "${marker}" ]] && tci_bundle_marker_only "${shipped}" "${built}" "${marker}" 2>/dev/null; then
+            echo "${label}: the shipped binary is the judged build (identical apart from the ${marker} bundle-type marker)"; return 0
+          fi
+          a="$(tci_stripped_sha256 "${shipped}" "${4:-}")" && b="$(tci_stripped_sha256 "${built}" "${4:-}")" && [[ -n "${a}" ]] ||
             { echo "${label}: FAILED - the shipped binary is not the build that was judged" >&2; return 1; }
-          echo "${label}: the shipped binary is the judged build (equal once stripped)"
+          if [[ "${a}" == "${b}" ]]; then
+            echo "${label}: the shipped binary is the judged build (equal once stripped)"; return 0
+          fi
+          # Stripped as well as marked: the stripped copies must then differ only in the marker.
+          if [[ -n "${marker}" ]] && sa="$(tci_stripped_copy "${shipped}" "${4:-}")" && sb="$(tci_stripped_copy "${built}" "${4:-}")" &&
+            tci_bundle_marker_only "${sa}" "${sb}" "${marker}"; then
+            echo "${label}: the shipped binary is the judged build (equal once stripped, apart from the ${marker} bundle-type marker)"; return 0
+          fi
+          echo "${label}: FAILED - the shipped binary is not the build that was judged" >&2; return 1
         }
         tci_build_id() {
           "$1" -n "$2" 2>/dev/null | sed -nE 's/.*Build ID: *([0-9a-fA-F]+).*/\1/p' | head -n 1
@@ -574,7 +639,7 @@ runs:
         # The packaging concern's artefact proof: the door-only gate on the desktop graph, then
         # the executable's size and linkage, the built graph, and the bundle bound to the build.
         desktop_artefact_check() {
-          local os="$1" door file bundle root main
+          local os="$1" door file bundle root main marker=''
           openssl_door_gate "${os}-desktop-openssl-door-only" taurine-desktop - || return 1
           door="$(door_in_graph taurine-desktop -)" || { echo "${os}-desktop-artefact: FAILED - the door query did not resolve" >&2; return 1; }
           file="$(desktop_executable)" || { echo "${os}-desktop-artefact: FAILED - the desktop binary could not be located" >&2; return 1; }
@@ -588,6 +653,8 @@ runs:
               root="${RUNNER_TEMP}/desktop-deb"; rm -rf "${root}"
               [[ -n "${bundle}" ]] && dpkg-deb -x "${bundle}" "${root}" || { echo 'Linux-desktop-bundle: FAILED - the .deb was not found or did not unpack' >&2; return 1; }
               main="${root}/usr/bin/$(basename "${file}")"
+              # The bundler marks the copy it puts in a .deb (tci_bundle_marker_only).
+              marker=DEB
               ;;
             macOS)
               root="$(find "$(dirname "${file}")/bundle/macos" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -n 1 || true)"
@@ -606,7 +673,7 @@ runs:
           esac
           if [[ -n "${root}" ]]; then
             # The bundle's main binary must be the build that was judged.
-            bind_same_binary "${os}-desktop-binding" "${main}" "${file}" || return 1
+            TCI_BUNDLE_TYPE="${marker}" bind_same_binary "${os}-desktop-binding" "${main}" "${file}" || return 1
             artefact_tree_check "${os}-desktop-bundle" "${root}" "${main}" debug "${door}" || return 1
           fi
         }

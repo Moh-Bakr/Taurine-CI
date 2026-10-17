@@ -533,6 +533,12 @@ mutation '17. a restore with no ref gate, reachable on the untrusted ref' "${mac
 "
 mutation '17. rule N dropped from the checker' .github/policy/check-cache-mode.rb "      next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')" "      next"
 
+# 18. The case-evidence admission in the e2e-visual container (git as root, checkouts owned by the
+# runner's uid): its git calls carry an exact safe.directory for the checkout they read.
+admission=.github/policy/case-evidence-admission.rb
+mutation_by test-case-evidence-admission.sh '18. the admission git calls without safe.directory' "${admission}" "tool, '-c', safe_directory!(root, code), '-C', root," "tool, '-C', root,"
+mutation_by test-case-evidence-admission.sh '18. the admission safe.directory widened to every repository' "${admission}" '"safe.directory=#{real}"' '"safe.directory=*"'
+
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
 # toJSON(secrets) read to that concern in the same change: its own policy passes, and the base
