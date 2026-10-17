@@ -2,22 +2,38 @@
 
 require 'strscan'
 
-# A conservative subset of Actions expressions: literals, property/index access, calls,
-# grouping, !, comparisons, && and ||. Unsupported or malformed syntax fails closed.
+# A conservative subset of Actions expressions: literals, context property/index access,
+# allow-listed calls with checked arity, grouping, !, comparisons, && and ||.
+# Unsupported or malformed syntax fails closed; see docs/cache-expression-policy.md.
 # Only exact, unparenthesised top-level conjuncts count as guards. Nothing is evaluated
 # or deleted: a string's doubled quotes, parentheses and operators remain opaque tokens.
 module CacheExpression
   class Invalid < StandardError; end
   Node = Struct.new(:kind, :first, :last, :children)
   Token = Struct.new(:kind, :first, :last)
+  CONTEXTS = %w[github needs vars strategy matrix steps inputs job runner env].freeze
+  FUNCTIONS = {
+    'always' => 0..0, 'cancelled' => 0..0, 'failure' => 0..0, 'success' => 0..0,
+    'contains' => 2..2, 'endswith' => 2..2, 'startswith' => 2..2,
+    'format' => 1..255, 'join' => 1..2, 'tojson' => 1..1, 'fromjson' => 1..1,
+    'hashfiles' => 1..255
+  }.freeze
   PRECEDENCE = { '||' => 1, '&&' => 2, '==' => 3, '!=' => 3,
                  '<' => 4, '<=' => 4, '>' => 4, '>=' => 4 }.freeze
 
   def self.top_terms(value)
-    return nil unless value.is_a?(String) && value.length <= 8192 && !value.match?(/[\r\n]/)
+    return nil unless value.is_a?(String) && value.bytesize <= 8192 && !value.match?(/[\r\n]/)
 
-    text = value.strip
-    text = text[3...-2].strip if text.start_with?('${{') && text.end_with?('}}')
+    # TemplateReader segments the original scalar BEFORE expression parsing. Padding or
+    # mixed interpolation is a formatted string, so trimming could invent a guard. The
+    # supported template form is exactly one whole-scalar wrapper, without literal padding.
+    text = value
+    if text.include?('${{')
+      return nil unless text.start_with?('${{') && text.end_with?('}}')
+
+      text = text[3...-2]
+      return nil if text.include?('${{') # Nested markers, even in strings, are unsupported.
+    end
     parser = Parser.new(text)
     root = parser.parse
     return nil if root.kind == '||'
@@ -32,6 +48,7 @@ module CacheExpression
 
   class Parser
     def initialize(text)
+      @text = text
       @tokens = []
       scan = StringScanner.new(text)
       until scan.eos?
@@ -43,8 +60,8 @@ module CacheExpression
                elsif scan.scan(/(?:0[xX][0-9a-fA-F]+|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/)
                  :literal
                elsif scan.scan(/[A-Za-z_][A-Za-z0-9_-]*/)
-                 %w[true false null].include?(scan.matched) ? :literal : :name
-               elsif scan.scan(/&&|\|\||==|!=|<=|>=|[!<>()\[\].,*]/)
+                 %w[true false null].include?(scan.matched.downcase) ? :literal : :name
+               elsif scan.scan(/&&|\|\||==|!=|<=|>=|[!<>()\[\].,]/)
                  scan.matched
                else
                  raise Invalid
@@ -76,6 +93,10 @@ module CacheExpression
       token
     end
 
+    def spelling(token)
+      @text.byteslice(token.first...token.last).downcase
+    end
+
     def expression(minimum, depth)
       raise Invalid if depth > 64
 
@@ -100,8 +121,17 @@ module CacheExpression
         child = expression(1, depth + 1)
         last = take(')').last
         node = Node.new(:group, token.first, last, [child])
-      when :name, :literal
-        node = Node.new(token.kind, token.first, token.last, [])
+      when :name
+        # A bare name is a known context, or a function immediately followed by `(`.
+        # Property names are consumed separately below and are never function identities.
+        if current&.kind == '('
+          raise Invalid unless FUNCTIONS.key?(spelling(token))
+        else
+          raise Invalid unless CONTEXTS.include?(spelling(token))
+        end
+        node = Node.new(:name, token.first, token.last, [])
+      when :literal
+        node = Node.new(:literal, token.first, token.last, [])
       else
         raise Invalid
       end
@@ -109,12 +139,16 @@ module CacheExpression
       loop do
         case current&.kind
         when '.'
+          # Runner token contexts forbid dereference/index directly after a literal.
+          raise Invalid if node.kind == :literal
+
           take('.')
-          part = take
-          raise Invalid unless [:name, '*'].include?(part.kind)
+          part = take(:name) # Wildcards and literal-spelled properties are unsupported.
 
           node = Node.new(:access, node.first, part.last, [node])
         when '['
+          raise Invalid if node.kind == :literal
+
           take('[')
           index = expression(1, depth + 1)
           node = Node.new(:access, node.first, take(']').last, [node, index])
@@ -132,7 +166,10 @@ module CacheExpression
               take(',')
             end
           end
-          node = Node.new(:call, node.first, take(')').last, arguments)
+          last = take(')').last
+          raise Invalid unless FUNCTIONS.fetch(spelling(token)).cover?(arguments.length)
+
+          node = Node.new(:call, node.first, last, arguments)
         else
           return node
         end
@@ -142,13 +179,23 @@ module CacheExpression
 end
 
 # check-cache-policy.sh receives a raw, single-line `if:` line from its text walk.
-# Keep this adapter out of the YAML checker's decoded-value entry point.
+# Decode YAML quoting here, preserving literal scalar padding and template boundaries.
+# Keep this adapter out of the YAML checker's already-decoded entry point.
 if $PROGRAM_NAME == __FILE__
   value = $stdin.read(8193)
   exit 1 if value.bytesize > 8192
 
-  value = value.sub(/\A\s*if:\s*/, '')
-  terms = CacheExpression.top_terms(value)
+  exit 1 unless value.match?(/\A[ \t]*if:[ \t]/) && !value.match?(/[\r\n]/)
+
+  require 'yaml'
+  begin
+    doc = YAML.safe_load(value, aliases: false)
+  rescue Psych::Exception
+    exit 1
+  end
+  exit 1 unless doc.is_a?(Hash) && doc.keys == ['if']
+
+  terms = CacheExpression.top_terms(doc['if'])
   exit 1 if terms.nil?
 
   puts terms
