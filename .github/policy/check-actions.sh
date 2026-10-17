@@ -6,9 +6,10 @@
 # action-allowlist.rb, one line per entry.
 
 check_action_references() {
+  (( $# > 0 )) || { echo 'No Action reference file to check.' >&2; return 1; }
   local here="${BASH_SOURCE[0]%/*}"
-  ruby "${here}/check-action-uses.rb" "$1" || {
-    echo "Action reference policy violated: $1" >&2
+  ruby "${here}/check-action-uses.rb" "$@" || {
+    echo "Action reference policy violated: $*" >&2
     exit 1
   }
 }

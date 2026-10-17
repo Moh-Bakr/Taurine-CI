@@ -87,6 +87,7 @@ jobs:
           ruby .github/policy/check-universal.rb
           bash .github/policy/test-structure.sh
           bash .github/policy/test-action-uses.sh
+          bash .github/policy/test-policy-batching.sh
 
       # Dedicated and exactly one command (check-strict-structure.rb asserts it): the strict form of the
       # structure check, where a transitional alternative left in the manifest is an error.

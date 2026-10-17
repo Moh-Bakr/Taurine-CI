@@ -9,7 +9,7 @@
 cache_gated_to_protected_main() {
   local cond="$1"
   cond_requires "$cond" "github.ref == 'refs/heads/main'" \
-    && cond_requires "$cond" "steps.verified-source.outputs.protected-ancestor == 'true'"
+    "steps.verified-source.outputs.protected-ancestor == 'true'"
 }
 # Read-only restore on the untrusted ref (docs/untrusted-readonly-cache.md, Stage 2). A restore
 # step may carry EITHER the protected-main gate OR this one, never both, never neither: the
@@ -21,10 +21,14 @@ cache_gated_untrusted_restore() {
     && ! cond_requires "$cond" "github.ref == 'refs/heads/main'"
 }
 cache_restore_gate_ok() {
-  if cache_gated_to_protected_main "$1"; then
+  local terms
+  terms="$(cond_top_terms "$1")" || return 1
+  if grep -qxF "github.ref == 'refs/heads/main'" <<<"${terms}" \
+    && grep -qxF "steps.verified-source.outputs.protected-ancestor == 'true'" <<<"${terms}"; then
     [[ "$1" != *untrusted* ]]
   else
-    cache_gated_untrusted_restore "$1"
+    grep -qxF "github.ref == 'refs/heads/untrusted'" <<<"${terms}" \
+      && ! grep -qxF "github.ref == 'refs/heads/main'" <<<"${terms}"
   fi
 }
 UNTRUSTED_WRITE_RULE="a cache save, completion or strip-and-prove step must never mention the untrusted ref: only restores may run there, read-only"
@@ -61,11 +65,16 @@ cond_top_terms() {
   printf '%s' "$1" | ruby "${cache_expression_parser}"
 }
 
-# True when the condition has the exact top-level conjunct $2.
+# Parse this condition once, then require every exact top-level conjunct argument.
+# No parse result or verdict survives this call, file, fixture or mutation.
 cond_requires() {
-  local terms
+  local terms term
+  (( $# >= 2 )) || return 1
   terms="$(cond_top_terms "$1")" || return 1
-  grep -qxF -- "$2" <<<"$terms"
+  shift
+  for term in "$@"; do
+    grep -qxF -- "${term}" <<<"${terms}" || return 1
+  done
 }
 
 check_cache_policy() {

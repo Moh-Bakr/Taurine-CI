@@ -31,10 +31,13 @@ check_drop_root_order() {
 # script may contain an inline GitHub expression (inputs reach scripts
 # through env: only, so an input can never be interpreted as shell code).
 check_composite_action() {
-  if grep -nE 'secrets\.|vars\.|id-token:|actions/(upload|download)-artifact|actions/cache([^[:alnum:]_-]|$)' "$1"; then
-    echo "A composite action may not use secrets, variables, OIDC, artifacts or a cache: $1" >&2
-    return 1
-  fi
-  check_builtin_cache_off "$1" || return 1
-  ruby .github/policy/composite-action.rb "$1"
+  local file
+  for file in "$@"; do
+    if grep -nE 'secrets\.|vars\.|id-token:|actions/(upload|download)-artifact|actions/cache([^[:alnum:]_-]|$)' "${file}"; then
+      echo "A composite action may not use secrets, variables, OIDC, artifacts or a cache: ${file}" >&2
+      return 1
+    fi
+    check_builtin_cache_off "${file}" || return 1
+  done
+  ruby .github/policy/composite-action.rb "$@"
 }
