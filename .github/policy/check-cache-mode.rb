@@ -39,6 +39,7 @@
 # secret and no local composite (it deletes cache entries, which cache-mode does not govern), and
 # the weekly resolver's main-only dispatch job.
 require 'yaml'
+require_relative 'cache-expression'
 
 MAIN = "github.ref == 'refs/heads/main'".freeze
 UNTRUSTED = "github.ref == 'refs/heads/untrusted'".freeze
@@ -48,16 +49,9 @@ MODES = %w[read write none].freeze
 # or after the run) can never print a passing verdict.
 BLOCKING_EXPR = %q(${{ (contains(fromJSON('["failure","cancelled"]'), needs.cache-audit.result) || contains(fromJSON('["failure","cancelled"]'), needs.cache-audit-after.result)) && '1' || '0' }}).freeze
 
-# The top-level conjuncts of an `if:` value, as check-cache-policy.sh's cond_top_terms: the
-# ${{ }} wrapper is dropped, every parenthesised group is removed whole, and the rest is split on
-# &&. Returns nil when an || remains at the top level.
+# Both cache checkers use the same string-aware, fail-closed expression parser.
 def top_terms(value)
-  return [] unless value.is_a?(String)
-  flat = value.strip
-  flat = flat[3..-3].strip if flat.start_with?('${{') && flat.end_with?('}}')
-  nil while flat.gsub!(/\([^()]*\)/, '')
-  return nil if flat.include?('||')
-  flat.split('&&').map(&:strip)
+  CacheExpression.top_terms(value)
 end
 
 def requires?(value, term)
@@ -81,17 +75,21 @@ end
 # strip chomping indicator (|- or >-) removes every newline from the decoded value.
 def key_hygiene(path, failures)
   block_scalar_ifs = []
+  # Resolve AST scalar keys exactly as safe_load does, including quoted/explicitly tagged
+  # keys. Raw YAML 1.1 spellings such as on/yes and off/no become true and false.
+  classes = Psych::ClassLoader::Restricted.new([], [])
+  keys = Psych::Visitors::NoAliasRuby.new(Psych::ScalarScanner.new(classes), classes)
   walk = lambda do |node, location|
     if node.is_a?(Psych::Nodes::Mapping)
       seen = {}
       node.children.each_slice(2) do |key, value|
         if key.is_a?(Psych::Nodes::Scalar)
           name = key.value
-          failures << "#{path}: duplicate key #{name.inspect} in one mapping" if seen[name]
-          seen[name] = true
+          failures << "#{path}: duplicate key #{name.inspect} in one mapping" if seen.key?(keys.accept(key))
+          seen[keys.accept(key)] = true
           failures << "#{path}: #{name.inspect} is cache-mode in disguise; the key is exactly cache-mode" if name.match?(/\Acache[\s_-]*mode\z/i) && name != 'cache-mode'
         end
-        child_location = location + [key.is_a?(Psych::Nodes::Scalar) ? key.value : nil]
+        child_location = location + [key.is_a?(Psych::Nodes::Scalar) ? keys.accept(key) : nil]
         if key.is_a?(Psych::Nodes::Scalar) && key.value == 'if' && value.is_a?(Psych::Nodes::Scalar) &&
            [Psych::Nodes::Scalar::LITERAL, Psych::Nodes::Scalar::FOLDED].include?(value.style)
           block_scalar_ifs << child_location

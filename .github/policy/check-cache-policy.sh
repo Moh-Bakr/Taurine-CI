@@ -54,29 +54,11 @@ check_builtin_cache_off() {
   fi
 }
 
-# The top-level conjuncts of an `if:` condition, one per line. The `${{ }}` wrapper is
-# dropped, every parenthesised group (a call's arguments, an `(a || b)` alternative, a
-# negated `!(...)`) is removed whole, and what remains is split on `&&`. A required term
-# therefore counts only when it stands alone at the top level: `(x == 'true' || true)`,
-# `!(x == 'true')` and `x == 'true' || true` do not yield the exact term `x == 'true'`.
-# Returns 1 (no output) when an `||` remains at the top level.
+# Use the same parser as check-cache-mode.rb. Read the condition as data on stdin;
+# quoted parentheses/operators are string contents, never expression structure.
+cache_expression_parser="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cache-expression.rb"
 cond_top_terms() {
-  local flat="$1" term
-  flat="${flat#*if:}"
-  flat="${flat#"${flat%%[![:space:]]*}"}"
-  flat="${flat%"${flat##*[![:space:]]}"}"
-  if [[ "$flat" == '${{'*'}}' ]]; then
-    flat="${flat#'${{'}"; flat="${flat%'}}'}"
-  fi
-  while [[ "$flat" =~ \([^()]*\) ]]; do
-    flat="${flat//"${BASH_REMATCH[0]}"/}"
-  done
-  [[ "$flat" != *'||'* ]] || return 1
-  while IFS= read -r term; do
-    term="${term#"${term%%[![:space:]]*}"}"
-    term="${term%"${term##*[![:space:]]}"}"
-    printf '%s\n' "$term"
-  done <<<"${flat//&&/$'\n'}"
+  printf '%s' "$1" | ruby "${cache_expression_parser}"
 }
 
 # True when the condition has the exact top-level conjunct $2.
