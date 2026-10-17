@@ -76,9 +76,12 @@ end
 # Psych keeps the last of two equal keys and cache-mode is a case-sensitive key, so a job with
 # `cache-mode: write` followed by `cache-mode: read` would be checked as read while GitHub may take
 # either, and `Cache-Mode:` would be invisible to every rule. Refuse a duplicate key in any mapping
-# and any key that is cache-mode in disguise (another case, an underscore, a space).
+# and any key that is cache-mode in disguise (another case, an underscore, a space). Return the
+# paths of block-scalar if values for rule N: safe_load loses their style, including when the
+# strip chomping indicator (|- or >-) removes every newline from the decoded value.
 def key_hygiene(path, failures)
-  walk = lambda do |node|
+  block_scalar_ifs = []
+  walk = lambda do |node, location|
     if node.is_a?(Psych::Nodes::Mapping)
       seen = {}
       node.children.each_slice(2) do |key, value|
@@ -88,13 +91,21 @@ def key_hygiene(path, failures)
           seen[name] = true
           failures << "#{path}: #{name.inspect} is cache-mode in disguise; the key is exactly cache-mode" if name.match?(/\Acache[\s_-]*mode\z/i) && name != 'cache-mode'
         end
-        walk.call(value)
+        child_location = location + [key.is_a?(Psych::Nodes::Scalar) ? key.value : nil]
+        if key.is_a?(Psych::Nodes::Scalar) && key.value == 'if' && value.is_a?(Psych::Nodes::Scalar) &&
+           [Psych::Nodes::Scalar::LITERAL, Psych::Nodes::Scalar::FOLDED].include?(value.style)
+          block_scalar_ifs << child_location
+        end
+        walk.call(value, child_location)
       end
+    elsif node.is_a?(Psych::Nodes::Sequence)
+      node.children.each_with_index { |child, index| walk.call(child, location + [index]) }
     elsif node.respond_to?(:children) && node.children
-      node.children.each { |child| walk.call(child) }
+      node.children.each { |child| walk.call(child, location) }
     end
   end
-  walk.call(Psych.parse_stream(read_text(path)))
+  walk.call(Psych.parse_stream(read_text(path)), [])
+  block_scalar_ifs
 end
 
 # The cache kinds a list of steps can reach: :save, :restore or :combined (the plain actions/cache,
@@ -180,7 +191,7 @@ failures = []
 docs = {}
 args.each { |path| docs[path] = load(path) }
 
-docs.each_key { |path| key_hygiene(path, failures) }
+block_scalar_ifs = docs.keys.to_h { |path| [path, key_hygiene(path, failures)] }
 
 docs.each do |path, doc|
   base = File.basename(path)
@@ -356,9 +367,17 @@ end
 docs.each do |path, doc|
   (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).each do |name, job|
     next unless job.is_a?(Hash)
-    steps_of(job).each do |st|
+    Array(job['steps']).each_with_index do |st, index|
+      next unless st.is_a?(Hash)
       kinds = cache_kinds([st])
       next unless kinds.include?(:restore) || kinds.include?(:combined)
+      # Do not strip a block scalar down to an apparently main-only expression: surrounding
+      # whitespace can turn a wrapped ${{ }} condition into a truthy string. Reject every block
+      # style (even |- and >-, whose decoded value can be single-line), plus quoted newlines.
+      if block_scalar_ifs.fetch(path).include?(['jobs', name, 'steps', index, 'if']) || st['if'].to_s.match?(/[\r\n]/)
+        failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} has a block-scalar or multiline if; use a single-line main-only expression"
+        next
+      end
       next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')
       failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref); an untrusted cache restore awaits the owner's Stage 2 decision"
     end

@@ -256,4 +256,78 @@ set -e
   exit 1
 }
 
-echo 'dispatch identity: canonical defaults, typed inputs, source/control binding and fixed errors passed'
+# The macos-validation flavor: the reviewed choice contract (options prod, dev, uat; default prod)
+# is validated like every other choice input. An omitted input, an explicitly defaulted one and a
+# rendered-null one are the same identity; the other reviewed values are accepted identities of
+# their own; an unknown or non-string flavor is refused without echoing the value.
+flavor_workflow=.github/workflows/macos-validation.yml
+flavor_base=(
+  "CI_DISPATCH_CONTRACT_JSON=${matrix}"
+  "CI_WORKFLOW_PATH=${flavor_workflow}"
+  "CI_SOURCE_SHA=${source_sha}"
+  CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI
+  "CI_CONTROL_SHA=${control_sha}"
+  CI_CONTROL_REF=refs/heads/main
+)
+flavor_generate() {
+  env "${flavor_base[@]}" "CI_NORMALIZED_INPUTS=$1" CI_GENERATE_ONLY=true \
+    ruby .github/policy/dispatch-identity.rb
+}
+flavor_defaults_key="$(flavor_generate "$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha}')")"
+[[ "${flavor_defaults_key}" =~ ^[0-9a-f]{64}$ ]] || {
+  echo 'the macOS dispatch identity was not produced for the defaulted inputs' >&2
+  exit 1
+}
+flavor_explicit_key="$(flavor_generate "$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,flavor:"prod",only:"",rust:false}')")"
+[[ "${flavor_explicit_key}" == "${flavor_defaults_key}" ]] || {
+  echo 'an explicitly defaulted flavor did not match the omitted-input identity' >&2
+  exit 1
+}
+flavor_null_key="$(flavor_generate "$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,flavor:null,only:null,rust:null}')")"
+[[ "${flavor_null_key}" == "${flavor_defaults_key}" ]] || {
+  echo 'a rendered null flavor was not normalized to its declared default' >&2
+  exit 1
+}
+flavor_prod_key="$(flavor_generate "$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,flavor:"prod"}')")"
+[[ "${flavor_prod_key}" == "${flavor_defaults_key}" ]] || {
+  echo 'an explicit prod flavor did not match the defaulted identity' >&2
+  exit 1
+}
+previous_flavor_key="${flavor_defaults_key}"
+for flavor in prod dev uat; do
+  flavor_key="$(flavor_generate "$(jq -cn --arg sha "${source_sha}" --arg flavor "${flavor}" '{source_sha:$sha,flavor:$flavor}')")"
+  [[ "${flavor_key}" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "the reviewed ${flavor} flavor did not produce an identity" >&2
+    exit 1
+  }
+  if [[ "${flavor}" != prod && ( "${flavor_key}" == "${flavor_defaults_key}" || "${flavor_key}" == "${previous_flavor_key}" ) ]]; then
+    echo "the reviewed ${flavor} flavor did not produce a distinct identity" >&2
+    exit 1
+  fi
+  flavor_proof="$(env "${flavor_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg flavor "${flavor}" '{source_sha:$sha,flavor:$flavor}')" \
+    CI_DISPATCH_KEY="${flavor_key}" ruby .github/policy/dispatch-identity.rb)"
+  jq -e --arg flavor "${flavor}" '.identity.inputs.flavor == $flavor' \
+    <<<"${flavor_proof#CI_DISPATCH_IDENTITY=}" >/dev/null
+  previous_flavor_key="${flavor_key}"
+done
+expect_reject 'unknown flavor' inputs_invalid \
+  env "${flavor_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg flavor "${sentinel}" '{source_sha:$sha,flavor:$flavor}')" \
+  CI_DISPATCH_KEY="${flavor_defaults_key}" ruby .github/policy/dispatch-identity.rb
+set +e
+unknown_flavor_output="$(env "${flavor_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg leak "${sentinel}" '{source_sha:$sha,flavor:$leak}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb 2>&1)"
+unknown_flavor_status=$?
+set -e
+[[ "${unknown_flavor_status}" -ne 0 && "${unknown_flavor_output}" == 'CI_DISPATCH_IDENTITY_ERROR=inputs_invalid' && "${unknown_flavor_output}" != *"${sentinel}"* ]] || {
+  echo 'unknown flavor value was not rejected without echoing the value' >&2
+  exit 1
+}
+for invalid_flavor in '1' 'true' '[]' '{}' '""'; do
+  expect_reject 'non-string or empty flavor' inputs_invalid \
+    env "${flavor_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --argjson flavor "${invalid_flavor}" '{source_sha:$sha,flavor:$flavor}')" \
+    CI_DISPATCH_KEY="${flavor_defaults_key}" ruby .github/policy/dispatch-identity.rb
+done
+expect_reject 'flavor key replay for another choice' key_mismatch \
+  env "${flavor_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,flavor:"dev"}')" \
+  CI_DISPATCH_KEY="${flavor_defaults_key}" ruby .github/policy/dispatch-identity.rb
+
+echo 'dispatch identity: canonical defaults, typed inputs, flavor choices, source/control binding and fixed errors passed'

@@ -109,6 +109,11 @@ jobs:
         shell: bash
         run: bash .github/policy/test-policy.sh
 
+      # Keep block-scalar condition refusal in policy even when YAML chomping removes newlines.
+      - name: Test rule N's block-scalar if refusal
+        shell: bash
+        run: bash .github/policy/test-rule-n-if-shape.sh
+
       # The environment pre-flight composite, run against stub API answers: only custom branch
       # policies of exactly main and untrusted pass.
       - name: Test the environment pre-flight against stub endpoints
