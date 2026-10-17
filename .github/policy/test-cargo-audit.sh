@@ -65,11 +65,14 @@ case "${STUB_AUDIT_MODE}" in
   unmaintained) echo 'Warning: unmaintained'; exit 0 ;;
   scanner-error) echo 'audit fixture: scanner failed' >&2; exit 70 ;;
   unsound|nonfatal)
-    if [[ "$(cat "${lock}")" == affected ]]; then
-      echo 'ID: RUSTSEC-2026-0097'
-      echo 'Warning: unsound'
-      if [[ "${deny}" -eq 1 && "${STUB_AUDIT_MODE}" != nonfatal ]]; then exit 1; fi
-    fi
+    case "$(cat "${lock}")" in
+      affected0097)
+        echo 'ID: RUSTSEC-2026-0097'
+        echo 'Warning: unsound'
+        if [[ "${deny}" -eq 1 && "${STUB_AUDIT_MODE}" != nonfatal ]]; then exit 1; fi ;;
+      repaired0097) ;;
+      *) echo 'audit fixture: unknown lock selection' >&2; exit 65 ;;
+    esac
     exit 0 ;;
   *) exit 64 ;;
 esac
@@ -97,10 +100,10 @@ export CONCERN=contracts OS_LABEL=Linux
 odd='untracked ; $(touch ARG_INJECTION)'
 mkdir -p "${dir}/work/ignored" "${dir}/work/patched" "${dir}/work/${odd}" \
   "${dir}/work/target" "${dir}/work/node_modules"
-printf 'affected\n' > "${dir}/work/Cargo.lock"
-printf 'affected\n' > "${dir}/work/ignored/Cargo.lock"
-printf 'patched\n' > "${dir}/work/patched/Cargo.lock"
-printf 'patched\n' > "${dir}/work/${odd}/Cargo.lock"
+printf 'affected0097\n' > "${dir}/work/Cargo.lock"
+printf 'affected0097\n' > "${dir}/work/ignored/Cargo.lock"
+printf 'repaired0097\n' > "${dir}/work/patched/Cargo.lock"
+printf 'repaired0097\n' > "${dir}/work/${odd}/Cargo.lock"
 printf 'affected\n' > "${dir}/work/target/Cargo.lock"
 printf 'affected\n' > "${dir}/work/node_modules/Cargo.lock"
 printf 'ignored/\ntarget/\nnode_modules/\n' > "${dir}/work/.gitignore"
@@ -157,6 +160,32 @@ grep -qF '| `cargo-audit` | failed:' "${GITHUB_STEP_SUMMARY}"
 grep -qF 'error: unaccepted advisory findings in lock #1' "${RUNNER_TEMP}/cargo-audit.log"
 grep -qF 'error: unaccepted advisory findings in lock #2' "${RUNNER_TEMP}/cargo-audit.log"
 grep -qF 'cargo-audit: lock #4: passed' "${RUNNER_TEMP}/cargo-audit.log"
+
+# A typo or missing fixture classification must fail rather than silently model a
+# repaired graph. The other locks must still run and the concern must aggregate
+# the scanner error. This is synthetic selection proof, not a dependency scan.
+printf 'repaired0097\n' > "${dir}/work/Cargo.lock"
+printf 'affected0097-typo\n' > "${dir}/work/ignored/Cargo.lock"
+run_case unsound "${dir}/sweep.sh" 0
+rc_is 1; all_locks_scanned; private_output_is_withheld
+grep -qF 'audit fixture: unknown lock selection' "${RUNNER_TEMP}/cargo-audit.log"
+grep -qF 'cargo-audit: lock #4: passed' "${RUNNER_TEMP}/cargo-audit.log"
+must 'cargo-audit: failed'
+printf 'affected0097\n' > "${dir}/work/Cargo.lock"
+printf 'affected0097\n' > "${dir}/work/ignored/Cargo.lock"
+
+# The same finding-sensitive path passes only after both affected selections are
+# repaired; the clean mode above deliberately tests reporting independently.
+printf 'repaired0097\n' > "${dir}/work/Cargo.lock"
+printf 'repaired0097\n' > "${dir}/work/ignored/Cargo.lock"
+run_case unsound "${dir}/sweep.sh" 0
+rc_is 0; all_locks_scanned; private_output_is_withheld
+must 'cargo-audit: passed'
+if grep -qF 'RUSTSEC-2026-0097' "${dir}/out" "${RUNNER_TEMP}/cargo-audit.log"; then
+  echo 'audit fixture: repaired selection retained an affected finding' >&2; exit 1
+fi
+printf 'affected0097\n' > "${dir}/work/Cargo.lock"
+printf 'affected0097\n' > "${dir}/work/ignored/Cargo.lock"
 
 run_case scanner-error "${dir}/sweep.sh" 0
 rc_is 1; all_locks_scanned; private_output_is_withheld

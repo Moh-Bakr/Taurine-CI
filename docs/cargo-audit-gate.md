@@ -39,6 +39,9 @@ and fail-closed concern aggregation. Output checks cover both logs and summaries
 raw private-shaped paths, source excerpts, crate names and tokens stay withheld.
 Two falsifiers require the same unsound-failure assertion to reject a removed deny
 flag and a stub that makes an unsound report nonfatal even with the flag present.
+The finding-sensitive stub accepts only explicit `affected0097` and `repaired0097`
+lock classifications. An unknown classification fails while later locks still run;
+reclassifying both affected fixtures as repaired passes the same scanner path.
 
 These are wrapper/policy simulations, not proof of scanner authenticity or advisory
 closure. The unchanged protected installer supplies checksum verification. Actual

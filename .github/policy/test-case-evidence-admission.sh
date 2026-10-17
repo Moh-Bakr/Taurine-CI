@@ -229,7 +229,7 @@ run_admission() {
   rm -rf "$tmp/work"
   mkdir -p "$tmp/work"
   chmod 700 "$tmp/work"
-  env -i PATH="$tmp/fake-bin:$(dirname "$(command -v ruby)"):$(dirname "$(command -v git)"):/usr/bin:/bin" HOME="$tmp" \
+  env -i PATH="${GIT_FIRST:+$GIT_FIRST:}$tmp/fake-bin:$(dirname "$(command -v ruby)"):$(dirname "$(command -v git)"):/usr/bin:/bin" HOME="$tmp" \
     CI_EXPECTED_SOURCE_SHA="$source_sha" \
     CI_EXPECTED_CONTROL_SHA="$control_sha" \
     CI_EXPECTED_MANIFEST_DIGEST="${MANIFEST_DIGEST_OVERRIDE-$CI_EXPECTED_MANIFEST_DIGEST}" \
@@ -479,5 +479,53 @@ cp "$tmp/reporter.keep" "$control/.github/policy/case-evidence-assets/playwright
 
 # The sharded regression concerns are refused rather than quietly passed.
 expect_blocked 'a sharded concern' concern_unsupported e2e-regression-1
+
+# The e2e-visual job container: git runs as root over checkouts the runner created under its own
+# uid, with no global or system config, so git's ownership check calls both of them "dubious".
+# GIT_TEST_ASSUME_DIFFERENT_OWNER is git's own switch for that check; this git sets it on every
+# call and records the arguments it was given, so the fixture runs the hosted ownership case as an
+# unprivileged user.
+foreign="$tmp/foreign-git"
+mkdir -p "$foreign"
+cat > "$foreign/git" <<GIT
+#!/bin/sh
+printf '%s\n' "\$*" >> '$tmp/foreign-git.log'
+GIT_TEST_ASSUME_DIFFERENT_OWNER=1 exec '$(command -v git)' "\$@"
+GIT
+chmod 755 "$foreign/git"
+# The stand-in must reproduce the hosted failure, or the case below proves nothing.
+if env -i PATH=/usr/bin:/bin HOME="$tmp" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  "$foreign/git" -C "$control" rev-parse --verify HEAD >/dev/null 2>&1; then
+  echo 'the foreign-owner git did not reproduce the dubious-ownership refusal' >&2
+  exit 1
+fi
+: > "$tmp/foreign-git.log"
+foreign_status=0
+foreign_out="$(GIT_FIRST="$foreign" run_admission e2e-critical)" || foreign_status=$?
+[[ "$foreign_status" -eq 0 ]] || { echo "checkouts owned by another uid did not reconcile: ${foreign_out}" >&2; exit 1; }
+ruby -rjson -e '
+  result = JSON.parse(ARGV.fetch(0))
+  abort "checkouts owned by another uid: #{result.inspect}" unless result["status"] == "case_evidence_reconciled"
+' "$foreign_out"
+# The exemption names exactly the checkout each call reads, never a pattern or another directory.
+ruby -e '
+  log, control, source = ARGV
+  roots = [File.realpath(control), File.realpath(source)]
+  lines = File.readlines(log, chomp: true)
+  abort "the admission ran no git under the foreign-owner stand-in" if lines.empty?
+  lines.each do |line|
+    words = line.split(" ")
+    exact = words[0] == "-c" && words[2] == "-C" && words[1] == "safe.directory=#{File.realpath(words[3])}" &&
+      roots.include?(File.realpath(words[3]))
+    abort "a git call without an exact safe.directory for its own checkout: #{line}" unless exact
+  end
+' "$tmp/foreign-git.log" "$control" "$tmp/source"
+# A directory that is not a work tree of its own is still answered for by the repository above it,
+# which the exemption does not cover.
+mkdir "$control/src-nogit"
+cp -R "$control/src/." "$control/src-nogit/"
+rm -rf "$control/src-nogit/.git"
+GIT_FIRST="$foreign" SOURCE_DIR="$control/src-nogit" expect_blocked 'a non-work-tree source under a foreign owner' source_path_invalid
+rm -rf "$control/src-nogit"
 
 echo 'Case evidence admission: real 1.62.0 discovery and execution reconcile; identity, pin, manifest and parity disagreements each block with their own class'

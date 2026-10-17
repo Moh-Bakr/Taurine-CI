@@ -278,23 +278,83 @@ runs:
 
         # verify_door_crate_build_inputs: after the build, before anything is deleted, each door
         # crate cargo built from must equal its verified archive: every cached copy still matches
-        # the lock, and each extracted registry/src copy is compared, file by file, with a fresh
-        # extraction of the archive (cargo's `.cargo-ok` marker aside). Any difference fails.
+        # the lock, and each extracted registry/src copy is compared, file by file, with the
+        # archive's own members (cargo's `.cargo-ok` marker aside): the same regular files with
+        # the same bytes, no file or directory the archive does not hold, no link. Any difference
+        # fails. The archive is read in place with Python's tarfile, not extracted with the
+        # runner's tar and compared with diff: one implementation on every OS, opened through
+        # tci_native_path so the native Windows Python reads the same files.
+        tci_crate_matches_archive() {
+          local python
+          python="$(tci_python)" || { echo 'door-crate-inputs: FAILED - no Python 3.11+ to compare the extracted crates' >&2; return 1; }
+          "${python}" -c '
+        import hashlib, os, posixpath, stat, sys, tarfile
+        archive, root, name = sys.argv[1:4]
+        def digest(handle):
+            sha = hashlib.sha256()
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                sha.update(block)
+            return sha.digest()
+        files, dirs = {}, set()
+        with tarfile.open(archive, "r:gz") as tar:
+            for member in tar:
+                path = posixpath.normpath(member.name)
+                parts = path.split("/")
+                if member.name.startswith("/") or ".." in parts or parts[0] != name:
+                    sys.exit(1)
+                relative = "/".join(parts[1:])
+                if member.isdir():
+                    if relative:
+                        dirs.add(relative)
+                    continue
+                if not member.isfile() or not relative or relative in files:
+                    sys.exit(1)
+                files[relative] = digest(tar.extractfile(member))
+        for relative in files:
+            parent = posixpath.dirname(relative)
+            while parent:
+                dirs.add(parent)
+                parent = posixpath.dirname(parent)
+        seen_files, seen_dirs = {}, set()
+        # os.walk otherwise ignores failed descent, so an unreadable empty archive directory
+        # could conceal extra files without changing either set above.
+        def walk_error(_error):
+            sys.exit(1)
+        for current, subdirs, names in os.walk(root, onerror=walk_error):
+            base = os.path.relpath(current, root).replace(os.sep, "/")
+            base = "" if base == "." else base
+            for entry in subdirs + names:
+                full = os.path.join(current, entry)
+                relative = posixpath.join(base, entry) if base else entry
+                mode = os.lstat(full).st_mode
+                if stat.S_ISLNK(mode):
+                    sys.exit(1)
+                if stat.S_ISDIR(mode):
+                    seen_dirs.add(relative)
+                elif stat.S_ISREG(mode):
+                    if relative == ".cargo-ok":
+                        continue
+                    with open(full, "rb") as handle:
+                        seen_files[relative] = digest(handle)
+                else:
+                    sys.exit(1)
+        sys.exit(0 if seen_files == files and seen_dirs == dirs else 1)
+        ' "$(tci_native_path "$1")" "$(tci_native_path "$2")" "$3"
+        }
         verify_door_crate_build_inputs() {
-          local home crate version sum archive tmp dir n bad=0
+          local home crate version sum archive dir n bad=0
           home="$(tci_cargo_home)"
           [[ -f "${RUNNER_TEMP}/door-crates.verified" ]] || { echo 'door-crate-inputs: FAILED - the sources were not verified before the build' >&2; return 1; }
+          tci_python >/dev/null || { echo 'door-crate-inputs: FAILED - no Python 3.11+ to compare the extracted crates' >&2; return 1; }
           while read -r crate version sum; do
             [[ -n "${crate}" ]] || continue
             tci_verify_cached "${crate}" "${version}" "${sum}" || { bad=1; continue; }
             archive="$(ls "${home}"/registry/cache/*/"${crate}-${version}.crate" | head -n 1)"
-            tmp="${RUNNER_TEMP}/door-crate-extract"; rm -rf "${tmp}"; mkdir -p "${tmp}"
-            tar -xzf "${archive}" -C "${tmp}" || { echo "door-crate-inputs: FAILED - the ${crate} archive did not extract" >&2; bad=1; continue; }
             n=0
             for dir in "${home}"/registry/src/*/"${crate}-${version}"; do
               [[ -d "${dir}" ]] || continue
               n=$((n + 1))
-              if ! diff -r -q -x .cargo-ok "${tmp}/${crate}-${version}" "${dir}" >/dev/null 2>&1; then
+              if ! tci_crate_matches_archive "${archive}" "${dir}" "${crate}-${version}" >/dev/null 2>&1; then
                 echo "door-crate-inputs: FAILED - the extracted ${crate} ${version} differs from its verified archive" >&2; bad=1
               fi
             done
@@ -451,6 +511,18 @@ runs:
           done
           return 1
         }
+        # A path as the Python found by tci_python can open it. On the Windows runners that Python
+        # is a native Windows program, which cannot open the MSYS form Git Bash produces
+        # (`/d/a/...` would be read as `\d\a\...` on the current drive); cygpath -m gives the
+        # `D:/a/...` form instead. Elsewhere there is no cygpath and the path is unchanged.
+        tci_native_path() {
+          local native="$1"
+          if command -v cygpath >/dev/null 2>&1; then
+            native="$(cygpath -m "$1")" || return 1
+          fi
+          [[ -n "${native}" ]] || return 1
+          printf '%s\n' "${native}"
+        }
         tci_cargo_configs() {
           local dir file start
           find . \( -name node_modules -o -name target -o -name .git \) -prune -o \( -path '*/.cargo/config.toml' -o -path '*/.cargo/config' \) -type f -print 2>/dev/null
@@ -466,13 +538,23 @@ runs:
           for file in "${CARGO_HOME:-${HOME}/.cargo}/config.toml" "${CARGO_HOME:-${HOME}/.cargo}/config"; do [[ -f "${file}" ]] && echo "${file}"; done
         }
         refuse_openssl_overrides() {
-          local bad=0 names python configs
+          local bad=0 names python configs='' file converted
           names="$(compgen -e | grep -ixE "${TCI_OPENSSL_OVERRIDE}|CARGO_BUILD_DEP_INFO_BASEDIR" || true)"
           if [[ -n "${names}" ]]; then
             echo "openssl-overrides: FAILED - the job environment sets an OpenSSL override that bypasses the vendored build: $(printf '%s' "${names}" | tr '\n' ' ')" >&2
             bad=1
           fi
-          configs="$(tci_cargo_configs | sort -u)"
+          # run_quiet invokes this function on the left of ||, where errexit is disabled.
+          # Keep the loop in this shell and explicitly refuse every failed or empty conversion;
+          # a pipeline could lose a failed path and let Python check only the surviving configs.
+          while IFS= read -r file; do
+            if ! converted="$(tci_native_path "${file}")" || [[ -z "${converted}" ]]; then
+              echo 'openssl-overrides: FAILED - a cargo config path could not be converted' >&2
+              return 1
+            fi
+            configs+="${converted}"$'\n'
+          done < <(tci_cargo_configs)
+          configs="$(printf '%s' "${configs}" | sort -u)" || return 1
           if [[ -n "${configs}" ]]; then
             if ! python="$(tci_python)"; then
               echo 'openssl-overrides: FAILED - no Python with tomllib to read the cargo configs' >&2

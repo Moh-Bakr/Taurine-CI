@@ -228,12 +228,28 @@ def git_env(tool)
     'GIT_CONFIG_NOSYSTEM' => '1', 'GIT_CONFIG_GLOBAL' => File::NULL, 'GIT_TERMINAL_PROMPT' => '0' }
 end
 
+# The one directory git may treat as safe for this call: the real path of the checkout being read,
+# never a pattern. With the global and system configs cut off above, `-c` is the only protected
+# configuration git reads, and in the e2e-visual job container git runs as root over a workspace the
+# runner created under its own uid, so without this the control checkout is "dubious ownership" and
+# every read of it fails. The exemption covers that one path: a repository git discovers anywhere
+# else (a parent above a directory that is not its own work tree) is still subject to git's
+# ownership check. Both checkouts are created by this control plane's own checkout steps, and only
+# read-only plumbing runs in them.
+def safe_directory!(root, code)
+  real = File.realpath(root)
+  block!(code) unless real.start_with?('/') && !real.include?('*')
+  "safe.directory=#{real}"
+rescue SystemCallError
+  block!(code)
+end
+
 def git_capture(tool, root, arguments, code, timeout: 30)
   # Binary, like the File.binread it is compared with: git's output would otherwise be tagged with
   # the default external encoding, and String#== is false between a binary and a UTF-8 string once
   # either holds a non-ASCII byte, even when every byte is the same.
-  stdout, _stderr, status = Open3.capture3(git_env(tool), tool, '-C', root, *arguments, unsetenv_others: true,
-    binmode: true)
+  stdout, _stderr, status = Open3.capture3(git_env(tool), tool, '-c', safe_directory!(root, code), '-C', root,
+    *arguments, unsetenv_others: true, binmode: true)
   block!(code) unless status.exitstatus.zero?
   stdout
 rescue SystemCallError
