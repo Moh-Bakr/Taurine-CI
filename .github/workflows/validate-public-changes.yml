@@ -166,6 +166,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-scan-deny.sh
 
+      - name: Test unsound advisory enforcement and protected reporting against a stub
+        shell: bash
+        run: bash .github/policy/test-cargo-audit.sh
+
       - name: Test that the base-pass step is found in either public policy workflow
         shell: bash
         run: bash .github/policy/test-base-pass-locate.sh

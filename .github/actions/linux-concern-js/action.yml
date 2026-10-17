@@ -107,7 +107,8 @@ runs:
             # anything, and this one only needs to read a lock file.
             # Unmaintained-crate warnings (rustls-pemfile, paste) are
             # recorded acceptances tracked in the private repository and do
-            # not fail the concern; only vulnerabilities do.
+            # not fail the concern. Vulnerabilities and unsound advisories
+            # fail it: cargo-audit otherwise treats unsoundness as a warning.
             run_deferred cargo-audit-install bash -c '
               set -euo pipefail
               bin_dir="${RUNNER_TEMP}/cargo-audit-bin"
@@ -157,7 +158,10 @@ runs:
               lock_index=0
               while IFS= read -r lock; do
                 lock_index=$((lock_index + 1))
-                if "${audit_bin}" audit --file "${lock}"; then
+                # Literal CLI arguments, never environment/source-supplied options.
+                # This promotes unsound warnings to failures; it does not override
+                # advisory IDs ignored by the reviewed private audit.toml.
+                if "${audit_bin}" audit --deny unsound --file "${lock}"; then
                   echo "cargo-audit: lock #${lock_index}: passed"
                 else
                   echo "error: unaccepted advisory findings in lock #${lock_index}" >&2
