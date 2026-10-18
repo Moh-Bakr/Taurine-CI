@@ -439,6 +439,9 @@ jobs:
         uses: ./.github/actions/linux-concern-js  # zizmor: ignore[self-repository]
         with:
           concern: ${{ inputs.concern }}
+          # The all-locks advisory helper is mandatory exactly on a protected SHA (develop, uat,
+          # main): the source-checkout answer, written after token revocation.
+          require-all-locks-audit: ${{ steps.verified-source.outputs.protected-ancestor == 'true' }}
 
       - name: Run the isolated Linux browser concern
         id: concern-e2e

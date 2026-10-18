@@ -71,7 +71,7 @@ runs:
         # picks up the same `.cargo/audit.toml`.
         cargo_audit_detail() {
           sanitize_stream <"$1" |
-            grep -E '^ID: |^Severity: |^error: [0-9]+ vulnerabilit|^warning: [0-9]+ (allowed )?warning|^Warning: (unmaintained|unsound|yanked|notice)' |
+            grep -E '^ID: |^Severity: |^[0-9]+ lockfile\(s\) audited, [0-9]+ failed\.$|^error: [0-9]+ vulnerabilit|^warning: [0-9]+ (allowed )?warning|^Warning: (unmaintained|unsound|yanked|notice)' |
             head -40 >&2 || true
           echo 'names withheld: run `cargo audit` in the private checkout to see the affected crates' >&2
         }
@@ -346,7 +346,7 @@ runs:
                 echo 'panics (test, file:line, class; messages withheld):' >&2
                 printf '%s\n' "${panics}" >&2
               fi
-            elif [[ "${label}" == cargo-audit ]]; then
+            elif [[ "${label}" == cargo-audit || "${label}" == cargo-audit-all-locks ]]; then
               echo "${label}: failed (advisory findings below; exit ${rc}; remaining output withheld)" >&2
               cargo_audit_detail "${log}"
             else

@@ -1,7 +1,9 @@
 name: Rust fmt and clippy enforcement
 description: >
   Runs `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked
-  -- -D warnings` over the Taurine-owned workspace and fails the job on any finding. The
+  -- -D warnings` over the Taurine-owned workspace. A formatting difference fails the job
+  (`fmt-fail`, default true); a clippy finding is reported and fails only when `fail` is true
+  (default false until clippy is proven clean on the protected tip). The
   workspace's own `exclude` list already keeps the vendored and adopted trees (vendor/*,
   dbx-core, dbx-mongo-shell, dbx-sqlite-worker) out of `--workspace`; the two crates that need
   the native OpenVPN3 toolchain are excluded exactly as the warning-only clippy scan does.
@@ -13,11 +15,20 @@ inputs:
     description: Directory, relative to the workspace, holding the private source
     required: false
     default: src
+  fmt-fail:
+    description: >
+      Whether a rustfmt difference fails the job. True (the default) enforces it: the private
+      workspace passes `cargo fmt --all -- --check` and the vendored forks opt out through the
+      private `.rustfmt.toml`. False reports only. The step reads this input and never `fail`,
+      so loosening clippy cannot loosen formatting.
+    required: false
+    default: 'true'
   fail:
     description: >
-      Whether a finding fails the job. True enforces; false reports only. Landed as false so
-      the first run on the private develop tip could be proven before it can fail any other
-      lane; the follow-up change flips the default to true.
+      Whether a clippy finding fails the job. True enforces; false (the default) reports only.
+      It stays false because the last hosted evidence showed clippy findings and no run since
+      has proven zero; the change that flips it carries its own zero-findings evidence. It does
+      not control the formatting check (see `fmt-fail`).
     required: false
     default: 'false'
 
@@ -29,7 +40,7 @@ runs:
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
       env:
-        FAIL: ${{ inputs.fail }}
+        FAIL: ${{ inputs.fmt-fail }}
       run: |
         set -euo pipefail
         status=0
