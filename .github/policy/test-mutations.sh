@@ -736,6 +736,46 @@ mutation '20. a compiled cache step in a workflow outside the allowlist' .github
 
       - name: Record the runner image"
 
+# 20c. Positive identification of compiled-cache steps (confirmation review): a door-selected
+# actions/cache restore or save step whose path is an alias (a glob, an env var, the temp root) is still a
+# compiled-cache step and is refused; so is a workflow file with a second YAML document.
+sources_anchor="      - name: Restore cached third-party crate sources"
+for alias in '${{ runner.temp }}/cargo-t*/debug/de?ps' '${{ env.CT }}' '${{ runner.temp }}' '${{ runner.temp }}/ct'; do
+  for verb in restore save; do
+    mutation "20c. a door-selected cache ${verb} step with the aliased path ${alias}" "${windows_concern}" "${sources_anchor}" "      - name: Aliased compiled ${verb}
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache/${verb}@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${alias}
+          key: door
+
+${sources_anchor}"
+  done
+done
+mutation '20c. a combined actions/cache step selected for the door with an aliased path' "${windows_concern}" "${sources_anchor}" "      - name: Aliased compiled combined
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ env.CT }}
+          key: door
+
+${sources_anchor}"
+mutation '20c. the crate-sources restore widened to a second path' "${windows_concern}" "            \${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: cargo-sources-v3" "            \${{ steps.cargo-home.outputs.dir }}/registry/cache
+            \${{ runner.temp }}/cargo-target
+          key: cargo-sources-v3"
+mutation '20c. a second YAML document in a concern workflow' "${windows_concern}" "          phase: report" "          phase: report
+---
+jobs:
+  other:
+    steps:
+      - name: Hidden compiled restore
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ env.CT }}
+          key: door"
+
 # 18. The case-evidence admission in the e2e-visual container (git as root, checkouts owned by the
 # runner's uid): its git calls carry an exact safe.directory for the checkout they read.
 admission=.github/policy/case-evidence-admission.rb

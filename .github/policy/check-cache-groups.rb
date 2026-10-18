@@ -20,6 +20,10 @@
 #     anything but selectors) fails; a step with no selector fails, as it would select every concern.
 #     Literals are compared after downcasing because Actions string comparison is case-insensitive.
 #     A compiled-cache step in a workflow that has no allowlist entry fails.
+#  3b. Cache steps are identified positively: every step whose `uses` starts (any case) with actions/cache,
+#     or that uses rust-target-cache, is a compiled-cache step, whatever its path, unless it is exactly the
+#     reviewed crate-sources restore or save (pinned by path, key, restore-keys, `if` and keys). A workflow
+#     file with more than one YAML document is refused.
 #  4. Every designated saver has a group (a literal mapping, or the fallback group for rust-app-*), and no
 #     two savers share a group (rust-app-2 alone owns the fallback).
 #  6. The steps of one cache kind select the same concerns: the restore-time strip as the restore, the
@@ -47,6 +51,46 @@ CONCERNS = {
     save: %w[rust-app-2 rust-db rust-domain rust-packaging]
   }
 }.freeze
+# The reviewed crate-sources steps (lockfile-verified archives only, never compiled output), pinned by
+# exact path set, key and `if` per workflow. Every other cache step is a compiled-cache step.
+SOURCES_PATH = "${{ steps.cargo-home.outputs.dir }}/registry/cache"
+SOURCES_KEY = "cargo-sources-v3-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}"
+SOURCES_RESTORE_KEYS = "cargo-sources-v3-${{ runner.os }}-"
+SAVE_KEY = '${{ steps.cargo-sources.outputs.cache-primary-key }}'
+PV = "github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true'"
+SOURCES = {
+  'linux-validation-concern.yml' => {
+    restore: "${{ #{PV} && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}",
+    save: "${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}"
+  },
+  'macos-validation-concern.yml' => {
+    restore: "${{ #{PV} && startsWith(inputs.concern, 'rust-') }}",
+    save: "${{ github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}"
+  },
+  'windows-validation-concern.yml' => {
+    restore: "${{ #{PV} && startsWith(inputs.concern, 'rust-') }}",
+    save: "${{ github.ref == 'refs/heads/main' && startsWith(inputs.concern, 'rust-') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}"
+  }
+}.freeze
+
+cache_uses = ->(step) { step['uses'].to_s.strip.downcase.start_with?('actions/cache') }
+target_cache_uses = ->(step) { step['uses'].to_s.downcase.include?('rust-target-cache') }
+path_set = ->(step) { step.dig('with', 'path').to_s.lines.map(&:strip).reject(&:empty?) }
+crate_sources = lambda do |step, base|
+  pin = SOURCES[base]
+  return false if pin.nil? || !step.is_a?(Hash)
+  uses = step['uses'].to_s
+  w = step['with'].is_a?(Hash) ? step['with'] : {}
+  if uses.start_with?('actions/cache/restore@') && step['id'] == 'cargo-sources'
+    step['if'].to_s == pin[:restore] && path_set.call(step) == [SOURCES_PATH] && w['key'] == SOURCES_KEY &&
+      w['restore-keys'].to_s.strip == SOURCES_RESTORE_KEYS && (w.keys - %w[path key restore-keys]).empty?
+  elsif uses.start_with?('actions/cache/save@')
+    step['if'].to_s == pin[:save] && path_set.call(step) == [SOURCES_PATH] && w['key'] == SAVE_KEY && (w.keys - %w[path key]).empty?
+  else
+    false
+  end
+end
+
 LOOKBEHIND = '(?<![\w.\[\]])'
 LITERAL = /#{LOOKBEHIND}inputs\.concern == '([a-z0-9-]+)'/
 PREFIX = /#{LOOKBEHIND}startsWith\(inputs\.concern, '([a-z0-9-]+)'\)/
@@ -77,21 +121,38 @@ end
 failures = []
 ARGV.each do |path|
   base = File.basename(path)
-  doc = YAML.safe_load(File.read(path, encoding: 'UTF-8'), aliases: false) || {}
-  steps = (doc['jobs'] || {}).values.flat_map { |job| job.is_a?(Hash) ? Array(job['steps']) : [] }.select { |s| s.is_a?(Hash) }
-  compiled = steps.select do |s|
-    uses = s['uses'].to_s
-    path_text = s.dig('with', 'path').to_s
-    (uses.start_with?('actions/cache') && path_text.match?(%r{cargo-target|debug/(deps|build)|\.fingerprint})) || uses == './.github/actions/rust-target-cache'
+  text = File.read(path, encoding: 'UTF-8')
+  documents = YAML.parse_stream(text).children.length
+  if documents != 1
+    failures << "#{path}: #{documents} YAML documents (a workflow file must hold exactly one; only the first is read by the checks)"
+    next
   end
+  doc = YAML.safe_load(text, aliases: false) || {}
+  steps = (doc['jobs'] || {}).values.flat_map { |job| job.is_a?(Hash) ? Array(job['steps']) : [] }.select { |s| s.is_a?(Hash) }
+  # Positive identification: every cache step is a compiled-cache step unless it is exactly a reviewed
+  # crate-sources step; a path pattern decides nothing (aliased paths cannot hide a step).
+  compiled = steps.select { |s| (cache_uses.call(s) || target_cache_uses.call(s)) && !crate_sources.call(s, base) }
   allow = CONCERNS[base]
   if allow.nil?
     failures << "#{path}: compiled-dependency cache steps in a workflow with no reviewed concern allowlist (add it to CONCERNS in check-cache-groups.rb, in review)" unless compiled.empty?
     next
   end
-  save = compiled.find { |s| s['uses'].to_s.start_with?('actions/cache/save@') }
-  locate = compiled.find { |s| s['uses'].to_s == './.github/actions/rust-target-cache' && s.dig('with', 'mode') == 'locate' }
-  restore = compiled.find { |s| s['uses'].to_s.start_with?('actions/cache/restore@') }
+  kind = lambda do |s|
+    u = s['uses'].to_s
+    return :save if u.start_with?('actions/cache/save@')
+    return :restore if u.start_with?('actions/cache/restore@')
+    return "composite-#{s.dig('with', 'mode')}".to_sym if u == './.github/actions/rust-target-cache'
+    :other
+  end
+  kinds = compiled.map(&kind)
+  expected_kinds = %i[composite-locate restore composite-restored composite-save save].sort
+  unless kinds.sort == expected_kinds
+    failures << "#{path}: the cache steps other than the reviewed crate-sources pair must be exactly one each of locate, restore, restore-time strip, strip-and-prove and save (found #{kinds.inspect})"
+    next
+  end
+  save = compiled.find { |s| kind.call(s) == :save }
+  locate = compiled.find { |s| kind.call(s) == :'composite-locate' }
+  restore = compiled.find { |s| kind.call(s) == :restore }
   if compiled.empty?
     failures << "#{path}: no compiled-dependency cache steps were found (an empty parse proves nothing)"
     next
@@ -111,7 +172,7 @@ ARGV.each do |path|
       next
     end
     selectors[step] = tokens
-    side = step['uses'].to_s.start_with?('actions/cache/save@') || step.dig('with', 'mode') == 'save' ? :save : :restore
+    side = kind.call(step) == :save || kind.call(step) == :'composite-save' ? :save : :restore
     expected = allow[side].sort
     failures << "#{path}: step #{step['name'].inspect} selects #{tokens.inspect}, not the reviewed #{side} set #{expected.inspect}" unless tokens == expected
     group_text = step.dig('with', 'group').to_s
