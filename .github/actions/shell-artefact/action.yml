@@ -34,14 +34,18 @@ runs:
 
         # The crates the OpenSSL door is made of, and the only crates each one may be a direct
         # (normal) dependency of. Everything that reaches OpenSSL must enter through
-        # `taurine-db-dbx` (the database subsystem) or the door crate itself; the private
+        # `taurine-db-dbx` (the database subsystem), the vendored `taurine-mysql-async` fork (a
+        # tokio-openssl consumer only) or the door crate itself; the private
         # deny.toml bans every other path, and this gate proves it on the resolved graph of the
         # shell being validated, for the target being built.
         tci_door_allowed_parents() {
           case "$1" in
             openssl-sys) echo 'openssl tokio-openssl taurine-tls-openssl' ;;
             openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;
-            tokio-openssl) echo 'taurine-db-dbx' ;;
+            # taurine-mysql-async (the vendored MySQL fork) wraps the door's Connector::into_ssl
+            # with tokio-openssl's SslStream under its own `legacy-tls` feature. It has no direct
+            # `openssl` edge, so it is a parent of tokio-openssl and of nothing else here.
+            tokio-openssl) echo 'taurine-db-dbx taurine-mysql-async' ;;
             taurine-tls-openssl) echo 'taurine-db-dbx' ;;
             # The vendored OpenSSL source is a build-dependency of openssl-sys and nothing else:
             # any other crate building it would link its own copy of the same 3.5.M.
@@ -253,14 +257,14 @@ runs:
         label, depinfo, meta_path, shell, door = sys.argv[1:6]
         allowed = {"openssl-sys": {"openssl", "tokio-openssl", "taurine-tls-openssl"},
                    "openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},
-                   "tokio-openssl": {"taurine-db-dbx"},
+                   "tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async"},
                    "openssl-src": {"openssl-sys"}}
         def fail(reason):
             print(label + ": FAILED - " + reason, file=sys.stderr)
             sys.exit(1)
         def norm(path):
             return os.path.normcase(os.path.realpath(path))
-        meta = json.load(open(meta_path))
+        meta = json.load(open(meta_path, encoding="utf-8"))
         root = meta.get("workspace_root") or os.getcwd()
         names = {p["id"]: p["name"] for p in meta["packages"]}
         by_name, by_target = {}, {}

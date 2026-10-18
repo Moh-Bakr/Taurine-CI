@@ -131,7 +131,7 @@ runs:
                 check_file(path)
             else:
                 refuse("a resource is neither a file nor a directory")
-        resources = json.load(open(config)).get("bundle", {}).get("resources")
+        resources = json.load(open(config, encoding="utf-8")).get("bundle", {}).get("resources")
         if isinstance(resources, dict):
             sources = list(resources.keys())
         elif isinstance(resources, list):
