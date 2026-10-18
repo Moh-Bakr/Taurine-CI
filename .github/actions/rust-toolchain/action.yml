@@ -53,11 +53,17 @@ runs:
             local re_item="^[[:space:]]*${items}(#.*)?\$"
             local re_close='^[[:space:]]*\][[:space:]]*(#.*)?$'
             local re_plain='^[A-Za-z0-9._+-]+$'
+            # A channel of exactly `.` or `..` would name a directory, not a toolchain.
+            local re_dots_channel='^channel[[:space:]]*=[[:space:]]*"\.{1,2}"'
+            local re_dots_plain='^\.{1,2}$'
             while IFS= read -r line || [[ -n "${line}" ]]; do
               line="${line%$'\r'}"
               [[ "${line}" =~ ^[[:space:]]*(#.*)?$ ]] && continue
               count=$((count + 1))
               plain="${line}"
+              if [[ "${line}" =~ ${re_dots_channel} ]] || [[ "${kind}" == legacy && count -eq 1 && "${line}" =~ ${re_dots_plain} ]]; then
+                toolchain_refuse "a channel of . or .." "${file}"
+              fi
               if (( in_array )); then
                 if [[ "${line}" =~ ${re_close} ]]; then in_array=0
                 elif [[ "${line}" =~ ${re_item} ]]; then :

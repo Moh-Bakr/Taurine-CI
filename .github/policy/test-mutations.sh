@@ -828,6 +828,10 @@ mutation '19. a combined actions/cache step before the root removal' "${linux_co
           key: k
 
       - name: Remove root before project code'
+mutation '19. the toolchain guard accepts a channel of . or ..' .github/actions/rust-toolchain/action.yml '              if [[ "${line}" =~ ${re_dots_channel} ]] || [[ "${kind}" == legacy && count -eq 1 && "${line}" =~ ${re_dots_plain} ]]; then
+                toolchain_refuse "a channel of . or .." "${file}"
+              fi
+' ''
 mutation '19. the toolchain guard accepts an unrecognised line' .github/actions/rust-toolchain/action.yml '              else toolchain_refuse "an unrecognised line" "${file}"; fi' '              else :; fi'
 mutation '19. the toolchain guard no longer reads the legacy file' .github/actions/rust-toolchain/action.yml '          [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy
 ' ''

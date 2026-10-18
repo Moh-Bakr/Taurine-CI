@@ -561,6 +561,14 @@ lock files before the vendored fetch (a fetched vendored crate that ships its ow
 in the key, and its archives are re-downloaded because the re-hash does not find them in a lock), and the
 key schema is unchanged.
 
+Not pinned, by decision: the composites in the pre-restore set (`sanitize`, `concern-report`,
+`shell-artefact`, `rust-toolchain`, `rust-target-cache`, `verify-cargo-cache`; `drop-root-order.rb`,
+`PRE_RESTORE_COMPOSITES`) are admitted by name only, and their `action.yml` content is not pinned
+(pinning a hash of each would break on every unrelated edit and on the sibling cache PRs). Any change to
+one of them must therefore be reviewed for source-controlled execution before the untrusted restore:
+none may run a project script, read a source file as code, or honour an environment value the source can
+set. This is a review duty, not a mechanical guard.
+
 Scratch workflow, **no private source**, on a throwaway branch `cache-mode-spike-2` (never merged,
 deleted afterwards), two files. It needs a throwaway repository secret and environment, both removed
 afterwards. Pin `actions/github-script` to the SHA in `.github/policy/action-allowlist.rb`.
