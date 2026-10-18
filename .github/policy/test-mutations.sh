@@ -28,6 +28,9 @@ mkdir -p "${jobs_dir}"
 export RUNNER_TEMP="${RUNNER_TEMP:-${root}/runner-temp}"
 mkdir -p "${RUNNER_TEMP}"
 policy_source="${MUTATION_POLICY:-${src}/.github/policy}"
+# The unmutated tree is the base for the spike gate: a mutation that flips the flag and adds the record in
+# one diff is judged against a base with no record, as the base-policy pass judges a pull request.
+export CACHE_MODE_BASE_DOC="${src}/docs/untrusted-readonly-cache.md"
 missed=0
 max_jobs="${MUTATION_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 [[ "${max_jobs}" =~ ^[1-9][0-9]*$ ]] || { echo "MUTATION_JOBS must be a positive integer, got '${max_jobs}'" >&2; exit 1; }
@@ -768,8 +771,68 @@ mutation '19. a project step between the untrusted restore and its verifier' "${
 
       - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)'
 # the switch
-mutation '19. the Stage 2 flag switched on without the recorded spike' "${linux}" 'untrusted_readonly_cache: false' 'untrusted_readonly_cache: true'
-mutation '19. the Stage 2 flag fed from an expression' "${linux}" 'untrusted_readonly_cache: false' "untrusted_readonly_cache: \${{ inputs.source_sha != '' }}"
+unt_block="$(sed -n '/^  validate-untrusted:/,/untrusted_readonly_cache: false/p' "${linux}")"
+unt_true="${unt_block%false}true"
+unt_expr="${unt_block%false}\${{ inputs.source_sha != 'x' }}"
+unt_nokey="${unt_block%untrusted_readonly_cache: false}"
+record='Stage 2 enforcement spike result: GREEN run 12345678901 reviewed by a-person on 2026-10-20'
+mutation '19. the Stage 2 flag switched on without the recorded spike' "${linux}" "${unt_block}" "${unt_true}"
+mutation '19. the Stage 2 flag fed from an expression' "${linux}" "${unt_block}" "${unt_expr}"
+mutation '19. the Stage 2 flag flipped and the record added in the same diff' "${linux}" "${unt_block}" "${unt_true}" docs/untrusted-readonly-cache.md '### 7b.' "${record}
+
+### 7b."
+mutation '19. the untrusted half omits the flag key' "${linux}" "${unt_block}" "${unt_nokey}"
+mutation '19. the callee default set to true' "${linux_concern}" '        default: false
+        type: boolean
+      suite_selection' '        default: true
+        type: boolean
+      suite_selection'
+mutation '19. the flag referenced from an env value' "${linux_concern}" '      - name: Report concern duration
+        if: ${{ always() }}
+' '      - name: Report concern duration
+        if: ${{ always() }}
+        env:
+          X: ${{ inputs.untrusted_readonly_cache }}
+'
+mutation '19. the flag referenced from another step condition' "${linux_concern}" '      - name: Fetch pinned vendored sources
+        if: ' '      - name: Fetch pinned vendored sources
+        if: inputs.untrusted_readonly_cache || '
+# verifiers that are present but neutered
+vname='      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)'
+mutation '19. the untrusted verifier condition ANDed with false' "${linux_concern}" "${vname}
+${ug_if}" "${vname}
+        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' && false }}"
+mutation '19. the untrusted verifier cache-hit a literal' "${linux_concern}" "          cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}" "          cache-hit: 'false'"
+mutation '19. the untrusted verifier with continue-on-error' "${linux_concern}" "${vname}
+${ug_if}" "${vname}
+        continue-on-error: true
+${ug_if}"
+mutation '19. the untrusted verifier pointed at another directory' "${linux_concern}" "          sources-dir: \${{ steps.cargo-home.outputs.dir }}
+          cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}" "          sources-dir: /nonexistent
+          cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}"
+mutation '19. the untrusted strip takes its cache-hit from the main restore' "${linux_concern}" "          cache-hit: \${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}" "          cache-hit: \${{ steps.cargo-target-cache.outputs.cache-hit }}"
+# source-controlled code ahead of a token-holding restore
+mutation '19. a project script before the source restores' "${linux_concern}" '      - name: Locate Cargo home for the third-party source cache' '      - name: Fetch pinned vendored sources early
+        shell: bash
+        run: bash scripts/vendor-openvpn3.sh fetch
+
+      - name: Locate Cargo home for the third-party source cache'
+mutation '19. the Node install ahead of the compiled restores' "${linux_concern}" '      - name: Locate the compiled dependency cache' '      - name: Install JavaScript early
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
+
+      - name: Locate the compiled dependency cache'
+mutation '19. a combined actions/cache step before the root removal' "${linux_concern}" '      - name: Remove root before project code' '      - name: Early combined cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: x
+          key: k
+
+      - name: Remove root before project code'
+mutation '19. the toolchain path guard message removed' .github/actions/rust-toolchain/action.yml 'a path toolchain in the source is refused' 'x'
+mutation '19. the crate re-hash keeps symlinks' .github/actions/verify-cargo-cache/action.yml '          find "${cache_dir}" -type l -delete
+' ''
+mutation '19. the crate re-hash keeps nested directories' .github/actions/verify-cargo-cache/action.yml '          find "${cache_dir}" -mindepth 2 -type d -prune -exec rm -rf -- {} +
+' ''
 
 # 18. The case-evidence admission in the e2e-visual container (git as root, checkouts owned by the
 # runner's uid): its git calls carry an exact safe.directory for the checkout they read.

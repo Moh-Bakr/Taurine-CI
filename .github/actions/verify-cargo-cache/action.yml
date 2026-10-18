@@ -46,6 +46,11 @@ runs:
         dropped=0
         cache_dir="${CARGO_SOURCES_DIR}/registry/cache"
         if [[ -d "${cache_dir}" ]]; then
+          # A restored tree holds only `<index-dir>/<name>-<version>.crate` files: a symlink (which a
+          # later step could follow out of the cache), a directory below the index level and any
+          # file that is not a `.crate` are removed before the archives are hashed.
+          find "${cache_dir}" -type l -delete
+          find "${cache_dir}" -mindepth 2 -type d -prune -exec rm -rf -- {} +
           find "${cache_dir}" -type f ! -name '*.crate' -delete
           # A POSIX path on every runner (Git Bash tools are given no drive-letter form).
           work="$(cygpath -u "${RUNNER_TEMP}" 2>/dev/null || printf '%s' "${RUNNER_TEMP}")/crate-verify"

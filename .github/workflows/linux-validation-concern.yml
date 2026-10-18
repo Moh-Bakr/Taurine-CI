@@ -239,40 +239,6 @@ jobs:
           set -euo pipefail
           ruby .github/policy/suite-contract.rb .github/ci-matrix.json "${CONCERN}" "${GITHUB_WORKSPACE}/src" >> "${GITHUB_OUTPUT}"
 
-      - name: Set up Node.js and install the locked JavaScript dependencies
-        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-security' || inputs.concern == 'rust-packaging'
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
-        with:
-          root: true
-          desktop: true
-          mobile: true
-          # The browser tiers are frontend-only: they do not need the vendored OpenVPN3 sources.
-          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' && !startsWith(inputs.concern, 'e2e-') }}
-
-      - name: Set up the Rust toolchain
-        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
-        with:
-          # The clippy scan compiles the workspace, so it takes the same system libraries
-          # as the rust-app concern (webkit, dbus, openssl).
-          concern: ${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
-
-      - name: Fetch pinned vendored sources
-        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # `fetch` verifies each download against the sha256 pinned in
-          # vendor.lock and applies the reviewed boringtun zeroize patch, so this
-          # is a supply-chain check as much as a prerequisite.
-          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
-            echo 'vendor-fetch: failed (detailed output withheld)' >&2
-            exit 1
-          fi
-          echo 'vendor-fetch: passed'
-
       # Third-party crate sources only: cargo's registry index, the downloaded
       # `.crate` archives and the git dependency databases. Never `target/`, never
       # an extracted source tree, never anything under the checked-out private
@@ -346,36 +312,14 @@ jobs:
           cache-hit: ${{ steps.cargo-sources-untrusted.outputs.cache-hit }}
           os-label: Linux
 
-      # Saved before any project code runs, so nothing the private SHA's build scripts, proc
-      # macros or tests do can reach what is saved: only from the protected main branch, only
-      # for a source SHA on a protected private branch (the source-checkout ancestry answer),
-      # only on a miss, and under the key the restore step computed (cache-primary-key), never
-      # a hashFiles evaluated later. Only registry/cache is cached: every `.crate` in it is
-      # re-hashed against Cargo.lock on restore, whereas the registry index and git databases
-      # could not be verified, so cargo rebuilds them. The entry is shared by every Rust concern
-      # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
-      # cargo verifies each download against the lock checksum and runs no build script.
-      - name: Complete the third-party source set before saving
-        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r lock; do
-            manifest="$(dirname "${lock}")/Cargo.toml"
-            [[ -f "${manifest}" ]] || continue
-            if ! cargo fetch --locked --manifest-path "${manifest}" >"${RUNNER_TEMP}/cargo-fetch.log" 2>&1; then
-              echo 'cargo-fetch: one lockfile could not be fetched completely (detail withheld)'
-            fi
-          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*' | sort)
-          echo 'cargo-fetch: done'
-
-      - name: Save verified third-party crate sources
-        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Set up the Rust toolchain
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
         with:
-          path: |
-            ${{ steps.cargo-home.outputs.dir }}/registry/cache
-          key: ${{ steps.cargo-sources.outputs.cache-primary-key }}
+          # The clippy scan compiles the workspace, so it takes the same system libraries
+          # as the rust-app concern (webkit, dbus, openssl).
+          concern: ${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
 
       # Compiled third-party dependency cache: main only, for a protected source SHA (ref isolation,
       # finding H1). cargo never re-verifies a compiled .rlib, so an entry is only as trustworthy as
@@ -437,6 +381,64 @@ jobs:
           dir: ${{ steps.cargo-target.outputs.dir }}
           cache-hit: ${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}
           os-label: Linux
+
+      # Project install scripts (npm ci) run here, after every cache restore: a restore holds the cache
+      # token and must not be reachable through an environment that source-controlled code could set.
+      - name: Set up Node.js and install the locked JavaScript dependencies
+        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-security' || inputs.concern == 'rust-packaging'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
+        with:
+          root: true
+          desktop: true
+          mobile: true
+          # The browser tiers are frontend-only: they do not need the vendored OpenVPN3 sources.
+          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' && !startsWith(inputs.concern, 'e2e-') }}
+
+      - name: Fetch pinned vendored sources
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `fetch` verifies each download against the sha256 pinned in
+          # vendor.lock and applies the reviewed boringtun zeroize patch, so this
+          # is a supply-chain check as much as a prerequisite.
+          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
+            echo 'vendor-fetch: failed (detailed output withheld)' >&2
+            exit 1
+          fi
+          echo 'vendor-fetch: passed'
+
+      # Saved before any project code runs, so nothing the private SHA's build scripts, proc
+      # macros or tests do can reach what is saved: only from the protected main branch, only
+      # for a source SHA on a protected private branch (the source-checkout ancestry answer),
+      # only on a miss, and under the key the restore step computed (cache-primary-key), never
+      # a hashFiles evaluated later. Only registry/cache is cached: every `.crate` in it is
+      # re-hashed against Cargo.lock on restore, whereas the registry index and git databases
+      # could not be verified, so cargo rebuilds them. The entry is shared by every Rust concern
+      # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
+      # cargo verifies each download against the lock checksum and runs no build script.
+      - name: Complete the third-party source set before saving
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r lock; do
+            manifest="$(dirname "${lock}")/Cargo.toml"
+            [[ -f "${manifest}" ]] || continue
+            if ! cargo fetch --locked --manifest-path "${manifest}" >"${RUNNER_TEMP}/cargo-fetch.log" 2>&1; then
+              echo 'cargo-fetch: one lockfile could not be fetched completely (detail withheld)'
+            fi
+          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*' | sort)
+          echo 'cargo-fetch: done'
+
+      - name: Save verified third-party crate sources
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: ${{ steps.cargo-sources.outputs.cache-primary-key }}
 
       - name: Install the pinned Playwright browser
         # e2e-visual runs in the Playwright image, whose browsers are preinstalled.

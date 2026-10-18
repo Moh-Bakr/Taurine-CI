@@ -30,6 +30,13 @@ runs:
         # When it does, install exactly that (rustup reads the file in this directory);
         # otherwise the runner image's default toolchain is used unchanged.
         if [[ -f rust-toolchain.toml || -f rust-toolchain ]]; then
+          # A `path` toolchain makes rustup resolve rustc to a directory of the private checkout,
+          # so the next `rustc` (the compiled-cache locate step runs `rustc -vV` before the
+          # untrusted restores) would execute source-controlled code. Refuse it, before any rustc runs.
+          if grep -qE '^[[:space:]]*path[[:space:]]*=' rust-toolchain.toml rust-toolchain 2>/dev/null; then
+            echo 'rust-toolchain: a path toolchain in the source is refused (it would run source-controlled rustc)' >&2
+            exit 1
+          fi
           echo 'rust-toolchain: installing the toolchain pinned by the source'
           rustup toolchain install || rustup show >/dev/null
         else

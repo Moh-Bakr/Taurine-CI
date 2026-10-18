@@ -818,6 +818,8 @@ real_mode_fail 'a restore with no ref gate (reachable on the untrusted ref)' "is
 real_mode_fail 'a Linux restore gated to the untrusted ref' "is not the reviewed read-only untrusted restore" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' linux-validation-concern.yml
 # Stage 2 (N and N2): the reviewed untrusted restores pass beside their callers, and each weakening is
 # refused by its own message. Both Linux files are given so the caller rules see the real pair.
+# The fixtures choose their own base document (CACHE_MODE_BASE_DOC), whatever the caller exported.
+unset CACHE_MODE_BASE_DOC
 pair_fail() { # label needle perl-expr file
   local d="${mode_root}/pair"
   rm -rf "${d}"; mkdir -p "${d}/.github/workflows" "${d}/docs"
@@ -843,19 +845,44 @@ pair_fail 'untrusted restore turned into a save' 'without the main-only gate' 's
 pair_fail 'a write-capable token in the called workflow' 'must set no write permission' 's/(  validate:\n    permissions:\n      contents: read\n)/$1      id-token: write\n/' "$c"
 pair_fail 'a write-capable token on the untrusted half' 'no write permission beside an untrusted restore' 's/(  validate-untrusted:\n    permissions:\n      contents: read\n)/$1      actions: write\n/' "$l"
 pair_fail 'the untrusted half granted write' 'cache-mode write needs the exact top-level term' 's/(  validate-untrusted:\n(?:.*\n)*?)    cache-mode: read\n/$1    cache-mode: write\n/' "$l"
-pair_fail 'the flag as an expression' 'must be a literal true or false' 's/untrusted_readonly_cache: false/untrusted_readonly_cache: \$\{\{ inputs.source_sha != "x" \}\}/' "$l"
-pair_fail 'the flag true without the recorded spike' 'needs the recorded green enforcement spike' 's/untrusted_readonly_cache: false/untrusted_readonly_cache: true/' "$l"
-pair_fail 'the flag true on the main half' 'may pass untrusted_readonly_cache: true' 's/(  validate-main:\n(?:.*\n)*?      source_sha: \$\{\{ inputs\.source_sha \}\}\n)/$1      untrusted_readonly_cache: true\n/' "$l"
+pair_fail 'the flag as an expression' 'must be a literal true or false' 's/(  validate-untrusted:\n(?:.*\n)*?      untrusted_readonly_cache: )false/$1\$\{\{ inputs.source_sha != "x" \}\}/' "$l"
+pair_fail 'the flag true without the recorded spike' 'needs exactly one recorded green enforcement spike line' 's/(  validate-untrusted:\n(?:.*\n)*?      untrusted_readonly_cache: )false/${1}true/' "$l"
+pair_fail 'the flag true on the main half' 'may pass untrusted_readonly_cache: true' 's/(  validate-main:\n(?:.*\n)*?      untrusted_readonly_cache: )false/${1}true/' "$l"
 # A flag true is accepted only with the recorded spike line.
 (
   d="${mode_root}/pair"
   rm -rf "${d}"; mkdir -p "${d}/.github/workflows" "${d}/docs"
   cp .github/workflows/linux-validation.yml .github/workflows/linux-validation-concern.yml "${d}/.github/workflows/"
   cp docs/untrusted-readonly-cache.md "${d}/docs/"
-  perl -0pi -e 's/untrusted_readonly_cache: false/untrusted_readonly_cache: true/' "${d}/.github/workflows/${l}"
-  printf 'Stage 2 enforcement spike result: GREEN run 12345678901 reviewed by a-person on 2026-10-20\n' >> "${d}/docs/untrusted-readonly-cache.md"
-  cd "${d}" && ruby "${policy}/check-cache-mode.rb" ".github/workflows/${l}" ".github/workflows/${c}" >/dev/null 2>"${base}/err"
-) || { echo 'the flag true with a recorded spike should pass' >&2; cat "${base}/err" >&2; exit 1; }
+  perl -0pi -e 's/(  validate-untrusted:\n(?:.*\n)*?      untrusted_readonly_cache: )false/${1}true/' "${d}/.github/workflows/${l}"
+  record='Stage 2 enforcement spike result: GREEN run 12345678901 reviewed by a-person on 2026-10-20'
+  printf '%s\n' "${record}" >> "${d}/docs/untrusted-readonly-cache.md"
+  # No base available (a push or a local run): the tree's own record is enough.
+  (cd "${d}" && ruby "${policy}/check-cache-mode.rb" ".github/workflows/${l}" ".github/workflows/${c}" >/dev/null 2>"${base}/err") || { echo 'the flag true with a recorded spike should pass' >&2; cat "${base}/err" >&2; exit 1; }
+  # The record merged on the base earlier and unchanged: the flip passes.
+  cp docs/untrusted-readonly-cache.md "${base}/base-with-record.md"; printf '%s\n' "${record}" >> "${base}/base-with-record.md"
+  (cd "${d}" && CACHE_MODE_BASE_DOC="${base}/base-with-record.md" ruby "${policy}/check-cache-mode.rb" ".github/workflows/${l}" ".github/workflows/${c}" >/dev/null 2>"${base}/err") || { echo 'the flip with the record merged on the base should pass' >&2; cat "${base}/err" >&2; exit 1; }
+) || { echo 'the flag true with a recorded spike should pass' >&2; exit 1; }
+cp docs/untrusted-readonly-cache.md "${base}/base-without-record.md"
+gate_fail() { # label needle base-doc tree-record-or-empty
+  local d="${mode_root}/pair"
+  rm -rf "${d}"; mkdir -p "${d}/.github/workflows" "${d}/docs"
+  cp .github/workflows/linux-validation.yml .github/workflows/linux-validation-concern.yml "${d}/.github/workflows/"
+  cp docs/untrusted-readonly-cache.md "${d}/docs/"
+  perl -0pi -e 's/(  validate-untrusted:\n(?:.*\n)*?      untrusted_readonly_cache: )false/${1}true/' "${d}/.github/workflows/${l}"
+  [[ -z "$4" ]] || printf '%s\n' "$4" >> "${d}/docs/untrusted-readonly-cache.md"
+  if (cd "${d}" && CACHE_MODE_BASE_DOC="$3" ruby "${policy}/check-cache-mode.rb" ".github/workflows/${l}" ".github/workflows/${c}" >/dev/null 2>"${base}/err"); then echo "gate fixture '$1' should fail but passed" >&2; exit 1; fi
+  grep -qF -- "$2" "${base}/err" || { echo "gate fixture '$1' failed with the wrong message:" >&2; cat "${base}/err" >&2; exit 1; }
+}
+rec='Stage 2 enforcement spike result: GREEN run 12345678901 reviewed by a-person on 2026-10-20'
+gate_fail 'record added in the diff that flips the flag' 'already merged on the base' "${base}/base-without-record.md" "${rec}"
+gate_fail 'record altered in the diff that flips the flag' 'differs from the merged base record' "${base}/base-with-record.md" 'Stage 2 enforcement spike result: GREEN run 99999999999 reviewed by a-person on 2026-10-20'
+gate_fail 'an unreadable base document' 'is not readable' "${base}/missing.md" "${rec}"
+pair_fail 'the callee default true' 'literal default false' 's/(        default: )false(\n        type: boolean\n      suite_selection)/${1}true$2/' "$c"
+pair_fail 'a caller key omitted' 'must pass untrusted_readonly_cache explicitly' 's/(  validate-untrusted:\n(?:.*\n)*?)      untrusted_readonly_cache: false\n/$1/' "$l"
+pair_fail 'the flag referenced from an env value' 'outside the reviewed routes' 's/(      - name: Report concern duration\n        if: \$\{\{ always\(\) \}\}\n)/$1        env:\n          X: \$\{\{ inputs.untrusted_readonly_cache \}\}\n/' "$c"
+pair_fail 'the flag in another step if' 'outside the reviewed routes' "s/(      - name: Fetch pinned vendored sources\n        if: )/\$1inputs.untrusted_readonly_cache || /" "$c"
+
 # P3 ordering, on the real concern workflow.
 order_fail() { # label needle perl-expr
   perl -0pe "$3" .github/workflows/linux-validation-concern.yml > "${cache_fixture}"
@@ -866,10 +893,31 @@ order_fail() { # label needle perl-expr
 ruby "${policy}/drop-root-order.rb" .github/workflows/linux-validation-concern.yml || { echo 'the reviewed concern ordering should pass' >&2; exit 1; }
 order_fail 'untrusted source restore moved above drop-root' 'runs before the root removal' 's/(      - name: Remove root before project code\n)/      - name: Restore cached third-party crate sources (untrusted, read-only)\n        uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: x\n          key: k\n\n$1/'
 order_fail 'a restore above the source checkout' 'runs before the root removal' 's/(      - name: Start the concern timer\n)/      - name: Early restore\n        uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: x\n          key: k\n\n$1/'
-order_fail 'the untrusted source verifier removed' 'must be followed directly by its verifier' 's/      - name: Verify restored crate archives against Cargo.lock \(untrusted, read-only\)\n.*?os-label: Linux\n\n//s'
-order_fail 'the untrusted strip removed' 'must be followed directly by its verifier' 's/      - name: Strip workspace crates from the restored dependency cache \(untrusted, read-only\)\n.*?os-label: Linux\n\n//s'
-order_fail 'a step between the restore and its verifier' 'must be followed directly by its verifier' 's/(      - name: Verify restored crate archives against Cargo.lock \(untrusted, read-only\)\n)/      - name: Install project dependencies\n        run: echo hi\n\n$1/'
-order_fail 'the untrusted verifier gated to main' 'must run on the untrusted ref' "s/(Verify restored crate archives against Cargo.lock \\(untrusted, read-only\\)\\n        if: \\\$\\{\\{ )github\\.ref == 'refs\\/heads\\/untrusted'/\$1github.ref == 'refs\\/heads\\/main'/"
+order_fail 'the untrusted source verifier removed' 'must be followed directly by its pinned verifier' 's/      - name: Verify restored crate archives against Cargo.lock \(untrusted, read-only\)\n.*?os-label: Linux\n\n//s'
+order_fail 'the untrusted strip removed' 'must be followed directly by its pinned verifier' 's/      - name: Strip workspace crates from the restored dependency cache \(untrusted, read-only\)\n.*?os-label: Linux\n\n//s'
+order_fail 'a step between the restore and its verifier' 'must be followed directly by its pinned verifier' 's/(      - name: Verify restored crate archives against Cargo.lock \(untrusted, read-only\)\n)/      - name: Install project dependencies\n        run: echo hi\n\n$1/'
+order_fail 'the untrusted verifier gated to main' 'does not run on exactly the untrusted-restore terms' "s/(Verify restored crate archives against Cargo.lock \\(untrusted, read-only\\)\\n        if: \\\$\\{\\{ )github\\.ref == 'refs\\/heads\\/untrusted'/\$1github.ref == 'refs\\/heads\\/main'/"
+# P2-2: a verifier that is present but neutered is refused, and so is every extra route to it.
+pinned='must be followed directly by its pinned verifier'
+order_fail 'the verifier condition ANDed with false' "${pinned}" "s/(Verify restored crate archives against Cargo.lock \\(untrusted, read-only\\)\\n        if: \\\$\\{\\{ [^\\n]*) \\}\\}/\$1 \\&\\& false }}/"
+order_fail 'the verifier cache-hit a literal' "${pinned}" "s/cache-hit: \\\$\\{\\{ steps\\.cargo-sources-untrusted\\.outputs\\.cache-hit \\}\\}/cache-hit: 'false'/"
+order_fail 'the verifier with continue-on-error' "${pinned}" 's/(      - name: Verify restored crate archives against Cargo.lock \(untrusted, read-only\)\n)/$1        continue-on-error: true\n/'
+order_fail 'the verifier pointed at another directory' "${pinned}" 's/(Verify restored crate archives against Cargo.lock \(untrusted, read-only\)\n(?:.*\n)*?          sources-dir: )[^\n]*/$1\/nonexistent/'
+order_fail 'the strip cache-hit taken from the main restore' "${pinned}" 's/cache-hit: \$\{\{ steps\.cargo-target-cache-untrusted\.outputs\.cache-hit \}\}/cache-hit: \${{ steps.cargo-target-cache.outputs.cache-hit }}/'
+order_fail 'the strip in a mode other than restored' "${pinned}" 's/(Strip workspace crates from the restored dependency cache \(untrusted, read-only\)\n(?:.*\n)*?          mode: )restored/${1}locate/'
+# P2-3: nothing source-controlled runs between drop-root and an untrusted restore.
+order_fail 'a project script before the untrusted restores' 'runs no source-controlled code' 's/(      - name: Set up the Rust toolchain\n)/      - name: Fetch pinned vendored sources early\n        run: bash scripts\/vendor-openvpn3.sh fetch\n\n$1/'
+order_fail 'the Node install before the untrusted restores' 'runs no source-controlled code' 's/(      - name: Locate the compiled dependency cache\n)/      - name: Install JavaScript\n        uses: .\/.github\/actions\/node-setup\n\n$1/'
+# P3-3: the combined actions/cache, and a restore in a job without the source-read environment.
+order_fail 'a combined actions/cache step before drop-root' 'runs before the root removal' 's/(      - name: Remove root before project code\n)/      - name: Early combined cache\n        uses: actions\/cache\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: x\n          key: k\n\n$1/'
+printf 'name: n\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n        with:\n          path: x\n          key: k\n' > "${base}/noenv.yml"
+if ruby "${policy}/drop-root-order.rb" "${base}/noenv.yml" >/dev/null 2>"${base}/err"; then echo 'a combined cache step in a job without the source-read environment should fail' >&2; exit 1; fi
+grep -qF 'does not enter the source-read environment' "${base}/err" || { echo 'wrong message for a cache step outside source-read' >&2; cat "${base}/err" >&2; exit 1; }
+# The toolchain composite refuses a path toolchain before any rustc runs.
+grep -qF "a path toolchain in the source is refused" .github/actions/rust-toolchain/action.yml || { echo 'the toolchain path guard is missing' >&2; exit 1; }
+for needle in 'find "${cache_dir}" -type l -delete' 'find "${cache_dir}" -mindepth 2 -type d -prune -exec rm -rf -- {} +'; do
+  grep -qF -- "${needle}" .github/actions/verify-cargo-cache/action.yml || { echo "the crate re-hash lost: ${needle}" >&2; exit 1; }
+done
 echo 'stage 2 fixtures: only the reviewed untrusted restores pass; a key, scope, token, ordering or flag weakening is refused'
 echo 'cache-mode real-tree fixtures: the reviewed Linux, Windows and macOS dispatchers pass; each weakening of the split, the audit or the explicit grants is refused'
 printf 'name: p\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted"\n' > "${composite_probe}"

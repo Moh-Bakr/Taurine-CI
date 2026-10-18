@@ -426,17 +426,63 @@ end
 
 # N2: around a reviewed untrusted restore. The called workflow holds no write permission anywhere
 # (the cache grant is the caller's `cache-mode: read`; a write-capable GITHUB_TOKEN or id-token is a
-# second way to reach a cache or a release), has no step that saves, and each caller job is the
-# read half (untrusted-gated) or the write half (main-gated), passes the flag as a literal boolean
-# and only the read half passes true, and then only with the recorded spike.
+# second way to reach a cache or a release), has no step that saves without the main-only gate, and
+# declares the flag as a boolean with the literal default false. Every caller job is the read half
+# (untrusted-gated) or the write half (main-gated), PASSES the flag as a literal boolean (an omitted key
+# would leave the callee default in force), and only the read half may pass true, and then only with
+# the recorded spike that was already merged (spike_gate below).
 def write_permission?(value)
   value == 'write-all' || (value.is_a?(Hash) && value.values.any? { |v| v.to_s.include?('write') }) || (value.is_a?(String) && value.include?('write'))
+end
+
+def workflow_triggers_input(doc)
+  on = doc.key?('on') ? doc['on'] : doc[true]
+  on.is_a?(Hash) && on['workflow_call'].is_a?(Hash) && on['workflow_call']['inputs'].is_a?(Hash) ? on['workflow_call']['inputs'] : {}
+end
+
+# The recorded spike must be merged before the flag is flipped, and the flipping change must not add or
+# alter it (docs/untrusted-readonly-cache.md section 7c). The base side is the explicit
+# CACHE_MODE_BASE_DOC, or, in the base-policy pass of a pull request (which runs this checker from main
+# against the pull request's tree), the base checkout at RUNNER_TEMP/base-policy. In a pull request's
+# own pass the base is unavailable and the base-policy pass is the gate; on a push (the merge) and
+# locally the tree's own record is required.
+def spike_gate(caller_path, name, failures)
+  root = File.dirname(File.dirname(File.dirname(caller_path)))
+  tree_doc = File.join(root, 'docs', 'untrusted-readonly-cache.md')
+  tree_doc = 'docs/untrusted-readonly-cache.md' unless File.exist?(tree_doc)
+  records = ->(file) { File.exist?(file) ? read_text(file).lines.map(&:chomp).select { |l| l.match?(SPIKE_RECORD) } : [] }
+  tree = records.call(tree_doc)
+  where = "#{caller_path}: job #{name}: #{UNTRUSTED_FLAG}: true"
+  unless tree.length == 1
+    failures << "#{where} needs exactly one recorded green enforcement spike line in docs/untrusted-readonly-cache.md (section 7c), found #{tree.length}"
+    return
+  end
+  base_doc = ENV['CACHE_MODE_BASE_DOC']
+  if base_doc.nil? && ENV['GITHUB_EVENT_NAME'] == 'pull_request' && ENV['RUNNER_TEMP']
+    candidate = File.join(ENV['RUNNER_TEMP'], 'base-policy', 'docs', 'untrusted-readonly-cache.md')
+    base_doc = candidate if File.exist?(candidate)
+  end
+  if base_doc.nil?
+    warn "cache-mode policy: #{where}: no base document is available (a pull request's own pass); the base-policy pass judges the flip" if ENV['GITHUB_EVENT_NAME'] == 'pull_request'
+    return
+  end
+  unless File.exist?(base_doc)
+    failures << "#{where}: the base document #{base_doc} is not readable, so the flip cannot be judged"
+    return
+  end
+  base = records.call(base_doc)
+  failures << "#{where} needs the spike record already merged on the base: the base has #{base.length} record line(s), and a change may not add one in the same diff that flips the flag" unless base.length == 1
+  failures << "#{where}: the spike record in this change differs from the merged base record; it may not be altered in the diff that flips the flag" if base.length == 1 && base.first != tree.first
 end
 
 reviewed_restores.each_key do |path|
   doc = docs.fetch(path)
   base = File.basename(path)
   failures << "#{path}: a workflow with an untrusted restore must set no write permission at workflow level" if write_permission?(doc['permissions'])
+  declared = workflow_triggers_input(doc)[UNTRUSTED_FLAG]
+  unless declared.is_a?(Hash) && declared['type'] == 'boolean' && declared['default'] == false && declared['required'] == false
+    failures << "#{path}: input #{UNTRUSTED_FLAG} must be declared type boolean, required false, with the literal default false (got #{declared.inspect})"
+  end
   (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).each do |name, job|
     next unless job.is_a?(Hash)
     failures << "#{path}: job #{name}: a workflow with an untrusted restore must set no write permission (a write-capable token beside a read-only cache)" if write_permission?(job['permissions'])
@@ -454,7 +500,10 @@ reviewed_restores.each_key do |path|
       failures << "#{caller_path}: job #{name} calls #{base}, which has an untrusted restore, and must be cache-mode read (untrusted half) or write (main half), not #{mode.inspect}" unless %w[read write].include?(mode)
       failures << "#{caller_path}: job #{name}: no write permission beside an untrusted restore (a write-capable token)" if write_permission?(job['permissions'])
       with = job['with'].is_a?(Hash) ? job['with'] : {}
-      next unless with.key?(UNTRUSTED_FLAG)
+      unless with.key?(UNTRUSTED_FLAG)
+        failures << "#{caller_path}: job #{name} calls #{base} and must pass #{UNTRUSTED_FLAG} explicitly as a literal true or false (an omitted key leaves the callee's default in force)"
+        next
+      end
       flag = with[UNTRUSTED_FLAG]
       unless [true, false].include?(flag)
         failures << "#{caller_path}: job #{name}: #{UNTRUSTED_FLAG} must be a literal true or false, never an expression or an input (got #{flag.inspect})"
@@ -464,12 +513,49 @@ reviewed_restores.each_key do |path|
       unless mode == 'read' && requires?(job['if'], UNTRUSTED)
         failures << "#{caller_path}: job #{name}: only the read-only untrusted half (cache-mode read, the exact top-level term #{UNTRUSTED}) may pass #{UNTRUSTED_FLAG}: true"
       end
-      spike = File.join(File.dirname(File.dirname(File.dirname(caller_path))), 'docs', 'untrusted-readonly-cache.md')
-      spike = 'docs/untrusted-readonly-cache.md' unless File.exist?(spike)
-      unless File.exist?(spike) && read_text(spike).match?(SPIKE_RECORD)
-        failures << "#{caller_path}: job #{name}: #{UNTRUSTED_FLAG}: true needs the recorded green enforcement spike line in docs/untrusted-readonly-cache.md (section 7c)"
-      end
+      spike_gate(caller_path, name, failures)
     end
+  end
+end
+
+# N3: the flag is reachable only through the reviewed routes: its declaration in the called workflow, the
+# `with` key of a job that calls that workflow, and the `if` of a step whose terms are exactly the reviewed
+# untrusted-restore terms. Any other mention, in any workflow or composite given, is refused (an env
+# value, a matrix entry, another step's if, a composite input).
+def flag_mentions(node, path, found)
+  case node
+  when Hash
+    node.each do |k, v|
+      found << [path + [k], :key] if k.to_s.include?(UNTRUSTED_FLAG)
+      flag_mentions(v, path + [k], found)
+    end
+  when Array
+    node.each_with_index { |v, i| flag_mentions(v, path + [i], found) }
+  when String
+    found << [path, :value] if node.include?(UNTRUSTED_FLAG)
+  end
+end
+
+docs.each do |path, doc|
+  base = File.basename(path)
+  found = []
+  flag_mentions(doc, [], found)
+  next if found.empty?
+  is_callee = UNTRUSTED_RESTORE_WORKFLOWS.include?(base)
+  found.each do |where, kind|
+    ok =
+      if kind == :key && where.last == UNTRUSTED_FLAG && where.length >= 4 && where[0..1] == %w[on workflow_call] || (kind == :key && where.first == true && where[1] == 'workflow_call' && where.last == UNTRUSTED_FLAG)
+        is_callee
+      elsif kind == :key && where.length == 4 && where[0] == 'jobs' && where[2] == 'with' && where[3] == UNTRUSTED_FLAG
+        job = doc.dig('jobs', where[1])
+        job.is_a?(Hash) && UNTRUSTED_RESTORE_WORKFLOWS.any? { |w| job['uses'].to_s == "./.github/workflows/#{w}" }
+      elsif kind == :value && is_callee && where.length == 5 && where[0] == 'jobs' && where[2] == 'steps' && where[4] == 'if'
+        terms = top_terms(doc.dig('jobs', where[1], 'steps', where[3], 'if'))
+        !terms.nil? && terms.sort == UNTRUSTED_RESTORE_TERMS.sort
+      else
+        false
+      end
+    failures << "#{path}: #{UNTRUSTED_FLAG} is mentioned at #{where.map(&:to_s).join('.')} outside the reviewed routes (its declaration, a caller's with key, and the if of a step with exactly the reviewed untrusted-restore terms)" unless ok
   end
 end
 
