@@ -539,6 +539,32 @@ admission=.github/policy/case-evidence-admission.rb
 mutation_by test-case-evidence-admission.sh '18. the admission git calls without safe.directory' "${admission}" "tool, '-c', safe_directory!(root, code), '-C', root," "tool, '-C', root,"
 mutation_by test-case-evidence-admission.sh '18. the admission safe.directory widened to every repository' "${admission}" '"safe.directory=#{real}"' '"safe.directory=*"'
 
+# 11. The security scan gate: each weakening of the full set, of a scanner or of the lint job.
+scan_action=.github/actions/scan-concern/action.yml
+matrix=.github/ci-matrix.json
+mutation '11. scan-lint dropped from the full set (made opt-in)' "${matrix}" '      "scan-lint": {
+        "always": true,' '      "scan-lint": {
+        "opt_in": "visual",
+        "always": true,'
+mutation '11. scan-lint no longer selected in the full set' "${matrix}" '      "scan-lint": {
+        "always": true,
+        "full_only": true,' '      "scan-lint": {
+        "always": true,
+        "full_only": false,'
+mutation '11. the scan-lint job no longer runs the security lints' "${linux_concern}" '          scanner: clippy' '          scanner: semgrep'
+mutation '11. gitleaks dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'gitleaks' || inputs.scanner == 'all' }}" "      if: \${{ inputs.scanner == 'gitleaks' }}"
+mutation '11. npm audit dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'npm-audit' || inputs.scanner == 'all' }}" "      if: \${{ inputs.scanner == 'npm-audit' }}"
+mutation '11. Semgrep dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'semgrep' || inputs.scanner == 'all' || inputs.scanner == 'semgrep-container' }}" "      if: \${{ inputs.scanner == 'semgrep' || inputs.scanner == 'semgrep-container' }}"
+mutation '11. cargo-deny dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'deny' || inputs.scanner == 'all' }}
+      shell" "      if: \${{ inputs.scanner == 'deny' }}
+      shell"
+mutation '11. a scanner no longer fails the report' "${scan_action}" '"cargo-deny|${DENY_OUTCOME}|deny"' '"cargo-deny-skipped|${DENY_OUTCOME}|deny"'
+mutation '11. the scanner report no longer fails the job' "${scan_action}" 'if [[ "${outcome}" != success ]]; then failed=1; fi' 'if [[ "${outcome}" == never ]]; then failed=1; fi'
+mutation '11. rust-lint-enforce made report-only' "${linux_concern}" '        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]' "        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]
+        with:
+          fail: 'false'"
+mutation '11. rust-lint-enforce no longer runs for scan-lint' "${linux_concern}" "inputs.concern == 'scan-lint' && steps.verified-source.outcome == 'success'" "inputs.concern == 'scan-security' && steps.verified-source.outcome == 'success'"
+
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
 # toJSON(secrets) read to that concern in the same change: its own policy passes, and the base

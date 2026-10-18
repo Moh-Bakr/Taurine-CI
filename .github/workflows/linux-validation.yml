@@ -527,7 +527,7 @@ jobs:
         with:
           mode: table
           label: Linux
-          baseline-seconds: '{"rust-app-1":1981,"rust-app-2":2100,"rust-db":839,"rust-dbx":603,"rust-domain":186,"rust-net":124,"rust-packaging":999,"rust-tls-openssl":45,"taurine-cli":206,"scan-security":853,"desktop-shard-1":626,"desktop-shard-2":701,"desktop-quality":161,"mobile-quality":146,"frontend-build-budget":118,"contracts":95,"e2e-critical":744,"e2e-a11y":356,"e2e-regression-1":892,"e2e-regression-2":852,"e2e-regression-3":891,"e2e-regression-4":734,"e2e-visual":192}'
+          baseline-seconds: '{"rust-app-1":1981,"rust-app-2":2100,"rust-db":839,"rust-dbx":603,"rust-domain":186,"rust-net":124,"rust-packaging":999,"rust-tls-openssl":45,"taurine-cli":206,"scan-security":853,"scan-lint":600,"desktop-shard-1":626,"desktop-shard-2":701,"desktop-quality":161,"mobile-quality":146,"frontend-build-budget":118,"contracts":95,"e2e-critical":744,"e2e-a11y":356,"e2e-regression-1":892,"e2e-regression-2":852,"e2e-regression-3":891,"e2e-regression-4":734,"e2e-visual":192}'
           name-pattern: '^validate-(main|untrusted) \(.+\) / Linux (?<concern>.+)$'
           github-token: ${{ github.token }}
 

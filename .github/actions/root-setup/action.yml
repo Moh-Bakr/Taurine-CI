@@ -28,7 +28,7 @@ runs:
         packages=()
         rust_concern="${CONCERN}"
         # The clippy scan compiles the workspace, so it takes the rust-app system libraries.
-        [[ "${rust_concern}" == scan-security ]] && rust_concern=rust-app
+        [[ "${rust_concern}" == scan-security || "${rust_concern}" == scan-lint ]] && rust_concern=rust-app
         # The Rust concerns' libraries, one line per concern. Each line's reason is
         # recorded beside the toolchain setup (.github/actions/rust-toolchain), which used
         # to install them itself after the source was checked out.

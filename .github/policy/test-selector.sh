@@ -56,13 +56,13 @@ expect() {
 }
 all="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null) | .key] | join(",")' .github/ci-matrix.json)"
 sha="$(change docs/a.md)"
-expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial scan-security,contracts'
+expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial scan-security,scan-lint,contracts'
 sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial rust-app-1,rust-app-2,scan-security,contracts,rust-domain'
+expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial rust-app-1,rust-app-2,scan-security,scan-lint,contracts,rust-domain'
 sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
-expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial rust-db,scan-security,contracts'
+expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial rust-db,scan-security,scan-lint,contracts'
 sha="$(change taurine-desktop/src/a.ts)"
-expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial e2e-regression-3,e2e-regression-4,e2e-regression-2,e2e-critical,scan-security,rust-packaging,desktop-shard-1,desktop-shard-2,e2e-regression-1,contracts,frontend-build-budget,desktop-quality,e2e-a11y'
+expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial e2e-regression-3,e2e-regression-4,e2e-regression-2,e2e-critical,scan-security,scan-lint,rust-packaging,desktop-shard-1,desktop-shard-2,e2e-regression-1,contracts,frontend-build-budget,desktop-quality,e2e-a11y'
 sha="$(change Cargo.lock)"
 expect lockfile "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
 sha="$(change mystery/a.txt)"
@@ -70,7 +70,7 @@ expect unknown "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
 expect no-base "$(selected "" "${sha}")" "full ${all}"
 # An explicitly requested opt-in concern joins a partial selection (docs only here).
 docs_sha="$(change docs/b.md)"
-expect opt-in "$(selected "$(parent_of "${docs_sha}")" "${docs_sha}" '["e2e-visual"]')" 'partial scan-security,contracts,e2e-visual'
+expect opt-in "$(selected "$(parent_of "${docs_sha}")" "${docs_sha}" '["e2e-visual"]')" 'partial scan-security,scan-lint,contracts,e2e-visual'
 tree_ref='HEAD^{tree}'
 orphan="$(git -C "${repo}" commit-tree "$(git -C "${repo}" rev-parse "${tree_ref}")" -m orphan)"
 expect not-ancestor "$(selected "${orphan}" "${sha}")" "full ${all}"
