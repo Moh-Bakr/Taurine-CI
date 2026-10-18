@@ -100,8 +100,13 @@ if [[ "${target}" == armv7-linux-androideabi && -n "${FAKE_ARMV7_BAD:-}" && "${c
 fi
 case "${crate}" in
   openssl-sys) printf '0openssl-sys v0.9.117\n1openssl v0.10.81\n1taurine-tls-openssl v0.1.0 (path)\n1tokio-openssl v0.6.5\n' ;;
-  openssl) printf '0openssl v0.10.81\n1taurine-db-dbx v0.1.0 (path)\n1taurine-tls-openssl v0.1.0 (path)\n1tokio-openssl v0.6.5\n' ;;
-  tokio-openssl|taurine-tls-openssl) printf '0%s v0.1.0\n1taurine-db-dbx v0.1.0 (path)\n' "${crate}" ;;
+  openssl) printf '0openssl v0.10.81\n1taurine-db-dbx v0.1.0 (path)\n1taurine-tls-openssl v0.1.0 (path)\n1tokio-openssl v0.6.5\n'; [[ -n "${FAKE_MYSQL_OPENSSL:-}" ]] && printf '1taurine-mysql-async v0.1.0 (path)\n'; true ;;
+  tokio-openssl|taurine-tls-openssl)
+    printf '0%s v0.1.0\n1taurine-db-dbx v0.1.0 (path)\n' "${crate}"
+    # FAKE_MYSQL_PARENT adds the vendored MySQL fork as a direct parent; FAKE_TOKIO_BAD an unrelated crate.
+    [[ "${crate}" == tokio-openssl && -n "${FAKE_MYSQL_PARENT:-}" ]] && printf '1taurine-mysql-async v0.1.0 (path)\n'
+    [[ "${crate}" == tokio-openssl && -n "${FAKE_TOKIO_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'
+    true ;;
   openssl-src) printf '0openssl-src v300.5.5+3.5.5\n'; [[ -n "${FAKE_SRC_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'; true ;;
   *) echo "error: package ID specification \`${crate}\` did not match any packages" >&2; exit 101 ;;
 esac
@@ -216,6 +221,10 @@ expect_fail 'dynamic libssl' "FAKE_NEEDED=libssl.so.3 artefact_check t '$(artefa
 # ---- the gate itself -------------------------------------------------------------------------
 expect_pass 'door-only graph' 'openssl_door_gate g taurine-mobile aarch64-linux-android'
 expect_pass 'absent graph' 'FAKE_TREE=absent openssl_door_gate g taurine-mobile aarch64-linux-android'
+expect_pass 'the MySQL fork wrapping tokio-openssl' 'FAKE_MYSQL_PARENT=1 openssl_door_gate g taurine-mobile aarch64-linux-android'
+expect_fail 'the MySQL fork with a direct openssl edge (S1 gate)' 'FAKE_MYSQL_OPENSSL=1 openssl_door_gate g taurine-mobile -' 'taurine-mysql-async depends on openssl outside the OpenSSL door'
+expect_fail 'another crate depending on tokio-openssl (S1 gate)' 'FAKE_TOKIO_BAD=1 openssl_door_gate g taurine-mobile -' 'evil-sys depends on tokio-openssl outside the OpenSSL door'
+mutant 'the shell list re-widened: the MySQL fork allowed on openssl' artefact "openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;" "openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx taurine-mysql-async' ;;" fail 'FAKE_MYSQL_OPENSSL=1 openssl_door_gate g taurine-mobile -'
 expect_fail 'unknown package' 'openssl_door_gate g no-such-package -' 'did not resolve'
 
 # ---- N3: the gate must see the built feature set -------------------------------------------
@@ -677,15 +686,26 @@ openssl-sys = { path = "../openssl-sys" }'
 crate dbx taurine-db-dbx 'openssl = { path = "../openssl" }
 taurine-tls-openssl = { path = "../tls" }'
 crate consumer consumer 'openssl = { path = "../openssl" }'
+crate tokio tokio-openssl 'openssl = { path = "../openssl" }'
+# The vendored MySQL fork: a tokio-openssl consumer only; `direct` adds the forbidden openssl edge.
+# Its description carries U+0401, whose UTF-8 bytes (d0 81) a cp1252 or ASCII reader cannot decode.
+crate mysql taurine-mysql-async 'tokio-openssl = { path = "../tokio", optional = true }' 'description = "MySQL fork \u0401"
+[features]
+legacy-tls = ["dep:tokio-openssl"]'
+crate evil2 evil2 'tokio-openssl = { path = "../tokio" }'
 crate evil evil '' '[build-dependencies]
 openssl-src = { path = "../openssl-src" }'
 printf 'fn main() {}\n' >"${toy}/evil/build.rs"
 crate shell taurine-mobile 'taurine-db-dbx = { path = "../dbx" }
 consumer = { path = "../consumer", optional = true }
+evil2 = { path = "../evil2", optional = true }
+taurine-mysql-async = { path = "../mysql", optional = true }
 evil = { path = "../evil", optional = true }' '[features]
 extra = ["dep:consumer"]
+mysqlok = ["dep:taurine-mysql-async", "taurine-mysql-async/legacy-tls"]
+tokiobad = ["dep:evil2"]
 evilsrc = ["dep:evil"]'
-printf '[workspace]\nmembers = ["shell", "dbx", "tls", "openssl", "openssl-sys", "openssl-src", "consumer", "evil"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
+printf '[workspace]\nmembers = ["shell", "dbx", "tls", "openssl", "openssl-sys", "openssl-src", "consumer", "evil", "evil2", "tokio", "mysql"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
 toy_build() { # toy_build <target-dir> [cargo args]
   local dir="$1"; shift
   ( cd "${toy}" && CARGO_TARGET_DIR="${dir}" "${real_cargo}" build --offline -q -p taurine-mobile "$@" ) >/dev/null 2>&1 ||
@@ -708,6 +728,24 @@ expect_fail 'a door-present build missing openssl-src (real cargo)' "$(toy_check
 expect_fail 'a door-absent build that contains openssl (real cargo)' "$(toy_check "${work}/t-door" absent)" 'the built set contains'
 toy_build "${work}/t-extra" --features extra
 expect_fail 'an extra feature that builds a non-door OpenSSL consumer (real cargo)' "$(toy_check "${work}/t-extra")" 'consumer depends on openssl outside the door'
+# The vendored MySQL fork: allowed on tokio-openssl only. Built under a non-UTF-8 locale, with a
+# U+0401 package description in the metadata, so a text open() without encoding= dies as on Windows.
+toy_build "${work}/t-mysql" --features mysqlok
+run_lib "PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 LC_ALL=C LANG=C; export PYTHONUTF8 PYTHONCOERCECLOCALE LC_ALL LANG; $(toy_check "${work}/t-mysql")" || { cat "${work}/out" >&2; fail 'the MySQL fork wrapping tokio-openssl, non-UTF-8 locale (real cargo): should pass'; }
+grep -qF 'taurine-mysql-async' "${work}/out" || { cat "${work}/out" >&2; fail 'the MySQL fork did not appear among the door consumers'; }
+mutant 'the cargo-metadata open() without encoding=' artefact 'json.load(open(meta_path, encoding="utf-8"))' 'json.load(open(meta_path))' pass "PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 LC_ALL=C LANG=C; export PYTHONUTF8 PYTHONCOERCECLOCALE LC_ALL LANG; $(toy_check "${work}/t-mysql")"
+# The built graph reads the all-features resolve, so the forbidden edge is added to the fork's own
+# manifest for this one build (the fork has no direct openssl edge) and restored after it.
+printf 'openssl = { path = "../openssl" }\n' >>"${toy}/mysql/Cargo.toml"
+toy_build "${work}/t-mysqldirect" --features mysqlok
+expect_fail 'the MySQL fork depending on openssl directly (real cargo)' "$(toy_check "${work}/t-mysqldirect")" 'taurine-mysql-async depends on openssl outside the door'
+crate mysql taurine-mysql-async 'tokio-openssl = { path = "../tokio", optional = true }' 'description = "MySQL fork \u0401"
+[features]
+legacy-tls = ["dep:tokio-openssl"]'
+toy_build "${work}/t-tokiobad" --features tokiobad
+expect_fail 'another crate depending on tokio-openssl (real cargo)' "$(toy_check "${work}/t-tokiobad")" 'evil2 depends on tokio-openssl outside the door'
+mutant 'the built-graph allowlist re-widened: the MySQL fork allowed on openssl' artefact '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},' '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx", "taurine-mysql-async"},' fail "$(toy_check "${work}/t-mysqldirect")"
+mutant 'the built-graph allowlist re-widened: any crate allowed on tokio-openssl' artefact '"tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async"},' '"tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async", "evil2"},' fail "$(toy_check "${work}/t-tokiobad")"
 toy_build "${work}/t-evil" --features evilsrc
 expect_fail 'a non-door crate building openssl-src (real cargo)' "$(toy_check "${work}/t-evil")" 'evil depends on openssl-src outside the door'
 # The basedir is the real path cargo writes (macOS resolves /var to /private/var).
@@ -768,7 +806,7 @@ expect_fail 'a cross build whose host profile lost openssl-src (real cargo)' \
 # ---- B3: the shipped artefact is the judged build ---------------------------------------------
 crate bin taurine-desktop ''
 printf 'fn main() {}\n' >"${toy}/bin/src/main.rs"
-printf '[workspace]\nmembers = ["shell", "dbx", "tls", "openssl", "openssl-sys", "openssl-src", "consumer", "evil", "bin"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
+printf '[workspace]\nmembers = ["shell", "dbx", "tls", "openssl", "openssl-sys", "openssl-src", "consumer", "evil", "evil2", "tokio", "mysql", "bin"]\nresolver = "2"\n' >"${toy}/Cargo.toml"
 ( cd "${toy}" && CARGO_TARGET_DIR="${work}/t-bin" "${real_cargo}" build --offline -q -p taurine-desktop ) >/dev/null 2>&1 || fail 'the toy binary did not build'
 cp "${work}/t-bin/debug/taurine-desktop" "${work}/shipped-bin"
 expect_pass 'a bundled copy of the judged binary (real cargo)' "bind_same_binary b '${work}/shipped-bin' '${work}/t-bin/debug/taurine-desktop'"
