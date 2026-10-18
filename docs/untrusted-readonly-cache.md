@@ -327,6 +327,15 @@ also matters for this design for a second reason: it is the only legitimate way 
 `refs/heads/main`'s scope other than eviction, and the audit in section 3.3 depends on nobody
 else being able to delete or rewrite scopes.
 
+### 4.5 Door concerns are never cached
+
+The OpenSSL door concern (`rust-tls-openssl`) is never in any compiled-dependency cache group, on any
+operating system, and no cache step may name it or cover it with a prefix (`check-cache-groups.rb`, the
+`DOOR_CONCERNS` list). Its proof (`taurine-tls-openssl/src/policy.rs`) compares version strings, so a
+restored, tampered static library that reports the locked patch would pass it, and the concern is our one
+independent proof that the vendored OpenSSL is the locked build. The measured saving (about one to two
+minutes, off the critical path) does not justify weakening that. It always builds OpenSSL from source.
+
 ## 5. Policy changes (so a later edit cannot silently add `save` to `untrusted`)
 
 All in `.github/policy/`. Per "Changing the policy" in `docs/how-ci-works.md` these land in two

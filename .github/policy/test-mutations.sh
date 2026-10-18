@@ -651,54 +651,58 @@ mutation '17. a restore with no ref gate, reachable on the untrusted ref' "${mac
 "
 mutation '17. rule N dropped from the checker' .github/policy/check-cache-mode.rb "      next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')" "      next"
 
-# 20. The OpenSSL door's compiled-dependency group on Windows (rust-tls-openssl, survey item 7.1): the
-# group stays main-only, protected-SHA-only, exact-keyed and its own; each weakening is refused.
+# 20. The compiled-dependency cache groups on Windows and the uncached OpenSSL door (survey 7.1, decision:
+# the door concern rust-tls-openssl is never cached; check-cache-groups.rb refuses it in any compiled
+# cache step), plus the existing cache's conditions that no test had pinned.
 windows_concern=.github/workflows/windows-validation-concern.yml
-tls_scope="inputs.concern == 'rust-tls-openssl'"
-mutation '20. the door group folded into the rust-app group' "${windows_concern}" " || (inputs.concern == 'rust-tls-openssl' && 'rust-tls-openssl')" ''
-mutation '20. the door compiled save gated to the untrusted ref' "${windows_concern}" "      - name: Save compiled third-party dependencies
-        if: \${{ github.ref == 'refs/heads/main'" "      - name: Save compiled third-party dependencies
-        if: \${{ github.ref == 'refs/heads/untrusted'"
-mutation '20. the door compiled save without protected ancestry' "${windows_concern}" "      - name: Save compiled third-party dependencies
-        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' || ${tls_scope}) && steps.verified-source.outputs.protected-ancestor == 'true' && " "      - name: Save compiled third-party dependencies
-        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' || ${tls_scope}) && "
-mutation '20. the door compiled save without the strip-and-prove step' "${windows_concern}" " && steps.cargo-target-strip.outcome == 'success' }}
-        uses: actions/cache/save@" " }}
+door="inputs.concern == 'rust-tls-openssl'"
+mutation '20. the door concern added to the compiled locate' "${windows_concern}" "        id: cargo-target
+        if: \${{ startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target
+        if: \${{ ${door} || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door concern added to the compiled restore' "${windows_concern}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (${door} || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door concern added to the compiled save' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2'" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (${door} || inputs.concern == 'rust-app-2'"
+mutation '20. the door concern added to the strip-and-prove' "${windows_concern}" "        id: cargo-target-strip
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2'" "        id: cargo-target-strip
+        if: \${{ github.ref == 'refs/heads/main' && (${door} || inputs.concern == 'rust-app-2'"
+mutation '20. the door concern given a group' "${windows_concern}" "(inputs.concern == 'rust-packaging' && 'rust-packaging') || 'rust-app' }}" "(inputs.concern == 'rust-packaging' && 'rust-packaging') || (${door} && 'rust-tls-openssl') || 'rust-app' }}"
+mutation '20. a prefix covering the door concern in the restore' "${windows_concern}" "inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "inputs.concern == 'rust-packaging' || startsWith(inputs.concern, 'rust-tls')) }}
+        uses: actions/cache/restore@"
+mutation '20. the door concern hidden in an unreadable selector (M2)' "${windows_concern}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (contains(fromJSON('[\"rust-tls-openssl\"]'), inputs.concern) || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. an unmapped concern joins the restore and so the fallback group (M8)' "${windows_concern}" "inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "inputs.concern == 'rust-packaging' || inputs.concern == 'rust-net') }}
+        uses: actions/cache/restore@"
+mutation '20. a concern dropped from the restore-time strip (M1)' "${windows_concern}" "'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored" "'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored"
+mutation '20. the compiled save without the miss condition (M5)' "${windows_concern}" " && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        uses: actions/cache/save@" " && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-strip.outcome == 'success' }}
         uses: actions/cache/save@"
-mutation '20. the door compiled restore without the main guard' "${windows_concern}" "      - name: Restore compiled third-party dependencies
-        id: cargo-target-cache
-        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && " "      - name: Restore compiled third-party dependencies
-        id: cargo-target-cache
-        if: \${{ steps.verified-source.outputs.protected-ancestor == 'true' && "
-mutation '20. the door compiled restore gated to the untrusted ref' "${windows_concern}" "      - name: Restore compiled third-party dependencies
-        id: cargo-target-cache
-        if: \${{ github.ref == 'refs/heads/main' &&" "      - name: Restore compiled third-party dependencies
-        id: cargo-target-cache
-        if: \${{ github.ref == 'refs/heads/untrusted' &&"
-mutation '20. restore-keys on the door compiled restore' "${windows_concern}" "          key: \${{ steps.cargo-target.outputs.key }}
-
-      - name: Strip workspace crates from the restored dependency cache" "          key: \${{ steps.cargo-target.outputs.key }}
-          restore-keys: |
-            cargo-target-v1-
-
-      - name: Strip workspace crates from the restored dependency cache"
-mutation '20. the door compiled key derived from the source SHA input' "${windows_concern}" "          key: \${{ steps.cargo-target.outputs.key }}
-
-      - name: Strip workspace crates from the restored dependency cache" "          key: cargo-target-\${{ inputs.source_sha }}
-
-      - name: Strip workspace crates from the restored dependency cache"
-mutation '20. the door compiled restore path moved into the checkout' "${windows_concern}" "            \${{ steps.cargo-target.outputs.dir }}/debug/deps
-            \${{ steps.cargo-target.outputs.dir }}/debug/build
-            \${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint
-          key: \${{ steps.cargo-target.outputs.key }}
-
-      - name: Strip workspace crates from the restored" "            src/target
-          key: \${{ steps.cargo-target.outputs.key }}
-
-      - name: Strip workspace crates from the restored"
-mutation '20. the door restore-time strip removed' "${windows_concern}" "      - name: Strip workspace crates from the restored dependency cache
-" "      - name: Not the strip
-"
+mutation '20. the strip-and-prove without the concern success (M7)' "${windows_concern}" " && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        # Kept as ./" " && steps.cargo-target-cache.outputs.cache-hit != 'true' }}
+        # Kept as ./"
+mutation '20. a saver dropped from the compiled save and its strip-and-prove' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging')" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-packaging')"
+mutation '20. the compiled save step removed (an empty parse)' "${windows_concern}" "        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-target.outputs.dir }}/debug/deps" "        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-target.outputs.dir }}/debug/deps"
 
 # 18. The case-evidence admission in the e2e-visual container (git as root, checkouts owned by the
 # runner's uid): its git calls carry an exact safe.directory for the checkout they read.
