@@ -555,9 +555,11 @@ mutation '11. the scan-lint job no longer runs the security lints' "${linux_conc
 mutation '11. gitleaks dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'gitleaks' || inputs.scanner == 'all' }}" "      if: \${{ inputs.scanner == 'gitleaks' }}"
 mutation '11. npm audit dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'npm-audit' || inputs.scanner == 'all' }}" "      if: \${{ inputs.scanner == 'npm-audit' }}"
 mutation '11. Semgrep dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'semgrep' || inputs.scanner == 'all' || inputs.scanner == 'semgrep-container' }}" "      if: \${{ inputs.scanner == 'semgrep' || inputs.scanner == 'semgrep-container' }}"
-mutation '11. cargo-deny dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'deny' || inputs.scanner == 'all' }}
-      shell" "      if: \${{ inputs.scanner == 'deny' }}
-      shell"
+mutation '11. cargo-deny dropped from the scanner run' "${scan_action}" "      id: scan-deny
+      continue-on-error: \${{ inputs.scanner == 'all' }}
+      if: \${{ inputs.scanner == 'deny' || inputs.scanner == 'all' }}" "      id: scan-deny
+      continue-on-error: \${{ inputs.scanner == 'all' }}
+      if: \${{ inputs.scanner == 'deny' }}"
 mutation '11. a scanner no longer fails the report' "${scan_action}" '"cargo-deny|${DENY_OUTCOME}|deny"' '"cargo-deny-skipped|${DENY_OUTCOME}|deny"'
 mutation '11. the scanner report no longer fails the job' "${scan_action}" 'if [[ "${outcome}" != success ]]; then failed=1; fi' 'if [[ "${outcome}" == never ]]; then failed=1; fi'
 mutation '11. rust-lint-enforce made report-only' "${linux_concern}" '        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]' "        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]
