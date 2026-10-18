@@ -34,6 +34,17 @@
 #     blocking-failures expression, so a failed audit cannot print PASS;
 #  I. a job whose steps contain actions/cache/save is `write`;
 #  J. a job whose steps contain actions/cache/restore (and no save) is `read` or `write`.
+#  N. (Stage 2) a cache restore is main-only, or it is exactly one of the four reviewed read-only
+#     untrusted restores (see REVIEWED_UNTRUSTED_RESTORES): Linux concern workflow only, rust-db only,
+#     `actions/cache/restore` directly (never through a composite), its `if` the exact top-level
+#     terms `github.ref == 'refs/heads/untrusted'`, `inputs.untrusted_readonly_cache` and
+#     `inputs.concern == 'rust-db'` and nothing else, `with` exactly `path` and `key`, the path and
+#     the key the reviewed literals (a key never derives from a dispatch input, the head ref or any
+#     other expression), and no other step key (no env, continue-on-error, timeout). Around it:
+#     no `write` permission anywhere in the called workflow or in the untrusted half that calls it,
+#     every caller is a read or write job, the flag a caller passes is a literal boolean, only the
+#     read (untrusted) half may pass true, and true needs the recorded enforcement spike
+#     (SPIKE_RECORD in docs/untrusted-readonly-cache.md).
 # Always on, over every workflow and composite action given: `actions: write` (or write-all) is
 # held to the two reviewed places (P7): cache-prune.yml, a main-only job with no environment, no
 # secret and no local composite (it deletes cache entries, which cache-mode does not govern), and
@@ -48,6 +59,21 @@ MODES = %w[read write none].freeze
 # What the dispatch's Result job passes to run-result so a failed untrusted cache scope audit (before
 # or after the run) can never print a passing verdict.
 BLOCKING_EXPR = %q(${{ (contains(fromJSON('["failure","cancelled"]'), needs.cache-audit.result) || contains(fromJSON('["failure","cancelled"]'), needs.cache-audit-after.result)) && '1' || '0' }}).freeze
+
+UNTRUSTED_RESTORE_WORKFLOWS = %w[linux-validation-concern.yml].freeze
+UNTRUSTED_FLAG = 'untrusted_readonly_cache'.freeze
+UNTRUSTED_RESTORE_TERMS = [UNTRUSTED, 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
+PIN = 'actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9'.freeze
+SOURCES_PATH = "${{ steps.cargo-home.outputs.dir }}/registry/cache\n".freeze
+TARGET_PATH = "${{ steps.cargo-target.outputs.dir }}/debug/deps\n${{ steps.cargo-target.outputs.dir }}/debug/build\n${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint\n".freeze
+SOURCES_KEY = "cargo-sources-v3-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}".freeze
+TARGET_KEY = '${{ steps.cargo-target.outputs.key }}'.freeze
+# The only untrusted restores that may exist: [path, key], nothing else is reviewed.
+REVIEWED_UNTRUSTED_RESTORES = [[SOURCES_PATH, SOURCES_KEY], [TARGET_PATH, TARGET_KEY]].freeze
+# A flag set true needs this exact line in docs/untrusted-readonly-cache.md: the green enforcement
+# spike (section 7c) recorded by a person after reading the run, with its run id.
+SPIKE_RECORD = /^Stage 2 enforcement spike result: GREEN run [0-9]{8,} reviewed by [A-Za-z0-9._-]+ on 20[0-9]{2}-[0-9]{2}-[0-9]{2}$/.freeze
+STEP_KEYS = %w[name id if uses with].freeze
 
 # Both cache checkers use the same string-aware, fail-closed expression parser.
 def top_terms(value)
@@ -356,12 +382,24 @@ if any_untrusted_cache
   end
 end
 
-# N (standing, no staging): no cache restore may run on the untrusted ref. Stage 2 (the read-only
-# untrusted restore) needs the owner's decision, so until then every restore step, whether it uses
-# actions/cache/restore, the combined actions/cache or reaches one through a local composite, must
-# carry the exact top-level term github.ref == 'refs/heads/main' in its own if and never mention the
-# untrusted ref. A restore gated to the untrusted ref, or gated to neither ref (so reachable on it),
-# is refused, with no dependence on which workflows are enforced.
+# N (Stage 2): no cache restore may run off main except the four reviewed read-only untrusted
+# restores. Every restore step, whether it uses actions/cache/restore, the combined actions/cache or
+# reaches one through a local composite, either carries the exact top-level term
+# github.ref == 'refs/heads/main' in its own if and never mentions the untrusted ref, or it is
+# exactly a reviewed untrusted restore (reviewed_untrusted_restore? below) in a workflow of
+# UNTRUSTED_RESTORE_WORKFLOWS, whose surroundings the rules after this loop check. A restore gated to
+# neither ref (so reachable on the untrusted ref), or gated to untrusted in any other shape, is refused,
+# with no dependence on which workflows are enforced.
+def reviewed_untrusted_restore?(st)
+  return false unless (st.keys - STEP_KEYS).empty? && st['uses'].to_s == PIN
+  with = st['with']
+  return false unless with.is_a?(Hash) && with.keys.sort == %w[key path]
+  return false unless REVIEWED_UNTRUSTED_RESTORES.include?([with['path'].to_s, with['key'].to_s])
+  terms = top_terms(st['if'])
+  !terms.nil? && terms.sort == UNTRUSTED_RESTORE_TERMS.sort
+end
+
+reviewed_restores = {}
 docs.each do |path, doc|
   (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).each do |name, job|
     next unless job.is_a?(Hash)
@@ -377,7 +415,60 @@ docs.each do |path, doc|
         next
       end
       next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')
-      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref); an untrusted cache restore awaits the owner's Stage 2 decision"
+      if UNTRUSTED_RESTORE_WORKFLOWS.include?(File.basename(path)) && reviewed_untrusted_restore?(st)
+        (reviewed_restores[path] ||= []) << st
+        next
+      end
+      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref) and is not the reviewed read-only untrusted restore (Linux concern workflow, rust-db, the exact terms, path and key of docs/untrusted-readonly-cache.md, Stage 2)"
+    end
+  end
+end
+
+# N2: around a reviewed untrusted restore. The called workflow holds no write permission anywhere
+# (the cache grant is the caller's `cache-mode: read`; a write-capable GITHUB_TOKEN or id-token is a
+# second way to reach a cache or a release), has no step that saves, and each caller job is the
+# read half (untrusted-gated) or the write half (main-gated), passes the flag as a literal boolean
+# and only the read half passes true, and then only with the recorded spike.
+def write_permission?(value)
+  value == 'write-all' || (value.is_a?(Hash) && value.values.any? { |v| v.to_s.include?('write') }) || (value.is_a?(String) && value.include?('write'))
+end
+
+reviewed_restores.each_key do |path|
+  doc = docs.fetch(path)
+  base = File.basename(path)
+  failures << "#{path}: a workflow with an untrusted restore must set no write permission at workflow level" if write_permission?(doc['permissions'])
+  (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).each do |name, job|
+    next unless job.is_a?(Hash)
+    failures << "#{path}: job #{name}: a workflow with an untrusted restore must set no write permission (a write-capable token beside a read-only cache)" if write_permission?(job['permissions'])
+    next unless cache_kinds(steps_of(job)).any? { |k| %i[save combined].include?(k) }
+    failures << "#{path}: job #{name}: a workflow with an untrusted restore must not save a cache from the same job without the main-only gate" unless Array(job['steps']).select { |st| st.is_a?(Hash) && cache_kinds([st]).any? { |k| %i[save combined].include?(k) } }.all? { |st| requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted') }
+  end
+  callers = docs.select do |other_path, other|
+    !other_path.include?('/actions/') && (other['jobs'].is_a?(Hash) ? other['jobs'] : {}).values.any? { |job| job.is_a?(Hash) && job['uses'].to_s == "./.github/workflows/#{base}" }
+  end
+  callers.each do |caller_path, caller_doc|
+    failures << "#{caller_path}: a workflow-level write permission beside an untrusted restore" if write_permission?(caller_doc['permissions'])
+    caller_doc['jobs'].each do |name, job|
+      next unless job.is_a?(Hash) && job['uses'].to_s == "./.github/workflows/#{base}"
+      mode = job['cache-mode']
+      failures << "#{caller_path}: job #{name} calls #{base}, which has an untrusted restore, and must be cache-mode read (untrusted half) or write (main half), not #{mode.inspect}" unless %w[read write].include?(mode)
+      failures << "#{caller_path}: job #{name}: no write permission beside an untrusted restore (a write-capable token)" if write_permission?(job['permissions'])
+      with = job['with'].is_a?(Hash) ? job['with'] : {}
+      next unless with.key?(UNTRUSTED_FLAG)
+      flag = with[UNTRUSTED_FLAG]
+      unless [true, false].include?(flag)
+        failures << "#{caller_path}: job #{name}: #{UNTRUSTED_FLAG} must be a literal true or false, never an expression or an input (got #{flag.inspect})"
+        next
+      end
+      next unless flag
+      unless mode == 'read' && requires?(job['if'], UNTRUSTED)
+        failures << "#{caller_path}: job #{name}: only the read-only untrusted half (cache-mode read, the exact top-level term #{UNTRUSTED}) may pass #{UNTRUSTED_FLAG}: true"
+      end
+      spike = File.join(File.dirname(File.dirname(File.dirname(caller_path))), 'docs', 'untrusted-readonly-cache.md')
+      spike = 'docs/untrusted-readonly-cache.md' unless File.exist?(spike)
+      unless File.exist?(spike) && read_text(spike).match?(SPIKE_RECORD)
+        failures << "#{caller_path}: job #{name}: #{UNTRUSTED_FLAG}: true needs the recorded green enforcement spike line in docs/untrusted-readonly-cache.md (section 7c)"
+      end
     end
   end
 end

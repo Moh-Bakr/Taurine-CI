@@ -7,7 +7,12 @@
 #  2. every step between the revoke and drop-root is a reviewed pre-root step: a listed
 #     composite or Action, or plain shell that runs no project command (Docker and sudo are
 #     allowed there, because that is where root-needing work belongs);
-#  3. no workflow step after drop-root calls sudo, or Docker unless drop-root keeps Docker for
+#  3. (cache ordering, docs/untrusted-readonly-cache.md P3) every actions/cache/restore step comes
+#     after drop-root, so after the revoke and the root removal; and every restore gated to the
+#     untrusted ref is followed directly by its verifier, gated to the same ref, so nothing runs
+#     between the extraction and the verification (the crate-archive re-hash for the sources
+#     cache, the workspace-crate strip for the compiled cache);
+#  4. no workflow step after drop-root calls sudo, or Docker unless drop-root keeps Docker for
 #     that job, and no composite called after drop-root contains sudo (the egress audit's
 #     best-effort `sudo -n` fallbacks excepted).
 require 'yaml'
@@ -66,6 +71,29 @@ root = File.expand_path('../..', File.dirname(File.expand_path(workflow)))
     end
     code_lines(st['run']).each do |line|
       failures << "job #{job_id}: step #{label} runs a project command before drop-root: #{line.strip[0, 60]}" if PROJECT_COMMAND.match?(line)
+    end
+  end
+  steps.each_with_index do |st, i|
+    next unless st['uses'].to_s.match?(%r{\Aactions/cache/restore@})
+    label = st['name'].inspect
+    failures << "job #{job_id}: cache restore #{label} runs before the root removal (it must follow the source revoke and drop-root)" if i <= drop_at
+    next unless st['if'].to_s.include?('refs/heads/untrusted')
+    path = st.dig('with', 'path').to_s
+    verifier = steps[i + 1] || {}
+    verified =
+      if path.include?('registry/cache')
+        verifier['uses'].to_s == './.github/actions/verify-cargo-cache'
+      elsif path.include?('debug/')
+        verifier['uses'].to_s == './.github/actions/rust-target-cache' && verifier.dig('with', 'mode') == 'restored'
+      else
+        false
+      end
+    unless verified
+      failures << "job #{job_id}: untrusted cache restore #{label} must be followed directly by its verifier (verify-cargo-cache for the crate sources, rust-target-cache mode restored for the compiled dependencies)"
+      next
+    end
+    unless verifier['if'].to_s.include?("github.ref == 'refs/heads/untrusted'") && !verifier['if'].to_s.include?('refs/heads/main')
+      failures << "job #{job_id}: the verifier after untrusted cache restore #{label} must run on the untrusted ref and not be main-gated, or the restored files would go unchecked"
     end
   end
   steps[(drop_at + 1)..].each do |st|

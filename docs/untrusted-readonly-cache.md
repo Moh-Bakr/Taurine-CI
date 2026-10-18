@@ -1,8 +1,9 @@
 # Design: read-only cache restore on `untrusted` runs
 
-Status: **design, plus Stage 1's policy half implemented (this pull request: P1 to P3, P7, P8, the
-staged cache-mode rules, their fixtures and mutations). No workflow carries `cache-mode` yet, and no
-untrusted restore exists.** Implementation needs (1) an independent adversarial security review and (2) the
+Status: **design; Stage 1 is merged. Stage 2 (this pull request) adds the four reviewed read-only
+untrusted restores to `linux-validation-concern.yml` (rust-db only), behind a caller flag
+(`untrusted_readonly_cache`) that stays `false` until the dispatch-path enforcement spike of
+section 7c is recorded green in this file. With the flag false no untrusted restore runs.** Implementation needs (1) an independent adversarial security review and (2) the
 owner's explicit sign-off, because it changes a stated security rule (see
 [section 9](#9-rules-that-change-and-the-owners-approval)).
 
@@ -530,6 +531,99 @@ Final runs: `38746264008` (verdicts), `38746489504` (shadowing), `38746690385` (
 - Residual wording to keep honest: the cache service's refusal of a direct write under `read` is
   an `ok=false` answer plus a token with no write scope, not an HTTP error code, so the audit
   and the policy must not depend on the response shape.
+
+### 7c. Stage 2 enforcement spike (dispatch path)
+
+Section 7a-result proved the platform claims on a `push` trigger. Stage 2 relies on one more path, not
+yet proved: a `workflow_dispatch` run, a job with `cache-mode: read` that **calls a reusable workflow**,
+and the reusable workflow's steps (a restore that hits, a direct reservation that is refused). Until it
+is recorded green, the Stage 2 flag stays `false` and the policy refuses `true`
+(`SPIKE_RECORD` in `check-cache-mode.rb`).
+
+Scratch workflow, **no secrets, no environment, no private source**, on a throwaway branch
+`cache-mode-spike-2` (never merged, deleted afterwards), as two files.
+
+`.github/workflows/spike2.yml`
+
+```yaml
+name: cache-mode spike 2
+on:
+  workflow_dispatch:
+permissions: {}
+cache-mode: none
+jobs:
+  write-twin:
+    cache-mode: write
+    uses: ./.github/workflows/spike2-called.yml
+    with: { mode: write }
+  read-half:
+    needs: write-twin
+    cache-mode: read
+    uses: ./.github/workflows/spike2-called.yml
+    with: { mode: read }
+```
+
+`.github/workflows/spike2-called.yml`
+
+```yaml
+name: cache-mode spike 2 called
+on:
+  workflow_call:
+    inputs:
+      mode: { required: true, type: string }
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Seed a harmless file
+        run: mkdir -p "${RUNNER_TEMP}/seed" && echo spike > "${RUNNER_TEMP}/seed/f"
+      - name: Restore the seeded entry (must hit in the read half)
+        id: r
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/seed
+          key: spike2-seed-${{ github.ref_name }}
+      - name: Direct reservation with the runtime token
+        uses: actions/github-script@<the allow-listed pin>
+        with:
+          script: |
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const url = process.env.ACTIONS_RESULTS_URL;
+            core.info(`mode=${{ inputs.mode }} ACTIONS_CACHE_MODE=${process.env.ACTIONS_CACHE_MODE} token=${token ? 'present' : 'ABSENT'}`);
+            core.info(`ac claim=${JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).ac}`);
+            const res = await fetch(`${url}twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ key: `spike2-direct-${{ inputs.mode }}-${Date.now()}`, version: 'v1' }),
+            });
+            core.info(`reservation http=${res.status} body=${await res.text()}`);
+      - name: Save the seed (write half only, on a miss)
+        if: ${{ inputs.mode == 'write' && steps.r.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/seed
+          key: spike2-seed-${{ github.ref_name }}
+```
+
+The `actions/github-script` pin must be copied from `.github/policy/action-allowlist.rb`, or the
+step replaced by a small JavaScript step the throwaway branch carries (the spike is not subject to the
+policy, which only runs on pull requests, but the pin discipline is kept anyway).
+
+Dispatch instructions for the coordinator (the lane never dispatches): push the two files to
+`cache-mode-spike-2`; check the incident feed; run
+`gh workflow run spike2.yml -R Moh-Bakr/Taurine-CI --ref cache-mode-spike-2` **twice**: the first run
+writes the seed in `write-twin`, the second proves the hit. Read each job's log once after it ends.
+Green means, in the second run: `write-twin` shows `ACTIONS_CACHE_MODE=write`, token present, reservation
+`ok:true`; `read-half` shows `ACTIONS_CACHE_MODE=read`, token present, reservation `ok:false`, and its
+restore step reports a hit. Any other result keeps the flag `false`. After a green result a person adds
+one line to this file, in the form below on its own line, and flips the flag in `linux-validation.yml`
+(the policy refuses the flip without the line):
+
+`Stage 2 enforcement spike result: GREEN run <run id> reviewed by <name> on <YYYY-MM-DD>`
+
+Also before the flip: the owner runs `gh cache delete --all --ref refs/heads/untrusted` (section 3.3),
+and a protected `main` run of `rust-db` has saved the week's key.
 
 ### 7b. Gain on one concern (`rust-db`), only after Stage 1 is merged and reviewed
 

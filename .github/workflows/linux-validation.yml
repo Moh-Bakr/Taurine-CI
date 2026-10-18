@@ -460,6 +460,10 @@ jobs:
       SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
+      # Stage 2 switch, a literal (never an expression, never a dispatch input): false until the
+      # enforcement spike of docs/untrusted-readonly-cache.md is recorded green there. The policy
+      # refuses true without that record.
+      untrusted_readonly_cache: false
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeouts)[matrix.concern] }}
       # The shadow review this concern's coverage group would run under a

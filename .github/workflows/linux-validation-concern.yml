@@ -18,6 +18,11 @@ on:
         required: false
         default: 60
         type: number
+      untrusted_readonly_cache:
+        description: Restore the two reviewed Rust caches read-only on the untrusted ref, for rust-db only (docs/untrusted-readonly-cache.md, Stage 2). The caller passes a literal; the reviewed default is off until the enforcement spike is recorded green.
+        required: false
+        default: false
+        type: boolean
       suite_selection:
         description: Optional reviewed suite selection JSON ({selection_mode, selected_suite_ids, selection_digest}); empty means the full set
         required: false
@@ -318,6 +323,29 @@ jobs:
           cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}
           os-label: Linux
 
+      # Stage 2 (docs/untrusted-readonly-cache.md): the untrusted ref restores the reviewed crate
+      # sources read-only, rust-db only, behind the caller's literal flag. It runs after the token
+      # revoke and the root removal, under the caller's `cache-mode: read` (the platform refuses any
+      # write), with the exact key (no restore-keys: a branch-scoped prefix match would beat main's
+      # entry) and is verified by the very next step. No save, completion or strip step takes this ref.
+      - name: Restore cached third-party crate sources (untrusted, read-only)
+        id: cargo-sources-untrusted
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: cargo-sources-v3-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
+
+      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
+        with:
+          sources-dir: ${{ steps.cargo-home.outputs.dir }}
+          cache-hit: ${{ steps.cargo-sources-untrusted.outputs.cache-hit }}
+          os-label: Linux
+
       # Saved before any project code runs, so nothing the private SHA's build scripts, proc
       # macros or tests do can reach what is saved: only from the protected main branch, only
       # for a source SHA on a protected private branch (the source-checkout ancestry answer),
@@ -385,6 +413,29 @@ jobs:
           mode: restored
           dir: ${{ steps.cargo-target.outputs.dir }}
           cache-hit: ${{ steps.cargo-target-cache.outputs.cache-hit }}
+          os-label: Linux
+
+      # Stage 2: the compiled third-party dependencies, restored read-only on the untrusted ref
+      # (rust-db only, exact key, no restore-keys), stripped by the very next step. Never saved.
+      - name: Restore compiled third-party dependencies (untrusted, read-only)
+        id: cargo-target-cache-untrusted
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-target.outputs.dir }}/debug/deps
+            ${{ steps.cargo-target.outputs.dir }}/debug/build
+            ${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint
+          key: ${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored dependency cache (untrusted, read-only)
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored
+          dir: ${{ steps.cargo-target.outputs.dir }}
+          cache-hit: ${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}
           os-label: Linux
 
       - name: Install the pinned Playwright browser
