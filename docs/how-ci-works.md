@@ -1230,6 +1230,29 @@ What this does **not** do, plainly:
 - **The sudo assertion cannot be exercised off a runner.** It needs passwordless sudo to be present
   to prove it is gone, which a developer machine does not have.
 
+### Local checks before pushing a CI change
+
+A pull request is judged by main's policy scripts, and main's fixtures can pin exact text (a
+timeout, a job shape, a concern order). Before pushing a change to `.github/` or the policy, run
+the base pass locally:
+
+```bash
+git fetch origin
+bash .github/policy/base-pass-lite.sh            # fast subset, a few minutes
+bash .github/policy/base-pass-lite.sh --full     # also lint.sh and test-mutations.sh, where they run natively
+bash .github/policy/base-pass-lite.sh origin/main  # the base ref is the first argument
+```
+
+It extracts the base ref's `.github/policy` with `git archive`, copies your working tree to a
+temp directory, runs the base scripts there in the order and with the script set that the
+base-policy step uses, and prints PASS or FAIL per script with the first failing lines. Your
+working tree is untouched, nothing uses the network or a token, and your own scripts never act as
+the judge. The fast mode skips `lint.sh` (needs the pinned actionlint and zizmor binaries),
+`test-mutations.sh` and the slowest fixture suites (the `slow_scripts` list in the script). It does
+not reproduce the hosted step's sandbox, and the Linux-only fixtures skip themselves on macOS, so a
+pass here is a rehearsal, not admission. CI never runs it, and its name matches neither `check-*`
+nor `test-*`, so the base pass's glob does not pick it up.
+
 ### Where the base-pass step lives
 
 The base-policy jobs are in `.github/workflows/base-policy.yml`, the reusable half of the public
