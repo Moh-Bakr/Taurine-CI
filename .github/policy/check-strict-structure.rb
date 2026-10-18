@@ -82,6 +82,35 @@ end
   problems << "validate-public-changes.yml may not carry #{key} at the workflow level" if doc.key?(key)
 end
 problems << "the policy job's if must be exactly ${{ always() }}" unless (jobs['policy'] || {})['if'].to_s.strip == '${{ always() }}'
+# The required check's context is its job `name`: only `policy` may carry it, in either layout, or a
+# trivially green job could carry the context the branch protection waits for. Each shard's name and
+# key set are pinned too, so it cannot gain a strategy, concurrency, a different name or another key.
+REQUIRED_NAME = 'Validate workflow policy'
+SHARD_TITLES = {
+  'policy-evidence' => 'Policy case-evidence tests',
+  'policy-fixtures' => 'Policy fixtures and unit tests',
+  'policy-mutations' => 'Policy mutations',
+  'policy-structure' => 'Policy structure and lint'
+}.freeze
+jobs.each do |name, j|
+  next unless j.is_a?(Hash)
+
+  problems << "the #{name} job carries the required check's name #{REQUIRED_NAME.inspect}: only policy may" if name != 'policy' && j['name'] == REQUIRED_NAME
+end
+SHARD_TITLES.each do |name, title|
+  sj = jobs[name]
+  next unless sj
+
+  problems << "the #{name} job's name must be exactly #{title.inspect} (got #{sj['name'].inspect})" unless sj['name'] == title
+  problems << "the #{name} job's keys must be exactly permissions, name, runs-on, timeout-minutes and steps (got #{sj.keys.sort.inspect})" unless sj.keys.sort == %w[name permissions runs-on steps timeout-minutes]
+  problems << "the #{name} job's permissions must be exactly contents: read (got #{sj['permissions'].inspect})" unless sj['permissions'] == { 'contents' => 'read' }
+end
+if sharded
+  agg = jobs['policy'] || {}
+  problems << "the policy aggregate's keys must be exactly permissions, name, needs, if, runs-on, timeout-minutes and steps (got #{agg.keys.sort.inspect})" unless agg.keys.sort == %w[if name needs permissions runs-on steps timeout-minutes]
+  problems << "the policy aggregate's permissions must be exactly {} (got #{agg['permissions'].inspect})" unless agg['permissions'] == {}
+end
+(jobs.keys - %w[policy base-pass] - SHARD_TITLES.keys).each { |name| problems << "unexpected job #{name} in the policy workflow" }
 # A shard is never conditional: a skipped shard is a skipped check, and the aggregate (which requires
 # success from each) is not the only line of defence.
 SHARDS.each { |name| problems << "the #{name} job may not carry if" if jobs[name]&.key?('if') }

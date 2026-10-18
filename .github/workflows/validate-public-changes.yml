@@ -95,6 +95,11 @@ jobs:
         shell: bash
         run: ruby .github/policy/check-structure.rb --strict
 
+      # Every policy step is present once, runs its pinned command and sits in its pinned job.
+      - name: Check that every policy step is present, exact and in its job
+        shell: bash
+        run: ruby .github/policy/check-policy-steps.rb
+
       # Trust tiers: reviewed Actions, token revocation order, cache, secrets, dispatchers.
       - name: Enforce immutable reviewed Actions and safe workflow features
         shell: bash
