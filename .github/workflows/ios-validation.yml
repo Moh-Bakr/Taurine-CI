@@ -137,7 +137,7 @@ jobs:
     # Xcode toolchain shipped on macos-15. macos-14's older Xcode rejects it
     # before Tauri can compile the Rust framework.
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       # ios-rust is added by the `plan` job when rust=true. The iOS simulator target's

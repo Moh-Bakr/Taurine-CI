@@ -50,7 +50,7 @@ jobs:
     # OpenSSL, jsoncpp, lz4, fmt and xxhash from source through vcpkg before it
     # compiles openvpn3 (the private notes record roughly 23 minutes for that
     # alone).
-    timeout-minutes: ${{ (startsWith(inputs.concern, 'rust-app') || inputs.concern == 'rust-packaging') && 150 || (inputs.concern == 'rust-db' || inputs.concern == 'rust-net' || inputs.concern == 'rust-ovpn') && 120 || startsWith(inputs.concern, 'rust-') && 90 || 60 }}
+    timeout-minutes: ${{ startsWith(inputs.concern, 'rust-app') && 110 || (inputs.concern == 'rust-packaging' || startsWith(inputs.concern, 'rust-')) && 60 || 45 }}
     defaults:
       run:
         working-directory: src

@@ -41,14 +41,14 @@ jobs:
     name: macOS ${{ inputs.concern }} validation
     environment: source-read
     runs-on: macos-15
-    # The TypeScript concerns stay on the reviewed 45. The Rust concerns compile
+    # Budgets are about 1.5 to 2x the measured green duration (30 for the TypeScript concerns). The Rust concerns compile
     # their closure on a three-core runner (the rust-app shards restore compiled
     # third-party crates on main, for a protected source SHA; compiled private
     # source is never cached): `rust-app-1`/`rust-app-2` carry DuckDB's C++
     # amalgamation, Tauri and over a hundred test binaries (about 40 minutes
     # cold on the four-core Linux runner), `rust-db` the same drivers' offline
     # suites (about 10 there).
-    timeout-minutes: ${{ (startsWith(inputs.concern, 'rust-app') || inputs.concern == 'rust-packaging') && 120 || inputs.concern == 'rust-db' && 90 || startsWith(inputs.concern, 'rust-') && 60 || 45 }}
+    timeout-minutes: ${{ startsWith(inputs.concern, 'rust-app') && 100 || (inputs.concern == 'rust-packaging' || inputs.concern == 'rust-db') && 60 || startsWith(inputs.concern, 'rust-') && 45 || 30 }}
     defaults:
       run:
         working-directory: src
