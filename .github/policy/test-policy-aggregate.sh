@@ -213,7 +213,7 @@ expect_extra 'an extra running bash on a .rb file' refuse "d['jobs']['policy-fix
 expect_extra 'an extra running ruby on a .sh file' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('run' => 'ruby .github/policy/check-new-rule.sh')"
 GUARD1='Require the base-policy workflow to have passed'
 expect_extra 'a duplicate guard name in a shard' refuse "d['jobs']['policy-fixtures']['steps'] << { 'name' => '${GUARD1}', 'shell' => 'bash', 'run' => 'bash .github/policy/x.sh' }"
-expect_extra 'a duplicate of the whole guard in the aggregate' refuse "d['jobs']['policy']['steps'] << d['jobs']['policy']['steps'][0].dup"
+expect_extra 'a duplicate of the whole guard in the aggregate' refuse "d['jobs']['policy']['steps'] << d['jobs']['policy']['steps'][0].then { |s| Marshal.load(Marshal.dump(s)) }"
 expect_extra 'a guard with a modified run' refuse "d['jobs']['policy']['steps'][0]['run'] = \"echo ok\\n\""
 expect_extra 'the shards guard with a modified run' refuse "d['jobs']['policy']['steps'][1]['run'] = \"true\\n\""
 expect_extra 'a guard with an added key' refuse "d['jobs']['policy']['steps'][0]['continue-on-error'] = true"
