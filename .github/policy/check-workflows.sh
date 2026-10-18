@@ -71,6 +71,7 @@ fi
 cache_mode_files=()
 while IFS= read -r -d '' file; do cache_mode_files+=("${file}"); done < <(find .github/workflows -type f -name '*.yml' -print0 | sort -z)
 ruby "${policy}/check-cache-mode.rb" "${cache_mode_files[@]}"
+ruby "${policy}/check-cache-groups.rb" .github/workflows/linux-validation-concern.yml .github/workflows/macos-validation-concern.yml .github/workflows/windows-validation-concern.yml
 
 ruby "${policy}/check-dispatch-contracts.rb"
 ruby "${policy}/check-suite-catalog.rb"

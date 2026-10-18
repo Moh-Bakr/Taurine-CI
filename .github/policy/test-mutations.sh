@@ -651,6 +651,55 @@ mutation '17. a restore with no ref gate, reachable on the untrusted ref' "${mac
 "
 mutation '17. rule N dropped from the checker' .github/policy/check-cache-mode.rb "      next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')" "      next"
 
+# 20. The OpenSSL door's compiled-dependency group on Windows (rust-tls-openssl, survey item 7.1): the
+# group stays main-only, protected-SHA-only, exact-keyed and its own; each weakening is refused.
+windows_concern=.github/workflows/windows-validation-concern.yml
+tls_scope="inputs.concern == 'rust-tls-openssl'"
+mutation '20. the door group folded into the rust-app group' "${windows_concern}" " || (inputs.concern == 'rust-tls-openssl' && 'rust-tls-openssl')" ''
+mutation '20. the door compiled save gated to the untrusted ref' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main'" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/untrusted'"
+mutation '20. the door compiled save without protected ancestry' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' || ${tls_scope}) && steps.verified-source.outputs.protected-ancestor == 'true' && " "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' || ${tls_scope}) && "
+mutation '20. the door compiled save without the strip-and-prove step' "${windows_concern}" " && steps.cargo-target-strip.outcome == 'success' }}
+        uses: actions/cache/save@" " }}
+        uses: actions/cache/save@"
+mutation '20. the door compiled restore without the main guard' "${windows_concern}" "      - name: Restore compiled third-party dependencies
+        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && " "      - name: Restore compiled third-party dependencies
+        id: cargo-target-cache
+        if: \${{ steps.verified-source.outputs.protected-ancestor == 'true' && "
+mutation '20. the door compiled restore gated to the untrusted ref' "${windows_concern}" "      - name: Restore compiled third-party dependencies
+        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' &&" "      - name: Restore compiled third-party dependencies
+        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/untrusted' &&"
+mutation '20. restore-keys on the door compiled restore' "${windows_concern}" "          key: \${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored dependency cache" "          key: \${{ steps.cargo-target.outputs.key }}
+          restore-keys: |
+            cargo-target-v1-
+
+      - name: Strip workspace crates from the restored dependency cache"
+mutation '20. the door compiled key derived from the source SHA input' "${windows_concern}" "          key: \${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored dependency cache" "          key: cargo-target-\${{ inputs.source_sha }}
+
+      - name: Strip workspace crates from the restored dependency cache"
+mutation '20. the door compiled restore path moved into the checkout' "${windows_concern}" "            \${{ steps.cargo-target.outputs.dir }}/debug/deps
+            \${{ steps.cargo-target.outputs.dir }}/debug/build
+            \${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint
+          key: \${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored" "            src/target
+          key: \${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored"
+mutation '20. the door restore-time strip removed' "${windows_concern}" "      - name: Strip workspace crates from the restored dependency cache
+" "      - name: Not the strip
+"
+
 # 18. The case-evidence admission in the e2e-visual container (git as root, checkouts owned by the
 # runner's uid): its git calls carry an exact safe.directory for the checkout they read.
 admission=.github/policy/case-evidence-admission.rb
