@@ -2977,139 +2977,6 @@
   },
   "concerns": {
     "linux": {
-      "rust-app-1": {
-        "rust_packages": [
-          "taurine-app",
-          "taurine-desktop",
-          "taurine-mobile"
-        ],
-        "full_only": true,
-        "timeout": 60,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "rust-app-2": {
-        "rust_packages": [
-          "taurine-app",
-          "taurine-desktop",
-          "taurine-mobile"
-        ],
-        "full_only": true,
-        "timeout": 60,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "rust-db": {
-        "rust_package_glob": "taurine-db*",
-        "full_only": true,
-        "timeout": 40,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "e2e-regression-3": {
-        "paths": [
-          "taurine-desktop/**",
-          "packages/**"
-        ],
-        "full_only": true,
-        "timeout": 40,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "e2e-regression-4": {
-        "paths": [
-          "taurine-desktop/**",
-          "packages/**"
-        ],
-        "full_only": true,
-        "timeout": 40,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "e2e-regression-2": {
-        "paths": [
-          "taurine-desktop/**",
-          "packages/**"
-        ],
-        "full_only": true,
-        "timeout": 40,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "e2e-critical": {
-        "paths": [
-          "taurine-desktop/**",
-          "packages/**"
-        ],
-        "timeout": 40,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "scan-security": {
-        "always": true,
-        "full_only": true,
-        "timeout": 45,
-        "paths": [
-          "**/*.rs",
-          "**/*.ts",
-          "**/*.tsx",
-          "**/Cargo.toml",
-          "**/package.json"
-        ],
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "rust-packaging": {
-        "paths": [
-          "taurine-desktop/**",
-          "packages/**"
-        ],
-        "rust_packages": [
-          "taurine-desktop"
-        ],
-        "timeout": 40,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "desktop-shard-1": {
-        "paths": [
-          "taurine-desktop/**",
-          "packages/**"
-        ],
-        "timeout": 30,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "desktop-shard-2": {
-        "paths": [
-          "taurine-desktop/**",
-          "packages/**"
-        ],
-        "timeout": 30,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "e2e-regression-1": {
-        "paths": [
-          "taurine-desktop/**",
-          "packages/**"
-        ],
-        "full_only": true,
-        "timeout": 40,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
-      "rust-dbx": {
-        "rust_packages": [
-          "dbx-core",
-          "dbx-sqlite-worker",
-          "dbx-mongo-shell"
-        ],
-        "full_only": true,
-        "timeout": 30,
-        "egress": "audit",
-        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
-      },
       "contracts": {
         "always": true,
         "paths": [
@@ -3131,6 +2998,24 @@
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
       "desktop-quality": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "timeout": 30,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "desktop-shard-1": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "timeout": 30,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "desktop-shard-2": {
         "paths": [
           "taurine-desktop/**",
           "packages/**"
@@ -3182,6 +3067,13 @@
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
+      "rust-db": {
+        "rust_package_glob": "taurine-db*",
+        "full_only": true,
+        "timeout": 40,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
       "rust-net": {
         "rust_packages": [
           "taurine-peer-sys",
@@ -3190,6 +3082,48 @@
           "taurine-net-conformance"
         ],
         "timeout": 30,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "rust-app-1": {
+        "rust_packages": [
+          "taurine-app",
+          "taurine-desktop",
+          "taurine-mobile"
+        ],
+        "full_only": true,
+        "timeout": 60,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "rust-app-2": {
+        "rust_packages": [
+          "taurine-app",
+          "taurine-desktop",
+          "taurine-mobile"
+        ],
+        "full_only": true,
+        "timeout": 60,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "rust-dbx": {
+        "rust_packages": [
+          "dbx-core",
+          "dbx-sqlite-worker",
+          "dbx-mongo-shell"
+        ],
+        "full_only": true,
+        "timeout": 30,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "e2e-critical": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3203,12 +3137,78 @@
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
+      "e2e-regression-1": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true,
+        "timeout": 40,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "e2e-regression-2": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true,
+        "timeout": 40,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "e2e-regression-3": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true,
+        "timeout": 40,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "e2e-regression-4": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "full_only": true,
+        "timeout": 40,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "rust-packaging": {
+        "paths": [
+          "taurine-desktop/**",
+          "packages/**"
+        ],
+        "rust_packages": [
+          "taurine-desktop"
+        ],
+        "timeout": 40,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
       "rust-tls-openssl": {
         "rust_packages": [
           "taurine-tls-openssl"
         ],
         "full_only": true,
         "timeout": 30,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
+      "scan-security": {
+        "always": true,
+        "full_only": true,
+        "timeout": 45,
+        "paths": [
+          "**/*.rs",
+          "**/*.ts",
+          "**/*.tsx",
+          "**/Cargo.toml",
+          "**/package.json"
+        ],
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },

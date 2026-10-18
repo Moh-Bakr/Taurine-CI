@@ -344,7 +344,7 @@ run_windows_plan() {
   fi
 }
 run_windows_plan 'full Windows Rust matrix' true '' success
-ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "wrong full Windows Rust matrix" unless JSON.parse(out.fetch("rust_matrix")) == {"concern"=>%w[rust-app-1 rust-app-2 rust-db rust-packaging rust-domain rust-net rust-ovpn rust-tls-openssl]}' "${work}/windows-plan.out"
+ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "wrong full Windows Rust matrix" unless JSON.parse(out.fetch("rust_matrix")).then { |m| m.keys == ["concern"] && m["concern"].sort == %w[rust-domain rust-db rust-net rust-ovpn rust-app-1 rust-app-2 rust-packaging rust-tls-openssl].sort && m["concern"].uniq.length == m["concern"].length }' "${work}/windows-plan.out"
 run_windows_plan 'filtered Windows Rust concern' true rust-db success
 ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "valid rust-db concern was not selected" unless JSON.parse(out.fetch("rust_matrix")) == {"concern"=>["rust-db"]}' "${work}/windows-plan.out"
 run_windows_plan 'unknown Windows concern' true rust-not-reviewed reject

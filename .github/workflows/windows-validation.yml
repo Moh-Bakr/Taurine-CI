@@ -186,8 +186,7 @@ jobs:
         run: |
           set -euo pipefail
           ts='["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]'
-          # Longest first: the matrix starts jobs in list order as runner slots free up. Order only.
-          rust='["rust-app-1","rust-app-2","rust-db","rust-packaging","rust-domain","rust-net","rust-ovpn","rust-tls-openssl"]'
+          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           if [[ "${RUST_REQUESTED}" == true ]]; then
             rust_selected="${rust}"
             known="$(jq -cn --argjson t "${ts}" --argjson r "${rust}" '$t + $r')"

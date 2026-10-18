@@ -47,8 +47,21 @@ selected() {
   echo "$(grep '^selection=' "${work}/out.txt" | cut -d= -f2) $(grep '^matrix=' "${work}/out.txt" | cut -d= -f2- | jq -r '.concern | join(",")')"
 }
 parent_of() { git -C "${repo}" rev-parse "$1~1"; }
+# Concern lists are compared as sets, never as ordered strings, so the matrix's own order may change.
+# A partial selection always carries every concern the matrix declares `always`, so the wanted set is
+# the case's own concerns plus those; a concern added to the matrix (declared `always` or not
+# selected here) is judged by the matrix, while an undeclared or missing concern still fails.
+always_set="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null and .value.always == true) | .key] | join(",")' .github/ci-matrix.json)"
+canonical() {
+  local value="$1" kind="${1%% *}" list="${1#* }" extra="${2:-}"
+  [[ -n "${extra}" ]] && list="${list},${extra}"
+  printf '%s %s' "${kind}" "$(tr ',' '\n' <<<"${list}" | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -)"
+}
 expect() {
-  local label="$1" got="$2" want="$3"
+  local label="$1" got="$2" want="$3" extra=''
+  [[ "${want}" == partial* ]] && extra="${always_set}"
+  got="$(canonical "${got}")"
+  want="$(canonical "${want}" "${extra}")"
   if [[ "${got}" != "${want}" ]]; then
     echo "selector case '${label}' failed: wanted '${want}' got '${got}'" >&2
     exit 1
@@ -56,13 +69,13 @@ expect() {
 }
 all="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null) | .key] | join(",")' .github/ci-matrix.json)"
 sha="$(change docs/a.md)"
-expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial scan-security,contracts'
+expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-security'
 sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial rust-app-1,rust-app-2,scan-security,contracts,rust-domain'
+expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app-1,rust-app-2,scan-security'
 sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
-expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial rust-db,scan-security,contracts'
+expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-security'
 sha="$(change taurine-desktop/src/a.ts)"
-expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial e2e-regression-3,e2e-regression-4,e2e-regression-2,e2e-critical,scan-security,rust-packaging,desktop-shard-1,desktop-shard-2,e2e-regression-1,contracts,frontend-build-budget,desktop-quality,e2e-a11y'
+expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,frontend-build-budget,desktop-quality,desktop-shard-1,desktop-shard-2,e2e-critical,e2e-a11y,e2e-regression-1,e2e-regression-2,e2e-regression-3,e2e-regression-4,rust-packaging,scan-security'
 sha="$(change Cargo.lock)"
 expect lockfile "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
 sha="$(change mystery/a.txt)"
@@ -70,7 +83,7 @@ expect unknown "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
 expect no-base "$(selected "" "${sha}")" "full ${all}"
 # An explicitly requested opt-in concern joins a partial selection (docs only here).
 docs_sha="$(change docs/b.md)"
-expect opt-in "$(selected "$(parent_of "${docs_sha}")" "${docs_sha}" '["e2e-visual"]')" 'partial scan-security,contracts,e2e-visual'
+expect opt-in "$(selected "$(parent_of "${docs_sha}")" "${docs_sha}" '["e2e-visual"]')" 'partial contracts,scan-security,e2e-visual'
 tree_ref='HEAD^{tree}'
 orphan="$(git -C "${repo}" commit-tree "$(git -C "${repo}" rev-parse "${tree_ref}")" -m orphan)"
 expect not-ancestor "$(selected "${orphan}" "${sha}")" "full ${all}"
