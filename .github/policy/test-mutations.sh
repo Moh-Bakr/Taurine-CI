@@ -704,6 +704,38 @@ mutation '20. the compiled save step removed (an empty parse)' "${windows_concer
           path: |
             \${{ steps.cargo-target.outputs.dir }}/debug/deps"
 
+# 20b. The door denylist's bypasses (review of the first cache-groups PR): the door is excluded by a
+# positive allowlist per OS now, and every compiled step needs a concern selector.
+restore_if="        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by an upper-case literal in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'RUST-TLS-OPENSSL' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by inputs[concern] in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs['concern'] == 'rust-tls-openssl' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by inputs.CONCERN in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.CONCERN == 'rust-tls-openssl' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by a case-varied prefix in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'RUST-TLS') || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the compiled restore with no concern selector' "${windows_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' }}
+        uses: actions/cache/restore@"
+mutation '20. the compiled locate with no concern selector' "${windows_concern}" "        if: \${{ startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' }}
+        # Kept as ./" "        if: \${{ github.ref == 'refs/heads/main' }}
+        # Kept as ./"
+mutation '20. the compiled save with no concern selector' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') && " "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && "
+mutation '20. every concern but one selected by a negation in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (!(inputs.concern == 'x') || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. a compiled cache step in a workflow outside the allowlist' .github/workflows/android-validation.yml "      - name: Record the runner image" "      - name: Restore compiled
+        if: \${{ inputs.rust }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ runner.temp }}/cargo-target/debug/deps
+          key: x
+
+      - name: Record the runner image"
+
 # 18. The case-evidence admission in the e2e-visual container (git as root, checkouts owned by the
 # runner's uid): its git calls carry an exact safe.directory for the checkout they read.
 admission=.github/policy/case-evidence-admission.rb

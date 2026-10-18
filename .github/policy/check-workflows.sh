@@ -71,10 +71,11 @@ fi
 cache_mode_files=()
 while IFS= read -r -d '' file; do cache_mode_files+=("${file}"); done < <(find .github/workflows -type f -name '*.yml' -print0 | sort -z)
 ruby "${policy}/check-cache-mode.rb" "${cache_mode_files[@]}"
-concern_workflows=()
-while IFS= read -r -d '' file; do concern_workflows+=("${file}"); done < <(find .github/workflows -type f -name '*-validation-concern.yml' -print0 | sort -z)
-(( ${#concern_workflows[@]} >= 3 )) || { echo "check-cache-groups: expected at least the Linux, macOS and Windows concern workflows, found ${#concern_workflows[@]}" >&2; exit 1; }
-ruby "${policy}/check-cache-groups.rb" "${concern_workflows[@]}"
+# Every workflow, not only the concern ones: a compiled-cache step anywhere else fails the check.
+for required in linux macos windows; do
+  [[ -f ".github/workflows/${required}-validation-concern.yml" ]] || { echo "check-cache-groups: missing .github/workflows/${required}-validation-concern.yml" >&2; exit 1; }
+done
+ruby "${policy}/check-cache-groups.rb" "${cache_mode_files[@]}"
 
 ruby "${policy}/check-dispatch-contracts.rb"
 ruby "${policy}/check-suite-catalog.rb"

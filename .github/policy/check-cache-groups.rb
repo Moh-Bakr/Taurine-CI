@@ -1,17 +1,25 @@
 # Compiled-dependency cache groups and the uncached door concerns.
-# Usage: ruby check-cache-groups.rb CONCERN-WORKFLOW.yml...
+# Usage: ruby check-cache-groups.rb WORKFLOW.yml...  (every workflow: one without an allowlist entry may
+# not carry a compiled-cache step at all)
 #
-# Every concern workflow that handles the compiled-dependency cache (the cargo-target path, or the
+# Every workflow that handles the compiled-dependency cache (the cargo-target path, or the
 # rust-target-cache composite) is held to these rules. They fail closed: a form of concern selection
 # the parser cannot read is a failure, not a skip.
-#  1. The workflow has exactly the reviewed locate, restore and save steps, and at least the minimum
-#     number of designated savers recorded in MINIMUM_SAVERS below (an empty or truncated parse fails).
-#  2. A door concern (DOOR_CONCERNS: the OpenSSL door, whose version-string proof cannot detect a
-#     tampered restored library, and which is our only independent proof of the vendored OpenSSL) never
-#     appears in, and is never covered by a prefix in, the `if` of any compiled-cache step, nor in the
-#     group mapping: it always builds from source.
-#  3. Every concern is selected by `inputs.concern == 'literal'` or `startsWith(inputs.concern, 'literal')`
-#     only; any other mention of inputs.concern in those `if`s fails.
+#  1. The workflow has exactly the reviewed locate, restore and save steps, and exactly the
+#     designated savers of the reviewed save set in CONCERNS below (an empty or truncated parse fails).
+#  2. A positive allowlist, per operating system (CONCERNS below), is the only set of concerns that may
+#     appear in a compiled-cache step's `if` or in the group mapping: the exact restore set (locate,
+#     restore, restore-time strip) and the exact save set (save, strip-and-prove). Anything else, the
+#     OpenSSL door (rust-tls-openssl: its version-string proof cannot detect a tampered restored library
+#     and it is our only independent proof of the vendored OpenSSL) included, always builds from source.
+#     A new concern is cached only by editing the allowlist here, in review.
+#  3. Every compiled-cache step carries exactly one concern selector conjunct, an optionally parenthesised
+#     `||` list of `inputs.concern == 'literal'` / `startsWith(inputs.concern, 'literal')` (lower-case
+#     literals, the exact lower-case spelling `inputs.concern`). Any other mention of the inputs context
+#     in those steps (`inputs['concern']`, `inputs.CONCERN`, `startswith`, `!=`, a negation, an `||` with
+#     anything but selectors) fails; a step with no selector fails, as it would select every concern.
+#     Literals are compared after downcasing because Actions string comparison is case-insensitive.
+#     A compiled-cache step in a workflow that has no allowlist entry fails.
 #  4. Every designated saver has a group (a literal mapping, or the fallback group for rust-app-*), and no
 #     two savers share a group (rust-app-2 alone owns the fallback).
 #  6. The steps of one cache kind select the same concerns: the restore-time strip as the restore, the
@@ -23,10 +31,48 @@
 require 'yaml'
 require_relative 'cache-expression'
 
-DOOR_CONCERNS = %w[rust-tls-openssl].freeze
-MINIMUM_SAVERS = { 'linux-validation-concern.yml' => 3, 'macos-validation-concern.yml' => 4, 'windows-validation-concern.yml' => 4 }.freeze
-LITERAL = /inputs\.concern == '([^']+)'/
-PREFIX = /startsWith\(inputs\.concern, '([^']+)'\)/
+# Reviewed allowlist: the exact selector tokens of the restore side and of the save side, per workflow.
+# 'prefix:x' is startsWith(inputs.concern, 'x'); a bare name is inputs.concern == 'name'.
+CONCERNS = {
+  'linux-validation-concern.yml' => {
+    restore: %w[prefix:rust-app- rust-db rust-packaging],
+    save: %w[rust-app-2 rust-db rust-packaging]
+  },
+  'macos-validation-concern.yml' => {
+    restore: %w[prefix:rust-app- rust-db rust-domain rust-packaging],
+    save: %w[rust-app-2 rust-db rust-domain rust-packaging]
+  },
+  'windows-validation-concern.yml' => {
+    restore: %w[prefix:rust-app- rust-db rust-domain rust-packaging],
+    save: %w[rust-app-2 rust-db rust-domain rust-packaging]
+  }
+}.freeze
+LOOKBEHIND = '(?<![\w.\[\]])'
+LITERAL = /#{LOOKBEHIND}inputs\.concern == '([a-z0-9-]+)'/
+PREFIX = /#{LOOKBEHIND}startsWith\(inputs\.concern, '([a-z0-9-]+)'\)/
+SELECTOR = /#{LITERAL.source}|#{PREFIX.source}/
+
+# The selector tokens of an `if` (or nil with a failure message). The text, minus the single selector
+# conjunct, must not mention the inputs context at all (any case, any spelling).
+read_selector = lambda do |text|
+  inner = text.strip
+  inner = inner[3...-2].strip if inner.start_with?('${{') && inner.end_with?('}}')
+  terms = CacheExpression.top_terms(text)
+  terms = [inner] if terms.nil? && inner.match?(/\A[^\n]*\z/) # a root `||` is one term; it must still be a pure selector list
+  pure = lambda do |term|
+    t = term.strip
+    x = t.gsub(SELECTOR, 'X')
+    x.match?(/\A\(\s*X(\s*\|\|\s*X)*\s*\)\z/) || x.match?(/\A\s*X(\s*\|\|\s*X)*\s*\z/) ? t : nil
+  end
+  picked = terms.map { |term| [term, pure.call(term)] }.select { |_, sel| sel }
+  return [nil, 'no concern selector conjunct that is a plain list of lower-case inputs.concern selectors (an unselected compiled-cache step selects every concern)'] if picked.empty?
+  return [nil, 'more than one concern selector conjunct'] if picked.length > 1
+  rest = (terms - [picked.first.first]).join(' ')
+  return [nil, "mentions the inputs context outside the concern selector (#{rest[/[^\n]*inputs[^\n]*/i].to_s.strip[0, 80]})"] if rest.match?(/inputs/i)
+  sel = picked.first.last
+  tokens = sel.scan(SELECTOR).map { |lit, pre| pre ? "prefix:#{pre}" : lit }
+  [tokens.sort, nil]
+end
 
 failures = []
 ARGV.each do |path|
@@ -35,41 +81,51 @@ ARGV.each do |path|
   steps = (doc['jobs'] || {}).values.flat_map { |job| job.is_a?(Hash) ? Array(job['steps']) : [] }.select { |s| s.is_a?(Hash) }
   compiled = steps.select do |s|
     uses = s['uses'].to_s
-    (uses.start_with?('actions/cache/') && s.dig('with', 'path').to_s.include?('cargo-target')) || uses == './.github/actions/rust-target-cache'
+    path_text = s.dig('with', 'path').to_s
+    (uses.start_with?('actions/cache') && path_text.match?(%r{cargo-target|debug/(deps|build)|\.fingerprint})) || uses == './.github/actions/rust-target-cache'
+  end
+  allow = CONCERNS[base]
+  if allow.nil?
+    failures << "#{path}: compiled-dependency cache steps in a workflow with no reviewed concern allowlist (add it to CONCERNS in check-cache-groups.rb, in review)" unless compiled.empty?
+    next
   end
   save = compiled.find { |s| s['uses'].to_s.start_with?('actions/cache/save@') }
   locate = compiled.find { |s| s['uses'].to_s == './.github/actions/rust-target-cache' && s.dig('with', 'mode') == 'locate' }
   restore = compiled.find { |s| s['uses'].to_s.start_with?('actions/cache/restore@') }
-  if compiled.empty? && MINIMUM_SAVERS.key?(base)
+  if compiled.empty?
     failures << "#{path}: no compiled-dependency cache steps were found (an empty parse proves nothing)"
     next
   end
-  next if compiled.empty?
   unless save && locate && restore
     failures << "#{path}: the compiled-dependency cache needs its locate, restore and save steps"
     next
   end
 
-  # Rule 3 and 2: read every concern selector in every compiled step, failing closed on the unreadable.
+  # Rules 2 and 3: every compiled step carries one readable selector, and the selectors are the exact
+  # reviewed set of its side. The group mapping may name only reviewed restore concerns.
+  selectors = {}
   compiled.each do |step|
-    conds = [step['if'].to_s, step.dig('with', 'group').to_s].reject(&:empty?)
-    conds.each do |text|
-      literals = text.scan(LITERAL).flatten
-      prefixes = text.scan(PREFIX).flatten
-      rest = text.gsub(LITERAL, '').gsub(PREFIX, '')
-      failures << "#{path}: step #{step['name'].inspect} selects concerns in a form this check cannot read (#{rest.scan(/[^\n]*inputs\.concern[^\n]*/).first.to_s.strip[0, 80]})" if rest.include?('inputs.concern')
-      DOOR_CONCERNS.each do |door|
-        failures << "#{path}: step #{step['name'].inspect} names the door concern #{door}, which is never cached" if literals.include?(door)
-        failures << "#{path}: step #{step['name'].inspect} has the prefix #{prefixes.find { |p| door.start_with?(p) }.inspect}, which covers the door concern #{door}" if prefixes.any? { |p| door.start_with?(p) }
-      end
+    tokens, problem = read_selector.call(step['if'].to_s)
+    if problem
+      failures << "#{path}: step #{step['name'].inspect}: #{problem}"
+      next
+    end
+    selectors[step] = tokens
+    side = step['uses'].to_s.start_with?('actions/cache/save@') || step.dig('with', 'mode') == 'save' ? :save : :restore
+    expected = allow[side].sort
+    failures << "#{path}: step #{step['name'].inspect} selects #{tokens.inspect}, not the reviewed #{side} set #{expected.inspect}" unless tokens == expected
+    group_text = step.dig('with', 'group').to_s
+    next if group_text.empty?
+
+    rest = group_text.gsub(/\(#{LITERAL.source} && '[^']+'\)/, '')
+    failures << "#{path}: step #{step['name'].inspect}: the group expression mentions the inputs context in a form this check cannot read" if rest.match?(/inputs/i)
+    group_text.scan(/\(#{LITERAL.source} && '[^']+'\)/).flatten.each do |name|
+      failures << "#{path}: the group mapping names #{name}, which is not a reviewed cached concern" unless allow[:restore].include?(name)
     end
   end
 
   # Rules 6 and 7.
-  tokens = lambda do |step|
-    text = step['if'].to_s
-    text.scan(LITERAL).flatten.sort + text.scan(PREFIX).flatten.map { |p| "prefix:#{p}" }.sort
-  end
+  tokens = ->(step) { selectors[step] || [] }
   strip_restored = compiled.find { |s| s['uses'].to_s == './.github/actions/rust-target-cache' && s.dig('with', 'mode') == 'restored' }
   strip_save = compiled.find { |s| s['uses'].to_s == './.github/actions/rust-target-cache' && s.dig('with', 'mode') == 'save' }
   if strip_restored.nil? || strip_save.nil?
@@ -96,8 +152,6 @@ ARGV.each do |path|
     nil
   end
   savers = save['if'].to_s.scan(LITERAL).flatten
-  minimum = MINIMUM_SAVERS[base]
-  failures << "#{path}: #{savers.length} designated savers, fewer than the reviewed minimum #{minimum}" if minimum && savers.length < minimum
   failures << "#{path}: the save step names no designated saver" if savers.empty?
   seen = {}
   savers.each do |concern|
@@ -122,7 +176,7 @@ ARGV.each do |path|
   end
 end
 if failures.empty?
-  puts "compiled cache groups: #{ARGV.size} concern workflows checked"
+  puts "compiled cache groups: #{ARGV.size} workflows checked"
 else
   warn failures.uniq.join("\n")
   exit 1
