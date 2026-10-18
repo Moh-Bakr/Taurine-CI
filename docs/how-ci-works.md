@@ -1237,20 +1237,23 @@ timeout, a job shape, a concern order). Before pushing a change to `.github/` or
 the base pass locally:
 
 ```bash
-git fetch origin
-bash .github/policy/base-pass-lite.sh            # fast subset, a few minutes
-bash .github/policy/base-pass-lite.sh --full     # also lint.sh and test-mutations.sh, where they run natively
+git fetch origin                                 # the base ref must be current
+bash .github/policy/base-pass-lite.sh            # fast subset, about 2 minutes (measured, loaded 10-core Mac)
+bash .github/policy/base-pass-lite.sh --full     # also test-mutations.sh and the slow suites; lint.sh on Linux x86_64
 bash .github/policy/base-pass-lite.sh origin/main  # the base ref is the first argument
 ```
 
 It extracts the base ref's `.github/policy` with `git archive`, copies your working tree to a
 temp directory, runs the base scripts there in the order and with the script set that the
 base-policy step uses, and prints PASS or FAIL per script with the first failing lines. Your
-working tree is untouched, nothing uses the network or a token, and your own scripts never act as
-the judge. The fast mode skips `lint.sh` (needs the pinned actionlint and zizmor binaries),
-`test-mutations.sh` and the slowest fixture suites (the `slow_scripts` list in the script). It does
-not reproduce the hosted step's sandbox, and the Linux-only fixtures skip themselves on macOS, so a
-pass here is a rehearsal, not admission. CI never runs it, and its name matches neither `check-*`
+working tree is untouched, no token is used, and your own scripts never act as the judge. Fast
+mode makes no network calls; `--full` on Linux x86_64 runs `lint.sh`, which downloads pinned
+binaries (on other hosts it is skipped as "downloads pinned Linux binaries"). The fast mode skips
+`lint.sh`, `test-mutations.sh` and the slowest fixture suites (the `slow_scripts` list in the
+script). It does not reproduce drop-root, process containment or the hosted HOME layout, and
+fixtures that cannot run on the host (the Linux-only `test-base-policy-*` on macOS) are reported as
+`SKIPPED(self)`. A pass ends "not equivalent to the hosted base pass": it is a rehearsal, not
+admission. CI never runs it, and its name matches neither `check-*`
 nor `test-*`, so the base pass's glob does not pick it up.
 
 ### Where the base-pass step lives
