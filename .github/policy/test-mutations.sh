@@ -541,9 +541,14 @@ mutation_by test-case-evidence-admission.sh '18. the admission safe.directory wi
 
 mutation '11. rustfmt back to report-only by default' .github/actions/rust-lint-enforce/action.yml "    default: 'true'" "    default: 'false'"
 mutation '11. the fmt step reads the clippy input' .github/actions/rust-lint-enforce/action.yml 'FAIL: ${{ inputs.fmt-fail }}' 'FAIL: ${{ inputs.fail }}'
-mutation '12. a protected SHA may omit the all-locks advisory helper' .github/actions/linux-concern-js/action.yml 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" == true ]]; then' 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" == never ]]; then'
+mutation '12. a protected SHA may omit the all-locks advisory helper' .github/actions/linux-concern-js/action.yml 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" != false ]]; then' 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" == never ]]; then'
 mutation '12. the workflow stops requiring the helper on protected SHAs' "${linux_concern}" "          require-all-locks-audit: \${{ steps.verified-source.outputs.protected-ancestor == 'true' }}
 " ''
+mutation '12. the required-helper gate fails open on an empty value' .github/actions/linux-concern-js/action.yml 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" != false ]]; then' 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" == true ]]; then'
+mutation '12. the all-locks helper runs without a timeout' .github/actions/linux-concern-js/action.yml 'timeout --kill-after=15s 6m bash' 'bash'
+mutation '11. an empty value relaxes the fmt gate' .github/actions/rust-lint-enforce/action.yml '          [[ "${FAIL}" != false ]] || exit 0
+          exit 1' '          [[ "${FAIL}" == true ]] || exit 0
+          exit 1'
 mutation '12. the all-locks helper runs with the inherited environment' .github/actions/linux-concern-js/action.yml 'env -i PATH="${PATH}" HOME="${HOME}" LANG=C.UTF-8 TMPDIR="${RUNNER_TEMP}" \' 'env PATH="${PATH}" \'
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own

@@ -52,6 +52,12 @@ check() {
     set -a; . "${env_file}"; set +a
     PATH="${dir}/bin:${PATH}" STUB_FMT=clean bash "${dir}/step.sh" ) > "${dir}/out" 2>&1 || rc=$?
   [[ "${rc}" -eq 0 ]] && grep -qF 'fmt: passed' "${dir}/out" || { echo 'clean tree did not pass' >&2; return 1; }
+  # An empty value must enforce too (only the exact string false relaxes).
+  rc=0
+  ( cd "${dir}/work/src"
+    set -a; . "${env_file}"; set +a
+    FAIL='' PATH="${dir}/bin:${PATH}" STUB_FMT=diff bash "${dir}/step.sh" ) > "${dir}/out" 2>&1 || rc=$?
+  [[ "${rc}" -eq 1 ]] || { echo 'an empty FAIL did not enforce' >&2; return 1; }
   # Clippy stays report-only by default: the clippy input must not have been flipped here.
   [[ "${fail_default}" == false ]] || { echo 'the clippy fail default changed without clippy evidence' >&2; return 1; }
 }
@@ -61,9 +67,16 @@ check "${action}"
 # The fmt step may be switched to report-only explicitly, never by default.
 ruby .github/policy/extract-step.rb "${action}" "${step}" run > "${dir}/step.sh"
 ( cd "${dir}/work/src"; PATH="${dir}/bin:${PATH}" STUB_FMT=diff FAIL=false bash "${dir}/step.sh" ) >/dev/null 2>&1
-if grep -rn 'fmt-fail' .github/workflows | grep -qv 'fmt-fail: true'; then
-  echo 'a workflow overrides fmt-fail' >&2; exit 1
+# No caller (workflow or composite) overrides fmt-fail, other than the action's own file.
+if grep -rn 'fmt-fail' .github/workflows .github/actions | grep -v '^.github/actions/rust-lint-enforce/action.yml:' | grep -qv 'fmt-fail: true'; then
+  echo 'a caller overrides fmt-fail' >&2; exit 1
 fi
+# Only the exact string false relaxes: an empty or odd value enforces, in both steps.
+for v in '' 'False' 'no'; do
+  rc=0
+  ( cd "${dir}/work/src"; PATH="${dir}/bin:${PATH}" STUB_FMT=diff FAIL="${v}" bash "${dir}/step.sh" ) >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" -eq 1 ]] || { echo "fmt value '${v}' did not enforce" >&2; exit 1; }
+done
 
 falsify() {
   local label="$1" old="$2" new="$3"
@@ -74,6 +87,9 @@ falsify() {
 }
 falsify 'fmt-fail default flipped back to report-only' "    default: 'true'" "    default: 'false'"
 falsify 'fmt step reads the clippy input' 'FAIL: ${{ inputs.fmt-fail }}' 'FAIL: ${{ inputs.fail }}'
-falsify 'fmt difference never exits non-zero' '          [[ "${FAIL}" == true ]] || exit 0
+falsify 'fmt difference never exits non-zero' '          [[ "${FAIL}" != false ]] || exit 0
           exit 1' '          exit 0'
+falsify 'an empty value relaxes fmt' '          [[ "${FAIL}" != false ]] || exit 0
+          exit 1' '          [[ "${FAIL}" == true ]] || exit 0
+          exit 1'
 echo 'lint-enforce fixtures: rustfmt fails by default, independent of clippy, and three re-weakenings are rejected PASS'

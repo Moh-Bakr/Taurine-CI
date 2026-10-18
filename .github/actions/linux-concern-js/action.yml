@@ -265,19 +265,23 @@ runs:
             # severity filter in the audit policy, lock-byte tamper detection); a helper that
             # exits 0 cannot lower the floor's verdict. It runs here, after the token was
             # revoked and root was dropped, like every other project command: with a cleared
-            # environment, the pinned scanner named explicitly (never found on PATH), a time
-            # limit and no argument supplied from the source. Its output is never published:
-            # only advisory ids in their exact RUSTSEC shape and one fixed-shape
+            # environment, the pinned scanner named explicitly (never found on PATH), a 6-minute
+            # limit and no argument supplied from the source. The contracts job has a 30-minute
+            # timeout (ci-matrix.json); the helper is capped so that, with the earlier
+            # sub-steps, the deferred summary is still written. The job timeout is unchanged. Its output is never published:
+            # only advisory ids (re-emitted canonically, at most 50) in their RUSTSEC shape and one fixed-shape
             # lockfile count survive. The advisory database is fetched exactly as the sweep
             # above fetches it; this step adds no cache and no new destination.
             #
-            # Fail closed on presence: a symlink or a non-regular file at the helper path fails
-            # on every ref. A missing helper fails on a protected SHA (REQUIRE_ALL_LOCKS_AUDIT
-            # is true there) so the gate cannot be dropped by deleting the file; on an
+            # Fail closed on presence: a symlink at `scripts` or at the helper path, or a
+            # non-regular file there, fails on every ref (hygiene, not a trust boundary: the
+            # source is untrusted either way and could do the same inside the helper). A missing helper fails on a protected SHA (REQUIRE_ALL_LOCKS_AUDIT
+            # is anything but the exact string false, so an empty or odd value enforces) so the
+            # gate cannot be dropped by deleting the file; on an
             # unprotected SHA it is a fixed-shape transition notice and the sweep alone decides.
             all_locks_helper=scripts/audit-all-locks.sh
-            if [[ -L "${all_locks_helper}" || ( -e "${all_locks_helper}" && ! -f "${all_locks_helper}" ) ]]; then
-              run_deferred cargo-audit-all-locks bash -c 'echo "cargo-audit-all-locks: the helper path is not a regular file" >&2; exit 1'
+            if [[ -L scripts || -L "${all_locks_helper}" || ( -e "${all_locks_helper}" && ! -f "${all_locks_helper}" ) ]]; then
+              run_deferred cargo-audit-all-locks bash -c 'echo "cargo-audit-all-locks: the helper path is a symlink or not a regular file" >&2; exit 1'
             elif [[ -f "${all_locks_helper}" ]]; then
               if [[ "${deferred_results[*]}" == *"cargo-audit-install|failed"* ]]; then
                 run_deferred cargo-audit-all-locks bash -c 'echo "cargo-audit-all-locks not run: the pinned scanner did not install" >&2; exit 1'
@@ -291,13 +295,16 @@ runs:
                 # taken from the source or the environment.
                 env -i PATH="${PATH}" HOME="${HOME}" LANG=C.UTF-8 TMPDIR="${RUNNER_TEMP}" \
                   CARGO_AUDIT_BIN="${audit_bin}" \
-                  timeout --kill-after=30s 20m bash scripts/audit-all-locks.sh >"${out}" 2>&1 || rc=$?
+                  timeout --kill-after=15s 6m bash scripts/audit-all-locks.sh >"${out}" 2>&1 || rc=$?
                 # One fixed-shape count line, numbers only; nothing else of the output is kept.
-                count_line="$(grep -E "^[0-9]+ lockfile[(]s[)] audited, [0-9]+ failed[.]$" "${out}" | tail -n 1 || true)"
+                count_line="$(grep -E "^[0-9]{1,4} lockfile[(]s[)] audited, [0-9]{1,4} failed[.]$" "${out}" | tail -n 1 || true)"
                 echo "${count_line}"
                 # Advisory ids in their exact public shape only (an id does not encode a crate
                 # name); every other line of the helper output stays in the withheld file.
-                grep -E "^ID: RUSTSEC-[0-9]{4}-[0-9]{4}$" "${out}" | sort -u | head -n 40 || true
+                # The helper indents and cargo-audit pads its labels, so match loosely and re-emit canonically.
+                grep -E "^[[:space:]]*ID:[[:space:]]+RUSTSEC-20[12][0-9]-[0-9]{4,5}[[:space:]]*$" "${out}" \
+                  | sed -E "s/^[[:space:]]*ID:[[:space:]]+(RUSTSEC-[0-9]{4}-[0-9]{4,5})[[:space:]]*$/ID: \1/" \
+                  | sort -u | head -n 50 || true
                 if [[ -n "${count_line}" ]]; then
                   echo "- cargo-audit-all-locks: ${count_line}" >> "${GITHUB_STEP_SUMMARY}"
                 fi
@@ -313,7 +320,7 @@ runs:
                 fi
               '
               fi
-            elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" == true ]]; then
+            elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" != false ]]; then
               run_deferred cargo-audit-all-locks bash -c 'echo "error: the all-locks advisory helper is required at a protected source SHA and is absent" >&2; exit 1'
             else
               echo 'cargo-audit-all-locks: helper absent at this unprotected SHA; the per-lock sweep alone applied (transition)'

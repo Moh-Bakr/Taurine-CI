@@ -59,16 +59,27 @@ it reads (`.cargo/audit.toml`, `deny.toml`) remain the single private record.
 
 - **Where it runs:** after token revocation and `drop-root`, like every project command, with a
   cleared environment, the pinned scanner passed explicitly as `CARGO_AUDIT_BIN`, no arguments and
-  a 20-minute limit. The advisory database is fetched as the sweep fetches it; no cache is added
+  a 6-minute limit. The `contracts` job timeout is 30 minutes (`ci-matrix.json`); the helper is
+  capped so the deferred summary is still written, and the job timeout is unchanged. The advisory database is fetched as the sweep fetches it; no cache is added
   and none is restored on `untrusted`.
 - **Fail closed:** a symlink or non-regular file at the helper path fails on every ref. A missing
   helper fails when the checked-out SHA is on `develop`, `uat` or `main` (the source-checkout
   `protected-ancestor` answer, passed as `require-all-locks-audit`); on any other SHA it prints a
   fixed-shape transition notice and the sweep alone decides. An exit 0 without a clean
   `N lockfile(s) audited, 0 failed.` line (N at least 1) is a failure.
-- **Published:** only advisory IDs in the exact `ID: RUSTSEC-YYYY-NNNN` shape and the numeric
-  count line. The helper's output file is never printed, uploaded or cat-ed.
+- **Published:** at most 50 advisory IDs, matched leniently (the helper indents, cargo-audit pads
+  labels) and re-emitted canonically as `ID: RUSTSEC-YYYY-NNNN`, plus the count line (at most four
+  digits per number). The helper's output file is never printed, uploaded or cat-ed.
 - **Fixtures:** `bash .github/policy/test-all-locks-audit.sh` (stub helper, four falsifiers) and
   mutation cases 12 in `test-mutations.sh`.
+
+- **Fail-closed values:** only the exact string `false` relaxes `require-all-locks-audit`, and
+  likewise `fmt-fail` / `fail` in `rust-lint-enforce`; an empty or other value enforces.
+- **Network egress (accepted for now):** the `contracts` concern runs with `egress: "audit"`, so the
+  helper, and any `vendor-openvpn3.sh fetch` it triggers when generated vendor locks are missing,
+  have unrestricted network. That is no worse than the npm sub-steps in the same step. Follow-up:
+  move `contracts` to block-mode egress, or give the helper a provisioned-vendor / no-fetch path.
+- **rustfmt is a hygiene gate:** `.rustfmt.toml` is source-controlled, so the source can opt crates
+  out of formatting. The gate catches accidents, not a hostile source.
 
 Rollout order: this change must merge only after the private source has the helper on `develop`.
