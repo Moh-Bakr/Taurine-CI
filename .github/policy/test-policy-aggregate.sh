@@ -183,6 +183,8 @@ check_tree() {
   rm -rf "${tmp}/tree"; mkdir -p "${tmp}/tree/.github/workflows"
   cp -R "${root}/.github/policy" "${tmp}/tree/.github/policy"
   cp "$1" "${tmp}/tree/${entry}"
+  # The scripts the extra-step cases name exist (an extra must name a real script).
+  : > "${tmp}/tree/.github/policy/check-new-rule.sh"; : > "${tmp}/tree/.github/policy/check-new-rule.rb"; : > "${tmp}/tree/.github/policy/x.sh"
 }
 # yaml_variant EXPR: the fixture edited by EXPR (it sees `d`), written to mut.yml.
 yaml_variant() {
@@ -199,7 +201,24 @@ expect_extra() { # LABEL accept|refuse EXPR [FLAG]
   if [[ "$2" == accept ]]; then echo "accepted  $1"; else echo "refused   $1"; fi
 }
 expect_extra 'a compliant extra at the end of a shard (superset mode)' accept "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}"
-expect_extra 'a compliant extra with an env (superset mode)' accept "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('env' => { 'X' => 'y' })"
+expect_extra 'an extra with an env' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('env' => { 'X' => 'y' })"
+expect_extra 'an extra with an env that sets BASH_ENV' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('env' => { 'BASH_ENV' => '/tmp/x' })"
+expect_extra 'an extra with an env that reads a secret' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('env' => { 'T' => '\${{ secrets.X }}' })"
+expect_extra 'an extra with an empty env' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('env' => {})"
+expect_extra 'an extra naming a script that does not exist' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('run' => 'bash .github/policy/missing-script.sh')"
+expect_extra 'an extra running ruby -e' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('run' => 'ruby .github/policy/-e')"
+expect_extra 'an extra with a .. path' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('run' => 'bash .github/policy/../x.sh')"
+expect_extra 'an extra running python3 on a .rb file' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('run' => 'python3 .github/policy/check-new-rule.rb')"
+expect_extra 'an extra running bash on a .rb file' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('run' => 'bash .github/policy/check-new-rule.rb')"
+expect_extra 'an extra running ruby on a .sh file' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('run' => 'ruby .github/policy/check-new-rule.sh')"
+GUARD1='Require the base-policy workflow to have passed'
+expect_extra 'a duplicate guard name in a shard' refuse "d['jobs']['policy-fixtures']['steps'] << { 'name' => '${GUARD1}', 'shell' => 'bash', 'run' => 'bash .github/policy/x.sh' }"
+expect_extra 'a duplicate of the whole guard in the aggregate' refuse "d['jobs']['policy']['steps'] << d['jobs']['policy']['steps'][0].dup"
+expect_extra 'a guard with a modified run' refuse "d['jobs']['policy']['steps'][0]['run'] = \"echo ok\\n\""
+expect_extra 'the shards guard with a modified run' refuse "d['jobs']['policy']['steps'][1]['run'] = \"true\\n\""
+expect_extra 'a guard with an added key' refuse "d['jobs']['policy']['steps'][0]['continue-on-error'] = true"
+expect_extra 'a guard moved into a shard' refuse "g = d['jobs']['policy']['steps'].shift; d['jobs']['policy-structure']['steps'].unshift(g)"
+expect_extra 'the guards swapped' refuse "d['jobs']['policy']['steps'].reverse!"
 expect_extra 'a compliant extra at the end of the evidence shard (superset mode)' accept "d['jobs']['policy-evidence']['steps'] << ${EXTRA}.merge('run' => 'ruby .github/policy/check-new-rule.rb')"
 expect_extra 'the same extra in exact mode (its row is missing)' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}" --exact
 expect_extra 'an extra with || true' refuse "d['jobs']['policy-fixtures']['steps'] << ${EXTRA}.merge('run' => 'bash .github/policy/x.sh || true')"

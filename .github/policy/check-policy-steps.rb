@@ -19,10 +19,12 @@
 # would deadlock every later change (main's table lacks the new row, the PR's tree lacks nothing).
 #   - Default (superset, what the base pass runs): every table row must be present exactly as pinned, but
 #     a step NOT in the table is allowed when it is a plain, shape-checked extra: keys exactly name,
-#     shell: bash, run (and optionally env); a unique name that is no table row, guard or the required
+#     shell: bash, run (no env); a unique name that is no table row, guard or the required
 #     check's name; a `run` of one line `bash|ruby|python3 .github/policy/<file>` with no arguments, so no
 #     `|| true`, `;`, `&&`, `$(` or heredoc; in a shard (or `policy` in the single-job layout), never in
-#     the aggregate; and after the last pinned step of its job. Removing or changing a pinned step stays
+#     the aggregate; naming an existing script whose extension matches its interpreter; and after the
+#     last pinned step of its job. The order of the pinned steps within a job is deliberately NOT enforced:
+#     pinning it would recreate the add-or-change deadlock for any legitimate reorder. Removing or changing a pinned step stays
 #     refused.
 #   - `--exact` (the policy step of this workflow): the table is this tree's own and must match exactly,
 #     extras refused, so a pull request that adds a step must add its row in the same change.
@@ -37,7 +39,12 @@ EXTRA_RUN = %r{\A(bash|ruby|python3) \.github/policy/[A-Za-z0-9._-]+\z}
 REQUIRED_NAME = 'Validate workflow policy'
 CHECKOUT_USES = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
 CHECKOUT_WITH = { 'fetch-depth' => 1, 'persist-credentials' => false }.freeze
-GUARDS = ['Require the base-policy workflow to have passed', 'Require every policy check shard to have passed'].freeze
+# The two aggregate guards, pinned exactly (they are not table rows: they live in the aggregate, in this
+# position, and nowhere else). The second exists only in the sharded layout.
+GUARD_PINS = JSON.parse(<<~'GUARDS_JSON')
+  [{"name":"Require the base-policy workflow to have passed","if":"${{ always() }}","shell":"bash","env":{"BASE_PASS_RESULT":"${{ needs.base-pass.result }}"},"run":"set -euo pipefail\nif [[ \"${BASE_PASS_RESULT}\" != 'success' ]]; then\n  echo \"::error::the base-policy workflow did not pass (result: ${BASE_PASS_RESULT})\"\n  exit 1\nfi\necho 'base policy: the base-policy workflow passed'\n"},{"name":"Require every policy check shard to have passed","if":"${{ always() }}","shell":"bash","env":{"POLICY_EVIDENCE_RESULT":"${{ needs.policy-evidence.result }}","POLICY_FIXTURES_RESULT":"${{ needs.policy-fixtures.result }}","POLICY_MUTATIONS_RESULT":"${{ needs.policy-mutations.result }}","POLICY_STRUCTURE_RESULT":"${{ needs.policy-structure.result }}"},"run":"set -euo pipefail\nfailed=0\nfor pair in \"evidence:${POLICY_EVIDENCE_RESULT}\" \"fixtures:${POLICY_FIXTURES_RESULT}\" \"mutations:${POLICY_MUTATIONS_RESULT}\" \"structure:${POLICY_STRUCTURE_RESULT}\"; do\n  if [[ \"${pair#*:}\" != 'success' ]]; then\n    echo \"::error::the policy ${pair%%:*} shard did not pass (result: ${pair#*:})\"\n    failed=1\n  fi\ndone\n[[ \"${failed}\" -eq 0 ]] || exit 1\necho 'policy checks: every policy shard passed'\n"}]
+GUARDS_JSON
+GUARDS = GUARD_PINS.map { |gd| gd['name'] }.freeze
 SHARDS = %w[policy-evidence policy-fixtures policy-mutations policy-structure].freeze
 
 rows = DATA.read.lines.map { |l| JSON.parse(l) }
@@ -61,7 +68,7 @@ last_pinned = {}
       problems << "#{job_name}: step #{st['name'].inspect} uses #{st['uses'].inspect}: only the pinned checkout with exactly #{CHECKOUT_WITH.keys.join(' and ')} is allowed" unless ok
       next
     end
-    next if job_name == 'policy' && GUARDS.include?(st['name'])
+    next if GUARDS.include?(st['name'])
 
     name = st['name']
     pinned = table[name]
@@ -80,6 +87,17 @@ last_pinned = {}
     problems << "step #{name.inspect} must use shell: bash" unless st['shell'] == 'bash'
   end
 end
+# Guards: each exactly once, in the aggregate at its pinned position with its exact pinned shape; the second
+# only in the sharded layout. (A second step carrying a guard's name anywhere is a duplicate.)
+GUARD_PINS.each_with_index do |pin, pos|
+  holders = jobs.flat_map { |jn, j| (j.is_a?(Hash) ? j.fetch('steps', []) : []).each_with_index.select { |st, _| st['name'] == pin['name'] }.map { |st, i| [jn, i, st] } }
+  want = pos.zero? || sharded ? 1 : 0
+  problems << "guard #{pin['name'].inspect} appears #{holders.size} times, expected #{want}" unless holders.size == want
+  holders.each do |jn, i, st|
+    problems << "guard #{pin['name'].inspect} is in #{jn} at step #{i}, expected policy at step #{pos}" unless jn == 'policy' && i == pos
+    problems << "guard #{pin['name'].inspect} differs from its pinned shape (name, if, shell, env and run are exact)" unless st == pin
+  end
+end
 extra_names = Hash.new(0)
 extras.each { |_, st, _| extra_names[st['name']] += 1 }
 extras.each do |job_name, st, index|
@@ -89,12 +107,13 @@ extras.each do |job_name, st, index|
     next
   end
   why = []
-  want_keys = %w[name shell run] + (st.key?('env') ? ['env'] : [])
-  why << 'keys other than name, shell, run and optionally env' unless st.keys.sort == want_keys.sort
+  why << 'keys other than exactly name, shell and run (no env: it could carry a secret or steer the shell)' unless st.keys.sort == %w[name run shell]
   why << 'shell is not bash' unless st['shell'] == 'bash'
   why << 'the name is empty, reserved or repeated' if !name.is_a?(String) || name.empty? || GUARDS.include?(name) || name == REQUIRED_NAME || extra_names[name] > 1
   why << 'run is not one plain command of a policy script' unless st['run'].is_a?(String) && st['run'].match?(EXTRA_RUN)
-  why << 'env is not a plain map' unless !st.key?('env') || (st['env'].is_a?(Hash) && st['env'].all? { |k, v| k.is_a?(String) && v.is_a?(String) })
+  script = st['run'].to_s[%r{\A\S+ (\.github/policy/\S+)\z}, 1]
+  ext = { 'bash' => '.sh', 'ruby' => '.rb', 'python3' => '.py' }[st['run'].to_s.split.first]
+  why << "the script #{script.inspect} is missing or does not match its interpreter's extension" unless script && ext && script.end_with?(ext) && !script.include?('..') && !File.basename(script).start_with?('-') && File.file?(script)
   why << 'it is in the aggregate: only a shard or the single job may hold it' if sharded && job_name == 'policy'
   why << 'it comes before a pinned step of its job' if last_pinned[job_name] && index < last_pinned[job_name]
   problems << "#{job_name}: step #{name.inspect} is not in the reviewed step table and is not a compliant extra (#{why.join('; ')})" unless why.empty?
