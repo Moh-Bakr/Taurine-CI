@@ -32,8 +32,10 @@ arms="$(sed -n 's/^arms=//p' "${work}/output")"
 }
 jq -e '
   type == "object" and
-  (keys | sort) == (["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"] | sort) and
-  (."pg-dbx".suites == ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
+  (keys | sort) == (["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"] | sort) and
+  (has("pg-dbx") | not) and
+  (.postgres.suites == ["taurine-db-conformance live_servers postgres_passes_every_check", "taurine-db-postgres live_catalog,live_blob,live_ddl,live_depth,live_explain,live_notices,cancel", "taurine-db-engine live_postgres", "taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
+  (.postgres.cargo_features == null) and
   (.pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]) and
   ((.pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] or
     .pgtls.cargo_features == ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"])) and
@@ -42,13 +44,27 @@ jq -e '
   (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string"))
 ' <<< "${roster}" >/dev/null
 jq -e --argjson selected "${arms}" '
-  $selected == ["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"]
+  $selected == ["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"]
 ' <<< "${roster}" >/dev/null
 contract_arms="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options' .github/ci-matrix.json)"
 [[ "${contract_arms}" == "${arms}" ]] || {
   echo 'live roster fixture: dispatch identity contract differs from the executed arm roster' >&2
   exit 1
 }
+
+# pg-dbx was merged into postgres: a dispatch for it (alone or in a list) is refused with a pointer.
+for requested in pg-dbx 'postgres,pg-dbx'; do
+  if RUNNER_TEMP="${work}" GITHUB_OUTPUT="${work}/pgdbx-output" \
+    REQUESTED_ENGINE="${requested}" REQUESTED_SOURCE_SHA="${source_sha}" \
+    bash "${work}/plan.sh" > "${work}/pgdbx-stdout" 2> "${work}/pgdbx-stderr"; then
+    echo "live roster fixture: engine '${requested}' was accepted after pg-dbx was merged into postgres" >&2
+    exit 1
+  fi
+  grep -Fq 'merged into the postgres arm' "${work}/pgdbx-stderr" || {
+    echo 'live roster fixture: the pg-dbx refusal did not say it was merged into postgres' >&2
+    exit 1
+  }
+done
 
 # Exercise the reusable arm's exact configuration gate. Only the legacy arm
 # may request the fixed OpenSSL feature and exact target/filter; pgtls must
@@ -119,6 +135,13 @@ if [[ "$*" == *--no-run* ]]; then
   fi
   echo 'Finished synthetic proof binary build'
   exit 0
+fi
+# The merged postgres arm's Dbx-route suite: a failing or skipping run of it must fail the arm.
+if [[ "$*" == *dbx_pg_live* ]]; then
+  case "${FAKE_CARGO_MODE:-}" in
+    dbx-fail) printf 'test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n'; exit 101 ;;
+    dbx-skip) printf 'SKIPPED dbx_pg_passes_the_suite: set TAURINE_TEST_PG=host:port to run\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n'; exit 0 ;;
+  esac
 fi
 if [[ "$*" != *dbx_pg_tls_live* && "$*" != *dbx_pg_mtls_live* ]]; then
   printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n'
@@ -194,6 +217,42 @@ run_fake_actions() {
     exit 1
   fi
 }
+# The postgres arm now carries the former pg-dbx proof: the Dbx suite reaches cargo with the same
+# targets, prints its own evidence row, and a failing or skipped Dbx suite fails the whole arm.
+postgres_config="$(jq -c '.postgres' <<< "${roster}")"
+run_fake_actions postgres "${postgres_config}" postgres pass2 pass
+grep -Fq -- '-p taurine-db-conformance --test dbx_pg_live --test dbx_shadow_pg -- --nocapture' "${work}/cargo-postgres.log" || {
+  echo 'live roster fixture: the postgres arm did not run dbx_pg_live and dbx_shadow_pg' >&2; exit 1;
+}
+grep -Fq 'pass: taurine-db-conformance [dbx_pg_live,dbx_shadow_pg]  passed=2 skipped=0' "${work}/runner-postgres/suite-results.txt" || {
+  echo 'live roster fixture: the postgres arm did not print the dbx_pg_live,dbx_shadow_pg evidence row' >&2; exit 1;
+}
+run_fake_actions postgres "${postgres_config}" postgres-dbx-fail dbx-fail reject
+run_fake_actions postgres "${postgres_config}" postgres-dbx-skip dbx-skip reject
+# The roster entry without the Dbx suite (the part made optional by omission) is refused by the
+# coverage guard, on a copy of the real workflow and contract.
+guard_tree="${work}/guard-tree"
+mkdir -p "${guard_tree}/.github/workflows"
+cp .github/ci-matrix.json "${guard_tree}/.github/"
+for variant in whole-row live-only shadow-only; do
+  case "${variant}" in
+    whole-row) from=',
+                        "taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]'; to=']' ;;
+    live-only) from='dbx_pg_live,dbx_shadow_pg"'; to='dbx_pg_live"' ;;
+    shadow-only) from='dbx_pg_live,dbx_shadow_pg"'; to='dbx_shadow_pg"' ;;
+  esac
+  FROM="${from}" TO="${to}" ruby -e '
+    text = File.read(ARGV.fetch(0), encoding: "UTF-8"); from = ENV.fetch("FROM")
+    abort "live roster fixture: dbx row text not found" unless text.scan(from).length >= 1
+    File.write(ARGV.fetch(1), text.sub(from, ENV.fetch("TO")))
+  ' .github/workflows/live-proofs.yml "${guard_tree}/.github/workflows/live-proofs.yml"
+  if ruby .github/policy/check-live-arm-coverage.rb "${guard_tree}" >/dev/null 2>&1; then
+    echo "live roster fixture: the coverage guard accepted a postgres arm with the ${variant} Dbx evidence mutation" >&2
+    exit 1
+  fi
+done
+cp .github/workflows/live-proofs.yml "${guard_tree}/.github/workflows/live-proofs.yml"
+ruby .github/policy/check-live-arm-coverage.rb "${guard_tree}" >/dev/null
 run_fake_actions pgtls "${pgtls_config}" pgtls "$(counts_mode "${ordinary_count}" "${legacy_count}" "${mtls_count}")" pass
 grep -Fq -- '-p taurine-db-conformance --test dbx_pg_tls_live dbx_tls_ -- --nocapture' "${work}/cargo-pgtls.log" || {
   echo 'live roster fixture: pgtls did not pass the exact ordinary DBX filter to cargo' >&2; exit 1;
@@ -281,9 +340,9 @@ done
 ruby -e '
   path = ARGV.fetch(0)
   script = File.read(path)
-  needle = %q|{"engine": "pg-dbx"|
+  needle = %q|{"engine": "postgres"|
   abort "live roster fixture: pg-dbx entry missing" unless script.scan(needle).length == 1
-  File.write(ARGV.fetch(1), script.sub(needle, "# invalid JSON before pg-dbx\n            #{needle}"))
+  File.write(ARGV.fetch(1), script.sub(needle, "# invalid JSON before postgres\n            #{needle}"))
 ' "${work}/plan.sh" "${work}/invalid.sh"
 if RUNNER_TEMP="${work}" GITHUB_OUTPUT="${work}/invalid-output" \
   REQUESTED_ENGINE=all REQUESTED_SOURCE_SHA="${source_sha}" \
@@ -296,7 +355,7 @@ grep -q 'parse error' "${work}/invalid-stderr" || {
   exit 1
 }
 
-echo 'live roster: extracted plan selects all 13 arms; arm schema binds exact DBX TLS tests and feature'
+echo 'live roster: extracted plan selects all 12 arms; arm schema binds exact DBX TLS tests and feature'
 if [[ "${LIVE_ROSTER_HOST_PREFIX_CHILD:-}" != 1 ]]; then
   hosted_temp="${work}/hosted-prefix/home/runner/work/_temp"
   mkdir -p "${hosted_temp}"

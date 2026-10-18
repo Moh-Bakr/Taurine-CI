@@ -33,7 +33,7 @@ SHA40 = { 'type' => 'string', 'required' => true, 'format' => 'sha40', 'digest_i
 DISPATCH_KEY = { 'type' => 'string', 'required' => true, 'format' => 'sha256', 'digest_include' => false }.freeze
 BOOLEAN_FALSE = { 'type' => 'boolean', 'required' => false, 'default' => false, 'digest_include' => true }.freeze
 STRING_DEFAULT_EMPTY = { 'type' => 'string', 'required' => false, 'default' => '', 'digest_include' => true }.freeze
-LIVE_ENGINE_ROSTER = %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion].freeze
+LIVE_ENGINE_ROSTER = %w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls tls-legacy bastion].freeze
 EXPECTED_INPUTS = {
   '.github/workflows/linux-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY,

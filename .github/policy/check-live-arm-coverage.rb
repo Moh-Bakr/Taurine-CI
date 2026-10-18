@@ -29,11 +29,19 @@ module LiveArmCoverage
   end
 
   # The complete required set. There is no waivable subset: `all` requires every registered arm,
-  # including `pg-dbx` (Dbx-route live proof) and `tls-legacy`. Changing this list is a reviewed
+  # including `tls-legacy`. The Dbx-route live proof is part of the `postgres` arm (the former
+  # `pg-dbx` arm, merged into it), pinned below as a required evidence row. Changing this list is a reviewed
   # policy change, and the base commit's copy of this check runs against the pull request.
   REQUIRED_ARMS = %w[
-    doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion
+    doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls tls-legacy bastion
   ].freeze
+
+  # Evidence rows an arm must keep, each exactly as the roster writes the suite, so the row the
+  # arm's summary prints keeps its name. The Dbx-route proof is two test targets in one suite row;
+  # dropping either target, narrowing it with a test-name filter, or removing the row fails here.
+  REQUIRED_SUITE_ROWS = {
+    'postgres' => ['taurine-db-conformance dbx_pg_live,dbx_shadow_pg']
+  }.freeze
 
   WORKFLOW_PATH = '.github/workflows/live-proofs.yml'.freeze
   MATRIX_PATH = '.github/ci-matrix.json'.freeze
@@ -135,6 +143,17 @@ module LiveArmCoverage
     nil
   end
 
+  # Returns [arm, row] for the first required evidence row an arm no longer carries, else nil.
+  def missing_suite_row(entries)
+    REQUIRED_SUITE_ROWS.each do |arm, rows|
+      entry = entries.find { |e| e['engine'] == arm }
+      suites = entry && entry['suites']
+      suites = [] unless suites.is_a?(Array)
+      rows.each { |row| return [arm, row] unless suites.count(row) == 1 }
+    end
+    nil
+  end
+
   def contract_arms(matrix)
     options = matrix.dig('dispatch_contracts', 'workflows', WORKFLOW_PATH, 'inputs', 'engine', 'options')
     unless options.is_a?(Array) && options.all? { |arm| arm.is_a?(String) }
@@ -181,6 +200,10 @@ module LiveArmCoverage
     end
     unless contract.sort == REQUIRED_ARMS.sort
       return report('contract_mismatch', **shared, subject: contract, reason: "#{MATRIX_LABEL}: engine options differ from the required set")
+    end
+
+    if (arm, row = missing_suite_row(entries))
+      return report('missing_evidence_row', **shared, reason: "#{WORKFLOW_LABEL}: arm '#{arm}' lacks the required suite row '#{row}'")
     end
 
     report('ok', **shared, subject: registered)

@@ -22,7 +22,7 @@ for the older baseline, but cannot manufacture required Stage2 test evidence.
 
 Source that predates Stage2 explicitly reports **uncovered / not executed** for
 these feature cases. Its existing baseline invocation remains supported. This
-does not remove the mandatory live `pg-dbx` arm, credit legacy tests as Dbx tests,
+does not remove the mandatory live Dbx-route proof (the `dbx_pg_live,dbx_shadow_pg` suite of the `postgres` arm), credit legacy tests as Dbx tests,
 or turn an old source with missing Dbx targets into an all-12 PASS.
 
 ## Required admission record

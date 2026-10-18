@@ -219,9 +219,9 @@ tls_legacy_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg s
 }
 # The exact proposed 13-arm contract must canonicalize the same way: `all` and
 # its explicit full roster are one identity, while the active old12 identity stays distinct.
-old12_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","bastion"]' .github/ci-matrix.json)"
+old12_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","bastion"]' .github/ci-matrix.json)"
 old12_all_key="$(env "CI_DISPATCH_CONTRACT_JSON=${old12_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"all"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
-new13_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]' .github/ci-matrix.json)"
+new13_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy","bastion"]' .github/ci-matrix.json)"
 new13_roster="$(jq -r '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options | join(",")' <<< "${new13_matrix}")"
 new13_all_key="$(env "CI_DISPATCH_CONTRACT_JSON=${new13_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"all"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
 new13_explicit_key="$(env "CI_DISPATCH_CONTRACT_JSON=${new13_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg engines "${new13_roster}" '{source_sha:$sha,engine:$engines}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
@@ -229,9 +229,14 @@ new13_explicit_key="$(env "CI_DISPATCH_CONTRACT_JSON=${new13_matrix}" "CI_WORKFL
   echo 'new13 all/explicit identity did not remain canonical and distinct from exact old12' >&2
   exit 1
 }
-pg_dbx_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"pg-dbx"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
-[[ "${pg_dbx_key}" =~ ^[0-9a-f]{64}$ ]] || {
-  echo 'direct pg-dbx dispatch was not accepted' >&2
+# pg-dbx was merged into the postgres arm: a direct dispatch for it is refused, not mapped silently.
+if env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"pg-dbx"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb >/dev/null 2>&1; then
+  echo 'direct pg-dbx dispatch was accepted after the arm was merged into postgres' >&2
+  exit 1
+fi
+postgres_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"postgres"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
+[[ "${postgres_key}" =~ ^[0-9a-f]{64}$ ]] || {
+  echo 'direct postgres dispatch was not accepted' >&2
   exit 1
 }
 engine_output="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"postgres, doris"}')" "CI_DISPATCH_KEY=${engine_key}" ruby .github/policy/dispatch-identity.rb)"
