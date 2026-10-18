@@ -1252,8 +1252,9 @@ binaries (on other hosts it is skipped as "downloads pinned Linux binaries"). Th
 `lint.sh`, `test-mutations.sh` and the slowest fixture suites (the `slow_scripts` list in the
 script). It does not reproduce drop-root, process containment or the hosted HOME layout, and
 fixtures that cannot run on the host (the Linux-only `test-base-policy-*` on macOS) are reported as
-`SKIPPED(self)`. A pass ends "not equivalent to the hosted base pass": it is a rehearsal, not
-admission. CI never runs it, and its name matches neither `check-*`
+`SKIPPED(self)`. When anything was skipped (fast mode always does), a clean run ends
+`PARTIAL (fast subset: N skipped; not equivalent to the hosted base pass)`, with exit status 0: a rehearsal, not
+admission. Only a run that skipped nothing ends `PASS (nothing skipped; still not the hosted sandbox)`. CI never runs it, and its name matches neither `check-*`
 nor `test-*`, so the base pass's glob does not pick it up.
 
 ### Where the base-pass step lives

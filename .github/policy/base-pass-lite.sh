@@ -62,7 +62,7 @@ work="$(mktemp -d)"
 cleanup() {
   local pid
   for pid in $(jobs -p); do pkill -P "${pid}" 2>/dev/null || true; kill "${pid}" 2>/dev/null || true; done
-  rm -rf "${work}"
+  rm -rf "${work:?}"
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
@@ -126,7 +126,13 @@ done
 # suites that mutate scripts or re-run the whole policy per case, each measured at minutes of CPU.
 # --full runs them. test-shell-artefact.sh fails on an unmodified main under macOS (its mutation
 # text assumes the hosted Linux shell), so it is skipped on Darwin in both modes.
-slow_scripts=" lint.sh test-mutations.sh test-policy.sh test-action-uses.sh test-policy-aggregate.sh test-rule-n-if-shape.sh test-cache-expressions.rb test-build-failure-category.sh test-case-evidence-admission.sh test-live-roster.sh "
+slow_scripts=" lint.sh test-mutations.sh test-policy.sh test-action-uses.sh test-rule-n-if-shape.sh test-cache-expressions.rb test-build-failure-category.sh test-case-evidence-admission.sh test-live-roster.sh "
+# A name here that the base policy no longer has is a stale entry: say so, so the list is pruned.
+for slow in ${slow_scripts}; do
+  found=0
+  for name in "${names[@]}"; do [[ "${name}" == "${slow}" ]] && found=1; done
+  (( found )) || echo "base-pass-lite: WARNING slow_scripts names ${slow}, which the base policy does not have; remove it from the list" >&2
+done
 skip_reason() {
   if [[ ${full} -eq 0 && "${slow_scripts}" == *" $1 "* ]]; then echo "fast mode"; return; fi
   if [[ "$1" == test-shell-artefact.sh && "$(uname -s)" == Darwin ]]; then echo "does not run under macOS"; return; fi
@@ -148,7 +154,7 @@ run_one() {
   [[ "${name}" == *.rb ]] && cmd=(ruby "${policy}/${name}")
   (cd "${dir}/tree" && "${scrub[@]}" "HOME=${dir}/home" "RUNNER_TEMP=${dir}/runner-temp" "${cmd[@]}") > "${dir}/log" 2>&1 || rc=$?
   echo "${rc} $((SECONDS - t0))" > "${dir}/done"
-  rm -rf "${dir}/tree" "${dir}/home" "${dir}/runner-temp"
+  rm -rf "${dir:?}/tree" "${dir:?}/home" "${dir:?}/runner-temp"
 }
 
 # test-mutations.sh runs its own pool sized by MUTATION_JOBS, so it goes alone, last.
@@ -195,7 +201,7 @@ if [[ ${failed} -gt 0 ]]; then
   exit 1
 fi
 if [[ ${skipped} -gt 0 ]]; then
-  echo "base-pass-lite: PASS (fast subset: ${skipped} skipped; not equivalent to the hosted base pass)"
+  echo "base-pass-lite: PARTIAL (fast subset: ${skipped} skipped; not equivalent to the hosted base pass)"
   echo "base-pass-lite: skipped: ${skipped_names[*]}"
 else
   echo "base-pass-lite: PASS (nothing skipped; still not the hosted sandbox)"
