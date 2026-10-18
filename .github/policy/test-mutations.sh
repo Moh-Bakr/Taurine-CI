@@ -69,6 +69,7 @@ flush() {
   local rc
   while (( next <= total )) && [[ -f "${jobs_dir}/${next}.rc" ]]; do
     rc="$(cat "${jobs_dir}/${next}.rc")"
+    [[ "${rc}" =~ ^[0-9]+$ ]] || rc=255
     cat "${jobs_dir}/${next}.out"; cat "${jobs_dir}/${next}.err" >&2
     rm -rf "${jobs_dir:?}/${next}"
     if (( rc == 3 )); then
@@ -116,11 +117,28 @@ offline_policy() {
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
     # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
     [[ "${check}" == check-structure.rb && -n "${SKIP_STRUCTURE:-}" ]] && continue
+    local rc=0
     case "${check}" in
-      *.rb) ruby ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
-      *) bash ".github/policy/${check}" >>"${dir}/log" 2>&1 ;;
-    esac || { printf '%s' "${check}"; return 1; }
+      *.rb) ruby ".github/policy/${check}" >>"${dir}/log" 2>&1 || rc=$? ;;
+      *) bash ".github/policy/${check}" >>"${dir}/log" 2>&1 || rc=$? ;;
+    esac
+    (( rc == 0 )) && continue
+    crashed "${check}" "${rc}"
+    printf '%s' "${check}"; return 1
   done
+}
+# crashed CHECK STATUS: a check killed by a signal or unable to run (status 126 and up) proves
+# nothing about the tree, so it must never count as a rejection. Mark the case; verdict and miss
+# turn the mark into a harness failure.
+crashed() {
+  (( $2 >= 126 )) || return 0
+  echo "${1} did not run to a verdict (status ${2})" >>"${dir}/crash"
+}
+# harness_crash: fail this case as a harness failure (status 2) when a check crashed.
+harness_crash() {
+  [[ -f "${dir}/crash" ]] || return 0
+  cat "${dir}/crash" >&2
+  return 2
 }
 # fresh_tree [policy-dir]: a copy of this repository's tree with the given policy (default: the
 # policy under test).
@@ -137,11 +155,13 @@ swap() {
 # miss LOG-TAIL-MESSAGE: a case the policy did not reject. Status 3 tells the scheduler it is a
 # policy miss, which MUTATION_REPORT may continue past, and not a harness failure.
 miss() {
+  harness_crash
   [[ -n "${MUTATION_REPORT:-}" ]] || tail -n 20 "${dir}/log" >&2
   return 3
 }
 verdict() {
   local label="$1" by="$2"
+  harness_crash
   if [[ -n "${by}" ]]; then
     echo "rejected  ${label}  (by ${by})"
   else
@@ -528,7 +548,10 @@ _mutation_by() {
   fresh_tree
   while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
   : > "${dir}/log"
-  if (cd "${dir}/tree" && bash ".github/policy/${checker}" >>"${dir}/log" 2>&1); then
+  local rc=0
+  (cd "${dir}/tree" && bash ".github/policy/${checker}" >>"${dir}/log" 2>&1) || rc=$?
+  crashed "${checker}" "${rc}"
+  if (( rc == 0 )); then
     verdict "${label}" ''
   else
     verdict "${label}" "${checker}"
