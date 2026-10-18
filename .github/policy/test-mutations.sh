@@ -192,6 +192,11 @@ linux=.github/workflows/linux-validation.yml
 linux_concern=.github/workflows/linux-validation-concern.yml
 preflight=.github/actions/environment-preflight/action.yml
 public=.github/workflows/validate-public-changes.yml
+# The policy job's timeout is a reviewed budget that may change, so the mutations that anchor on the
+# job's shape read the current value from the tree instead of pinning it: the first job shaped
+# like the anchor (the one swap() edits), and the one guarded by always().
+pol_to="$(ruby -e 'm = File.read(ARGV[0]).match(/    runs-on: ubuntu-24\.04\n    timeout-minutes: (\d+)\n    steps:/) or abort("no policy job shape"); puts m[1]' "${src}/${public}")"
+pol_to_guarded="$(ruby -e 'm = File.read(ARGV[0]).match(/    if: \$\{\{ always\(\) \}\}\n    runs-on: ubuntu-24\.04\n    timeout-minutes: (\d+)\n/) or abort("no guarded policy job shape"); puts m[1]' "${src}/${public}")"
 composite_revoke='        if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 weekly_revoke='          if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 
@@ -512,14 +517,14 @@ mutation '13. a service on the policy job' "${public}" '    name: Validate workf
         image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 '
 mutation '13. the policy job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:' '    runs-on: self-hosted
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:'
 mutation '13. the policy job on another hosted label' "${public}" '    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:' '    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:'
 mutation '13. a command chained onto an exempt helper line in test-structure.sh' .github/policy/test-structure.sh 'NOT rejected under --strict: $1" >&2; exit 1; fi' 'NOT rejected under --strict: $1" >&2; exit 1; fi; ruby "${check}" --strict "${dir}/t" >/dev/null'
 mutation '13. --strict run on the real tree by another policy script (the base pass would run it)' .github/policy/test-policy.sh 'set -euo pipefail
@@ -530,10 +535,10 @@ mutation '13. --strict run on the real tree inside test-structure.sh' .github/po
 echo 'accepted  the reviewed tree'"
 mutation '12. the policy job made conditional' "${public}" '    if: ${{ always() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to_guarded}"'
     steps:' '    if: ${{ github.event_name == '"'"'push'"'"' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to_guarded}"'
     steps:'
 mutation '12. the strict structure step made conditional' "${public}" '      - name: Check the control-plane structure, strictly
         shell: bash' "      - name: Check the control-plane structure, strictly
@@ -584,9 +589,9 @@ mutation_by test-base-policy-result.sh '14. a service on the guard job' "${publi
         image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 '
 mutation_by test-base-policy-result.sh '14. the guard job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:' '    runs-on: self-hosted
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:'
 
 mutation_by test-base-policy-result.sh '14. the guard step run as an argument to true (shell: true {0})' "${public}" '        shell: bash
