@@ -701,6 +701,10 @@ fi
 mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl edge (shell list)' .github/actions/shell-artefact/action.yml "            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;" "            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx taurine-mysql-async' ;;"
 mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl edge (built-graph map)' .github/actions/shell-artefact/action.yml '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},' '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx", "taurine-mysql-async"},'
 
+# 16. The selector's always path: a duplicated concern and a dropped always-concern are refused.
+mutation '16. the selector selects an always concern twice' .github/actions/select-concerns/action.yml "return always, 'partial', 'documentation only'" "return always + [always[0]], 'partial', 'documentation only'"
+mutation '16. the selector drops an always concern' .github/actions/select-concerns/action.yml "always = [c for c, s in concerns.items() if s.get('always')]" "always = [c for c, s in concerns.items() if s.get('always') and c != 'contracts' and not c.startswith('zz')]"
+
 drain
 (( missed == 0 )) || { echo "${missed} mutation(s) passed the policy" >&2; exit 1; }
 echo "mutation tests: every reviewed weakening is rejected by the offline policy (${total} cases, ${max_jobs} job(s))"

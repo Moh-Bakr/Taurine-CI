@@ -43,12 +43,30 @@ change() {
 }
 selected() {
   : > "${work}/out.txt"
-  python3 "${work}/concern_selector.py" .github/ci-matrix.json "${repo}" "$2" "$1" linux "${work}/out.txt" "${3:-[]}" > /dev/null
+  python3 "${work}/concern_selector.py" "${matrix_file:-.github/ci-matrix.json}" "${repo}" "$2" "$1" linux "${work}/out.txt" "${3:-[]}" > /dev/null
   echo "$(grep '^selection=' "${work}/out.txt" | cut -d= -f2) $(grep '^matrix=' "${work}/out.txt" | cut -d= -f2- | jq -r '.concern | join(",")')"
 }
 parent_of() { git -C "${repo}" rev-parse "$1~1"; }
+# Concern lists are compared as sets, never as ordered strings, so the matrix's own order may change.
+# A partial selection always carries every concern the matrix declares `always`, so the wanted set is
+# the case's own concerns plus those; a concern added to the matrix (declared `always` or not
+# selected here) is judged by the matrix, while an undeclared or missing concern still fails.
+always_set="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null and .value.always == true) | .key] | join(",")' .github/ci-matrix.json)"
+# The got side keeps every occurrence (a concern selected twice must fail); only the wanted side,
+# which is a union of two lists, is de-duplicated before both are sorted.
+canonical() {
+  local value="$1" kind="${1%% *}" list="${1#* }" extra="${2:-}" dedupe="${3:-}"
+  [[ -n "${extra}" ]] && list="${list},${extra}"
+  local lines
+  lines="$(tr ',' '\n' <<<"${list}" | sed '/^$/d')"
+  [[ -n "${dedupe}" ]] && lines="$(awk '!seen[$0]++' <<<"${lines}")"
+  printf '%s %s' "${kind}" "$(LC_ALL=C sort <<<"${lines}" | paste -sd, -)"
+}
 expect() {
-  local label="$1" got="$2" want="$3"
+  local label="$1" got="$2" want="$3" extra=''
+  [[ "${want}" == partial* ]] && extra="${always_set}"
+  got="$(canonical "${got}")"
+  want="$(canonical "${want}" "${extra}" dedupe)"
   if [[ "${got}" != "${want}" ]]; then
     echo "selector case '${label}' failed: wanted '${want}' got '${got}'" >&2
     exit 1
@@ -71,6 +89,23 @@ expect no-base "$(selected "" "${sha}")" "full ${all}"
 # An explicitly requested opt-in concern joins a partial selection (docs only here).
 docs_sha="$(change docs/b.md)"
 expect opt-in "$(selected "$(parent_of "${docs_sha}")" "${docs_sha}" '["e2e-visual"]')" 'partial contracts,scan-security,e2e-visual'
+# The selector's `always` path, proven on a synthetic matrix instead of by trusting the real one:
+# a concern declared `always` is selected exactly once on a docs-only and on a UI change, and a
+# concern that is not `always` and matches no changed path is not. This holds for any future
+# always-concern without naming one; whether the real matrix should mark a concern `always` is a
+# reviewed matrix change that no fixture can judge without pinning a list.
+matrix_file="${work}/synthetic-matrix.json"
+jq '.concerns.linux += {"zz-always": {"always": true, "timeout": 30, "paths": []}, "zz-optional": {"timeout": 30, "paths": ["never/**"]}}' .github/ci-matrix.json > "${matrix_file}"
+for synthetic_change in docs/c.md taurine-desktop/src/a.ts; do
+  sha_syn="$(change "${synthetic_change}")"
+  got_syn="$(selected "$(parent_of "${sha_syn}")" "${sha_syn}")"
+  count_always="$(tr ',' '\n' <<<"${got_syn#* }" | grep -cx 'zz-always' || true)"
+  if [[ "${got_syn%% *}" != partial || "${count_always}" != 1 ]] || tr ',' '\n' <<<"${got_syn#* }" | grep -qx 'zz-optional'; then
+    echo "selector case 'synthetic always' failed for ${synthetic_change}: got '${got_syn}'" >&2
+    exit 1
+  fi
+done
+unset matrix_file
 tree_ref='HEAD^{tree}'
 orphan="$(git -C "${repo}" commit-tree "$(git -C "${repo}" rev-parse "${tree_ref}")" -m orphan)"
 expect not-ancestor "$(selected "${orphan}" "${sha}")" "full ${all}"
