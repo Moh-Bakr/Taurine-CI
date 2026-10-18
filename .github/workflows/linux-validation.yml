@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       profile:
-        description: quick runs the fast concerns only (no rust-app, rust-db, rust-dbx, scan-security, a11y or regression e2e tiers) and gives a PASS (partial) verdict; full runs everything
+        description: quick runs the fast concerns only (no rust-app, rust-db, rust-dbx, scan-security, scan-lint, a11y or regression e2e tiers) and gives a PASS (partial) verdict; full runs everything
         required: false
         default: full
         type: choice
