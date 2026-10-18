@@ -9,18 +9,103 @@
 # MUTATION_POLICY=<dir> runs every case against another copy of .github/policy (for example an
 # older commit's) and MUTATION_REPORT=1 lists each verdict instead of stopping at the first
 # mutation that is not rejected.
+#
+# The cases are independent, so they run in parallel: MUTATION_JOBS=<n> bounds the concurrency
+# (default: the CPU count; 1 is strictly sequential). Each case gets its own directory, tree, log
+# and RUNNER_TEMP, and shares no mutable state with another. Results print in declaration order,
+# never completion order. A case that crashes, is killed or aborts (a stale mutation whose text is
+# not found) fails the run loudly, and so does a result count that differs from the declarations.
 set -euo pipefail
 # Never inherit the skip from the caller's environment: only reject_file sets it, for one call.
 unset SKIP_STRUCTURE
 
 src="${PWD}"
-dir="$(mktemp -d)"
-trap 'rm -rf "${dir}"' EXIT
-# Some fixture suites write under RUNNER_TEMP, which only a runner sets.
-export RUNNER_TEMP="${RUNNER_TEMP:-${dir}/runner-temp}"
+root="$(mktemp -d)"
+dir="${root}"
+jobs_dir="${root}/jobs"
+mkdir -p "${jobs_dir}"
+# Some fixture suites write under RUNNER_TEMP, which only a runner sets; each case gets its own.
+export RUNNER_TEMP="${RUNNER_TEMP:-${root}/runner-temp}"
 mkdir -p "${RUNNER_TEMP}"
 policy_source="${MUTATION_POLICY:-${src}/.github/policy}"
 missed=0
+max_jobs="${MUTATION_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
+[[ "${max_jobs}" =~ ^[1-9][0-9]*$ ]] || { echo "MUTATION_JOBS must be a positive integer, got '${max_jobs}'" >&2; exit 1; }
+total=0      # cases declared
+next=1       # the next case whose result is printed
+live=()      # indexes of running cases
+pids=()      # pids[index]: the worker of that case
+labels=()    # labels[index]: what the case is called, for failures that print no verdict
+
+# The scheduler. spawn LABEL FUNCTION ARGS...: start a case once a slot is free, and print every
+# finished case in declaration order as soon as all the cases before it have finished.
+kill_tree() {
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null || true); do kill_tree "${child}"; done
+  kill "$1" 2>/dev/null || true
+}
+cleanup() {
+  local i
+  for i in ${live[@]+"${live[@]}"}; do kill_tree "${pids[${i}]}"; done
+  rm -rf "${root}"
+}
+trap cleanup EXIT
+# reap: drop every worker that is gone; a worker that left no result was killed or crashed.
+reap() {
+  local i keep=()
+  for i in ${live[@]+"${live[@]}"}; do
+    if kill -0 "${pids[${i}]}" 2>/dev/null; then keep+=("${i}"); continue; fi
+    if [[ ! -f "${jobs_dir}/${i}.rc" ]]; then
+      echo 'the worker died without reporting a result' >>"${jobs_dir}/${i}.err"
+      echo 255 >"${jobs_dir}/${i}.rc"
+    fi
+  done
+  live=(${keep[@]+"${keep[@]}"})
+}
+wait_one() { wait -n 2>/dev/null || true; reap; }
+# flush: print each finished case, in order. A harness failure always stops the run; a policy miss
+# (status 3) stops it too unless MUTATION_REPORT is set, which keeps going and counts them.
+flush() {
+  local rc
+  while (( next <= total )) && [[ -f "${jobs_dir}/${next}.rc" ]]; do
+    rc="$(cat "${jobs_dir}/${next}.rc")"
+    cat "${jobs_dir}/${next}.out"; cat "${jobs_dir}/${next}.err" >&2
+    rm -rf "${jobs_dir:?}/${next}"
+    if (( rc == 3 )); then
+      missed=$((missed + 1))
+      [[ -n "${MUTATION_REPORT:-}" ]] || exit 1
+    elif (( rc != 0 )); then
+      echo "mutation harness failure: ${labels[${next}]} (status ${rc})" >&2
+      exit 1
+    fi
+    next=$((next + 1))
+  done
+}
+spawn() {
+  local label="$1" idx jd; shift
+  while (( ${#live[@]} >= max_jobs )); do wait_one; flush; done
+  total=$((total + 1)); idx="${total}"; jd="${jobs_dir}/${idx}"
+  labels[idx]="${label}"
+  mkdir -p "${jd}"
+  (
+    set +e
+    ( set -e; dir="${jd}"; export RUNNER_TEMP="${jd}/runner-temp"; mkdir -p "${RUNNER_TEMP}"; "$@" ) >"${jd}.out" 2>"${jd}.err"
+    echo "$?" >"${jd}.rc.tmp"; mv "${jd}.rc.tmp" "${jd}.rc"
+  ) &
+  pids[idx]=$!
+  live+=("${idx}")
+}
+# drain: wait for every case, print the rest, and prove that each declared case reported.
+drain() {
+  while (( ${#live[@]} > 0 )); do wait_one; flush; done
+  flush
+  local done_count
+  done_count="$(find "${jobs_dir}" -maxdepth 1 -name '*.rc' | wc -l | tr -d ' ')"
+  if (( next != total + 1 || total == 0 || done_count != total )); then
+    echo "mutation harness failure: ${total} case(s) declared, $((next - 1)) reported" >&2
+    exit 1
+  fi
+}
 
 # The offline policy, in the order the cheap checks fail first. Prints the first check that
 # rejects the tree and returns non-zero; returns zero when every check passes.
@@ -49,18 +134,23 @@ fresh_tree() {
 swap() {
   OLD="$2" NEW="$3" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found in #{ARGV[0]}: #{ENV["OLD"][0, 80]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/tree/$1"
 }
+# miss LOG-TAIL-MESSAGE: a case the policy did not reject. Status 3 tells the scheduler it is a
+# policy miss, which MUTATION_REPORT may continue past, and not a harness failure.
+miss() {
+  [[ -n "${MUTATION_REPORT:-}" ]] || tail -n 20 "${dir}/log" >&2
+  return 3
+}
 verdict() {
   local label="$1" by="$2"
   if [[ -n "${by}" ]]; then
     echo "rejected  ${label}  (by ${by})"
   else
     echo "PASSED    ${label}" >&2
-    missed=$((missed + 1))
-    [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+    miss
   fi
 }
 # mutation LABEL FILE OLD NEW [FILE OLD NEW ...]: apply every edit, then expect a rejection.
-mutation() {
+_mutation() {
   local label="$1" by=''; shift
   fresh_tree
   while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
@@ -68,6 +158,7 @@ mutation() {
   by="$(cd "${dir}/tree" && offline_policy)" || true
   verdict "${label}" "${by}"
 }
+mutation() { spawn "$1" _mutation "$@"; }
 
 # The unmutated tree must pass, or every rejection below would prove nothing.
 fresh_tree; : > "${dir}/log"
@@ -257,30 +348,30 @@ with_file() {
 # reject_file LABEL PATH BODY CHECKER: refused, and by CHECKER. The structure check is skipped here so
 # it cannot refuse the file for being a different shape and let the rule under test pass vacuously;
 # the structure manifest has its own fixtures in test-structure.sh.
-reject_file() {
+_reject_file() {
   local by
   with_file "$1" "$2" "$3"
   by="$(cd "${dir}/tree" && SKIP_STRUCTURE=1 offline_policy)" || true
   if [[ "${by}" != "$4" ]]; then
     echo "WRONG CHECKER  $1  (wanted $4, got '${by}')" >&2
-    missed=$((missed + 1))
-    [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
-    return 0
+    miss
+    return
   fi
   verdict "$1" "${by}"
 }
+reject_file() { spawn "$1" _reject_file "$@"; }
 # accept_file LABEL PATH BODY: accepted by every check, the structure check included.
-accept_file() {
+_accept_file() {
   local label="$1" by
   with_file "$@"
   if by="$(cd "${dir}/tree" && offline_policy)"; then
     echo "accepted  ${label}"
   else
     echo "REFUSED   ${label}  (by ${by})" >&2
-    missed=$((missed + 1))
-    [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
+    miss
   fi
 }
+accept_file() { spawn "$1" _accept_file "$@"; }
 accept_file '11. the reusable public policy workflow as a plain called workflow' "${reusable}" "$(reusable_body)"
 reject_file '11. the same called workflow at a path no tier names' .github/workflows/other-public.yml "$(reusable_body)" check-workflows.sh
 reject_file '11. the reusable public policy workflow with a schedule trigger' "${reusable}" "$(reusable_body '  schedule:' "    - cron: '0 0 * * *'")" check-workflows.sh
@@ -293,22 +384,25 @@ reject_file '11. the reusable public policy workflow with a deployment environme
 reject_file '11. the reusable public policy workflow reading a secret' "${reusable}" "$(reusable_body | sed "s/'true'/'echo \${{ secrets.TOKEN }}'/")" check-workflows.sh
 # A workflow calling it is accepted: the call is a reviewed local reusable workflow. The caller is a
 # small workflow of its own, so this tests the allow-list and not the size of the entrypoint.
-fresh_tree
-printf '%s\n' "$(reusable_body)" > "${dir}/tree/${reusable}"
-# The caller is new, so the fixture tree's manifest also lists it: a tree and its manifest changed
-# together, as a reviewed change does, and every check, the structure one included, accepts it.
-swap .github/policy/check-structure.rb '   ".github/workflows/cache-prune.yml" =>' '   ".github/workflows/call-fixture.yml" => {"tier" => "public", "triggers" => ["workflow_dispatch"], "jobs" => ["call"]},
+_calling_workflow() {
+  local by
+  fresh_tree
+  printf '%s\n' "$(reusable_body)" > "${dir}/tree/${reusable}"
+  # The caller is new, so the fixture tree's manifest also lists it: a tree and its manifest changed
+  # together, as a reviewed change does, and every check, the structure one included, accepts it.
+  swap .github/policy/check-structure.rb '   ".github/workflows/cache-prune.yml" =>' '   ".github/workflows/call-fixture.yml" => {"tier" => "public", "triggers" => ["workflow_dispatch"], "jobs" => ["call"]},
    ".github/workflows/cache-prune.yml" =>'
-printf '%s\n' 'name: Caller (fixture)' 'on:' '  workflow_dispatch:' 'permissions: {}' 'jobs:' '  call:' '    permissions:' \
+  printf '%s\n' 'name: Caller (fixture)' 'on:' '  workflow_dispatch:' 'permissions: {}' 'jobs:' '  call:' '    permissions:' \
   '      contents: read' '    uses: ./.github/workflows/base-policy.yml' > "${dir}/tree/.github/workflows/call-fixture.yml"
-: > "${dir}/log"
-if by="$(cd "${dir}/tree" && offline_policy)"; then
-  echo 'accepted  11. a workflow calling the reusable public policy workflow'
-else
-  echo "REFUSED   11. a workflow calling the reusable public policy workflow  (by ${by})" >&2
-  missed=$((missed + 1))
-  [[ -n "${MUTATION_REPORT:-}" ]] || { tail -n 20 "${dir}/log" >&2; exit 1; }
-fi
+  : > "${dir}/log"
+  if by="$(cd "${dir}/tree" && offline_policy)"; then
+    echo 'accepted  11. a workflow calling the reusable public policy workflow'
+  else
+    echo "REFUSED   11. a workflow calling the reusable public policy workflow  (by ${by})" >&2
+    miss
+  fi
+}
+spawn '11. a workflow calling the reusable public policy workflow' _calling_workflow
 mutation '12. the required status check job renamed' "${public}" '    name: Validate workflow policy' '    name: Validate workflow policy (renamed)'
 mutation '12. the required status check job id renamed' "${public}" '  policy:
 ' '  policy-renamed:
@@ -429,7 +523,7 @@ mutation '12. the strict structure step made conditional' "${public}" '      - n
 # mutation_by CHECKER LABEL FILE OLD NEW: like mutation, but the named check alone must refuse the tree.
 # test-base-policy-result.sh pins the shape of base-policy.yml, which the reusable-workflow fixtures
 # (11.) deliberately replace, so it is not part of offline_policy.
-mutation_by() {
+_mutation_by() {
   local checker="$1" label="$2"; shift 2
   fresh_tree
   while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
@@ -440,6 +534,7 @@ mutation_by() {
     verdict "${label}" "${checker}"
   fi
 }
+mutation_by() { spawn "$2" _mutation_by "$@"; }
 mutation_by test-base-policy-result.sh '14. a step ahead of the base-policy guard in the policy job' "${public}" '    steps:
       # FIRST, before the checkout' '    steps:
       - name: Early step
@@ -543,7 +638,8 @@ mutation_by test-case-evidence-admission.sh '18. the admission safe.directory wi
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
 # toJSON(secrets) read to that concern in the same change: its own policy passes, and the base
 # policy (this commit's, which the pull_request run checks out from the base SHA) rejects it.
-if [[ -z "${MUTATION_POLICY:-}" ]]; then
+_self_editing_policy() {
+  local own by
   cp -R "${src}/.github/policy" "${dir}/base-policy"
   fresh_tree
   swap .github/policy/check-universal.rb '  expressions(doc).each do |expr|
@@ -565,6 +661,9 @@ if [[ -z "${MUTATION_POLICY:-}" ]]; then
   : > "${dir}/log"
   by="$(cd "${dir}/tree" && offline_policy)" || true
   verdict '10. a pull request that weakens its own policy (own policy passes; base policy run)' "${by}"
+}
+if [[ -z "${MUTATION_POLICY:-}" ]]; then
+  spawn '10. a pull request that weakens its own policy (own policy passes; base policy run)' _self_editing_policy
 fi
 
 # 15. The OpenSSL door allowlist. taurine-mysql-async (the vendored MySQL fork) is a parent of
@@ -574,5 +673,6 @@ fi
 mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl edge (shell list)' .github/actions/shell-artefact/action.yml "            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;" "            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx taurine-mysql-async' ;;"
 mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl edge (built-graph map)' .github/actions/shell-artefact/action.yml '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},' '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx", "taurine-mysql-async"},'
 
+drain
 (( missed == 0 )) || { echo "${missed} mutation(s) passed the policy" >&2; exit 1; }
-echo 'mutation tests: every reviewed weakening is rejected by the offline policy'
+echo "mutation tests: every reviewed weakening is rejected by the offline policy (${total} cases, ${max_jobs} job(s))"
