@@ -205,6 +205,50 @@ ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch
   "${work}/tree/.github/ci-matrix.json"
 expect_policy_rejects 'unreviewed live engine'
 
+# The optional flavor remains a choice in both the reviewed matrix and the workflow.
+for mutation in matrix-type workflow-type workflow-required; do
+  reset_fixture
+  ruby -rjson -ryaml -e '
+    root, mutation = ARGV
+    if mutation == "matrix-type"
+      path = File.join(root, ".github/ci-matrix.json")
+      doc = JSON.parse(File.read(path))
+      doc.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/macos-validation.yml").fetch("inputs").fetch("flavor")["type"] = "string"
+      File.write(path, JSON.pretty_generate(doc))
+    else
+      path = File.join(root, ".github/workflows/macos-validation.yml")
+      doc = YAML.safe_load_file(path, aliases: false)
+      triggers = doc["on"].is_a?(Hash) ? doc["on"] : doc[true]
+      flavor = triggers.fetch("workflow_dispatch").fetch("inputs").fetch("flavor")
+      mutation == "workflow-type" ? flavor["type"] = "string" : flavor["required"] = true
+      File.write(path, YAML.dump(doc))
+    end
+  ' "${work}/tree" "${mutation}"
+  if [[ "${mutation}" == matrix-type ]]; then
+    expect_policy_rejects "flavor ${mutation}" 'input contract differs from the reviewed schema'
+  else
+    expect_policy_rejects "flavor ${mutation}" 'input flavor differs from the reviewed type/default/options'
+  fi
+done
+
+# The macOS flavor's reviewed choice contract is bound on both sides: the matrix may use only the
+# reviewed allowed values, and the workflow's own input declaration must carry exactly the same
+# list (an unreviewed option on either side is refused).
+reset_fixture
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); flavor=data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/macos-validation.yml").fetch("inputs").fetch("flavor"); options=flavor.fetch("options"); options.clear; options.concat(%w[prod dev uat staging]); File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+expect_policy_rejects 'matrix flavor gains an unreviewed option' 'input contract differs from the reviewed schema'
+
+reset_fixture
+ruby -ryaml -e 'path=ARGV.fetch(0); doc=YAML.safe_load_file(path, aliases: false); triggers=doc["on"].is_a?(Hash) ? doc["on"] : doc[true]; inputs=triggers.fetch("workflow_dispatch").fetch("inputs"); flavor=inputs.fetch("flavor"); options=flavor.fetch("options"); options.clear; options.concat(%w[prod dev uat staging]); File.write(path, YAML.dump(doc))' \
+  "${work}/tree/.github/workflows/macos-validation.yml"
+expect_policy_rejects 'workflow flavor gains an unreviewed option' 'input flavor differs from the reviewed type/default/options'
+
+reset_fixture
+ruby -ryaml -e 'path=ARGV.fetch(0); doc=YAML.safe_load_file(path, aliases: false); triggers=doc["on"].is_a?(Hash) ? doc["on"] : doc[true]; triggers.fetch("workflow_dispatch").fetch("inputs").fetch("flavor")["default"]="dev"; File.write(path, YAML.dump(doc))' \
+  "${work}/tree/.github/workflows/macos-validation.yml"
+expect_policy_rejects 'workflow flavor default drift' 'input flavor differs from the reviewed type/default/options'
+
 reset_fixture
 ruby -e 'path=ARGV.fetch(0); text=File.read(path); marker="      - name: Verify the coordinator dispatch identity\n"; abort unless text.include?(marker); File.write(path,text.sub(marker, marker + "        if: false\n"))' \
   "${work}/tree/.github/workflows/linux-validation.yml"

@@ -38,11 +38,16 @@ for skill_workflow in \
 done
 
 
-while IFS= read -r -d '' workflow; do
-  check_action_references "$workflow"
-
+# One invocation checks every file; do not pay Ruby startup once per reference file.
+# Keep the exact find inventory, including hidden files and .yaml, and refuse an empty set.
+workflow_files=()
+while IFS= read -r -d '' workflow; do workflow_files+=("${workflow}"); done < <(find .github/workflows .github/actions -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
+(( ${#workflow_files[@]} > 0 )) || { echo 'No workflow or composite file to check.' >&2; exit 1; }
+check_action_references "${workflow_files[@]}"
+composite_files=()
+for workflow in "${workflow_files[@]}"; do
   if [[ "$workflow" == .github/actions/*/action.yml ]]; then
-    check_composite_action "$workflow" || { echo "Composite action policy violated: $workflow" >&2; exit 1; }
+    composite_files+=("${workflow}")
     continue
   fi
 
@@ -56,7 +61,10 @@ while IFS= read -r -d '' workflow; do
   else
     check_dispatcher "$workflow"
   fi
-done < <(find .github/workflows .github/actions -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
+done
+if (( ${#composite_files[@]} > 0 )); then
+  check_composite_action "${composite_files[@]}" || { echo 'Composite action policy violated.' >&2; exit 1; }
+fi
 
 # cache-mode (always-on rules, plus the staged ones for ENFORCED_WORKFLOWS in check-cache-mode.rb)
 # and the actions: write allow-list (docs/untrusted-readonly-cache.md, P2 and P7).

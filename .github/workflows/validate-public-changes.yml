@@ -87,6 +87,7 @@ jobs:
           ruby .github/policy/check-universal.rb
           bash .github/policy/test-structure.sh
           bash .github/policy/test-action-uses.sh
+          bash .github/policy/test-policy-batching.sh
 
       # Dedicated and exactly one command (check-strict-structure.rb asserts it): the strict form of the
       # structure check, where a transitional alternative left in the manifest is an error.
@@ -108,6 +109,11 @@ jobs:
       - name: Test the policy rules against fixtures
         shell: bash
         run: bash .github/policy/test-policy.sh
+
+      # Keep block-scalar condition refusal in policy even when YAML chomping removes newlines.
+      - name: Test rule N's block-scalar if refusal
+        shell: bash
+        run: bash .github/policy/test-rule-n-if-shape.sh
 
       # The environment pre-flight composite, run against stub API answers: only custom branch
       # policies of exactly main and untrusted pass.
@@ -160,6 +166,10 @@ jobs:
       - name: Test the cargo-deny step's exit-code labels and counts against a stub
         shell: bash
         run: bash .github/policy/test-scan-deny.sh
+
+      - name: Test unsound advisory enforcement and protected reporting against a stub
+        shell: bash
+        run: bash .github/policy/test-cargo-audit.sh
 
       - name: Test that the base-pass step is found in either public policy workflow
         shell: bash
