@@ -567,5 +567,12 @@ if [[ -z "${MUTATION_POLICY:-}" ]]; then
   verdict '10. a pull request that weakens its own policy (own policy passes; base policy run)' "${by}"
 fi
 
+# 15. The OpenSSL door allowlist. taurine-mysql-async (the vendored MySQL fork) is a parent of
+# tokio-openssl and nothing else; re-widening it to a direct openssl edge, in either the shell list
+# or the Python map, must be refused by the shell-artefact fixtures (which are not part of
+# offline_policy: they build real toy workspaces and take minutes).
+mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl edge (shell list)' .github/actions/shell-artefact/action.yml "            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;" "            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx taurine-mysql-async' ;;"
+mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl edge (built-graph map)' .github/actions/shell-artefact/action.yml '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},' '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx", "taurine-mysql-async"},'
+
 (( missed == 0 )) || { echo "${missed} mutation(s) passed the policy" >&2; exit 1; }
 echo 'mutation tests: every reviewed weakening is rejected by the offline policy'
