@@ -33,11 +33,30 @@ STRICT_HELPER_LINES = [
 problems = []
 workflow = '.github/workflows/validate-public-changes.yml'
 doc = YAML.safe_load(File.read(workflow, encoding: 'UTF-8'), aliases: false)
-job = (doc['jobs'] || {})['policy'] || {}
+jobs = doc['jobs'] || {}
+# Two reviewed layouts of the policy gate (transitional: the single-job one is removed once the
+# sharded one has merged). Old: one `policy` job holds the guard and every check. New: `policy` is a
+# thin aggregate that holds only guards, and this pull request's own checks run in the four shard jobs
+# beside the base pass. A tree with any shard job must have all four, and keeps the strict step in
+# policy-structure and nowhere else, so the aggregate never runs a pull request script.
+SHARDS = %w[policy-evidence policy-fixtures policy-mutations policy-structure].freeze
+sharded = SHARDS.any? { |name| jobs.key?(name) }
+missing = sharded ? SHARDS.reject { |name| jobs.key?(name) } : []
+problems << "the sharded policy layout is missing #{missing.join(', ')}: a dropped shard drops its checks" unless missing.empty?
+holder_name = sharded ? 'policy-structure' : 'policy'
+job = jobs[holder_name] || {}
 strict_line = 'ruby .github/policy/check-structure.rb --strict'
-steps = (job['steps'] || []).select { |st| st['run'].to_s.lines.any? { |l| l.include?('check-structure.rb') && l.include?('--strict') } }
+strict_in = lambda do |j|
+  (j['steps'] || []).select { |st| st['run'].to_s.lines.any? { |l| l.include?('check-structure.rb') && l.include?('--strict') } }
+end
+jobs.each do |name, j|
+  next unless j.is_a?(Hash) && name != holder_name && name != 'base-pass'
+
+  problems << "the #{name} job may not run check-structure.rb --strict: it belongs in #{holder_name} only" unless strict_in.call(j).empty?
+end
+steps = strict_in.call(job)
 if steps.size != 1
-  problems << "the policy job must have exactly one step that runs check-structure.rb --strict (found #{steps.size})"
+  problems << "the #{holder_name} job must have exactly one step that runs check-structure.rb --strict (found #{steps.size})"
 else
   step = steps.first
   problems << "the strict step's run must be exactly: #{strict_line} (got #{step['run'].inspect})" unless step['run'].to_s.strip == strict_line && step['run'].to_s.lines.size == 1
@@ -45,20 +64,27 @@ else
   extra = step.keys - %w[name shell run]
   problems << "the strict step may only have name, shell and run (found #{extra.inspect})" unless extra.empty?
 end
-problems << 'the policy job may not carry continue-on-error' if job.key?('continue-on-error')
 # env and defaults at the workflow or policy-job level reach every step's shell: BASH_ENV, RUBYOPT,
 # PATH or a defaults.run.working-directory would steer or neutralise the strict step. (A step's own env
 # is refused for the strict step above, and other steps may carry theirs.)
-# The policy job runs on the plain hosted runner and in no container or service: a digest-pinned
+# Every policy job runs on the plain hosted runner and in no container or service: a digest-pinned
 # container image can still carry ENV BASH_ENV or RUBYOPT, or a ruby of its own, that steers the strict
-# step and the base-policy guard; a self-hosted or other runner label changes what runs them at all.
-problems << "the policy job's runs-on must be exactly ubuntu-24.04 (got #{job['runs-on'].inspect})" unless job['runs-on'] == 'ubuntu-24.04'
-%w[container services].each { |key| problems << "the policy job may not carry #{key}" if job.key?(key) }
+# step and the guards; a self-hosted or other runner label changes what runs them at all.
+(%w[policy] + SHARDS).each do |name|
+  pj = jobs[name]
+  next unless pj
+
+  problems << "the #{name} job may not carry continue-on-error" if pj.key?('continue-on-error')
+  problems << "the #{name} job's runs-on must be exactly ubuntu-24.04 (got #{pj['runs-on'].inspect})" unless pj['runs-on'] == 'ubuntu-24.04'
+  %w[container services env defaults].each { |key| problems << "the #{name} job may not carry #{key}" if pj.key?(key) }
+end
 %w[env defaults].each do |key|
   problems << "validate-public-changes.yml may not carry #{key} at the workflow level" if doc.key?(key)
-  problems << "the policy job may not carry #{key}" if job.key?(key)
 end
-problems << "the policy job's if must be exactly ${{ always() }}" unless job['if'].to_s.strip == '${{ always() }}'
+problems << "the policy job's if must be exactly ${{ always() }}" unless (jobs['policy'] || {})['if'].to_s.strip == '${{ always() }}'
+# A shard is never conditional: a skipped shard is a skipped check, and the aggregate (which requires
+# success from each) is not the only line of defence.
+SHARDS.each { |name| problems << "the #{name} job may not carry if" if jobs[name]&.key?('if') }
 
 # Not covered: a pull request can neuter the strict block inside its own check-structure.rb, and an
 # earlier step of the policy job (which runs the pull request's own scripts) could export BASH_ENV
@@ -80,7 +106,7 @@ Dir.glob('.github/policy/*.{sh,rb}').sort.each do |file|
 end
 
 if problems.empty?
-  puts 'strict structure: the policy job runs check-structure.rb --strict as a plain step, and no policy script runs it on a real tree'
+  puts 'strict structure: the policy job (or its structure shard) runs check-structure.rb --strict as a plain step, and no policy script runs it on a real tree'
 else
   problems.each { |p| warn p }
   exit 1

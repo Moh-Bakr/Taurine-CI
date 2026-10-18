@@ -47,6 +47,25 @@ expect_guard "${fixtures_guard}" FIXTURES_RESULT 'the fixtures guard'
 expect_guard "${base_guard}" BASE_RESULT 'the base-policy guard'
 expect_guard "${entry_guard}" BASE_PASS_RESULT 'the entrypoint guard'
 
+# Two reviewed layouts of the entrypoint (transitional, see check-strict-structure.rb): the one `policy`
+# job, or the thin aggregate `policy` beside four shard jobs that run this pull request's own checks. In
+# the aggregate layout one more guard reads all four shard results, and each must be the only thing
+# standing between a non-success result and a pass.
+shards=(policy-evidence policy-fixtures policy-mutations policy-structure)
+sharded="$(yaml "${entry}" 'doc["jobs"].keys.any? { |k| %w[policy-evidence policy-fixtures policy-mutations policy-structure].include?(k) }')"
+if [[ "${sharded}" == true ]]; then
+  shards_guard="$(step_script "${entry}" policy 'Require every policy check shard to have passed')"
+  vars=(POLICY_EVIDENCE_RESULT POLICY_FIXTURES_RESULT POLICY_MUTATIONS_RESULT POLICY_STRUCTURE_RESULT)
+  all_ok() { env "${vars[0]}=success" "${vars[1]}=success" "${vars[2]}=success" "${vars[3]}=success" bash -c "${shards_guard}" > "${tmp}/out" 2>&1; }
+  all_ok || { cat "${tmp}/out" >&2; fail 'the shards guard refused four successes'; }
+  for v in "${vars[@]}"; do
+    for result in failure skipped cancelled ''; do
+      args=(); for w in "${vars[@]}"; do if [[ "${w}" == "${v}" ]]; then args+=("${w}=${result}"); else args+=("${w}=success"); fi; done
+      if env "${args[@]}" bash -c "${shards_guard}" > "${tmp}/out" 2>&1; then fail "the shards guard accepted ${v}='${result}'"; fi
+    done
+  done
+fi
+
 # The conditions that decide when each guard runs are expressions, so they are compared as text.
 # Arrays, not a hash: Hash#inspect prints differently across Ruby versions, and the runner's is not mine.
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy-result"]["steps"].map { |s| [s["name"], s["if"]] }.inspect')" \
@@ -58,8 +77,15 @@ expect_guard "${entry_guard}" BASE_PASS_RESULT 'the entrypoint guard'
 # The chain that keeps the base pass on the required check.
 [[ "$(yaml "${entry}" 'doc["jobs"]["base-pass"]["uses"]')" == ./.github/workflows/base-policy.yml ]] \
   || fail 'the entrypoint does not call the reusable base-policy workflow'
-[[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["needs"].inspect')" == '["base-pass"]' ]] \
-  || fail 'the policy job does not need exactly the base-policy call'
+# The aggregate layout needs the base-policy call and all four shards, and nothing else; the single-job
+# layout needs the base-policy call alone.
+if [[ "${sharded}" == true ]]; then
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["needs"].inspect')" == '["base-pass", "policy-evidence", "policy-fixtures", "policy-mutations", "policy-structure"]' ]] \
+    || fail 'the policy aggregate does not need exactly the base-policy call and the four policy shards'
+else
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["needs"].inspect')" == '["base-pass"]' ]] \
+    || fail 'the policy job does not need exactly the base-policy call'
+fi
 [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["if"]')" == '${{ always() }}' ]] \
   || fail 'the policy job does not always run, so a failed base pass could skip it'
 # The guard is the policy job's FIRST step: before the checkout and before any step that runs this
@@ -76,6 +102,32 @@ expect_guard "${entry_guard}" BASE_PASS_RESULT 'the entrypoint guard'
   || fail 'the entrypoint guard step does not use exactly shell: bash'
 [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["env"].to_a.inspect')" == '[["BASE_PASS_RESULT", "${{ needs.base-pass.result }}"]]' ]] \
   || fail 'the entrypoint guard step env is not exactly BASE_PASS_RESULT: needs.base-pass.result'
+# The aggregate layout: `policy` holds exactly the two guards and no other step (no checkout, no script of
+# this pull request, nothing that could export BASH_ENV, PATH or RUBYOPT); the shards guard reads exactly
+# the four shard results; and each shard stands beside the base pass: it needs no job (a dependency on the
+# base pass would put the two back in sequence), runs on the plain runner and holds its own checkout.
+if [[ "${sharded}" == true ]]; then
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].map { |s| s["name"] }.inspect')" \
+    == '["Require the base-policy workflow to have passed", "Require every policy check shard to have passed"]' ]] \
+    || fail 'the policy aggregate holds a step other than its two guards, or they are renamed or reordered'
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"][1].keys.sort.inspect')" == '["env", "if", "name", "run", "shell"]' ]] \
+    || fail 'the shards guard step has keys other than name, if, shell, env and run'
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"][1]["shell"]')" == bash ]] \
+    || fail 'the shards guard step does not use exactly shell: bash'
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"][1]["if"]')" == '${{ always() }}' ]] \
+    || fail 'the shards guard step does not always run'
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"][1]["env"].to_a.inspect')" \
+    == '[["POLICY_EVIDENCE_RESULT", "${{ needs.policy-evidence.result }}"], ["POLICY_FIXTURES_RESULT", "${{ needs.policy-fixtures.result }}"], ["POLICY_MUTATIONS_RESULT", "${{ needs.policy-mutations.result }}"], ["POLICY_STRUCTURE_RESULT", "${{ needs.policy-structure.result }}"]]' ]] \
+    || fail 'the shards guard step env is not exactly the four needs.<shard>.result values'
+  for shard in "${shards[@]}"; do
+    [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"].key?(\"needs\")")" == false ]] \
+      || fail "${shard} needs another job, so it no longer runs beside the base pass"
+    [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"][\"runs-on\"]")" == ubuntu-24.04 ]] \
+      || fail "${shard} does not run on exactly ubuntu-24.04"
+    [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"][\"steps\"].first[\"uses\"].to_s.start_with?(\"actions/checkout@\")")" == true ]] \
+      || fail "${shard} does not start with its own checkout"
+  done
+fi
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy-result"]["needs"].inspect')" == '["base-policy-fixtures", "base-policy"]' ]] \
   || fail 'the result job does not need both base-policy jobs'
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy-result"]["if"]')" == '${{ always() }}' ]] \
@@ -107,6 +159,11 @@ no_unsafe "${entry}" base-pass 'if,continue-on-error,environment,secrets' ''
 # carry ENV BASH_ENV or RUBYOPT, or a ruby of its own, that changes how the guard behaves, and another
 # runner label changes what runs it.
 no_unsafe "${entry}" policy 'continue-on-error,environment,container,services' 'continue-on-error'
+if [[ "${sharded}" == true ]]; then
+  for shard in "${shards[@]}"; do
+    no_unsafe "${entry}" "${shard}" 'if,continue-on-error,environment,container,services,env,defaults' 'if,continue-on-error'
+  done
+fi
 [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["runs-on"]')" == ubuntu-24.04 ]] \
   || fail 'the policy job does not run on exactly ubuntu-24.04'
 no_unsafe "${reusable}" base-policy 'continue-on-error,environment' 'if,continue-on-error'
@@ -115,4 +172,4 @@ no_unsafe "${reusable}" base-policy-result 'continue-on-error,environment' 'cont
 [[ "$(yaml "${reusable}" 'doc["jobs"]["base-policy"]["steps"].count { |s| s["name"] == "Run the base commit'"'"'s policy against this pull request" }')" == 1 ]] \
   || fail 'the base-policy job does not hold exactly one base-pass step'
 
-echo 'base-policy result: the guards pass only on success, and the policy job needs the call that needs both jobs'
+echo 'base-policy result: the guards pass only on success, and the required check needs the call that needs both jobs (and, in the sharded layout, the four policy shards beside it)'

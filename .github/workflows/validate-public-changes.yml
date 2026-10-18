@@ -179,6 +179,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-base-policy-result.sh
 
+      - name: Test that the aggregate policy layout stays fail-closed
+        shell: bash
+        run: bash .github/policy/test-policy-aggregate.sh
+
       - name: Test sanitized build-failure category classification
         shell: bash
         run: bash .github/policy/test-build-failure-category.sh

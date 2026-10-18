@@ -74,7 +74,7 @@ expect_reject 'the required check renamed' 'not "Validate workflow policy"'
 fresh; swap "${public}" '  base-pass:
 ' '  base-pass-moved:
 '
-expect_reject 'another job renamed in the policy workflow' 'jobs changed'
+expect_reject 'another job renamed in the policy workflow' 'reviewed shapes'
 
 fresh; mv "${dir}/t/.github/workflows/base-policy.yml" "${dir}/t/.github/workflows/base-policy-moved.yml"
 expect_reject 'the reusable base-policy workflow renamed' 'in the manifest but missing from the tree'
@@ -227,11 +227,11 @@ fresh; variant "${prune_old}" "[${prune_old}, {\"tier\" => \"public\", \"trigger
 expect_reject 'a forbidden trigger in a transitional alternative' 'lists the forbidden trigger pull_request_target'
 # The required-check pin applies to every alternative.
 pol_old='{"tier" => "policy",
-     "triggers" => ["pull_request", "push", "workflow_dispatch"],
-     "jobs" => ["base-pass", "policy"]}'
-fresh; variant "${pol_old}" "[${pol_old}, {\"tier\" => \"policy\", \"triggers\" => [\"pull_request\", \"push\", \"workflow_dispatch\"], \"jobs\" => [\"base-pass\"]}]"
+      "triggers" => ["pull_request", "push", "workflow_dispatch"],
+      "jobs" => ["base-pass", "policy"]}'
+fresh; variant "${pol_old}" "${pol_old}, {\"tier\" => \"policy\", \"triggers\" => [\"pull_request\", \"push\", \"workflow_dispatch\"], \"jobs\" => [\"base-pass\"]}"
 expect_reject 'an alternative without the required check job' 'lacks the required check job policy'
-fresh; variant "${pol_old}" "[${pol_old}, \"absent\"]"
+fresh; variant "${pol_old}" "${pol_old}, \"absent\""
 expect_reject 'an alternative that lets the policy workflow be absent' 'required status check would be dropped'
 
 # A second YAML document is read by one parser and ignored by another: refused.

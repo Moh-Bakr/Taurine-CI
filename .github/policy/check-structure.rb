@@ -148,9 +148,12 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
      "triggers" => ["workflow_dispatch"],
      "jobs" => ["source-read", "validate-input"]},
    ".github/workflows/validate-public-changes.yml" =>
-    {"tier" => "policy",
-     "triggers" => ["pull_request", "push", "workflow_dispatch"],
-     "jobs" => ["base-pass", "policy"]},
+    [{"tier" => "policy",
+      "triggers" => ["pull_request", "push", "workflow_dispatch"],
+      "jobs" => ["base-pass", "policy", "policy-evidence", "policy-fixtures", "policy-mutations", "policy-structure"]},
+     {"tier" => "policy",
+      "triggers" => ["pull_request", "push", "workflow_dispatch"],
+      "jobs" => ["base-pass", "policy"]}],
    ".github/workflows/weekly-validation.yml" =>
     {"tier" => "public",
      "triggers" => ["schedule", "workflow_dispatch"],
