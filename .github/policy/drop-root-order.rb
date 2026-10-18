@@ -12,7 +12,7 @@
 #     exists only in a source-read job (no job without the environment restores a cache);
 #  3b. every restore gated to the untrusted ref (i) is preceded, after drop-root, only by reviewed
 #     steps that run no source-controlled code (the shared composites, the toolchain composite, the
-#     cache locate and verify steps, the suite-contract and Cargo-home steps, other cache restores), so
+#     cache locate and verify steps, the suite-contract and Cargo-home steps, whose whole bodies are pinned, other cache restores), so
 #     the token-holding restore cannot be reached through the environment by project code; and (ii) is
 #     followed directly by its verifier, whose exact shape is pinned (its if terms, its with keys and
 #     values, its cache-hit input taken from that restore's id, and no other step key), so it cannot be
@@ -45,7 +45,29 @@ UNTRUSTED_REF = "github.ref == 'refs/heads/untrusted'"
 UNTRUSTED_TERMS = [UNTRUSTED_REF, 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
 # Steps that may sit between drop-root and an untrusted restore: they run no source-controlled code.
 PRE_RESTORE_COMPOSITES = %w[sanitize concern-report shell-artefact rust-toolchain rust-target-cache verify-cargo-cache].freeze
-PRE_RESTORE_RUN_IDS = %w[suite-contract cargo-home].freeze
+# The two `run` steps that may sit ahead of an untrusted restore. Their whole body is pinned, not only
+# their id: an id alone would let a source-controlled command (`bash src/evil.sh`) run with the cache
+# token reachable. Every key but the free-text `name` must equal the pin exactly.
+PRE_RESTORE_RUN_PINS = {
+  'suite-contract' => {
+    'id' => 'suite-contract',
+    'shell' => 'bash',
+    'working-directory' => '${{ github.workspace }}',
+    'env' => { 'CONCERN' => '${{ inputs.concern }}', 'CI_SUITE_SELECTION' => '${{ inputs.suite_selection }}' },
+    'run' => "set -euo pipefail\nruby .github/policy/suite-contract.rb .github/ci-matrix.json \"${CONCERN}\" \"${GITHUB_WORKSPACE}/src\" >> \"${GITHUB_OUTPUT}\"\n"
+  },
+  'cargo-home' => {
+    'id' => 'cargo-home',
+    'if' => "${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}",
+    'shell' => 'bash',
+    'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
+  }
+}.freeze
+
+def pinned_run_step?(step)
+  pin = PRE_RESTORE_RUN_PINS[step['id'].to_s]
+  !pin.nil? && !step.key?('uses') && step.reject { |k, _| k == 'name' } == pin
+end
 
 def terms_equal?(value, wanted)
   terms = CacheExpression.top_terms(value)
@@ -140,7 +162,7 @@ root = File.expand_path('../..', File.dirname(File.expand_path(workflow)))
              elsif uses.start_with?('actions/cache/restore@')
                true
              else
-               uses.empty? && PRE_RESTORE_RUN_IDS.include?(before['id'].to_s)
+               uses.empty? && pinned_run_step?(before)
              end
         failures << "job #{job_id}: step #{before['name'].inspect} runs before untrusted cache restore #{label} and is not a reviewed step that runs no source-controlled code (the restore holds the cache token; run project-controlled steps after it)" unless ok
       end

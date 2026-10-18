@@ -914,7 +914,40 @@ printf 'name: n\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  a:\n    ru
 if ruby "${policy}/drop-root-order.rb" "${base}/noenv.yml" >/dev/null 2>"${base}/err"; then echo 'a combined cache step in a job without the source-read environment should fail' >&2; exit 1; fi
 grep -qF 'does not enter the source-read environment' "${base}/err" || { echo 'wrong message for a cache step outside source-read' >&2; cat "${base}/err" >&2; exit 1; }
 # The toolchain composite refuses a path toolchain before any rustc runs.
-grep -qF "a path toolchain in the source is refused" .github/actions/rust-toolchain/action.yml || { echo 'the toolchain path guard is missing' >&2; exit 1; }
+# P2-A: the two run steps allowed ahead of an untrusted restore are pinned by body, not by id.
+runpin='runs before untrusted cache restore'
+order_fail 'a source script added to the suite-contract step' "${runpin}" 's/(        run: \|\n          set -euo pipefail\n)(          ruby \.github\/policy\/suite-contract\.rb)/$1          bash src\/evil.sh\n$2/'
+order_fail 'a source script added to the Cargo-home step' "${runpin}" 's/(        id: cargo-home\n(?:.*\n)*?          set -euo pipefail\n)/$1          bash src\/evil.sh\n/'
+order_fail 'an env value added to the suite-contract step' "${runpin}" 's/(        id: suite-contract\n        shell: bash\n        working-directory: \$\{\{ github.workspace \}\}\n        env:\n)/$1          BASH_ENV: src\/evil.sh\n/'
+order_fail 'the suite-contract step given another shell' "${runpin}" 's/(        id: suite-contract\n        shell: )bash/${1}sh/'
+# P2-B: the toolchain composite is run against the spellings a grep for `path =` missed, with
+# stub rustup/rustc/cargo so nothing real executes; a plain channel pin must still pass.
+tc_dir="${base}/toolchain"; rm -rf "${tc_dir}"; mkdir -p "${tc_dir}/bin" "${tc_dir}/ws"
+for tool in rustup rustc cargo; do printf '#!/bin/sh\necho stub-%s\n' "${tool}" > "${tc_dir}/bin/${tool}"; chmod +x "${tc_dir}/bin/${tool}"; done
+ruby -ryaml -e 'puts YAML.safe_load(File.read(ARGV[0]), aliases: false)["runs"]["steps"][0]["run"]' .github/actions/rust-toolchain/action.yml > "${tc_dir}/step.sh"
+toolchain_case() { # label expected(pass|fail) toml-content legacy-content
+  rm -f "${tc_dir}/ws/rust-toolchain" "${tc_dir}/ws/rust-toolchain.toml"
+  [[ -z "$3" ]] || printf '%b' "$3" > "${tc_dir}/ws/rust-toolchain.toml"
+  [[ -z "$4" ]] || printf '%b' "$4" > "${tc_dir}/ws/rust-toolchain"
+  local rc=0
+  (cd "${tc_dir}/ws" && PATH="${tc_dir}/bin:${PATH}" bash "${tc_dir}/step.sh" >"${tc_dir}/out" 2>&1) || rc=$?
+  if [[ "$2" == pass && ${rc} -ne 0 ]] || [[ "$2" == fail && ${rc} -eq 0 ]]; then echo "toolchain fixture '$1' should ${2} but exited ${rc}" >&2; cat "${tc_dir}/out" >&2; exit 1; fi
+}
+toolchain_case 'a plain channel pin' pass '[toolchain]\nchannel = "1.85.0"\ncomponents = ["rustfmt", "clippy"]\n' ''
+toolchain_case 'a multi-line components array with comments' pass '# pinned\n[toolchain]\nchannel = "stable"\ncomponents = [\n  "rustfmt", # fmt\n  "clippy",\n]\nprofile = "minimal"\n' ''
+toolchain_case 'a legacy channel name' pass '' 'nightly-2024-01-01\n'
+toolchain_case 'no pin at all' pass '' ''
+toolchain_case 'a bare path key' fail '[toolchain]\npath = "/x"\n' ''
+toolchain_case 'a quoted path key' fail '[toolchain]\n"path" = "/x"\n' ''
+toolchain_case 'an inline-table toolchain' fail '[toolchain]\ntoolchain = { path = "/x" }\n' ''
+toolchain_case 'a dotted path key' fail '[toolchain]\ntoolchain.path = "/x"\n' ''
+toolchain_case 'a dotted table header' fail '[toolchain.x]\npath = "/x"\n' ''
+toolchain_case 'a path in the legacy file as a table' fail '' '[toolchain]\npath = "/x"\n'
+toolchain_case 'a legacy file with a second line' fail '' 'stable\n"path"="/x"\n'
+toolchain_case 'a channel that is a path' fail '[toolchain]\nchannel = "/x"\n' ''
+toolchain_case 'a multi-line string value' fail '[toolchain]\nchannel = """x"""\n' ''
+toolchain_case 'a table with no header' fail 'channel = "stable"\n' ''
+toolchain_case 'an unterminated array' fail '[toolchain]\ncomponents = [\n  "rustfmt",\n' ''
 for needle in 'find "${cache_dir}" -type l -delete' 'find "${cache_dir}" -mindepth 2 -type d -prune -exec rm -rf -- {} +'; do
   grep -qF -- "${needle}" .github/actions/verify-cargo-cache/action.yml || { echo "the crate re-hash lost: ${needle}" >&2; exit 1; }
 done

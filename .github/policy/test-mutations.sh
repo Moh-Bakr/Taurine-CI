@@ -828,7 +828,27 @@ mutation '19. a combined actions/cache step before the root removal' "${linux_co
           key: k
 
       - name: Remove root before project code'
-mutation '19. the toolchain path guard message removed' .github/actions/rust-toolchain/action.yml 'a path toolchain in the source is refused' 'x'
+mutation '19. the toolchain guard accepts an unrecognised line' .github/actions/rust-toolchain/action.yml '              else toolchain_refuse "an unrecognised line" "${file}"; fi' '              else :; fi'
+mutation '19. the toolchain guard no longer reads the legacy file' .github/actions/rust-toolchain/action.yml '          [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy
+' ''
+mutation '19. the toolchain guard falls back to a grep for path' .github/actions/rust-toolchain/action.yml '          [[ ! -f rust-toolchain.toml ]] || toolchain_check rust-toolchain.toml toml
+          [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy
+' "          if grep -qE '^[[:space:]]*path[[:space:]]*=' rust-toolchain.toml rust-toolchain 2>/dev/null; then exit 1; fi
+"
+mutation '19. a source script in the pinned suite-contract step' "${linux_concern}" '          ruby .github/policy/suite-contract.rb' '          bash src/evil.sh
+          ruby .github/policy/suite-contract.rb'
+mutation '19. a source script in the pinned Cargo-home step' "${linux_concern}" '          dir="${CARGO_HOME:-${HOME}/.cargo}"
+' '          bash src/evil.sh
+          dir="${CARGO_HOME:-${HOME}/.cargo}"
+'
+mutation '19. a BASH_ENV in the pinned suite-contract step' "${linux_concern}" '          CI_SUITE_SELECTION: ${{ inputs.suite_selection }}
+        run: |
+          set -euo pipefail
+          ruby .github/policy/suite-contract.rb' '          CI_SUITE_SELECTION: ${{ inputs.suite_selection }}
+          BASH_ENV: src/evil.sh
+        run: |
+          set -euo pipefail
+          ruby .github/policy/suite-contract.rb'
 mutation '19. the crate re-hash keeps symlinks' .github/actions/verify-cargo-cache/action.yml '          find "${cache_dir}" -type l -delete
 ' ''
 mutation '19. the crate re-hash keeps nested directories' .github/actions/verify-cargo-cache/action.yml '          find "${cache_dir}" -mindepth 2 -type d -prune -exec rm -rf -- {} +

@@ -549,10 +549,14 @@ and the vendored-source fetch. The compiled-dependency restore cannot: its key c
 lockfile and manifest hashes and the cargo environment, so the locate step needs the installed toolchain.
 The policy therefore allows exactly these steps ahead of an untrusted restore: the shared composites,
 `rust-toolchain`, the `rust-target-cache` locate and restored modes, the verifiers, other restores, and the
-`suite-contract` and Cargo-home steps (control-plane scripts that read the source as data). The vendored
+`suite-contract` and Cargo-home steps (control-plane scripts that read the source as data; the policy pins
+their whole bodies, shell, working directory and environment, so an id alone admits nothing). The vendored
 fetch (`scripts/vendor-openvpn3.sh`, a source script) and the Node install (`npm ci`) run after every
-restore. `rust-toolchain` refuses a `path` toolchain in the source, so `rustc` cannot be a source-controlled
-binary when locate runs it. Two consequences are accepted and recorded: the sources key now hashes the
+restore. `rust-toolchain` accepts a source `rust-toolchain.toml` or `rust-toolchain` only when every line is a
+plain form (the `[toolchain]` header, `channel` and `profile` strings, `components` and `targets` string
+arrays, comments; or, for the legacy file, one channel name). Any other key or spelling, `path` quoted,
+dotted or in an inline table included, is refused, so `rustc` cannot be a source-controlled binary when
+locate runs it. Only the files in the checkout root are read, which is where rustup resolves from. Two consequences are accepted and recorded: the sources key now hashes the
 lock files before the vendored fetch (a fetched vendored crate that ships its own Cargo.lock is no longer
 in the key, and its archives are re-downloaded because the re-hash does not find them in a lock), and the
 key schema is unchanged.
@@ -740,7 +744,11 @@ Any other result keeps the flag `false`. The record is merged **before** the fli
 Also before the flip: the owner runs `gh cache delete --all --ref refs/heads/untrusted` (section 3.3), and a
 protected `main` run of `rust-db` has saved the week's key. `.github/CODEOWNERS` names the owner for the
 workflows, composites, policy and this file; it takes effect only when "Require review from Code Owners"
-is on in the `main` branch protection, an owner action in the repository settings.
+is on in the `main` branch protection, an owner action in the repository settings; until then it names
+owners but binds nobody. Only the base-policy pass gates the record: it is the one run whose checker comes
+from `main` and reads the record from the base checkout, so a pull request's own pass is never the gate and
+the gate cannot be weakened by the pull request it judges. The flip is therefore not protected by a green
+own-policy run alone, and the record's reviewer line is an assertion a person made, not a machine proof.
 
 ### 7b. Gain on one concern (`rust-db`), only after Stage 1 is merged and reviewed
 
