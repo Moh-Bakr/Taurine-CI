@@ -34,11 +34,24 @@
 #     blocking-failures expression, so a failed audit cannot print PASS;
 #  I. a job whose steps contain actions/cache/save is `write`;
 #  J. a job whose steps contain actions/cache/restore (and no save) is `read` or `write`.
+#  N. (Stage 2) a cache restore is main-only, or it is exactly one of the four reviewed read-only
+#     untrusted restores (see REVIEWED_UNTRUSTED_RESTORES): Linux concern workflow only, rust-db only,
+#     `actions/cache/restore` directly (never through a composite), its `if` the exact top-level
+#     terms `github.ref == 'refs/heads/untrusted'`, `inputs.untrusted_readonly_cache` and
+#     `inputs.concern == 'rust-db'` and nothing else, `with` exactly `path` and `key`, the path and
+#     the key the reviewed literals (a key never derives from a dispatch input, the head ref or any
+#     other expression), and no other step key (no env, continue-on-error, timeout). Around it:
+#     no `write` permission anywhere in the called workflow or in the untrusted half that calls it,
+#     every caller is a read or write job, the flag a caller passes is a literal boolean, only the
+#     read (untrusted) half may pass true, and true needs the recorded enforcement spike
+#     (SPIKE_RECORD in docs/untrusted-readonly-cache.md).
 # Always on, over every workflow and composite action given: `actions: write` (or write-all) is
 # held to the two reviewed places (P7): cache-prune.yml, a main-only job with no environment, no
 # secret and no local composite (it deletes cache entries, which cache-mode does not govern), and
 # the weekly resolver's main-only dispatch job.
 require 'yaml'
+require 'json'
+require 'digest'
 require_relative 'cache-expression'
 
 MAIN = "github.ref == 'refs/heads/main'".freeze
@@ -48,6 +61,25 @@ MODES = %w[read write none].freeze
 # What the dispatch's Result job passes to run-result so a failed untrusted cache scope audit (before
 # or after the run) can never print a passing verdict.
 BLOCKING_EXPR = %q(${{ (contains(fromJSON('["failure","cancelled"]'), needs.cache-audit.result) || contains(fromJSON('["failure","cancelled"]'), needs.cache-audit-after.result)) && '1' || '0' }}).freeze
+
+UNTRUSTED_RESTORE_WORKFLOWS = %w[linux-validation-concern.yml].freeze
+UNTRUSTED_FLAG = 'untrusted_readonly_cache'.freeze
+UNTRUSTED_RESTORE_TERMS = [UNTRUSTED, 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
+# Batch 2 adds the rust-app shards to the untrusted restores: both reviewed concern terms are accepted here until
+# Batch 2's own checker (which accepts only the second) replaces this file.
+UNTRUSTED_RESTORE_TERMS_RUST_APP = [UNTRUSTED, 'inputs.untrusted_readonly_cache', "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))"].freeze
+UNTRUSTED_RESTORE_TERM_SETS = [UNTRUSTED_RESTORE_TERMS, UNTRUSTED_RESTORE_TERMS_RUST_APP].freeze
+PIN = 'actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9'.freeze
+SOURCES_PATH = "${{ steps.cargo-home.outputs.dir }}/registry/cache\n".freeze
+TARGET_PATH = "${{ steps.cargo-target.outputs.dir }}/debug/deps\n${{ steps.cargo-target.outputs.dir }}/debug/build\n${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint\n".freeze
+SOURCES_KEY = "cargo-sources-v3-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}".freeze
+TARGET_KEY = '${{ steps.cargo-target.outputs.key }}'.freeze
+# The only untrusted restores that may exist: [path, key], nothing else is reviewed.
+REVIEWED_UNTRUSTED_RESTORES = [[SOURCES_PATH, SOURCES_KEY], [TARGET_PATH, TARGET_KEY]].freeze
+# A flag set true needs this exact line in docs/untrusted-readonly-cache.md: the green enforcement
+# spike (section 7c) recorded by a person after reading the run, with its run id.
+SPIKE_RECORD = /^Stage 2 enforcement spike result: GREEN run [0-9]{8,} reviewed by [A-Za-z0-9._-]+ on 20[0-9]{2}-[0-9]{2}-[0-9]{2}$/.freeze
+STEP_KEYS = %w[name id if uses with].freeze
 
 # Both cache checkers use the same string-aware, fail-closed expression parser.
 def top_terms(value)
@@ -356,12 +388,24 @@ if any_untrusted_cache
   end
 end
 
-# N (standing, no staging): no cache restore may run on the untrusted ref. Stage 2 (the read-only
-# untrusted restore) needs the owner's decision, so until then every restore step, whether it uses
-# actions/cache/restore, the combined actions/cache or reaches one through a local composite, must
-# carry the exact top-level term github.ref == 'refs/heads/main' in its own if and never mention the
-# untrusted ref. A restore gated to the untrusted ref, or gated to neither ref (so reachable on it),
-# is refused, with no dependence on which workflows are enforced.
+# N (Stage 2): no cache restore may run off main except the four reviewed read-only untrusted
+# restores. Every restore step, whether it uses actions/cache/restore, the combined actions/cache or
+# reaches one through a local composite, either carries the exact top-level term
+# github.ref == 'refs/heads/main' in its own if and never mentions the untrusted ref, or it is
+# exactly a reviewed untrusted restore (reviewed_untrusted_restore? below) in a workflow of
+# UNTRUSTED_RESTORE_WORKFLOWS, whose surroundings the rules after this loop check. A restore gated to
+# neither ref (so reachable on the untrusted ref), or gated to untrusted in any other shape, is refused,
+# with no dependence on which workflows are enforced.
+def reviewed_untrusted_restore?(st)
+  return false unless (st.keys - STEP_KEYS).empty? && st['uses'].to_s == PIN
+  with = st['with']
+  return false unless with.is_a?(Hash) && with.keys.sort == %w[key path]
+  return false unless REVIEWED_UNTRUSTED_RESTORES.include?([with['path'].to_s, with['key'].to_s])
+  terms = top_terms(st['if'])
+  !terms.nil? && UNTRUSTED_RESTORE_TERM_SETS.any? { |set| terms.sort == set.sort }
+end
+
+reviewed_restores = {}
 docs.each do |path, doc|
   (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).each do |name, job|
     next unless job.is_a?(Hash)
@@ -377,8 +421,444 @@ docs.each do |path, doc|
         next
       end
       next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')
-      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref); an untrusted cache restore awaits the owner's Stage 2 decision"
+      if UNTRUSTED_RESTORE_WORKFLOWS.include?(File.basename(path)) && reviewed_untrusted_restore?(st)
+        (reviewed_restores[path] ||= []) << st
+        next
+      end
+      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref) and is not the reviewed read-only untrusted restore (Linux concern workflow, rust-db, the exact terms, path and key of docs/untrusted-readonly-cache.md, Stage 2)"
     end
+  end
+end
+
+# N2: around a reviewed untrusted restore. The called workflow holds no write permission anywhere
+# (the cache grant is the caller's `cache-mode: read`; a write-capable GITHUB_TOKEN or id-token is a
+# second way to reach a cache or a release), has no step that saves without the main-only gate, and
+# declares the flag as a boolean with the literal default false. Every caller job is the read half
+# (untrusted-gated) or the write half (main-gated), PASSES the flag as a literal boolean (an omitted key
+# would leave the callee default in force), and only the read half may pass true, and then only with
+# the recorded spike that was already merged (spike_gate below).
+def write_permission?(value)
+  value == 'write-all' || (value.is_a?(Hash) && value.values.any? { |v| v.to_s.include?('write') }) || (value.is_a?(String) && value.include?('write'))
+end
+
+def workflow_triggers_input(doc)
+  on = doc.key?('on') ? doc['on'] : doc[true]
+  on.is_a?(Hash) && on['workflow_call'].is_a?(Hash) && on['workflow_call']['inputs'].is_a?(Hash) ? on['workflow_call']['inputs'] : {}
+end
+
+# The recorded spike must be merged before the flag is flipped, and the flipping change must not add or
+# alter it (docs/untrusted-readonly-cache.md section 7c). The base side is the explicit
+# CACHE_MODE_BASE_DOC, or, in the base-policy pass of a pull request (which runs this checker from main
+# against the pull request's tree), the base checkout at RUNNER_TEMP/base-policy. In a pull request's
+# own pass the base is unavailable and the base-policy pass is the gate; on a push (the merge) and
+# locally the tree's own record is required.
+def spike_gate(caller_path, name, failures)
+  root = File.dirname(File.dirname(File.dirname(caller_path)))
+  tree_doc = File.join(root, 'docs', 'untrusted-readonly-cache.md')
+  tree_doc = 'docs/untrusted-readonly-cache.md' unless File.exist?(tree_doc)
+  records = ->(file) { File.exist?(file) ? read_text(file).lines.map(&:chomp).select { |l| l.match?(SPIKE_RECORD) } : [] }
+  tree = records.call(tree_doc)
+  where = "#{caller_path}: job #{name}: #{UNTRUSTED_FLAG}: true"
+  unless tree.length == 1
+    failures << "#{where} needs exactly one recorded green enforcement spike line in docs/untrusted-readonly-cache.md (section 7c), found #{tree.length}"
+    return
+  end
+  base_doc = ENV['CACHE_MODE_BASE_DOC']
+  if base_doc.nil? && ENV['GITHUB_EVENT_NAME'] == 'pull_request' && ENV['RUNNER_TEMP']
+    candidate = File.join(ENV['RUNNER_TEMP'], 'base-policy', 'docs', 'untrusted-readonly-cache.md')
+    base_doc = candidate if File.exist?(candidate)
+    # Fail closed: the base checkout is present (this is the base-policy pass) but its record document
+    # is missing or unreadable, so the flip cannot be judged. Only a pull request's own pass, where no
+    # base checkout exists at all, falls through to the warning below. A push and a local run (no
+    # pull_request event) need the tree's own record, checked above, and have no base to compare.
+    if base_doc.nil? && File.directory?(File.join(ENV['RUNNER_TEMP'], 'base-policy'))
+      failures << "#{where}: the base-policy checkout has no readable docs/untrusted-readonly-cache.md, so the flip cannot be judged"
+      return
+    end
+  end
+  if base_doc.nil?
+    warn "cache-mode policy: #{where}: no base document is available (a pull request's own pass); the base-policy pass judges the flip" if ENV['GITHUB_EVENT_NAME'] == 'pull_request'
+    return
+  end
+  unless File.exist?(base_doc)
+    failures << "#{where}: the base document #{base_doc} is not readable, so the flip cannot be judged"
+    return
+  end
+  base = records.call(base_doc)
+  failures << "#{where} needs the spike record already merged on the base: the base has #{base.length} record line(s), and a change may not add one in the same diff that flips the flag" unless base.length == 1
+  failures << "#{where}: the spike record in this change differs from the merged base record; it may not be altered in the diff that flips the flag" if base.length == 1 && base.first != tree.first
+end
+
+# N2b: what an untrusted restore's path, key and environment depend on. The restore reads outputs of two
+# producer steps (`cargo-home`, `cargo-target`), and anything that runs earlier in the job on the untrusted
+# ref can change what those steps compute (the environment and path files, shims on PATH, the target
+# directory, the toolchain that private source selects). So, for every job that carries a reviewed
+# untrusted restore:
+#  - every step that runs before the later producer is on a reviewed allowlist (reviewed_prefix_step?):
+#    the control-plane checkout, the shared local actions, the pinned plain `run` steps, the producers,
+#    steps gated to main alone (they never run on the untrusted ref), and the toolchain, cache-verify and
+#    target-cache local actions, each only with a whole-file hash that is pinned and `with` values that are
+#    the reviewed ones. No step that runs private-source code (`npm ci`, the vendor fetch) may precede them.
+#  - the job and the workflow set no PATH, BASH_ENV, ENV, HOME, CARGO_*, RUSTC*, RUSTUP_* or NODE_OPTIONS
+#    (`env:`), the container is exactly the reviewed digest-pinned expression and `defaults` is exactly
+#    the reviewed `run.working-directory: src` (a different container or default shell/directory would
+#    change what every step runs in).
+#  - the producer steps and the steps between a producer and its restore pass the same allowlist, per job.
+#  - the rust-target-cache composite is pinned as a whole file, with `locate` its first step.
+# Changing a pinned file is a reviewed change of the constants below, in the same pull request.
+CARGO_HOME_PIN = {
+  'id' => 'cargo-home', 'shell' => 'bash',
+  'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
+}.freeze
+TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
+RUST_TARGET_CACHE_FILE_SHA256 = '1eedb06f020f90666f1747a08c1339172e4caa1016d0381a37d93e6c6bd3913b'.freeze
+LOCATE_STEP_SHA256 = 'f0731f6e118740f65994e4a90b3a9c03f4e0f1c2b76c00a34ae1216232253c20'.freeze
+# Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
+# untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing
+# in the same reviewed pull request. A name lists TWO OR MORE hashes only where an open pull request changes
+# that file; the FIRST hash in such a pair is this repository's (main's) and must be removed once the pull
+# request(s) named beside it have landed:
+#   verify-cargo-cache: #365 (6c38bdfe...).
+#   timings:            Wave C (ff475be9...).
+#   root-setup:         Wave C (81fa9779...).
+# rust-toolchain is deliberately NOT a pair with main's hash: main's file (9ae7bf89...) and Wave C's alone
+# (3e991c0a...) run `rustc --version` and `cargo --version` through the rustup proxy from `src` before
+# anything refuses a `path` toolchain, so a checkout could run a planted compiler with the runner's
+# environment and path files in reach. Only versions that refuse it first are listed: #365's (04d9056e...)
+# and the #365 + Wave C merge (abec7733...), and each must also pass toolchain_guard_first? below. The pin
+# applies only to a job that carries a reviewed untrusted restore, which main does not.
+LOCAL_ACTION_FILE_SHA256 = {
+  'timings' => %w[
+    9d2a363af0af7877c4a0428c907bbd0445d9c43b0e6db2f033bd339f814fb860
+    ff475be9ed8faa47c3a218041c71505a17f0944fc4d32b9f25b08ae61fd59922
+  ],
+  'source-checkout' => %w[bcab0702e94fc10fa410a5d8875215dffc03189e557780f86662da4c1796fff0 ac95c29654593720210baa620edc335ecf49f33864f9d96deed73f1f296317b3],
+  'egress-audit' => %w[c6c3ff33427b869f38f3dc83800ae92143233b2137922d67d2a2f75aa32f74b5],
+  'root-setup' => %w[
+    92b689e1af931693bb99211a35383fd69879bccf77e1885045fc743675d97d41
+    81fa977997b32fbbe67028b272812e88e2164ef2ff9d9a7debe927811b116154
+    1f288c476f7598e3fd583b8116994c429c01e3dc30376ea2df1ae9e2affe1dce
+  ],
+  'drop-root' => %w[2562fdd5b283364bb839c3a547dce05bbea76438ea47c2be5f7efe26942579dc],
+  'sanitize' => %w[2de2e7da83f5011c724bf34f0096be6c703a0180272fbf7ff2eb2c96df075024 4bae990159024f93d9848b12344a7f1d92577dca0ee2aa9916b03c4196a06478],
+  'concern-report' => %w[d993053f802c03335cc09ce4a4b182b02e468d00202835673d50b4ffdb279435 49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
+  'shell-artefact' => %w[dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184 7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a],
+  'scan-concern' => %w[6a70b55ba6b730efcf8f74999261c46119243ce9eada546b46c73bc8d59327cd 4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
+  'verify-cargo-cache' => %w[
+    483f07957076d89b401ac26ce30b91c9f940b36a1d9c820680b7e29cffd456b8
+    6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a
+  ],
+  'rust-toolchain' => %w[
+    04d9056e51c8ae6fbfd85ca149ca71e38d291809131a00a28a2444161a3cbda0
+    abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec
+  ],
+  'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256, 'a50a7233883d1fff83fda68d6380937afa14db4256c8f6d725b4d674013df695']
+}.freeze
+# The toolchain action's refusal of a `path` toolchain (and of every non-plain key), as the text between
+# `toolchain_refuse() {` and the last call of `toolchain_check`, in the first step's decoded `run`.
+TOOLCHAIN_GUARD_SHA256 = '6eb49f42a7f8ee1177bb05fe0e8f344173f7b751eb4758637fa7e8970eb7be43'.freeze
+TOOLCHAIN_GUARD_LAST_CALL = "  [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy\n".freeze
+
+# True when the action's first step carries the reviewed guard and calls both checks before it runs any
+# rustup, rustc or cargo command (comment lines are not commands).
+def toolchain_guard_first?(doc)
+  step = Array(doc.dig('runs', 'steps')).first
+  run = step.is_a?(Hash) ? step['run'].to_s : ''
+  start = run.index('  toolchain_refuse() {')
+  stop = run.index(TOOLCHAIN_GUARD_LAST_CALL)
+  return false unless start && stop && start < stop
+  return false unless Digest::SHA256.hexdigest(run[start...(stop + TOOLCHAIN_GUARD_LAST_CALL.length)]) == TOOLCHAIN_GUARD_SHA256
+  code = run.lines.reject { |l| l.strip.start_with?('#') }.join
+  tool = code.index(/(^|[\s;(&|`])(rustup|rustc|cargo)\s/)
+  toml = code.index('toolchain_check rust-toolchain.toml toml')
+  legacy = code.index('toolchain_check rust-toolchain legacy')
+  !tool.nil? && !toml.nil? && !legacy.nil? && toml < tool && legacy < tool
+end
+
+# The exact `with` of each shared local action (the canonical JSON of the step's whole `with`, an absent
+# `with` counting as {}), by name. egress-audit appears in two phases; timings only at the start of the job.
+PREFIX_ACTION_WITH_SHA256 = {
+  'timings' => %w[d40321da9156f08b91b3fc4365a68317b0172bb0838462cc27c054e4a0391fe4],
+  'source-checkout' => %w[ca094fba0d5cf639b86a79a80a9606c6ae3627b276405e107804327def4c2251],
+  'egress-audit' => %w[
+    0425e778b9fce98006d5531cb64bb8bb50a56c8cad1a75093d899733921fc6b7
+    a010edbb307c54ebe97a693ad92bfe06f9298824825a0284b11936d465f7475f
+  ],
+  'scan-concern' => %w[71c7bea029bd1a9231abf6373a5d518bb45d2fa2cb449b10adb0dc01484dda5f],
+  'root-setup' => %w[422c143f47d2ac7910b7348b5b4e00f68ccbf86e5f9cfa1d51d350d089bb2b92],
+  'drop-root' => %w[7fea94b67beba935a17fd01ddee06f63266769df67633ff6f39a64eddb434652],
+  'sanitize' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a],
+  'concern-report' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a],
+  'shell-artefact' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a]
+}.freeze
+# The plain `run` steps ahead of the producers, by name; each is allowed only with a pinned body (the whole
+# step but its name hashes to a listed value).
+PREFIX_RUN_STEP_SHA256 = {
+  'Validate protected call input' => %w[624c9205f6916c4655ad74b5696f61106a738aa4a132bcd2b48c2be5f308b90d],
+  'Install jq and Ruby in the visual container' => %w[31b233667e9d4321de83ef2d88b058544421b485da66a0b7f121935b6dc25b16],
+  'Select the egress mode' => %w[40289952cb6c982cc79cd49ea9fbbe9a8e96833c5918b8f7e71ad8d6b3d7ee8a],
+  'Read the suite contract for this concern' => %w[6ea7f99c7b3ff6f95440e3e1636ecf867b0a9a47338519a328a9905950870995],
+  'Refuse test files with no suite owner before any build' => %w[b7fcf77c374702efd68183b00329bb0a09c4277bb63df553b82728fff19137b1]
+}.freeze
+REVIEWED_CONTAINER_SHA256 = '1681a3dd8f4a7b43784aac2160f99c2524bc5af526d87cf8dc0ecb11ee1e4f49'.freeze
+REVIEWED_DEFAULTS = { 'run' => { 'working-directory' => 'src' } }.freeze
+FORBIDDEN_ENV_KEY = /\A(PATH|BASH_ENV|ENV|HOME|CARGO_.*|RUSTC.*|RUSTUP_.*|NODE_OPTIONS)\z/i
+PINNED_CHECKOUT = %r{\Aactions/checkout@[0-9a-f]{40}\z}
+# The control-plane checkout: a pinned commit with exactly these inputs (no repository, path, ref or token).
+CHECKOUT_WITH = { 'fetch-depth' => 1, 'persist-credentials' => false }.freeze
+CACHE_HIT_REF = /\A\$\{\{ steps\.[a-z0-9-]+\.outputs\.cache-hit \}\}\z/
+
+def canonical_json(value)
+  case value
+  when Hash then value.map { |k, v| [k.to_s, canonical_json(v)] }.sort_by(&:first).to_h
+  when Array then value.map { |v| canonical_json(v) }
+  else value
+  end
+end
+
+def canonical_hash(value)
+  Digest::SHA256.hexdigest(JSON.generate(canonical_json(value)))
+end
+
+# The parsed action.yml of a local action: from the files given, else from the workflow's own tree.
+def local_action_doc(path, docs, name)
+  rel = ".github/actions/#{name}/action.yml"
+  doc = docs.find { |k, _| k.end_with?(rel) }&.last
+  return doc if doc.is_a?(Hash)
+  root = File.dirname(File.dirname(File.dirname(path)))
+  file = File.join(root, rel)
+  file = rel unless File.file?(file)
+  File.file?(file) ? (load(file) rescue nil) : nil
+end
+
+def local_action_hash(path, docs, name)
+  doc = local_action_doc(path, docs, name)
+  doc.is_a?(Hash) ? canonical_hash(doc) : nil
+end
+
+# A hash-pinned local action step with only the reviewed keys and `with` values (no env, no
+# continue-on-error, no other step key), or false.
+def pinned_local_action_step?(path, docs, st)
+  action = st['uses'].to_s
+  return false unless action.start_with?('./.github/actions/')
+  name = action.delete_prefix('./.github/actions/')
+  wanted = LOCAL_ACTION_FILE_SHA256[name]
+  # The egress audit alone is best-effort by design (continue-on-error); no other action may be.
+  allowed_keys = %w[name id if uses with] + (name == 'egress-audit' ? %w[continue-on-error] : [])
+  return false unless wanted && (st.keys - allowed_keys).empty?
+  return false unless wanted.include?(local_action_hash(path, docs, name))
+  with = st['with']
+  with = {} if with.nil?
+  return false unless with.is_a?(Hash)
+  case name
+  when *PREFIX_ACTION_WITH_SHA256.keys
+    PREFIX_ACTION_WITH_SHA256[name].include?(canonical_hash(with))
+  when 'rust-toolchain'
+    toolchain_guard_first?(local_action_doc(path, docs, name)) &&
+      ["${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}", "${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}"].map { |c| { 'concern' => c } }.include?(with)
+  when 'verify-cargo-cache'
+    with.keys.sort == %w[cache-hit os-label sources-dir] && with['sources-dir'] == '${{ steps.cargo-home.outputs.dir }}' &&
+      with['cache-hit'].to_s.match?(CACHE_HIT_REF) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
+  else # rust-target-cache: a mode and the reviewed inputs, nothing else
+    # deny-door (the restore-time strip's OpenSSL door removal) is accepted as a key here without Batch 2's restriction to
+    # restored mode and the literal true/false, and without its strip-follows-restore rule: closed by Batch 2. Not
+    # exploitable until then: no untrusted restore exists on main and the flag is false.
+    (with.keys - %w[mode group features dir cache-hit os-label deny-door]).empty? && %w[locate restored save].include?(with['mode']) &&
+      with.fetch('dir', '${{ steps.cargo-target.outputs.dir }}') == '${{ steps.cargo-target.outputs.dir }}' &&
+      (!with.key?('cache-hit') || with['cache-hit'].to_s.match?(CACHE_HIT_REF)) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
+  end
+end
+
+def reviewed_prefix_step?(path, docs, st)
+  return true if %w[cargo-home cargo-target].include?(st['id']) # their exact shape is checked on its own
+  return true if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted') # never runs on the untrusted ref
+  return true if reviewed_untrusted_restore?(st)
+  action = st['uses'].to_s
+  return true if action.match?(PINNED_CHECKOUT) && (st.keys - %w[name id if uses with]).empty? && st['with'] == CHECKOUT_WITH
+  if action.empty? && st.key?('run')
+    wanted = PREFIX_RUN_STEP_SHA256[st['name'].to_s]
+    return !wanted.nil? && wanted.include?(canonical_hash(st.reject { |k, _| k == 'name' }))
+  end
+  pinned_local_action_step?(path, docs, st)
+end
+
+def producer_step_failures(path, doc, docs, failures)
+  jobs = doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}
+  restores = [['cargo-sources-untrusted', 'cargo-home'], ['cargo-target-cache-untrusted', 'cargo-target']]
+  bad_env = lambda do |where, env|
+    next unless env.is_a?(Hash)
+    env.each_key { |k| failures << "#{path}: #{where} sets #{k}, which could redirect the untrusted restore's tools or paths" if k.to_s.match?(FORBIDDEN_ENV_KEY) }
+  end
+  bad_env.call('the workflow env', doc['env'])
+  failures << "#{path}: a workflow-level `defaults` must not exist beside an untrusted restore" if doc.key?('defaults')
+  jobs.each do |job_name, job|
+    next unless job.is_a?(Hash)
+    steps = steps_of(job).grep(Hash)
+    next unless steps.any? { |st| restores.any? { |rid, _| st['id'] == rid } }
+    bad_env.call("job #{job_name} env", job['env'])
+    container = job['container']
+    unless container.nil? || (container.is_a?(String) && Digest::SHA256.hexdigest(container) == REVIEWED_CONTAINER_SHA256)
+      failures << "#{path}: job #{job_name}: the container must be absent or exactly the reviewed digest-pinned expression"
+    end
+    failures << "#{path}: job #{job_name}: services must be absent beside an untrusted restore (a service container shares the job's network and volumes)" unless job['services'].nil?
+    unless job['defaults'].nil? || job['defaults'] == REVIEWED_DEFAULTS
+      failures << "#{path}: job #{job_name}: defaults must be absent or exactly the reviewed run.working-directory: src"
+    end
+    one = lambda do |id|
+      found = steps.select { |st| st['id'] == id }
+      failures << "#{path}: job #{job_name}: the untrusted restore needs exactly one step with id #{id} (found #{found.length})" unless found.length == 1
+      found.length == 1 ? found.first : nil
+    end
+    if (home = one.call('cargo-home'))
+      rest = home.reject { |k, _| %w[name if].include?(k) }
+      failures << "#{path}: step cargo-home differs from the pinned shape its untrusted restore path depends on" unless rest == CARGO_HOME_PIN
+    end
+    if (target = one.call('cargo-target'))
+      with = target['with']
+      shape_ok = (target.keys - %w[name id if uses with]).empty? && target['uses'].to_s == TARGET_CACHE_ACTION && with.is_a?(Hash) &&
+                 with.keys.sort == %w[features group mode os-label] && with['mode'] == 'locate' &&
+                 with['os-label'].is_a?(String) && with['os-label'].match?(/\A[A-Za-z]+\z/)
+      failures << "#{path}: step cargo-target differs from the pinned rust-target-cache locate shape its untrusted restore path and key depend on" unless shape_ok
+    end
+    ids = steps.map { |st| st['id'] }
+    last = restores.map { |_, pid| ids.index(pid) }.compact.max || 0
+    steps.first(last).each do |st|
+      bad_env.call("step #{st['name'].inspect} env", st['env'])
+      next if reviewed_prefix_step?(path, docs, st)
+      failures << "#{path}: job #{job_name}: step #{st['name'].inspect} runs before the producers of the untrusted restore and is not on the reviewed allowlist (it could change the environment, PATH or files their outputs depend on; project-code steps belong after the restores)"
+    end
+    restores.each do |rid, pid|
+      ri = ids.index(rid)
+      pi = ids.index(pid)
+      next if ri.nil? || pi.nil?
+      failures << "#{path}: job #{job_name}: step #{pid} must run before the untrusted restore #{rid} that uses its outputs" if pi > ri
+      next if pi > ri
+      steps[(pi + 1)...ri].each do |st|
+        next if reviewed_prefix_step?(path, docs, st)
+        failures << "#{path}: job #{job_name}: step #{st['name'].inspect} sits between #{pid} and the untrusted restore #{rid}: it must be gated to main alone or be a reviewed, hash-pinned step"
+      end
+    end
+  end
+
+  # The composite behind `cargo-target`: read from the files given, or else from the workflow's own tree
+  # (the workflow policy passes workflows only).
+  composite = local_action_doc(path, docs, 'rust-target-cache')
+  unless composite.is_a?(Hash)
+    failures << "#{path}: the untrusted restore depends on the rust-target-cache composite, which could not be read"
+    return
+  end
+  action_path = '.github/actions/rust-target-cache/action.yml'
+  failures << "#{action_path}: the whole file must match the reviewed content hash its untrusted restore depends on (every step after locate runs before the restore reads the outputs)" unless [RUST_TARGET_CACHE_FILE_SHA256, 'a50a7233883d1fff83fda68d6380937afa14db4256c8f6d725b4d674013df695'].include?(canonical_hash(composite))
+  outputs = composite['outputs']
+  outputs_ok = outputs.is_a?(Hash) && outputs.keys.sort == %w[dir key] &&
+               outputs['dir'].is_a?(Hash) && outputs['dir']['value'] == '${{ steps.locate.outputs.dir }}' &&
+               outputs['key'].is_a?(Hash) && outputs['key']['value'] == '${{ steps.locate.outputs.key }}'
+  failures << "#{action_path}: the dir and key outputs must be exactly the locate step's outputs" unless outputs_ok
+  composite_steps = Array(composite.dig('runs', 'steps')).grep(Hash)
+  # Any id that is `locate` in another case counts as a second locate step, so a look-alike cannot stand in.
+  look_alikes = composite_steps.select { |st| st['id'].to_s.casecmp?('locate') }
+  locate = look_alikes.select { |st| st['id'] == 'locate' }
+  if look_alikes.length != 1 || locate.length != 1
+    failures << "#{action_path}: expected exactly one step with id locate, and no other-case look-alike (found #{look_alikes.length})"
+    return
+  end
+  # STRUCTURAL: `locate` is the first step of the composite, so nothing in it can run before it. The
+  # whole-file hash above covers the steps after it; this keeps the rule explicit and the message clear.
+  if composite_steps.first.equal?(locate.first)
+    body = locate.first.reject { |k, _| %w[name if id].include?(k) }
+    failures << "#{action_path}: the locate step no longer matches the reviewed content hash its untrusted restore depends on" unless canonical_hash(body) == LOCATE_STEP_SHA256
+  else
+    failures << "#{action_path}: the locate step must be the first step of the composite (index 0): any step before it could change how it computes dir and key"
+  end
+  # Defence in depth only: no other step may name the runner's environment or path files.
+  composite_steps.each do |st|
+    next if st.equal?(locate.first)
+    failures << "#{action_path}: step #{st['name'].to_s.inspect} may not write GITHUB_ENV or GITHUB_PATH" if JSON.generate(st).match?(/GITHUB_(ENV|PATH)/i)
+  end
+end
+
+reviewed_restores.each_key do |path|
+  doc = docs.fetch(path)
+  producer_step_failures(path, doc, docs, failures)
+  base = File.basename(path)
+  failures << "#{path}: a workflow with an untrusted restore must set no write permission at workflow level" if write_permission?(doc['permissions'])
+  declared = workflow_triggers_input(doc)[UNTRUSTED_FLAG]
+  unless declared.is_a?(Hash) && declared['type'] == 'boolean' && declared['default'] == false && declared['required'] == false
+    failures << "#{path}: input #{UNTRUSTED_FLAG} must be declared type boolean, required false, with the literal default false (got #{declared.inspect})"
+  end
+  (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).each do |name, job|
+    next unless job.is_a?(Hash)
+    failures << "#{path}: job #{name}: a workflow with an untrusted restore must set no write permission (a write-capable token beside a read-only cache)" if write_permission?(job['permissions'])
+    next unless cache_kinds(steps_of(job)).any? { |k| %i[save combined].include?(k) }
+    failures << "#{path}: job #{name}: a workflow with an untrusted restore must not save a cache from the same job without the main-only gate" unless Array(job['steps']).select { |st| st.is_a?(Hash) && cache_kinds([st]).any? { |k| %i[save combined].include?(k) } }.all? { |st| requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted') }
+  end
+  callers = docs.select do |other_path, other|
+    !other_path.include?('/actions/') && (other['jobs'].is_a?(Hash) ? other['jobs'] : {}).values.any? { |job| job.is_a?(Hash) && job['uses'].to_s == "./.github/workflows/#{base}" }
+  end
+  callers.each do |caller_path, caller_doc|
+    failures << "#{caller_path}: a workflow-level write permission beside an untrusted restore" if write_permission?(caller_doc['permissions'])
+    caller_doc['jobs'].each do |name, job|
+      next unless job.is_a?(Hash) && job['uses'].to_s == "./.github/workflows/#{base}"
+      mode = job['cache-mode']
+      failures << "#{caller_path}: job #{name} calls #{base}, which has an untrusted restore, and must be cache-mode read (untrusted half) or write (main half), not #{mode.inspect}" unless %w[read write].include?(mode)
+      failures << "#{caller_path}: job #{name}: no write permission beside an untrusted restore (a write-capable token)" if write_permission?(job['permissions'])
+      with = job['with'].is_a?(Hash) ? job['with'] : {}
+      unless with.key?(UNTRUSTED_FLAG)
+        failures << "#{caller_path}: job #{name} calls #{base} and must pass #{UNTRUSTED_FLAG} explicitly as a literal true or false (an omitted key leaves the callee's default in force)"
+        next
+      end
+      flag = with[UNTRUSTED_FLAG]
+      unless [true, false].include?(flag)
+        failures << "#{caller_path}: job #{name}: #{UNTRUSTED_FLAG} must be a literal true or false, never an expression or an input (got #{flag.inspect})"
+        next
+      end
+      next unless flag
+      unless mode == 'read' && requires?(job['if'], UNTRUSTED)
+        failures << "#{caller_path}: job #{name}: only the read-only untrusted half (cache-mode read, the exact top-level term #{UNTRUSTED}) may pass #{UNTRUSTED_FLAG}: true"
+      end
+      spike_gate(caller_path, name, failures)
+    end
+  end
+end
+
+# N3: the flag is reachable only through the reviewed routes: its declaration in the called workflow, the
+# `with` key of a job that calls that workflow, and the `if` of a step whose terms are exactly the reviewed
+# untrusted-restore terms. Any other mention, in any workflow or composite given, is refused (an env
+# value, a matrix entry, another step's if, a composite input).
+def flag_mentions(node, path, found)
+  case node
+  when Hash
+    node.each do |k, v|
+      found << [path + [k], :key] if k.to_s.include?(UNTRUSTED_FLAG)
+      flag_mentions(v, path + [k], found)
+    end
+  when Array
+    node.each_with_index { |v, i| flag_mentions(v, path + [i], found) }
+  when String
+    found << [path, :value] if node.include?(UNTRUSTED_FLAG)
+  end
+end
+
+docs.each do |path, doc|
+  base = File.basename(path)
+  found = []
+  flag_mentions(doc, [], found)
+  next if found.empty?
+  is_callee = UNTRUSTED_RESTORE_WORKFLOWS.include?(base)
+  found.each do |where, kind|
+    ok =
+      if kind == :key && where.length == 4 && ['on', true].include?(where[0]) && where[1] == 'workflow_call' && where[2] == 'inputs' && where[3] == UNTRUSTED_FLAG
+        is_callee
+      elsif kind == :key && where.length == 4 && where[0] == 'jobs' && where[2] == 'with' && where[3] == UNTRUSTED_FLAG
+        job = doc.dig('jobs', where[1])
+        job.is_a?(Hash) && UNTRUSTED_RESTORE_WORKFLOWS.any? { |w| job['uses'].to_s == "./.github/workflows/#{w}" }
+      elsif kind == :value && is_callee && where.length == 5 && where[0] == 'jobs' && where[2] == 'steps' && where[4] == 'if'
+        terms = top_terms(doc.dig('jobs', where[1], 'steps', where[3], 'if'))
+        !terms.nil? && UNTRUSTED_RESTORE_TERM_SETS.any? { |set| terms.sort == set.sort }
+      else
+        false
+      end
+    failures << "#{path}: #{UNTRUSTED_FLAG} is mentioned at #{where.map(&:to_s).join('.')} outside the reviewed routes (its declaration, a caller's with key, and the if of a step with exactly the reviewed untrusted-restore terms)" unless ok
   end
 end
 

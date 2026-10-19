@@ -173,32 +173,51 @@ ruby -ryaml -e 'path=ARGV.fetch(0); doc=YAML.safe_load(File.read(path),aliases:f
   "${work}/tree/.github/workflows/pg8-measurement.yml"
 expect_policy_rejects 'future PG8 dispatch identity input drift'
 
-# Final Stage 2 accepts only new13. The Stage 1 predecessor policy separately
-# allows complete old12 during rollout; candidate policy must reject that old
-# schema as well as every incomplete subset.
-reset_fixture
-ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
-  "${work}/tree/.github/ci-matrix.json"
-expect_policy_rejects 'old12 rollback after Stage 2 activation'
+# The live engine roster has exactly two reviewed shapes while pg-dbx is merged into postgres: the
+# merged twelve (end state) and the legacy thirteen that still lists pg-dbx. The Stage 1 predecessor
+# policy separately allowed an older complete old12 during rollout; neither shape may regress to it,
+# and every incomplete subset, reordering or extra arm is refused.
+merged12='["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy","bastion"]'
+legacy13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
+set_roster() {
+  reset_fixture
+  ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=JSON.parse(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
+    "${work}/tree/.github/ci-matrix.json" "$1"
+}
+drop_arm() {
+  ruby -rjson -e 'list=JSON.parse(ARGV.fetch(0)); list.delete(ARGV.fetch(1)); puts JSON.generate(list)' "$1" "$2"
+}
 
-reset_fixture
-ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
-  "${work}/tree/.github/ci-matrix.json"
+# Both reviewed shapes are valid.
+set_roster "${merged12}"
+ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+set_roster "${legacy13}"
+ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+
+set_roster '["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","bastion"]'
+expect_policy_rejects 'old12 rollback (pg-dbx without tls-legacy)'
+set_roster '["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","bastion"]'
 expect_policy_rejects 'stale 11-arm live roster'
 
-# The exact complete new13 candidate schema is valid. Every proper subset
-# missing any previously mandatory arm is refused below.
-new13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
-reset_fixture
-ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=JSON.parse(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
-  "${work}/tree/.github/ci-matrix.json" "${new13}"
-ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
-for missing in doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion; do
-  reset_fixture
-  ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); options=data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]; options << "tls-legacy"; options.delete(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
-    "${work}/tree/.github/ci-matrix.json" "${missing}"
-  expect_policy_rejects "new13 missing mandatory old arm ${missing}"
+# Neither shape may lose an arm. postgres in particular is mandatory in both: it carries the Dbx proof.
+for missing in doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls tls-legacy bastion; do
+  set_roster "$(drop_arm "${merged12}" "${missing}")"
+  expect_policy_rejects "merged12 missing mandatory arm ${missing}"
 done
+for missing in doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion; do
+  # Legacy minus pg-dbx is the merged shape, which is valid; every other loss is not.
+  [[ "${missing}" != pg-dbx ]] || continue
+  set_roster "$(drop_arm "${legacy13}" "${missing}")"
+  expect_policy_rejects "legacy13 missing mandatory arm ${missing}"
+done
+# pg-dbx swapped in for postgres (same length as a reviewed shape) is refused.
+set_roster '["doris","starrocks","db2","informix","rocketmq","iris","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
+expect_policy_rejects 'pg-dbx replacing postgres'
+# Only the exact ordered lists pass: the same thirteen arms in another order, or pg-dbx appended, are refused.
+set_roster '["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy","bastion","pg-dbx"]'
+expect_policy_rejects 'merged12 with pg-dbx appended out of order'
+set_roster '["bastion","doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy"]'
+expect_policy_rejects 'merged12 reordered'
 
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"] << "unreviewed"; File.write(path,JSON.pretty_generate(data))' \
@@ -293,7 +312,7 @@ expect_policy_rejects 'a duplicate-dispatch guard that cannot fail'
 # concern must survive an empty set-difference, while an opt-in concern with its input off
 # and an unknown name still fail closed.
 reset_fixture
-ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("plan").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
+ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); jobs=workflow.fetch("jobs"); step=(jobs["plan"] || jobs.fetch("validate-input")).fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
   .github/workflows/linux-validation.yml "${work}/plan.sh"
 mkdir -p "${work}/plan-work/.github"
 cp .github/ci-matrix.json "${work}/plan-work/.github/ci-matrix.json"
@@ -313,6 +332,20 @@ run_plan() {
 run_plan 'visual only filter' true e2e-visual success
 ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "wrong planned matrix" unless JSON.parse(out.fetch("matrix")) == {"concern"=>["e2e-visual"]}; expected=JSON.parse(out.fetch("expected")); abort "visual absent from expected roster" unless expected.include?("e2e-visual"); abort "mandatory roster reduced" unless expected.length == JSON.parse(File.read(ARGV.fetch(1))).fetch("concerns").fetch("linux").count { |_, row| row["opt_in"].nil? } + 1; abort "opt-in identity missing" unless JSON.parse(out.fetch("optin")) == ["e2e-visual"]' \
   "${work}/plan.out" .github/ci-matrix.json
+# The plan also publishes the list split by the table's long_pole flag: long and short are disjoint,
+# together exactly `matrix` (the Result job requires it), and the long half is exactly the flagged concerns.
+split_plan_check() {
+  ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; whole=JSON.parse(out.fetch("matrix")).fetch("concern"); long=JSON.parse(out.fetch("long_matrix")).fetch("concern"); short=JSON.parse(out.fetch("short_matrix")).fetch("concern"); flagged=JSON.parse(File.read(ARGV.fetch(1))).fetch("concerns").fetch("linux").select { |_, row| row["long_pole"] }.keys; abort "#{ARGV.fetch(2)}: split lists are not the planned matrix" unless (long + short).sort == whole.sort && (long & short).empty?; abort "#{ARGV.fetch(2)}: long half is not the flagged concerns" unless long == whole.select { |c| flagged.include?(c) } && short.none? { |c| flagged.include?(c) }; abort "#{ARGV.fetch(2)}: expected #{ARGV.fetch(3)} long concerns" unless long.length == ARGV.fetch(3).to_i' "${work}/plan.out" .github/ci-matrix.json "$1" "$2"
+}
+# Wave C step A: only a plan that publishes the split is held to it (the current plan does not).
+if grep -q '^long_matrix=' "${work}/plan.out"; then
+  split_plan_check 'visual only' 0
+  run_plan 'full list' false '' success
+  split_plan_check 'full list' "$(jq '[.concerns.linux[] | select(.opt_in == null and .long_pole == true)] | length' .github/ci-matrix.json)"
+  run_plan 'one long pole' false rust-db success
+  split_plan_check 'one long pole' 1
+  ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "an only run of a long pole left a short job" unless JSON.parse(out.fetch("short_matrix")) == {"concern"=>[]}' "${work}/plan.out"
+fi
 run_plan 'visual opt-in disabled' false e2e-visual reject
 grep -qF 'only: not a concern of this dispatch' "${work}/plan.stderr"
 run_plan 'unknown concern' true e2e-not-reviewed reject
@@ -329,7 +362,7 @@ grep -Fq "inputs.only == ''" .github/workflows/linux-validation.yml || { echo 'o
 
 # Reproduce the actual Windows Plan step with the valid optional Rust concern.
 # jq -r is required because jq -c represents an empty set-difference as `""`.
-ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("plan").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
+ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); jobs=workflow.fetch("jobs"); step=(jobs["plan"] || jobs.fetch("validate-input")).fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
   .github/workflows/windows-validation.yml "${work}/windows-plan.sh"
 run_windows_plan() {
   local label="$1" rust="$2" only="$3" expected_status="$4" status=0
@@ -344,9 +377,17 @@ run_windows_plan() {
   fi
 }
 run_windows_plan 'full Windows Rust matrix' true '' success
+if grep -q "^rust_long_matrix=" "${work}/windows-plan.out"; then
+ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; long=JSON.parse(out.fetch("rust_long_matrix")); short=JSON.parse(out.fetch("rust_matrix")); abort "wrong Windows long-pole matrix" unless long == {"concern"=>%w[rust-db rust-app-1 rust-app-2 rust-app-3 rust-packaging]}; abort "wrong full Windows Rust matrix" unless short.keys == ["concern"] && (short["concern"] + long["concern"]).sort == %w[rust-domain rust-db rust-net rust-ovpn rust-app-1 rust-app-2 rust-app-3 rust-packaging rust-tls-openssl].sort && (short["concern"] + long["concern"]).uniq.length == 9 && (short["concern"] & long["concern"]).empty?' "${work}/windows-plan.out"
+else
 ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "wrong full Windows Rust matrix" unless JSON.parse(out.fetch("rust_matrix")).then { |m| m.keys == ["concern"] && m["concern"].sort == %w[rust-domain rust-db rust-net rust-ovpn rust-app-1 rust-app-2 rust-packaging rust-tls-openssl].sort && m["concern"].uniq.length == m["concern"].length }' "${work}/windows-plan.out"
+fi
 run_windows_plan 'filtered Windows Rust concern' true rust-db success
+if grep -q "^rust_long_matrix=" "${work}/windows-plan.out"; then
+ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "valid rust-db concern was not selected as a long pole" unless JSON.parse(out.fetch("rust_long_matrix")) == {"concern"=>["rust-db"]} && JSON.parse(out.fetch("rust_matrix")) == {"concern"=>[]}' "${work}/windows-plan.out"
+else
 ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "valid rust-db concern was not selected" unless JSON.parse(out.fetch("rust_matrix")) == {"concern"=>["rust-db"]}' "${work}/windows-plan.out"
+fi
 run_windows_plan 'unknown Windows concern' true rust-not-reviewed reject
 grep -qF 'only: not a Windows concern of this dispatch' "${work}/windows-plan.stderr"
 run_windows_plan 'Rust concern while Rust disabled' false rust-db reject

@@ -461,7 +461,7 @@ write_mode() { # file, content
 cm_filtered() {
   local err kept rc=0
   err="$(ruby "${policy}/check-cache-mode.rb" "$@" 2>&1 >/dev/null)" || rc=$?
-  kept="$(printf '%s\n' "${err}" | grep -vF "awaits the owner's Stage 2 decision" | grep . || true)"
+  kept="$(printf '%s\n' "${err}" | grep -vF "is not the reviewed read-only untrusted restore" | grep . || true)"
   [[ -n "${kept}" ]] && printf '%s\n' "${kept}" >&2
   [[ -z "${kept}" && ( "${rc}" -eq 0 || -n "${err}" ) ]]
 }
@@ -811,11 +811,11 @@ real_mode_fail 'base-pass granted read' 'must declare cache-mode: none' 's/    c
 real_mode_fail 'base-pass granted write' 'must declare cache-mode: none' 's/    cache-mode: none\n(    # Kept as \.\/ : the policy matches this exact form for protected reusable calls\.)/    cache-mode: write\n$1/' validate-public-changes.yml
 real_mode_fail 'base-pass renamed' 'is missing or renamed' 's/\n  base-pass:\n/\n  base-gate:\n/' validate-public-changes.yml
 # Rule N: no cache restore may run on the untrusted ref (docs/untrusted-readonly-cache.md, section 6).
-real_mode_fail 'macOS crate-source restore gated to the untrusted ref' "awaits the owner's Stage 2 decision" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' macos-validation-concern.yml
-real_mode_fail 'macOS compiled-cache restore gated to the untrusted ref' "awaits the owner's Stage 2 decision" 's/(name: Restore compiled third-party dependencies\n        id: cargo-target-cache\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' macos-validation-concern.yml
-real_mode_fail 'a new untrusted restore of node_modules' "awaits the owner's Stage 2 decision" 's/(      - name: Restore cached third-party crate sources\n)/      - name: Restore node modules\n        if: \$\{\{ github.ref == \x27refs\/heads\/untrusted\x27 }}\n        uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n        with:\n          path: node_modules\n          key: nm\n\n$1/' macos-validation-concern.yml
-real_mode_fail 'a restore with no ref gate (reachable on the untrusted ref)' "awaits the owner's Stage 2 decision" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n)        if: [^\n]*\n/$1/' macos-validation-concern.yml
-real_mode_fail 'a Linux restore gated to the untrusted ref' "awaits the owner's Stage 2 decision" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' linux-validation-concern.yml
+real_mode_fail 'macOS crate-source restore gated to the untrusted ref' "is not the reviewed read-only untrusted restore" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' macos-validation-concern.yml
+real_mode_fail 'macOS compiled-cache restore gated to the untrusted ref' "is not the reviewed read-only untrusted restore" 's/(name: Restore compiled third-party dependencies\n        id: cargo-target-cache\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' macos-validation-concern.yml
+real_mode_fail 'a new untrusted restore of node_modules' "is not the reviewed read-only untrusted restore" 's/(      - name: Restore cached third-party crate sources\n)/      - name: Restore node modules\n        if: \$\{\{ github.ref == \x27refs\/heads\/untrusted\x27 }}\n        uses: actions\/cache\/restore\@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n        with:\n          path: node_modules\n          key: nm\n\n$1/' macos-validation-concern.yml
+real_mode_fail 'a restore with no ref gate (reachable on the untrusted ref)' "is not the reviewed read-only untrusted restore" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n)        if: [^\n]*\n/$1/' macos-validation-concern.yml
+real_mode_fail 'a Linux restore gated to the untrusted ref' "is not the reviewed read-only untrusted restore" 's/(name: Restore cached third-party crate sources\n        id: cargo-sources\n        if: \$\{\{ )github\.ref == .refs\/heads\/main./$1github.ref == \x27refs\/heads\/untrusted\x27/' linux-validation-concern.yml
 echo 'cache-mode real-tree fixtures: the reviewed Linux, Windows and macOS dispatchers pass; each weakening of the split, the audit or the explicit grants is refused'
 printf 'name: p\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/untrusted"\n' > "${composite_probe}"
 (source "${policy}/lib.sh"; source "${policy}/check-cache-policy.sh"; check_composite_action "${composite_probe}") >/dev/null 2>&1 || { echo 'a composite that only reads the cache listing endpoint should pass the composite rules' >&2; exit 1; }
@@ -1055,3 +1055,8 @@ conc_fail "$(conc_file 'concurrency:
 echo 'concurrency fixtures: per-run groups pass; shared groups and cancel-in-progress true are refused'
 
 bash .github/policy/test-repository.sh
+# Rule N's Stage 2 form (the reviewed read-only untrusted restores). Run from here, not as a workflow
+# step of its own, so the reviewed step table of the base-policy pass needs no new entry.
+bash .github/policy/test-untrusted-restore-shape.sh
+# The hashed locate step of the target-cache composite, run with stub tools (checkout-supplied compilers refused).
+bash .github/policy/test-target-cache-locate.sh

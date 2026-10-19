@@ -775,6 +775,16 @@ expect_fail 'a plugin project in another plugin crate directory is refused' 'mob
 gradle_generated
 printf "include ':tauri-plugin-shell'\nproject(':tauri-plugin-shell').projectDir = new File(\"%s/tauri-plugin-shell-2.3.1/src\")\n" "${reg_dir}" >>"${aroot}/tauri.settings.gradle"
 expect_fail 'a plugin project outside the crate android directory is refused' 'mobile_android_generated_gradle_check' "not the included project's own crate directory"
+gradle_generated; sed -i.bak 's|tauri-2.0.0/mobile/android|tauri-2x/mobile/android|' "${aroot}/tauri.settings.gradle"; rm -f "${aroot}/tauri.settings.gradle.bak"
+expect_fail 'a tauri crate directory without a semver version is refused' 'mobile_android_generated_gradle_check' "not the included project's own crate directory"
+gradle_generated; sed -i.bak 's|tauri-2.0.0/mobile/android|tauri-2.5.1/mobile/android|' "${aroot}/tauri.settings.gradle"; rm -f "${aroot}/tauri.settings.gradle.bak"
+expect_pass 'a tauri crate directory with a semver version is accepted' 'mobile_android_generated_gradle_check'
+gradle_generated
+printf "include ':tauri-plugin-shell'\nproject(':tauri-plugin-shell').projectDir = new File(\"%s/tauri-plugin-shell-1-x/android\")\n" "${reg_dir}" >>"${aroot}/tauri.settings.gradle"
+expect_fail 'a plugin crate directory without a semver version is refused' 'mobile_android_generated_gradle_check' "not the included project's own crate directory"
+gradle_generated
+printf "include ':tauri-plugin-shell'\nproject(':tauri-plugin-shell').projectDir = new File(\"%s/tauri-plugin-shell-2.3.0-rc.1/android\")\n" "${reg_dir}" >>"${aroot}/tauri.settings.gradle"
+expect_pass 'a plugin crate directory with a pre-release semver version is accepted' 'mobile_android_generated_gradle_check'
 gradle_generated; sed -i.bak 's|tauri-2.0.0/mobile/android|evil-2.0.0/mobile/android|' "${aroot}/tauri.settings.gradle"; rm -f "${aroot}/tauri.settings.gradle.bak"
 expect_fail ':tauri-android in a crate that is not tauri is refused' 'mobile_android_generated_gradle_check' "not the included project's own crate directory"
 gradle_tracked; gradle_pins; gradle_init_generated; printf 'include '"'"':evil'"'"'\n' >"${aroot}/tauri.settings.gradle"

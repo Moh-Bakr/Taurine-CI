@@ -197,6 +197,27 @@ expected_manifest_digest="333333333333333333333333333333333333333333333333333333
 expect_reject 'stale manifest digest' desktop-shard-1
 expected_manifest_digest="$(manifest_digest)"
 
+# A manifest glob that is not plain path characters (here an unclosed bracket, placed first so it is
+# evaluated) is refused with a fixed reason class: the pattern text never reaches an error or the log.
+write_manifest
+ruby -rjson -e '
+  path=ARGV.fetch(0)
+  m=JSON.parse(File.read(path))
+  m["suites"]["desktop.vitest.default.rest"]["include"].unshift("secret-private-dir/[unclosed")
+  File.write(path,JSON.generate(m))
+' "${repo_root}/scripts/ci/suite-ownership.json"
+expected_manifest_digest="$(manifest_digest)"
+set +e
+output="$(run_collector desktop-shard-1 2>&1)"
+status=$?
+set -e
+[[ "${status}" -ne 0 && "${output}" == *"manifest_glob"* && "${output}" != *secret-private-dir* && "${output}" != *unclosed* && "${output}" != *RegexpError* && "${output}" != *"from /"* ]] || {
+  echo "bracket glob: the collector did not refuse it with the fixed manifest_glob reason, or printed the glob: ${output}" >&2
+  exit 1
+}
+write_manifest
+expected_manifest_digest="$(manifest_digest)"
+
 # Without a runner report the collector records that no evidence exists, and
 # nothing is written.
 rm -f "${report}" "${projection}"

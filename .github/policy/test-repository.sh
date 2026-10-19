@@ -55,6 +55,33 @@ printf 'source fixture\n' > "${private_source}/taurine-desktop/src/private.ts"
 git -C "${private_source}" add taurine-desktop/src/private.ts
 expect_reject "${private_source}" 'a private-source path' 'Unexpected tracked path in the public CI repository'
 
+# The one reviewed ownership file is admitted by its exact path only: not a copy elsewhere, a
+# different case, a sibling name or a nested one.
+codeowners="$(new_fixture)"
+printf '/.github/policy/ @Moh-Bakr\n' > "${codeowners}/.github/CODEOWNERS"
+git -C "${codeowners}" add .github/CODEOWNERS
+expect_pass "${codeowners}" 'the exact reviewed .github/CODEOWNERS path'
+for rejected in 'CODEOWNERS' 'docs/CODEOWNERS' '.github/codeowners' '.github/CODEOWNERS.bak' '.github/CODEOWNERS/extra' '.github/policy/CODEOWNERS'; do
+  misplaced="$(new_fixture)"
+  mkdir -p "${misplaced}/$(dirname "${rejected}")"
+  printf '/.github/policy/ @Moh-Bakr\n' > "${misplaced}/${rejected}"
+  git -C "${misplaced}" add "${rejected}"
+  expect_reject "${misplaced}" "ownership file at ${rejected}" 'Unexpected tracked path in the public CI repository'
+done
+
+# A symlink or an executable file at an exact-path file is refused (mode must be 100644).
+for exact in .github/CODEOWNERS .github/ci-matrix.json .github/dependabot.yml .github/tool-pins.json .github/egress-allowlist.txt; do
+  linked="$(new_fixture)"
+  ln -s /etc/hosts "${linked}/${exact}"
+  git -C "${linked}" add "${exact}"
+  expect_reject "${linked}" "a symlink at ${exact}" 'plain non-executable regular files'
+  runnable="$(new_fixture)"
+  printf 'x\n' > "${runnable}/${exact}"
+  chmod +x "${runnable}/${exact}"
+  git -C "${runnable}" add "${exact}"
+  expect_reject "${runnable}" "an executable file at ${exact}" 'plain non-executable regular files'
+done
+
 credential="$(new_fixture)"
 mkdir -p "${credential}/docs"
 printf 'GH_APP_PRIVATE_KEY=TEST_FIXTURE_SENTINEL\n' > "${credential}/docs/repository-fixture.md"
@@ -245,4 +272,4 @@ unreadable_asset="$(new_fixture)"
 git -C "${unreadable_asset}" update-index --add --cacheinfo 100644,1234567890abcdef1234567890abcdef12345678,.github/policy/case-evidence-assets/report.json
 expect_reject "${unreadable_asset}" 'an asset whose object does not exist' 'could not be read from the index'
 
-echo 'repository path fixtures: the PG8 pair, every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; NUL bytes, leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, index content that differs from the working tree, unreadable index objects, another directory, private source and starter documents rejected'
+echo 'repository path fixtures: the PG8 pair, the exact reviewed CODEOWNERS path (every other CODEOWNERS path rejected), every shipped case-evidence asset name, a one-character name and the reviewed .config/.spec pair allowed; NUL bytes, leading-dash, nested, prefixed, upper-case, hidden, other-extension, smuggled-extension and doubly-compound names, symlinked and executable assets, planted credentials, index content that differs from the working tree, unreadable index objects, another directory, private source and starter documents rejected'
