@@ -51,13 +51,22 @@ def reject!(code)
   raise OwnershipError, code
 end
 
-# Glob with the collector's semantics (collect-suite-evidence.rb, glob_regex). Kept identical on
-# purpose; test-suite-ownership-check.sh proves the two agree on the shapes the manifest uses.
+# A manifest glob is plain path characters and `*` and nothing else. Anything outside this set is refused
+# before a pattern is built, so no glob text can ever reach a regular expression compiler, an error message
+# or a log (an unclosed `[` would otherwise raise an error that quotes the pattern).
+GLOB_CHARS = %r{\A[A-Za-z0-9_./*@+-]+\z}
+
+# Glob with the collector's semantics (collect-suite-evidence.rb, glob_regex): `**` crosses directory
+# separators, `*` stays within a segment, everything else is literal. Every literal piece goes through
+# Regexp.escape, and the collector builds its pattern the same way; test-suite-ownership-check.sh proves
+# the two agree on the shapes the manifest uses.
 def glob_regex(glob)
   source = glob.split('**', -1).map do |segment|
-    segment.gsub('*', '[^/]*').gsub('.', '\.')
+    segment.split('*', -1).map { |literal| Regexp.escape(literal) }.join('[^/]*')
   end.join('.*')
   Regexp.new("\\A#{source}\\z")
+rescue RegexpError
+  reject!('manifest_glob')
 end
 
 def read_patterns(path)
@@ -69,7 +78,7 @@ def read_patterns(path)
     record['include']
   end
   patterns.each do |glob|
-    reject!('manifest_glob') unless glob.is_a?(String) && !glob.empty? && glob.ascii_only? && !glob.start_with?('/') && !glob.include?('..')
+    reject!('manifest_glob') unless glob.is_a?(String) && glob.match?(GLOB_CHARS) && !glob.start_with?('/') && !glob.include?('..')
   end
   patterns.uniq.map { |glob| glob_regex(glob) }
 rescue SystemCallError, JSON::ParserError
@@ -81,7 +90,9 @@ def tracked_files(root)
   # root over a workspace the runner user owns, and git would otherwise refuse the listing.
   out, status = Open3.capture2('git', '-c', "safe.directory=#{File.expand_path(root)}", '-C', root, 'ls-files', '-z', '--full-name')
   reject!('file_list') unless status.success?
-  files = out.split("\0")
+  # Raw bytes, never a decoded string: a file name that is not valid text must be counted or ignored like any
+  # other, not crash the matcher (the patterns are ASCII, so they match binary strings).
+  files = out.b.split("\0".b)
   reject!('file_list') if files.length > MAX_TRACKED_FILES
   files
 end
@@ -103,10 +114,18 @@ begin
   reject!('arguments') unless root && File.directory?(root)
   manifest = File.join(root, MANIFEST_PATH)
   summary = ENV['GITHUB_STEP_SUMMARY']
-  unless File.file?(manifest)
+  # lstat, never stat: the manifest must be a plain file in the checkout. A symbolic link (which could
+  # point outside it), a directory, a device or a pipe is refused, not followed or read.
+  manifest_stat = begin
+    File.lstat(manifest)
+  rescue SystemCallError
+    nil
+  end
+  if manifest_stat.nil?
     report(['suite ownership: skipped (this source carries no ownership manifest)'], summary)
     exit 0
   end
+  reject!('manifest_shape') unless manifest_stat.file?
 
   patterns = read_patterns(manifest)
   tests = tracked_files(root).select { |path| in_scope?(path) }
@@ -122,6 +141,13 @@ begin
   exit 1
 rescue OwnershipError => e
   line = "suite ownership: refused (reason #{e.message}): the check could not read its data"
+  report([line], ENV['GITHUB_STEP_SUMMARY'])
+  warn line
+  exit 1
+rescue StandardError
+  # Anything unforeseen. Nothing of the error is printed, not its message, its class or its backtrace: they
+  # could carry a path, a pattern or manifest text. Output is always a fixed reason class.
+  line = 'suite ownership: refused (reason internal): the check failed unexpectedly'
   report([line], ENV['GITHUB_STEP_SUMMARY'])
   warn line
   exit 1

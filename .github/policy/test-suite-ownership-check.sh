@@ -15,7 +15,8 @@
 set -euo pipefail
 # Wave C step A: this test lands before the tree it judges. It is enforced once the policy workflow
 # runs it (the step arrives with Wave C); in a tree whose workflow does not run it yet there is nothing
-# for it to hold, so it says so and passes. A tree that DOES run it is held to every assertion below.
+# for it to hold, so it says so and passes. A tree that DOES run it is held to every assertion below
+# (check-wave-c-wiring.rb fails a Wave C tree that drops the step).
 if ! grep -qF 'bash .github/policy/test-suite-ownership-check.sh' .github/workflows/validate-public-changes.yml 2>/dev/null; then
   echo 'suite ownership check: skipped, the policy workflow of this tree does not run this test yet'
   exit 0
@@ -160,6 +161,78 @@ ruby -e '
     abort "glob #{glob} disagrees on #{path}" unless a.call(glob).match?(path) == b.call(glob).match?(path)
   end
 ' "${script}" "${collector}"
+
+# 9b. A glob outside plain path characters is refused with the fixed reason manifest_glob, and nothing of the
+# glob is printed: not the text, not an error class, not a backtrace. The unclosed bracket would otherwise make
+# the regular expression compiler quote the pattern.
+for hostile in 'secret-private-dir/[unclosed' 'secret-private-dir/(open' 'secret-private-dir/a?b' 'secret-private-dir/{a,b}' 'secret-private-dir/a b' 'secret-private-dir/a\b' 'secret-private-dir/a|b' 'secret-private-dir/$x'; do
+  repo="$(new_repo hostile)"
+  add_file "${repo}" taurine-desktop/tests/e2e/x.spec.ts
+  ruby -rjson -e 'File.write(ARGV[1], JSON.generate({"suites" => {"s" => {"include" => [ARGV[0]]}}}))' "${hostile}" "${repo}/manifest.json"
+  mkdir -p "${repo}/scripts/ci"; mv "${repo}/manifest.json" "${repo}/scripts/ci/suite-ownership.json"
+  commit_all "${repo}"
+  run_check "${repo}"; expect_rc "hostile glob ${hostile}" 1
+  expect_text "hostile glob ${hostile}" 'reason manifest_glob'
+  for leak in secret-private-dir unclosed Regexp 'from /' '.rb:' Error; do expect_absent "hostile glob ${hostile}" "${leak}"; done
+  rm -rf "${repo}"
+done
+# The characters the manifest really uses, plus @ + and -, are plain path characters and are accepted.
+repo="$(new_repo plainchars)"
+add_file "${repo}" 'taurine-desktop/src/@scope/pkg+x-y/a_b.test.ts'
+write_manifest "${repo}" '{"suites":{"s":{"include":["taurine-desktop/src/@scope/pkg+x-y/**"]}}}'
+commit_all "${repo}"
+run_check "${repo}"; expect_rc plainchars 0
+
+# 9c. A file name that is not valid text (written straight into the index, as a file system that refuses such
+# names cannot hold it) is counted like any other: it neither crashes the matcher nor reaches the log.
+repo="$(new_repo badbytes)"
+add_file "${repo}" taurine-desktop/tests/e2e/a11y/page.spec.ts
+write_manifest "${repo}" "${MANIFEST}"
+commit_all "${repo}"
+blob="$(printf 'x' | git -C "${repo}" hash-object -w --stdin)"
+git -C "${repo}" update-index --add --cacheinfo "100644,${blob},taurine-desktop/tests/e2e/secretarea/$(printf 'bad\377name').spec.ts"
+git -C "${repo}" update-index --add --cacheinfo "100644,${blob},notes/$(printf 'plain\377').txt"
+run_check "${repo}"; expect_rc badbytes 1
+expect_text badbytes '1 of 2 test file(s) have no suite owner'
+expect_absent badbytes secretarea
+
+# 9d. The manifest must be a plain file: a symbolic link to a readable file is refused, not followed.
+repo="$(new_repo linkedmanifest)"
+add_file "${repo}" taurine-desktop/tests/e2e/a11y/page.spec.ts
+mkdir -p "${repo}/scripts/ci"
+printf '%s\n' "${MANIFEST}" > "${work}/elsewhere.json"
+ln -s "${work}/elsewhere.json" "${repo}/scripts/ci/suite-ownership.json"
+commit_all "${repo}"
+run_check "${repo}"; expect_rc linkedmanifest 1
+expect_text linkedmanifest 'reason manifest_shape'
+# a directory in its place is refused too
+repo="$(new_repo dirmanifest)"
+add_file "${repo}" taurine-desktop/tests/e2e/a11y/page.spec.ts
+mkdir -p "${repo}/scripts/ci/suite-ownership.json"; echo x > "${repo}/scripts/ci/suite-ownership.json/f"
+commit_all "${repo}"
+run_check "${repo}"; expect_rc dirmanifest 1
+expect_text dirmanifest 'reason manifest_shape'
+
+# 9e. An unforeseen error prints a fixed reason class only: a stand-in raising an error whose message names a
+# secret directory must leave none of it, nor its class or backtrace, in any output.
+repo="$(new_repo internal)"
+add_file "${repo}" taurine-desktop/tests/e2e/a11y/page.spec.ts
+write_manifest "${repo}" "${MANIFEST}"
+commit_all "${repo}"
+cat > "${work}/boom.rb" <<'BOOM'
+require 'open3'
+module Open3
+  def self.capture2(*)
+    raise ArgumentError, 'secret-private-dir exploded'
+  end
+end
+BOOM
+: > "${work}/summary.md"; rc=0
+GITHUB_STEP_SUMMARY="${work}/summary.md" ruby -r "${work}/boom.rb" "${script}" "${repo}" >"${work}/out.txt" 2>"${work}/err.txt" || rc=$?
+out="$(cat "${work}/out.txt")"; err="$(cat "${work}/err.txt")"; summary="$(cat "${work}/summary.md")"
+expect_rc internal 1
+expect_text internal 'reason internal'
+for leak in secret-private-dir exploded ArgumentError 'from /' '.rb:'; do expect_absent internal "${leak}"; done
 
 # 10. The wiring: the check is a step of every Linux concern job (no condition, never tolerated), after the
 # token revocation (the source checkout) and the root drop, and before any dependency install, toolchain
