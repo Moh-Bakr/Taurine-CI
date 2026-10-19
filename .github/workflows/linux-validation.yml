@@ -496,6 +496,8 @@ jobs:
       SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
+      # The main half never takes the untrusted restores; the key is passed so no caller relies on the callee default.
+      untrusted_readonly_cache: false
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.validate-input.outputs.timeouts)[matrix.concern] }}
       # The shadow review this concern's coverage group would run under a
@@ -523,6 +525,8 @@ jobs:
       SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
+      # Stage 2 switch, a literal like the long-pole caller's: false until the enforcement spike is recorded (docs/untrusted-readonly-cache.md).
+      untrusted_readonly_cache: false
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.validate-input.outputs.timeouts)[matrix.concern] }}
       # The shadow review this concern's coverage group would run under a
