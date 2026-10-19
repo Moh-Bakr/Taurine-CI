@@ -137,12 +137,10 @@ jobs:
           ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
-          # Longest first: the matrix starts jobs in list order as runner slots free up, so the
-          # rust-app shards, rust-db and rust-packaging go ahead of the short concerns. Order only.
           base='["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"]'
-          rust='["rust-app-1","rust-app-2","rust-db","rust-packaging","rust-domain","rust-net","rust-ovpn","rust-tls-openssl"]'
+          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           if [[ "${RUST_REQUESTED}" == true ]]; then
-            candidates="$(jq -cn --argjson b "${base}" --argjson r "${rust}" '$r + $b')"
+            candidates="$(jq -cn --argjson b "${base}" --argjson r "${rust}" '$b + $r')"
           else
             candidates="${base}"
           fi
