@@ -41,7 +41,7 @@ runs:
               next
             }
             /^[[:space:]]*= note: .*(lint level|-D |-W |deny\(|warn\()/ { print; next }
-            /^Diff in / || /^test .* FAILED$/ || /^test result: / || /^failures:$/ || /^smoke: / { print }
+            /^Diff in / || /^test result: / || /^failures:$/ || /^smoke: / { print }
           ' | head -40 >&2 || true
         }
 
@@ -101,13 +101,33 @@ runs:
             head -40 >&2 || true
         }
 
-        # Failing tests of a JavaScript runner: the `FAIL file > suite > test` lines (file path
-        # and test titles, the same identities the test inventory already publishes) plus the
-        # runner's own count lines. Assertion messages and received/expected values stay private.
+        # The failing tests of a JavaScript runner (vitest) as records `js<TAB>file<TAB>title<TAB>fail`
+        # for tci_failed_ids: from the `FAIL [|project|] file > suite > test` lines, the file being
+        # the runner's repository-relative path (a workspace prefix is removed, backslashes become
+        # slashes) and the title the part after the first ` > `. A `FAIL file [ file ]` line (a
+        # suite that did not load) has an empty title. Nothing here is printed: only the keyed ids.
+        js_failure_records() {
+          tr -d '\r' <"$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' |
+            awk -v ws="${GITHUB_WORKSPACE:+${GITHUB_WORKSPACE}/src/}" '
+              /^[[:space:]]*FAIL[[:space:]]/ {
+                l = $0; sub(/^[[:space:]]*FAIL[[:space:]]+/, "", l); sub(/^\|[^|]*\|[[:space:]]*/, "", l)
+                n = index(l, " > ")
+                if (n > 0) { file = substr(l, 1, n - 1); title = substr(l, n + 3) } else { file = l; sub(/ \[.*$/, "", file); title = "" }
+                gsub(/\\/, "/", file); if (ws != "" && index(file, ws) == 1) file = substr(file, length(ws) + 1)
+                sub(/[[:space:]]+$/, "", title)
+                printf "js\t%s\t%s\tfail\n", file, title
+              }' | awk '!seen[$0]++' | head -80
+        }
+
+        # Failing tests of a JavaScript runner as keyed ids (see the KEYED FAILING-TEST IDENTITIES
+        # note in the sanitize library) plus the runner's own count lines. Neither the `FAIL file >
+        # suite > test` lines nor the assertion messages and received/expected values are
+        # published; the file path and the test title go into the HMAC only.
         test_failures() {
+          js_failure_records "$1" | tci_failed_ids >&2 || true
           tr '\\' '/' <"$1" | sanitize_stream | strip_excerpts |
-            grep -E '^[[:space:]]*FAIL[[:space:]]|^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped)' |
-            cut -c1-200 | awk '!seen[$0]++' | head -60 >&2 || true
+            grep -E '^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped)' |
+            cut -c1-200 | awk '!seen[$0]++' | head -20 >&2 || true
         }
 
         # The packaging smoke build (an unsigned Tauri build): which phase failed and a fixed
@@ -347,8 +367,8 @@ runs:
               flaky="$(tr -d '\r' <"${log}" | grep -c ' FLAKY ' || true)"
               if [[ "${flaky}" -gt 0 ]]; then
                 echo "::warning title=flaky tests::${label}: ${flaky} test(s) passed only on retry"
-                echo 'flaky tests (retries, test binary and name):'
-                nextest_failures "${log}" | grep -E '^FLAKY' | head -40 || true
+                echo 'flaky tests (keyed ids; the seed is private):'
+                nextest_failures "${log}" | grep -E '^(test-id-key: |failed-test-id: .* status=flaky$|failed-test-ids: unavailable)' | head -40 || true
               fi
               if [[ "${executed}" -lt 1 ]]; then
                 echo "${label}: failed (no tests were executed; a test run that runs nothing proves nothing)" >&2
@@ -408,10 +428,11 @@ runs:
               if [[ "${label}" == rust-packaging-smoke ]]; then
                 packaging_detail "${log}"
               fi
-              # cargo-nextest: the failing tests, signals, timeouts and flaky retries by name.
+              # cargo-nextest: the failing tests, signals, timeouts and flaky retries as keyed ids
+              # (an HMAC of test binary and name; the local `ci-failed-tests` maps them back).
               nextest_lines="$(nextest_failures "${log}" || true)"
               if [[ -n "${nextest_lines}" ]]; then
-                echo 'nextest failures (status, test binary and name):' >&2
+                echo 'nextest failures (keyed ids and status; names, binaries and messages are never published):' >&2
                 printf '%s\n' "${nextest_lines}" >&2
                 nextest_summary "${log}" >&2 || true
               fi
@@ -421,7 +442,7 @@ runs:
               # The panicking tests with a fixed class of each panic and its file:line.
               panics="$(panic_summary "${log}" || true)"
               if [[ -n "${panics}" ]]; then
-                echo 'panics (test, file:line, class; messages withheld):' >&2
+                echo 'panics (keyed file id, line, class; test names, paths and messages withheld):' >&2
                 printf '%s\n' "${panics}" >&2
               fi
             elif [[ "${label}" == cargo-audit ]]; then
@@ -444,18 +465,19 @@ runs:
             fi
             if [[ "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
               test_failures "${log}"
-              sanitize_stream <"${log}" | strip_excerpts | grep -E '^(not ok|# (pass|fail|tests))' | head -20 >&2 || true
+              sanitize_stream <"${log}" | strip_excerpts | grep -E '^# (pass|fail|tests)' | head -20 >&2 || true
+              # TAP names its failing tests in `not ok` lines, which carry no file; only the count is published.
+              echo "failing TAP tests: $(grep -cE '^not ok' "${log}" || true)" >&2
             fi
             if [[ "${label}" == e2e-* ]]; then
-              # The failing specs by name (list reporter lines and annotation titles).
+              # The console reporter's failing specs are counted, never named.
               pw="$(playwright_failures "${log}" || true)"
               if [[ -n "${pw}" ]]; then
-                echo 'failing specs (spec > title):' >&2
                 printf '%s\n' "${pw}" >&2
               fi
               pwj="$(playwright_json_failures "${RUNNER_TEMP}/test-ids/${label}.json" || true)"
               if [[ -n "${pwj}" ]]; then
-                echo 'failing specs from the JSON report:' >&2
+                echo 'failing specs from the JSON report (keyed ids; spec files and titles are never published):' >&2
                 printf '%s\n' "${pwj}" >&2
               fi
             fi
@@ -463,12 +485,14 @@ runs:
               budget_report "${log}" >&2
             fi
             if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
-              # Keep hosted-only diagnostics useful without publishing
-              # private source paths or compiler/test output.
+              # Runner count lines only (the file and test counts and the pass/fail tallies). A
+              # failing test is never named here: `FAIL` lines, assertion text and received or
+              # expected values carry titles and source values, and the keyed ids come from
+              # test_failures and playwright_json_failures.
               sanitize_stream <"${log}" |
                 strip_excerpts |
-                grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|timed out|(^|[[:space:]])[0-9]+ (passed|failed|flaky|skipped)|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
-                tail -80 >&2 || true
+                grep -E '^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped)' |
+                cut -c1-120 | tail -20 >&2 || true
             fi
             exit 1
           fi

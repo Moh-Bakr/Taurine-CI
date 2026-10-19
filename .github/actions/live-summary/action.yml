@@ -43,7 +43,7 @@ runs:
         # never credentials or captured data. Paths are redacted below.
         outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  |^        ' "${log}" | sed -E 's/[[:space:]]+$//' | sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' | cut -c1-200 || true)"
         result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
-        test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 || true)"
+        test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 | sed -E 's/^test [a-z_]+ \.\.\. FAILED$/test (name withheld) ... FAILED/' || true)"
         # The panic block carries the assertion that named the failure: the
         # connect outcome, the suite's report header, the sign-off's counts.
         # Paths are redacted and lines cut before anything is published; the
@@ -89,14 +89,14 @@ runs:
             echo '```'
           fi
           if [[ -n "${failed_names}" ]]; then
-            echo 'Failed tests:'
+            echo 'Failed tests (keyed ids; the names are never published):'
             echo
             echo '```'
             printf '%s\n' "${failed_names}"
             echo '```'
           fi
           if [[ -n "${panic_lines}" ]]; then
-            echo 'Panics (test, file:line, class; the message text is never published):'
+            echo 'Panics (keyed file id, line, class; no test name, path or message text is published):'
             echo
             echo '```'
             printf '%s\n' "${panic_lines}"

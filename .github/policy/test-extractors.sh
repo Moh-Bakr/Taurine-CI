@@ -20,14 +20,13 @@ bash -c '
   tauri_version_mismatch "$1/tauri.log" | grep -qF "tauri-plugin-dialog (v2.4.1) : @tauri-apps/plugin-dialog (v2.3.0)"
   out="$(panic_summary "$1/panic.log")"
   grep -qF "code=not_connected" <<<"${out}"
-  if grep -q "hunter2" <<<"${out}"; then exit 1; fi
+  if grep -qE "hunter2|a::b|tests/x\.rs" <<<"${out}"; then echo "a panic leaked its test name, path or message" >&2; exit 1; fi
   out="$(playwright_json_failures "$1/pw.json")"
-  grep -qF "e2e/a.spec.ts:3" <<<"${out}"
+  # Keyed failing-test ids (see test-keyed-test-ids.sh): the spec file, the title, the locator and
+  # the expected and received values are never published, with or without a seed.
   grep -qF "1 screenshot mismatch" <<<"${out}"
   grep -qF "1234 pixels differ" <<<"${out}"
-  grep -qF "Locator: getByRole(heading)" <<<"${out}"
-  grep -qF "Received string: Loading" <<<"${out}"
-  if grep -q "SECRETTEXT" <<<"${out}"; then exit 1; fi
+  if grep -qE "a\.spec|Locator|getByRole|Welcome|Received string|Loading|SECRETTEXT" <<<"${out}"; then echo "a Playwright failure leaked its spec, title or assertion" >&2; exit 1; fi
 ' _ "${dir}"
 # Compiler diagnostics: an error[Ennnn] is its code and location, never its message.
 awk "/cat > .*report.sh.* <<'TCI_REPORT_LIBRARY'/{on=1; next} /^        TCI_REPORT_LIBRARY/{on=0} on" .github/actions/concern-report/action.yml | sed -E 's/^        //' > "${dir}/report.sh"
@@ -113,3 +112,5 @@ bash -c '
   [[ "${deferred_results[0]}" == "rust-a-build|passed" ]]
 ' _ "${dir}"
 echo 'failure-detail extractor fixtures: ok'
+# Keyed failing-test identities: the extractors publish an HMAC, never a name, path or message.
+bash .github/policy/test-keyed-test-ids.sh

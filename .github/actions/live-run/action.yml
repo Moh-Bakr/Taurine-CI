@@ -84,9 +84,9 @@ runs:
               # tests and one fixed-format line per panic (test, file:line, class; the
               # assertion text and values are never published).
               source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-              echo "FAILED in ${pkg} [${targets}] ${name:-}: failed tests:" >&2
+              echo "FAILED in ${pkg} [${targets}] ${name:-}: failed tests (keyed ids):" >&2
               failed_test_names "${suite_log}" | sed 's/^/  /' >&2 || true
-              echo "panics (test, file:line, class):" >&2
+              echo "panics (keyed file id, line, class):" >&2
               panic_summary "${suite_log}" >&2 || true
             fi
             if (( skips > 0 )); then
@@ -107,9 +107,9 @@ runs:
         echo "cargo test exited ${status}; sanitized report follows in the summary step"
         if [[ "${status}" -ne 0 ]]; then
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
-          echo 'failed tests:' >&2
+          echo 'failed tests (keyed ids):' >&2
           failed_test_names "${log}" | sed 's/^/  /' >&2 || true
-          echo 'panics (test, file:line, class):' >&2
+          echo 'panics (keyed file id, line, class):' >&2
           panic_summary "${log}" >&2 || true
         fi
         exit "${status}"

@@ -237,3 +237,46 @@ runs:
           echo 'protected-ancestor=false' >> "${GITHUB_OUTPUT}"
         fi
         [[ "${failed}" -eq 0 ]]
+
+    # The keyed test-ID seed (owner decision 2026-10-18, option A). The private source commits a
+    # random seed, and the shared reporters (the sanitize library) print `failed-test-id` as an
+    # HMAC of a failing test's file and title under it, so a public log identifies a failing test
+    # only to a reader of the private source. The seed is copied here, before any project command
+    # runs and after the token was revoked, into a runner-temp file that only the reporters read;
+    # it is masked in the log, validated against a fixed grammar and never evaluated, sourced or
+    # printed. A missing or malformed seed leaves no file: the reporters then print counts only.
+    # This step runs no project command and reads one regular file.
+    - name: Snapshot the keyed test-ID seed for the reporters
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        CHECKOUT_PATH: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        set +x
+        seed_source="${CHECKOUT_PATH}/scripts/ci/test-id-seed.txt"
+        seed_dir="${RUNNER_TEMP}/taurine-ci"
+        mkdir -p "${seed_dir}"
+        rm -f "${seed_dir}/test-id-seed"
+        if [[ ! -f "${seed_source}" || -L "${seed_source}" ]]; then
+          echo 'keyed test ids: this source has no seed file; failing tests will be counted, not identified'
+          exit 0
+        fi
+        # No symlinked directory may steer the read outside the checked-out tree.
+        seed_dir_real="$(cd "$(dirname "${seed_source}")" && pwd -P)"
+        checkout_real="$(cd "${CHECKOUT_PATH}" && pwd -P)"
+        if [[ "${seed_dir_real}" != "${checkout_real}/scripts/ci" ]]; then
+          echo 'keyed test ids: the seed path leaves the checkout; failing tests will be counted, not identified'
+          exit 0
+        fi
+        content="$(tr -d '\r' <"${seed_source}" | head -c 400)"
+        pattern=$'^taurine-test-id-seed v1\nseed-id: (k[0-9]{1,4})\nseed: ([0-9a-f]{64})$'
+        if [[ ! "${content}" =~ ${pattern} ]]; then
+          echo 'keyed test ids: the seed file does not match its fixed format; failing tests will be counted, not identified'
+          exit 0
+        fi
+        seed_id="${BASH_REMATCH[1]}"
+        seed="${BASH_REMATCH[2]}"
+        printf '::add-mask::%s\n' "${seed}"
+        (umask 077; printf 'seed-id=%s\nseed=%s\n' "${seed_id}" "${seed}" > "${seed_dir}/test-id-seed")
+        echo "keyed test ids: seed ${seed_id} loaded for the reporters"
