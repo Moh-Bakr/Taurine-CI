@@ -647,6 +647,10 @@ bsrc_tracked; bsrc_pins; rm "${bsrc}/${pkg}/RustPlugin.kt"
 expect_fail 'a missing pinned file is refused' "${mobile_pins} mobile_build_phase_reset android" 'missing file: src/main/java'
 bsrc_tracked; bsrc_pins; rm -rf "${bsrc}"
 expect_fail 'a missing buildSrc is refused' "${mobile_pins} mobile_build_phase_reset android" 'buildSrc is missing'
+bsrc_tracked; bsrc_pins; printf 'x\n' >"${bsrc}/$(printf 'a\nb.kt')"
+expect_fail 'a file name with a newline is refused' "${mobile_pins} mobile_build_phase_reset android" 'a path with a newline or control character'
+bsrc_tracked; bsrc_pins; printf 'x\n' >"${bsrc}/$(printf 'a\001b.kt')"
+expect_fail 'a file name with a control character is refused' "${mobile_pins} mobile_build_phase_reset android" 'a path with a newline or control character'
 bsrc_tracked; bsrc_pins; ln -s /etc/hosts "${bsrc}/link"
 expect_fail 'a symlink in buildSrc is refused' "${mobile_pins} mobile_build_phase_reset android" 'link or special file'
 bsrc_tracked; bsrc_pins; build_task npm '"run", "--", "tauri", "android", "android-studio-script"'

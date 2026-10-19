@@ -450,6 +450,11 @@ runs:
           if [[ -n "$(find "${dir}" ! -type f ! -type d 2>/dev/null)" ]]; then
             echo 'buildsrc-pin: FAILED - buildSrc holds a link or special file' >&2; return 1
           fi
+          while IFS= read -r -d '' file; do
+            if [[ "${file}" =~ [[:cntrl:]] ]]; then
+              echo 'buildsrc-pin: FAILED - unexpected file: a path with a newline or control character' >&2; return 1
+            fi
+          done < <(find "${dir}" -print0)
           want="$(mobile_android_buildsrc_pinned | awk '{print $2}')"
           [[ "${mode}" == with-callback ]] && want="$(printf '%s\n%s\n' "${want}" "${cb}")"
           want="$(printf '%s\n' "${want}" | LC_ALL=C sort)"
