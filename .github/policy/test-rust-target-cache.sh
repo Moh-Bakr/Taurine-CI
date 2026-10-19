@@ -258,9 +258,25 @@ LOCK
   for planted in deps/libopenssl_sys-9999.rlib deps/libopenssl-3333.rlib build/openssl-sys-9999 build/openssl-src-9999 \
     .fingerprint/openssl-sys-9999 .fingerprint/openssl-src-9999 .fingerprint/openssl-9999; do
     case "${planted}" in deps/*) printf 'planted' > "${dprofile}/${planted}" ;; *) mkdir -p "${dprofile}/${planted}/out"; printf 'x' > "${dprofile}/${planted}/out/libssl.a" ;; esac
-    [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 1 ]] || { echo "a surviving ${planted} was not reported" >&2; exit 1; }
+    # A planted directory also holds a nested libssl.a, which the recursive content check counts too.
+    [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" -ge 1 ]] || { echo "a surviving ${planted} was not reported" >&2; exit 1; }
     rm -rf "${dprofile:?}/${planted}"
   done
+  [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the door fixture was not clean after the survivor cases' >&2; exit 1; }
+  # A door library hidden under an unrelated crate name, at any depth and in any case, is reported.
+  for hidden in build/renamed-sys-7777/out/lib/libssl.a build/renamed-sys-7777/out/LIBCRYPTO.a build/other-8888/out/deep/er/libeay32.lib deps/SSLEAY32.dll; do
+    mkdir -p "${dprofile}/$(dirname "${hidden}")"; printf 'planted' > "${dprofile}/${hidden}"
+    [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 1 ]] || { echo "a hidden ${hidden} was not reported" >&2; exit 1; }
+    rm -rf "${dprofile:?}/build/renamed-sys-7777" "${dprofile:?}/build/other-8888" "${dprofile:?}/${hidden}"
+  done
+  # A traversal error fails the helper: an unreadable directory under deps is not read as an empty result.
+  mkdir -p "${dprofile}/build/unreadable-1/out"; chmod 000 "${dprofile}/build/unreadable-1/out"
+  if [[ "$(id -u)" != 0 ]]; then
+    if (door_entries_remaining "${dprofile}" "${door_dir}/sets") >/dev/null 2>&1; then
+      chmod 755 "${dprofile}/build/unreadable-1/out"; echo 'a traversal error was swallowed by the door check' >&2; exit 1
+    fi
+  fi
+  chmod 755 "${dprofile}/build/unreadable-1/out"; rm -rf "${dprofile:?}/build/unreadable-1"
   # Content-level defence in depth: whatever crate produced them, libssl*, libcrypto* and openssl-build*
   # entries under debug/deps and debug/build are refused after the door strip, and nothing else is.
   [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the door fixture was not clean before the content cases' >&2; exit 1; }

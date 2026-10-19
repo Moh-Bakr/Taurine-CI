@@ -410,8 +410,8 @@ runs:
 
         # Counts the entries of the debug profile under $1 that are named for a door crate (file or
         # directory, with or without the lib prefix), using door.txt of the sets directory $2, plus, as a
-        # content-level defence in depth, any entry under debug/deps or debug/build named libssl*,
-        # libcrypto* or openssl-build*, whichever crate produced it. Prints the count only, never a name.
+        # content-level defence in depth, any entry at any depth under debug/deps or debug/build named
+        # libssl*, libcrypto*, openssl-build*, libeay* or ssleay* (any case), whichever crate produced it. Prints the count only, never a name.
         door_entries_remaining() {
           local profile="$1" sets="$2" names entries d by_name=0 by_content=0
           names="$(sed 's/_/[-_]/g' "${sets}/door.txt" | paste -sd'|' -)" || return 1
@@ -421,9 +421,17 @@ runs:
           if [[ -n "${names}" ]]; then
             by_name="$(printf '%s\n' "${entries}" | sed -E 's#^.*/##' | grep -cE "^(lib)?(${names})-[0-9a-f]+(\.|$)" || true)"
           fi
-          by_content="$(for d in deps build; do
-            if [[ -d "${profile}/${d}" ]]; then cache_find "${profile}/${d}" -mindepth 1 -maxdepth 1 \( -name 'libssl*' -o -name 'libcrypto*' -o -name 'openssl-build*' \) -print || exit 1; fi
-          done | grep -c . || true)" || return 1
+          # Recursive, case-insensitive, and it names the old OpenSSL library names too: a door library hidden
+          # under an unrelated crate's output directory (build/renamed-sys-<hash>/out/lib/libssl.a) is found.
+          # A traversal error fails the helper instead of reading as an empty result.
+          content=''
+          for d in deps build; do
+            if [[ -d "${profile}/${d}" ]]; then
+              found="$(cache_find "${profile}/${d}" -mindepth 1 \( -iname 'libssl*' -o -iname 'libcrypto*' -o -iname 'openssl-build*' -o -iname 'libeay*' -o -iname 'ssleay*' \) -print)" || return 1
+              content="${content}${found}"$'\n'
+            fi
+          done
+          by_content="$(printf '%s' "${content}" | grep -c . || true)"
           echo $((by_name + by_content))
         }
 
