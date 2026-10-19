@@ -47,13 +47,12 @@ selected() {
   echo "$(grep '^selection=' "${work}/out.txt" | cut -d= -f2) $(grep '^matrix=' "${work}/out.txt" | cut -d= -f2- | jq -r '.concern | join(",")')"
 }
 parent_of() { git -C "${repo}" rev-parse "$1~1"; }
-# Concern lists are compared as sets, never as ordered strings, so the matrix's own order may change.
-# A partial selection always carries every concern the matrix declares `always`, so the wanted set is
-# the case's own concerns plus those; a concern added to the matrix (declared `always` or not
-# selected here) is judged by the matrix, while an undeclared or missing concern still fails.
+# Concern lists are compared sorted, never as ordered strings, so the matrix's own order may change.
+# A partial selection always carries every concern the matrix declares `always`, so the wanted list is
+# the case's own concerns plus those, de-duplicated (it is a union of two lists). The got list keeps
+# every occurrence, so a concern selected twice fails, as does an undeclared or missing one; a concern
+# added to the matrix (declared `always` or not selected here) is judged by the matrix.
 always_set="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null and .value.always == true) | .key] | join(",")' .github/ci-matrix.json)"
-# The got side keeps every occurrence (a concern selected twice must fail); only the wanted side,
-# which is a union of two lists, is de-duplicated before both are sorted.
 canonical() {
   local value="$1" kind="${1%% *}" list="${1#* }" extra="${2:-}" dedupe="${3:-}"
   [[ -n "${extra}" ]] && list="${list},${extra}"
