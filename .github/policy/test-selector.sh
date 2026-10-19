@@ -75,7 +75,14 @@ all="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null) | 
 sha="$(change docs/a.md)"
 expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-security'
 sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app-1,rust-app-2,scan-security'
+# Wave C step A: the selection must name exactly the app shard rows of this tree's own table: the two-shard table
+# selects two, the three-shard table three, never a list written for the other (a table of any other size is refused).
+table_shards="$(jq -r '[.concerns.linux | keys[] | select(test("^rust-app-[0-9]+$"))] | join(",")' .github/ci-matrix.json)"
+case "${table_shards}" in
+  'rust-app-1,rust-app-2' | 'rust-app-1,rust-app-2,rust-app-3') ;;
+  *) echo "selector case 'crate': the table's app shards are '${table_shards}', not the two reviewed sets" >&2; exit 1 ;;
+esac
+expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" "partial contracts,rust-domain,${table_shards},scan-security"
 sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
 expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-security'
 sha="$(change taurine-desktop/src/a.ts)"

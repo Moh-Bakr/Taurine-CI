@@ -12,14 +12,31 @@ require 'yaml'
 table = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux'].keys.sort
 wf = YAML.safe_load(File.read('.github/workflows/linux-validation.yml'), aliases: false)
 step = wf['jobs']['result']['steps'].find { |st| st['uses'].to_s == './.github/actions/run-result' }
-# The Result job expects exactly what the plan job computed from the table (every
-# non-opt-in concern, plus an opt-in one when its input is true), never a second,
-# hand-kept list that could drift from the table.
-unless step['with']['expected-concerns'].to_s == '$' + '{{ needs.plan.outputs.expected }}' && wf['jobs']['result']['needs'].include?('plan')
+# The Linux dispatcher has exactly one of two reviewed shapes (Wave C step A: the new shape and the
+# current one are both accepted until Wave C lands, and a tree that mixes them is refused):
+#   plan job:      a `plan` job computes the lists and the long Rust poles are matrix entries of validate-*;
+#   first-job plan: the `plan` step lives in validate-input (no `plan` job) and the long poles run in the
+#                   validate-long-main and validate-long-untrusted jobs.
+# Either way the Result job expects exactly what the planner computed from the table (every non-opt-in
+# concern, plus an opt-in one when its input is true), never a second, hand-kept list that could drift
+# from the table.
+long_jobs = %w[validate-long-main validate-long-untrusted]
+has_plan_job = wf['jobs'].key?('plan')
+has_long = long_jobs.map { |j| wf['jobs'].key?(j) }
+if has_plan_job && has_long.any?
+  warn 'The Linux dispatcher mixes the two reviewed shapes: a plan job beside the long-pole jobs'
+  exit 1
+end
+if !has_plan_job && !has_long.all?
+  warn 'The Linux dispatcher has no plan job, so it must carry both validate-long-main and validate-long-untrusted'
+  exit 1
+end
+planner = has_plan_job ? 'plan' : 'validate-input'
+unless step['with']['expected-concerns'].to_s == '$' + "{{ needs.#{planner}.outputs.expected }}" && wf['jobs']['result']['needs'].include?(planner)
   warn 'The Linux Result job must take its expected concerns from the plan job output'
   exit 1
 end
-unless step['with']['required-concerns'].to_s == '$' + '{{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}' && wf['jobs']['result']['needs'].include?('select')
+unless step['with']['required-concerns'].to_s == '$' + "{{ toJSON(fromJSON(needs.select.outputs.matrix || needs.#{planner}.outputs.matrix).concern) }}" && wf['jobs']['result']['needs'].include?('select')
   warn 'The Linux Result job must require every concern in the selected matrix to run'
   exit 1
 end
@@ -58,15 +75,23 @@ mode_by_workflow = {
   '.github/workflows/ios-validation.yml' => ["${{ inputs.rust && 'full' || 'partial' }}"],
   '.github/workflows/orchestrate-validation.yml' => ['full']
 }
+windows_old_names = %w[desktop-shard-1 desktop-shard-2 desktop-quality mobile contracts bundle-budget rust-domain rust-db rust-net rust-ovpn rust-app-1 rust-app-2 rust-packaging rust-tls-openssl]
+windows_new_names = windows_old_names.dup.insert(windows_old_names.index('rust-app-2') + 1, 'rust-app-3')
+windows_ts_names = %w[desktop-shard-1 desktop-shard-2 desktop-quality mobile contracts bundle-budget]
+windows_wrap = ->(names) { "${{ inputs.rust && '#{JSON.generate(names)}' || '#{JSON.generate(windows_ts_names)}' }}" }
+windows_doc = YAML.safe_load(File.read('.github/workflows/windows-validation.yml'), aliases: false)
+# Windows: the plan job with the eight-concern list, or the first-job plan with the nine-concern list
+# (rust-app-3): never one shape's jobs with the other's list.
+windows_list = windows_doc['jobs'].key?('plan') ? windows_old_names : windows_new_names
 required_by_workflow = {
-  '.github/workflows/linux-validation.yml' => "${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}",
+  '.github/workflows/linux-validation.yml' => "${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.#{planner}.outputs.matrix).concern) }}",
   '.github/workflows/macos-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
-  '.github/workflows/windows-validation.yml' => "${{ inputs.rust && '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\",\"rust-domain\",\"rust-db\",\"rust-net\",\"rust-ovpn\",\"rust-app-1\",\"rust-app-2\",\"rust-packaging\",\"rust-tls-openssl\"]' || '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\"]' }}",
+  '.github/workflows/windows-validation.yml' => windows_wrap.call(windows_list),
   '.github/workflows/android-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
   '.github/workflows/ios-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}"
 }
 needs_by_workflow = {
-  '.github/workflows/linux-validation.yml' => %w[plan select],
+  '.github/workflows/linux-validation.yml' => [planner, 'select'],
   '.github/workflows/macos-validation.yml' => %w[plan],
   '.github/workflows/android-validation.yml' => %w[plan],
   '.github/workflows/ios-validation.yml' => %w[plan]
@@ -86,6 +111,14 @@ mode_by_workflow.each do |path, allowed_modes|
   required_needs = needs_by_workflow[path] || []
   unless (required_needs - Array(parsed.fetch('jobs').fetch('result')['needs'])).empty?
     warn "#{path}: Result must depend on the jobs that supply its selected concern list"
+    exit 1
+  end
+  # The Result job waits for every validate-* job of its dispatcher, the long-pole jobs included: a
+  # concern job the verdict does not wait for could be missing from it.
+  validate_jobs = parsed.fetch('jobs').keys.select { |name| name.start_with?('validate-') && name != 'validate-input' }
+  missing_needs = validate_jobs - Array(parsed.fetch('jobs').fetch('result')['needs'])
+  unless validate_jobs.empty? || missing_needs.empty?
+    warn "#{path}: Result must depend on every validate job, but not on #{missing_needs.join(', ')}"
     exit 1
   end
 end
