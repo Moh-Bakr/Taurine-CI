@@ -466,7 +466,7 @@ defaults:
 
 env:'
 mutant 'the toolchain action file altered' "${allow_msg}" ".github/actions/rust-toolchain/action.yml" 'Per-OS setup for the Rust concerns' 'Per-OS planted setup for the Rust concerns'
-mutant 'the toolchain step gains a with key' "${allow_msg}" "${c}" "          concern: \${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" "          concern: \${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
+mutant 'the toolchain step gains a with key' "${allow_msg}" "${c}" "          concern: \${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}" "          concern: \${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}
           extra: x"
 
 # Every shared local action that runs ahead of the producers is pinned as a whole file and by its exact
@@ -600,6 +600,47 @@ for other in macos-validation-concern.yml windows-validation-concern.yml; do
   out=""; rc=0
   out="$(cd "${d}" && ruby "${OLDPWD}/${policy}/check-cache-mode.rb" ".github/workflows/${other}" 2>&1)" || rc=$?
   [[ ${rc} -ne 0 && "${out}" == *"${reviewed_msg}"* ]] || { echo "the reviewed untrusted restore in ${other} should be refused: ${out}" >&2; exit 1; }
+done
+
+# check-cache-groups.rb (main-only compiled-cache groups) skips exactly the reviewed untrusted restores of the
+# Linux concern workflow: its three steps carry exactly the reviewed `if` terms and are restores or the
+# restore-time strip. A widened term, a save, a strip in another mode, or the same step in another workflow
+# is still a compiled-cache step there and is refused.
+groups_run() { # dir workflow-file
+  (cd "$1" && ruby "${OLDPWD}/${policy}/check-cache-groups.rb" "$2") 2>&1
+}
+out="$(groups_run "${reviewed}" "${c}")" || { echo "check-cache-groups should accept the reviewed untrusted restores: ${out}" >&2; exit 1; }
+groups_mutant() { # label step-id from to
+  local d="${work}/groups-mutant" o rc=0
+  rm -rf "${d}"; cp -R "${reviewed}" "${d}"
+  STEP="$2" FROM="$3" TO="$4" ruby -e '
+    path = ARGV.fetch(0); lines = File.read(path, encoding: "UTF-8").lines
+    at = lines.index { |l| l.chomp == "        id: #{ENV.fetch("STEP")}" } or abort "untrusted restore fixture: step #{ENV.fetch("STEP")} not found"
+    first = at
+    first -= 1 until lines[first].start_with?("      - name:")
+    last = at
+    last += 1 while last + 1 < lines.length && !lines[last + 1].start_with?("      - name:") && !lines[last + 1].start_with?("      # ")
+    block = lines[first..last].join
+    abort "untrusted restore fixture: #{ENV.fetch("FROM").inspect} not in step #{ENV.fetch("STEP")}" unless block.include?(ENV.fetch("FROM"))
+    lines[first..last] = [block.sub(ENV.fetch("FROM")) { ENV.fetch("TO") }]
+    File.write(path, lines.join)
+  ' "${d}/${c}"
+  o="$(groups_run "${d}" "${c}")" || rc=$?
+  [[ ${rc} -ne 0 && "${o}" == *'the cache steps other than the reviewed crate-sources pair must be exactly one each of'* ]] || { echo "check-cache-groups fixture '$1' should be refused as a compiled-cache step, got: ${o}" >&2; exit 1; }
+}
+groups_mutant 'the untrusted compiled restore gains a term' cargo-target-cache-untrusted "inputs.concern == 'rust-db' }}" "inputs.concern == 'rust-db' && inputs.source_sha != '' }}"
+groups_mutant 'the untrusted compiled restore widened to every Rust concern' cargo-target-cache-untrusted "inputs.concern == 'rust-db' }}" "startsWith(inputs.concern, 'rust-') }}"
+groups_mutant 'the untrusted compiled restore becomes a save' cargo-target-cache-untrusted 'actions/cache/restore@' 'actions/cache/save@'
+groups_mutant 'the untrusted sources restore becomes a combined cache step' cargo-sources-untrusted 'actions/cache/restore@' 'actions/cache@'
+groups_mutant 'the untrusted sources restore loses the flag term' cargo-sources-untrusted "inputs.untrusted_readonly_cache && " ''
+for other in macos-validation-concern.yml windows-validation-concern.yml; do
+  d="${work}/groups-other-${other%%-*}"
+  rm -rf "${d}"; mkdir -p "${d}/.github/workflows"
+  cp ".github/workflows/${other}" "${d}/.github/workflows/"
+  anchor="$(grep -n '^      - name: Restore cached third-party crate sources' ".github/workflows/${other}" | head -1 | cut -d: -f1)"
+  insert_before "${d}/.github/workflows/${other}" "$(sed -n "${anchor}p" ".github/workflows/${other}")" "${work}/sources-step.yml"
+  rc=0; o="$(groups_run "${d}" ".github/workflows/${other}")" || rc=$?
+  [[ ${rc} -ne 0 ]] || { echo "check-cache-groups should refuse the untrusted restore in ${other}" >&2; exit 1; }
 done
 
 # The whole test again on a flipped tree (flag true on the untrusted half with its record line), which is

@@ -60,8 +60,8 @@ SAVE_KEY = '${{ steps.cargo-sources.outputs.cache-primary-key }}'
 PV = "github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true'"
 SOURCES = {
   'linux-validation-concern.yml' => {
-    restore: "${{ #{PV} && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}",
-    save: "${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}"
+    restore: "${{ #{PV} && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}",
+    save: "${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}"
   },
   'macos-validation-concern.yml' => {
     restore: "${{ #{PV} && startsWith(inputs.concern, 'rust-') }}",
@@ -91,6 +91,22 @@ crate_sources = lambda do |step, base|
   else
     false
   end
+end
+
+# The reviewed read-only untrusted restores of docs/untrusted-readonly-cache.md (Stage 2), Linux concern
+# workflow only: the untrusted crate-sources restore, the untrusted compiled restore and the untrusted
+# restore-time strip. Each carries exactly the three reviewed `if` terms (check-cache-mode.rb rule N and its
+# producer, path, key and ordering rules judge the rest of their shape), so they are not compiled-cache steps
+# of the main-only group scheme this file checks: they never save, and a save or any other cache step under
+# the same terms is still counted here and refused.
+UNTRUSTED_RESTORE_WORKFLOWS = %w[linux-validation-concern.yml].freeze
+UNTRUSTED_RESTORE_TERMS = ["github.ref == 'refs/heads/untrusted'", 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
+untrusted_restore = lambda do |step, base|
+  return false unless UNTRUSTED_RESTORE_WORKFLOWS.include?(base) && step.is_a?(Hash)
+  terms = CacheExpression.top_terms(step['if'].to_s)
+  return false if terms.nil? || terms.sort != UNTRUSTED_RESTORE_TERMS.sort
+  uses = step['uses'].to_s
+  uses.start_with?('actions/cache/restore@') || (uses == './.github/actions/rust-target-cache' && step.dig('with', 'mode') == 'restored')
 end
 
 LOOKBEHIND = '(?<![\w.\[\]])'
@@ -140,7 +156,7 @@ ARGV.each do |path|
   end
   # Positive identification: every cache step is a compiled-cache step unless it is exactly a reviewed
   # crate-sources step; a path pattern decides nothing (aliased paths cannot hide a step).
-  compiled = steps.select { |s| (cache_uses.call(s) || target_cache_uses.call(s)) && !crate_sources.call(s, base) }
+  compiled = steps.select { |s| (cache_uses.call(s) || target_cache_uses.call(s)) && !crate_sources.call(s, base) && !untrusted_restore.call(s, base) }
   allow = CONCERNS[base]
   if allow.nil?
     failures << "#{path}: compiled-dependency cache steps in a workflow with no reviewed concern allowlist (add it to CONCERNS in check-cache-groups.rb, in review)" unless compiled.empty?
