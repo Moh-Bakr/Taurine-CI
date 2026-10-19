@@ -56,6 +56,18 @@ while IFS= read -r -d '' path; do
   exit 1
 done < <(git ls-files -z)
 
+# The files admitted by exact path above are plain data too: a tracked symlink or an executable file at
+# one of those paths would pass the name rules while pointing elsewhere or being runnable. Read the git
+# mode from the index and accept only a regular, non-executable file (100644).
+while IFS= read -r -d '' record; do
+  mode="${record%% *}"
+  exact="${record#*$'\t'}"
+  if [[ "$mode" != '100644' ]]; then
+    echo "Exact-path files must be plain non-executable regular files: $exact has git mode $mode" >&2
+    exit 1
+  fi
+done < <(git ls-files -s -z -- .github/ci-matrix.json .github/dependabot.yml .github/tool-pins.json .github/egress-allowlist.txt .github/CODEOWNERS)
+
 # The assets in that directory are not inert data: the reporter is JavaScript
 # the pinned runner loads on the hosted runner. A tracked symlink would pass
 # every name rule above while pointing anywhere -- including into the private

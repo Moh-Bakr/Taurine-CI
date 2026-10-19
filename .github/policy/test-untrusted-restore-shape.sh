@@ -12,6 +12,7 @@ work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/untrusted-restore-shape.XXXXX
 trap 'rm -rf "${work}"' EXIT
 concern=linux-validation-concern.yml
 caller=linux-validation.yml
+composite=.github/actions/rust-target-cache/action.yml
 
 # The reviewed steps, verbatim: the exact pinned action, paths and keys the checker pins.
 cat > "${work}/sources-step.yml" <<'YAML'
@@ -73,6 +74,8 @@ build_reviewed() { # dir
   mkdir -p "${d}/.github/workflows" "${d}/docs"
   cp ".github/workflows/${concern}" ".github/workflows/${caller}" "${d}/.github/workflows/"
   cp docs/untrusted-readonly-cache.md "${d}/docs/"
+  mkdir -p "${d}/.github/actions/rust-target-cache"
+  cp "${composite}" "${d}/${composite}"
   local c="${d}/.github/workflows/${concern}" l="${d}/.github/workflows/${caller}"
   # A tree that already carries the reviewed restores (the change that introduces them) is its own
   # reviewed shape: nothing is added, and the same weakenings are applied to its real steps.
@@ -90,7 +93,7 @@ run_policy() { # dir [files...]; env passes through
   shift
   (cd "${d}" && ruby "${OLDPWD}/${policy}/check-cache-mode.rb" "${@:-.github/workflows/${caller}}") 2>&1
 }
-pair() { run_policy "$1" ".github/workflows/${caller}" ".github/workflows/${concern}"; }
+pair() { run_policy "$1" ".github/workflows/${caller}" ".github/workflows/${concern}" "${composite}"; }
 
 expect_pass() { # label dir
   local out rc=0
@@ -110,7 +113,7 @@ l=".github/workflows/${caller}"
 
 # The tree as it stands (no untrusted restore) passes, and so does the reviewed shape built from it.
 unset CACHE_MODE_BASE_DOC GITHUB_EVENT_NAME
-ruby "${policy}/check-cache-mode.rb" ".github/workflows/${caller}" ".github/workflows/${concern}" >/dev/null
+ruby "${policy}/check-cache-mode.rb" ".github/workflows/${caller}" ".github/workflows/${concern}" "${composite}" >/dev/null
 build_reviewed "${reviewed}"
 expect_pass 'the reviewed read-only untrusted restores behind a literal false' "${reviewed}"
 
@@ -190,9 +193,20 @@ mutant 'the untrusted half granted cache-mode write' 'cache-mode write needs the
     uses: ./.github/workflows/linux-validation-concern.yml'
 
 # The switch: a literal false in the callers, and a recorded spike before it may be true.
-mutant 'a caller key omitted' 'must pass untrusted_readonly_cache explicitly' "${l}" '      untrusted_readonly_cache: false
-' '' first
-mutant 'the flag as an expression' 'must be a literal true or false' "${l}" '      untrusted_readonly_cache: false' "      untrusted_readonly_cache: \${{ inputs.source_sha != 'x' }}" first
+# The flag lines are matched whatever their literal value (false, or true on a flipped tree).
+flag_mutant() { # label needle ruby-replacement-of-the-first-flag-line ("" removes the line)
+  local d="${work}/mutant"
+  rm -rf "${d}"; cp -R "${reviewed}" "${d}"
+  REPL="$3" ruby -e '
+    path = ARGV.fetch(0); text = File.read(path, encoding: "UTF-8")
+    re = /^      untrusted_readonly_cache: (?:false|true)\n/
+    abort "untrusted restore fixture: no flag line in #{path}" unless text.match?(re)
+    File.write(path, text.sub(re) { ENV["REPL"].empty? ? "" : "      untrusted_readonly_cache: #{ENV["REPL"]}\n" })
+  ' "${d}/${l}"
+  expect_fail "$1" "${d}" "$2"
+}
+flag_mutant 'a caller key omitted' 'must pass untrusted_readonly_cache explicitly' ''
+flag_mutant 'the flag as an expression' 'must be a literal true or false' "\${{ inputs.source_sha != 'x' }}"
 mutant 'the callee default true' 'literal default false' "${c}" '        default: false
         type: boolean' '        default: true
         type: boolean'
@@ -212,19 +226,21 @@ make_true() { # which-job
   JOB="$1" ruby -e '
     path = ARGV.fetch(0); text = File.read(path, encoding: "UTF-8")
     job = ENV.fetch("JOB"); start = text.index("\n  #{job}:\n") or abort "job #{job} not found"
-    flag = "      untrusted_readonly_cache: false"
-    at = text.index(flag, start) or abort "flag not found in #{job}"
-    text[at, flag.length] = "      untrusted_readonly_cache: true"
+    re = /^      untrusted_readonly_cache: (?:false|true)$/
+    at = text.index(re, start) or abort "flag not found in #{job}"
+    text[at...(at + text[at..][re].length)] = "      untrusted_readonly_cache: true"
     File.write(path, text)
   ' "${true_tree}/${l}"
+  # No spike record in the tree (a flipped tree carries one): each case adds what it needs.
+  ruby -e 'f = ARGV.fetch(0); File.write(f, File.read(f, encoding: "UTF-8").lines.reject { |x| x.start_with?("Stage 2 enforcement spike result:") }.join)' "${true_tree}/docs/untrusted-readonly-cache.md"
 }
 record='Stage 2 enforcement spike result: GREEN run 12345678901 reviewed by a-person on 2026-10-20'
 make_true validate-untrusted
 expect_fail 'the flag true without the recorded spike' "${true_tree}" 'needs exactly one recorded green enforcement spike line'
 printf '%s\n' "${record}" >> "${true_tree}/docs/untrusted-readonly-cache.md"
 expect_pass 'the flag true with the recorded spike in the tree (no base available)' "${true_tree}"
-cp docs/untrusted-readonly-cache.md "${work}/base-without-record.md"
-cp docs/untrusted-readonly-cache.md "${work}/base-with-record.md"; printf '%s\n' "${record}" >> "${work}/base-with-record.md"
+ruby -e 'File.write(ARGV[1], File.read(ARGV[0], encoding: "UTF-8").lines.reject { |x| x.start_with?("Stage 2 enforcement spike result:") }.join)' docs/untrusted-readonly-cache.md "${work}/base-without-record.md"
+cp "${work}/base-without-record.md" "${work}/base-with-record.md"; printf '%s\n' "${record}" >> "${work}/base-with-record.md"
 out="$(CACHE_MODE_BASE_DOC="${work}/base-with-record.md" pair "${true_tree}")" || { echo "the flip with the record merged on the base should pass: ${out}" >&2; exit 1; }
 for case in 'added|already merged on the base|base-without-record.md' 'unreadable|is not readable|missing.md'; do
   IFS='|' read -r label needle basefile <<< "${case}"
@@ -233,12 +249,88 @@ for case in 'added|already merged on the base|base-without-record.md' 'unreadabl
   [[ ${rc} -ne 0 && "${out}" == *"${needle}"* ]] || { echo "spike gate case '${label}' did not fail with '${needle}': ${out}" >&2; exit 1; }
 done
 printf '%s\n' 'Stage 2 enforcement spike result: GREEN run 99999999999 reviewed by a-person on 2026-10-20' > "${work}/base-altered.md"
-cat docs/untrusted-readonly-cache.md >> "${work}/base-altered.md"
+cat "${work}/base-without-record.md" >> "${work}/base-altered.md"
 out="$(CACHE_MODE_BASE_DOC="${work}/base-altered.md" pair "${true_tree}")" && { echo 'the flip with an altered record should fail' >&2; exit 1; }
 [[ "${out}" == *'differs from the merged base record'* ]] || { echo "an altered record failed with the wrong message: ${out}" >&2; exit 1; }
 make_true validate-main
 printf '%s\n' "${record}" >> "${true_tree}/docs/untrusted-readonly-cache.md"
 expect_fail 'the flag true on the main half, even with a record' "${true_tree}" 'may pass untrusted_readonly_cache: true'
+
+# Pull-request base pass: the base checkout is RUNNER_TEMP/base-policy. Present with its record document
+# and unchanged: the flip passes. Present but without the document: refused (fail closed). Absent (the
+# pull request's own pass): only a warning, the base-policy pass is the gate.
+make_true validate-untrusted
+printf '%s\n' "${record}" >> "${true_tree}/docs/untrusted-readonly-cache.md"
+rt="${work}/rt"; rm -rf "${rt}"; mkdir -p "${rt}/base-policy/docs"
+out="$(GITHUB_EVENT_NAME=pull_request RUNNER_TEMP="${rt}" pair "${true_tree}")" && { echo 'a pull-request pass whose base checkout lacks the record document should fail' >&2; exit 1; }
+[[ "${out}" == *'base-policy checkout has no readable docs/untrusted-readonly-cache.md'* ]] || { echo "the missing base document failed with the wrong message: ${out}" >&2; exit 1; }
+cp "${work}/base-with-record.md" "${rt}/base-policy/docs/untrusted-readonly-cache.md"
+out="$(GITHUB_EVENT_NAME=pull_request RUNNER_TEMP="${rt}" pair "${true_tree}")" || { echo "a pull-request pass with the record on the base should pass: ${out}" >&2; exit 1; }
+cp "${work}/base-without-record.md" "${rt}/base-policy/docs/untrusted-readonly-cache.md"
+out="$(GITHUB_EVENT_NAME=pull_request RUNNER_TEMP="${rt}" pair "${true_tree}")" && { echo 'a pull-request pass that adds the record in the flipping diff should fail' >&2; exit 1; }
+[[ "${out}" == *'already merged on the base'* ]] || { echo "adding the record in a pull request failed with the wrong message: ${out}" >&2; exit 1; }
+rm -rf "${rt}"; mkdir -p "${rt}"
+GITHUB_EVENT_NAME=pull_request RUNNER_TEMP="${rt}" pair "${true_tree}" >/dev/null || { echo 'a pull request own pass (no base checkout) should only warn' >&2; exit 1; }
+
+# The producers of the restore's path and key are pinned: the Cargo home step, the locate step and the
+# composite behind it (its outputs and the locate step's content hash).
+cargo_home_line='        id: cargo-home'
+mutant 'the Cargo-home step gains a source script' 'step cargo-home differs from the pinned shape' "${c}" '          set -euo pipefail
+          dir="${CARGO_HOME:-${HOME}/.cargo}"' '          set -euo pipefail
+          bash src/evil.sh
+          dir="${CARGO_HOME:-${HOME}/.cargo}"'
+mutant 'the Cargo-home step gains an env' 'step cargo-home differs from the pinned shape' "${c}" "${cargo_home_line}" "${cargo_home_line}
+        env:
+          CARGO_HOME: /tmp/elsewhere"
+mutant 'the locate step swapped for another action' 'step cargo-target differs from the pinned' "${c}" '        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: locate' '        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
+        with:
+          mode: locate'
+mutant 'the locate step gains an env' 'step cargo-target differs from the pinned' "${c}" '        id: cargo-target
+' '        id: cargo-target
+        env:
+          CARGO_TARGET_DIR: /tmp/x
+'
+mutant 'the locate step gains a with key' 'step cargo-target differs from the pinned' "${c}" '          mode: locate
+' '          mode: locate
+          dir: /tmp/x
+'
+mutant 'the locate step runs another mode' 'step cargo-target differs from the pinned' "${c}" '          mode: locate
+' '          mode: save
+'
+mutant 'the composite output key redirected' "outputs must be exactly the locate step's outputs" "${composite}" 'value: ${{ steps.locate.outputs.key }}' 'value: ${{ inputs.group }}'
+mutant 'the composite gains an output' "outputs must be exactly the locate step's outputs" "${composite}" 'outputs:
+  dir:' 'outputs:
+  extra:
+    description: x
+    value: y
+  dir:'
+mutant 'the composite locate step changed' 'no longer matches the reviewed content hash' "${composite}" '        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"' '        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
+        echo "dir=/tmp/planted" >> "${GITHUB_OUTPUT}"'
+no_composite="${work}/no-composite"; rm -rf "${no_composite}"; cp -R "${reviewed}" "${no_composite}"
+out="$(run_policy "${no_composite}" ".github/workflows/${caller}" ".github/workflows/${concern}")" && { echo 'the restore without the composite among the checked files should fail' >&2; exit 1; }
+[[ "${out}" == *'was not among the files checked'* ]] || { echo "a missing composite failed with the wrong message: ${out}" >&2; exit 1; }
+
+# The flag's workflow_call route is exactly on.workflow_call.inputs.<flag>: the same key under outputs or
+# secrets, or any deeper path, is another mention and is refused.
+mutant 'the flag name as a workflow_call output' 'outside the reviewed routes' "${c}" '  workflow_call:
+    inputs:' '  workflow_call:
+    outputs:
+      untrusted_readonly_cache:
+        value: ${{ jobs.validate.result }}
+    inputs:'
+mutant 'the flag name as a workflow_call secret' 'outside the reviewed routes' "${c}" '    secrets:
+      SOURCE_READER_PRIVATE_KEY:' '    secrets:
+      untrusted_readonly_cache:
+        required: false
+      SOURCE_READER_PRIVATE_KEY:'
+mutant 'the flag name nested inside its own input declaration' 'outside the reviewed routes' "${c}" '        required: false
+        default: false
+        type: boolean' '        required: false
+        default: false
+        type: boolean
+        untrusted_readonly_cache: x'
 
 # The reviewed restore is accepted in the Linux concern workflow only: the same step in the macOS or
 # Windows concern workflow is refused, and a main-gated restore elsewhere still passes untouched.
@@ -254,5 +346,21 @@ for other in macos-validation-concern.yml windows-validation-concern.yml; do
   out="$(cd "${d}" && ruby "${OLDPWD}/${policy}/check-cache-mode.rb" ".github/workflows/${other}" 2>&1)" || rc=$?
   [[ ${rc} -ne 0 && "${out}" == *"${reviewed_msg}"* ]] || { echo "the reviewed untrusted restore in ${other} should be refused: ${out}" >&2; exit 1; }
 done
+
+# The whole test again on a flipped tree (flag true on the untrusted half with its record line), which is
+# what the future flipping change looks like to the base pass: every case above must still hold there.
+if [[ "${UNTRUSTED_SHAPE_CHILD:-}" != 1 ]]; then
+  flipped="${work}/flipped"
+  rm -rf "${flipped}"; mkdir -p "${flipped}"
+  make_true validate-untrusted
+  printf '%s\n' "${record}" >> "${true_tree}/docs/untrusted-readonly-cache.md"
+  mkdir -p "${flipped}/.github" "${flipped}/docs"
+  cp -R .github/workflows .github/actions "${flipped}/.github/"
+  cp "${true_tree}/.github/workflows/${concern}" "${true_tree}/.github/workflows/${caller}" "${flipped}/.github/workflows/"
+  cp "${true_tree}/${composite}" "${flipped}/${composite}"
+  cp "${true_tree}/docs/untrusted-readonly-cache.md" "${flipped}/docs/"
+  cp -R "${policy}" "${flipped}/.github/policy"
+  (cd "${flipped}" && UNTRUSTED_SHAPE_CHILD=1 bash .github/policy/test-untrusted-restore-shape.sh >/dev/null) || { echo 'the untrusted restore fixtures failed on a flipped tree (flag true with its record)' >&2; exit 1; }
+fi
 
 echo 'untrusted restore fixtures: the reviewed read-only restores pass; a widened term, key, path or step key, a save, a write token, an unrecorded or misplaced switch and any other workflow are refused'

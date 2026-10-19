@@ -50,6 +50,8 @@
 # secret and no local composite (it deletes cache entries, which cache-mode does not govern), and
 # the weekly resolver's main-only dispatch job.
 require 'yaml'
+require 'json'
+require 'digest'
 require_relative 'cache-expression'
 
 MAIN = "github.ref == 'refs/heads/main'".freeze
@@ -461,6 +463,14 @@ def spike_gate(caller_path, name, failures)
   if base_doc.nil? && ENV['GITHUB_EVENT_NAME'] == 'pull_request' && ENV['RUNNER_TEMP']
     candidate = File.join(ENV['RUNNER_TEMP'], 'base-policy', 'docs', 'untrusted-readonly-cache.md')
     base_doc = candidate if File.exist?(candidate)
+    # Fail closed: the base checkout is present (this is the base-policy pass) but its record document
+    # is missing or unreadable, so the flip cannot be judged. Only a pull request's own pass, where no
+    # base checkout exists at all, falls through to the warning below. A push and a local run (no
+    # pull_request event) need the tree's own record, checked above, and have no base to compare.
+    if base_doc.nil? && File.directory?(File.join(ENV['RUNNER_TEMP'], 'base-policy'))
+      failures << "#{where}: the base-policy checkout has no readable docs/untrusted-readonly-cache.md, so the flip cannot be judged"
+      return
+    end
   end
   if base_doc.nil?
     warn "cache-mode policy: #{where}: no base document is available (a pull request's own pass); the base-policy pass judges the flip" if ENV['GITHUB_EVENT_NAME'] == 'pull_request'
@@ -475,8 +485,73 @@ def spike_gate(caller_path, name, failures)
   failures << "#{where}: the spike record in this change differs from the merged base record; it may not be altered in the diff that flips the flag" if base.length == 1 && base.first != tree.first
 end
 
+# N2b: the untrusted restore's path and key are outputs of two producer steps, so those steps are pinned
+# too (a restore whose path or key comes from an unpinned step is only as reviewed as that step).
+#  - `cargo-home`: the plain `run` step that writes the Cargo home directory, whole body pinned.
+#  - `cargo-target`: the local rust-target-cache composite in `locate` mode, with exactly the four
+#    reviewed `with` keys and no other step key (no env, no continue-on-error). Its group and features
+#    are free here because the composite itself refuses anything but fixed lower-case labels.
+#  - the composite: its `dir` and `key` outputs are exactly the `locate` step's outputs, and that step
+#    (shell, working directory, env and run, not its name or condition) hashes to LOCATE_STEP_SHA256.
+#    Changing that step is a reviewed change of this constant, in the same pull request.
+CARGO_HOME_PIN = {
+  'id' => 'cargo-home', 'shell' => 'bash',
+  'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
+}.freeze
+TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
+LOCATE_STEP_SHA256 = 'b2b5808bd0fae32e972af866f809044edb1be92d21e3c9ac5ee4bbf087f2808a'.freeze
+
+def canonical_json(value)
+  case value
+  when Hash then value.map { |k, v| [k.to_s, canonical_json(v)] }.sort_by(&:first).to_h
+  when Array then value.map { |v| canonical_json(v) }
+  else value
+  end
+end
+
+def producer_step_failures(path, doc, docs, failures)
+  steps = (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).values.flat_map { |job| job.is_a?(Hash) ? steps_of(job) : [] }.grep(Hash)
+  one = lambda do |id|
+    found = steps.select { |st| st['id'] == id }
+    failures << "#{path}: the untrusted restore needs exactly one step with id #{id} (found #{found.length})" unless found.length == 1
+    found.length == 1 ? found.first : nil
+  end
+  if (home = one.call('cargo-home'))
+    rest = home.reject { |k, _| %w[name if].include?(k) }
+    failures << "#{path}: step cargo-home differs from the pinned shape its untrusted restore path depends on" unless rest == CARGO_HOME_PIN
+  end
+  if (target = one.call('cargo-target'))
+    with = target['with']
+    keys_ok = (target.keys - %w[name id if uses with]).empty?
+    shape_ok = keys_ok && target['uses'].to_s == TARGET_CACHE_ACTION && with.is_a?(Hash) &&
+               with.keys.sort == %w[features group mode os-label] && with['mode'] == 'locate' &&
+               with['os-label'].is_a?(String) && with['os-label'].match?(/\A[A-Za-z]+\z/)
+    failures << "#{path}: step cargo-target differs from the pinned rust-target-cache locate shape its untrusted restore path and key depend on" unless shape_ok
+  end
+  action_path = docs.keys.find { |k| k.end_with?('.github/actions/rust-target-cache/action.yml') }
+  composite = action_path && docs[action_path]
+  unless composite.is_a?(Hash)
+    failures << "#{path}: the untrusted restore depends on the rust-target-cache composite, which was not among the files checked"
+    return
+  end
+  outputs = composite['outputs']
+  outputs_ok = outputs.is_a?(Hash) && outputs.keys.sort == %w[dir key] &&
+               outputs['dir'].is_a?(Hash) && outputs['dir']['value'] == '${{ steps.locate.outputs.dir }}' &&
+               outputs['key'].is_a?(Hash) && outputs['key']['value'] == '${{ steps.locate.outputs.key }}'
+  failures << "#{action_path}: the dir and key outputs must be exactly the locate step's outputs" unless outputs_ok
+  locate = Array(composite.dig('runs', 'steps')).grep(Hash).select { |st| st['id'] == 'locate' }
+  if locate.length != 1
+    failures << "#{action_path}: expected exactly one locate step (found #{locate.length})"
+  else
+    body = locate.first.reject { |k, _| %w[name if id].include?(k) }
+    digest = Digest::SHA256.hexdigest(JSON.generate(canonical_json(body)))
+    failures << "#{action_path}: the locate step no longer matches the reviewed content hash its untrusted restore depends on" unless digest == LOCATE_STEP_SHA256
+  end
+end
+
 reviewed_restores.each_key do |path|
   doc = docs.fetch(path)
+  producer_step_failures(path, doc, docs, failures)
   base = File.basename(path)
   failures << "#{path}: a workflow with an untrusted restore must set no write permission at workflow level" if write_permission?(doc['permissions'])
   declared = workflow_triggers_input(doc)[UNTRUSTED_FLAG]
@@ -544,7 +619,7 @@ docs.each do |path, doc|
   is_callee = UNTRUSTED_RESTORE_WORKFLOWS.include?(base)
   found.each do |where, kind|
     ok =
-      if kind == :key && where.last == UNTRUSTED_FLAG && where.length >= 4 && where[0..1] == %w[on workflow_call] || (kind == :key && where.first == true && where[1] == 'workflow_call' && where.last == UNTRUSTED_FLAG)
+      if kind == :key && where.length == 4 && ['on', true].include?(where[0]) && where[1] == 'workflow_call' && where[2] == 'inputs' && where[3] == UNTRUSTED_FLAG
         is_callee
       elsif kind == :key && where.length == 4 && where[0] == 'jobs' && where[2] == 'with' && where[3] == UNTRUSTED_FLAG
         job = doc.dig('jobs', where[1])

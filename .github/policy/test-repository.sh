@@ -69,6 +69,19 @@ for rejected in 'CODEOWNERS' 'docs/CODEOWNERS' '.github/codeowners' '.github/COD
   expect_reject "${misplaced}" "ownership file at ${rejected}" 'Unexpected tracked path in the public CI repository'
 done
 
+# A symlink or an executable file at an exact-path file is refused (mode must be 100644).
+for exact in .github/CODEOWNERS .github/ci-matrix.json .github/dependabot.yml .github/tool-pins.json .github/egress-allowlist.txt; do
+  linked="$(new_fixture)"
+  ln -s /etc/hosts "${linked}/${exact}"
+  git -C "${linked}" add "${exact}"
+  expect_reject "${linked}" "a symlink at ${exact}" 'plain non-executable regular files'
+  runnable="$(new_fixture)"
+  printf 'x\n' > "${runnable}/${exact}"
+  chmod +x "${runnable}/${exact}"
+  git -C "${runnable}" add "${exact}"
+  expect_reject "${runnable}" "an executable file at ${exact}" 'plain non-executable regular files'
+done
+
 credential="$(new_fixture)"
 mkdir -p "${credential}/docs"
 printf 'GH_APP_PRIVATE_KEY=TEST_FIXTURE_SENTINEL\n' > "${credential}/docs/repository-fixture.md"
