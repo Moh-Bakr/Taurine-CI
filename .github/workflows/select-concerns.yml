@@ -31,6 +31,12 @@ on:
       matrix:
         description: JSON object with the selected concern list
         value: ${{ jobs.select.outputs.matrix }}
+      long_matrix:
+        description: JSON object with the selected long-pole concerns
+        value: ${{ jobs.select.outputs.long_matrix }}
+      short_matrix:
+        description: JSON object with the selected concerns that are not long poles
+        value: ${{ jobs.select.outputs.short_matrix }}
       selection:
         description: full or partial
         value: ${{ jobs.select.outputs.selection }}
@@ -59,6 +65,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       matrix: ${{ steps.selection.outputs.matrix }}
+      long_matrix: ${{ steps.selection.outputs.long_matrix }}
+      short_matrix: ${{ steps.selection.outputs.short_matrix }}
       selection: ${{ steps.selection.outputs.selection }}
       reason: ${{ steps.selection.outputs.reason }}
     steps:

@@ -399,7 +399,7 @@ finished validation is normal, and the coordinator's ledger reconciles attempts.
 What dispatch does wire today is the shadow review. The Linux dispatcher accepts the
 classifier's request as an identity-bound `suite_selection` input (mutually exclusive with
 `base_sha`: one selection mechanism per dispatch), runs `select-suites.rb` over it in its
-plan job, and carries the per-group result to the bound concern workflows. Two rules keep
+plan step (in `validate-input`), and carries the per-group result to the bound concern workflows. Two rules keep
 that plumbing honest. First, fail-closed: a request the selector rejects - malformed, an
 unknown feature ID, an unreviewed review mode - dispatches the complete set, with the fixed
 rejection code recorded in the run summary; a selection bug must never look like a
@@ -437,6 +437,42 @@ coordinator's ledger with `suite-overview.rb`: GitHub provides no artifact-free 
 matrix legs to a sibling job. The generator refuses anything that is not the validator's
 reviewed shape and reports honestly when no evidence was collected. Existing concern coverage stays authoritative: the evidence pipeline
 observes, it does not yet narrow what a concern executes.
+
+### Early suite-ownership check
+
+The trusted evidence collector refuses a test no suite owns (`ownership_unowned`), but it runs at the end of a
+concern job, so a candidate that adds or renames a test file without regenerating the private ownership manifest
+(`scripts/ci/suite-ownership.json`) was found 25 to 60 minutes late. `refuse-unowned-tests.rb` runs the same rule on
+data only at the START of every Linux concern job, as the step "Refuse test files with no suite owner before any
+build", straight after the suite-contract snapshot.
+
+It is a concern-job step and not part of the plan because the plan step holds no source: a source-bearing planning
+job would be a runner on the critical path of every dispatch (the survey measured a 6-second plan queueing 569 s),
+and a refusal would still arrive only after the planner. Each concern job refuses within seconds of its checkout,
+which is before any dependency install, build or test, so a bad candidate fails every job in about the first minute
+instead of at the end of the longest one.
+
+What it does. It runs after the token is revoked and root is dropped (the source-checkout and drop-root steps stay
+before it, and `test-suite-ownership-check.sh` pins that order). It reads the manifest as JSON and the tracked file names
+from `git ls-files` (with `safe.directory` on the command line only); no test file is opened and no project script,
+config, hook or package manager runs. Every tracked `*.test.*` or `*.spec.*` source must match at least one suite's
+`include` glob, with exactly the collector's glob semantics (`**` crosses directories, `*` stays in a segment; the
+fixture proves the two implementations agree). A tracked file list has no base commit, so "added or renamed" cannot be
+told from "existing": the check covers every tracked test file, a superset that catches any added or renamed file the
+manifest does not cover. Three trees are exempt by reviewed prefix because no Linux suite runs them: `skills/` (the
+orchestrate skill's own suite), `vendor/` and `taurine-mobile/tests/e2e/` (the mobile journeys); everything else is
+in scope, so a new test area fails closed. A source with no manifest (an older revision) is skipped with a note, and a
+manifest that cannot be read fails closed with a fixed reason class (`manifest_shape`, `manifest_glob`, `file_list`, or `internal` for anything
+unforeseen, which prints nothing of the error). The manifest must be a plain file (read with `lstat`: a symbolic link, directory or device is
+refused), and a glob may contain only letters, digits and `_ . / * @ + -`: anything else is refused as `manifest_glob` before a pattern is built,
+so no glob text can reach the regular-expression compiler or a log. The trusted collector holds the same rule. File names are matched as raw bytes,
+so a name that is not valid text is counted or ignored like any other. `check-wave-c-wiring.rb` fails a tree in the Wave C shape that drops any of the
+three policy tests or this step.
+
+What it prints. Only fixed words and counts: the number of test files checked, the number with no owner and the reason
+class `ownership_unowned`, in the log and the step summary. No path, pattern or file name ever leaves the job (the rule
+in the private `ci-feature-suites.md`); to list the files, run the private ownership audit locally. It does not replace
+the collector: overlap between two suites, and ownership as the runner discovers it, are still decided at the end.
 
 ### Keeping untrusted in sync with main (manual, by design)
 
@@ -507,8 +543,8 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
 
 | Workflow | Concerns |
 | --- | --- |
-| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and the opt-in e2e-visual and scan-history |
-| `macos-validation.yml` and `macos-validation-concern.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app, rust-packaging, rust-tls-openssl |
+| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2/3, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and the opt-in e2e-visual and scan-history |
+| `macos-validation.yml` and `macos-validation-concern.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2, rust-packaging, rust-tls-openssl |
 | `windows-validation.yml` and `windows-validation-concern.yml` | The same app concerns plus contracts; Rust concerns with `rust=true`; `windows_image` selects `windows-2022` (default) or `windows-2025` |
 | `android-validation.yml` | android-native (debug build for aarch64); android-rust with `rust=true` (compile-only mobile test targets, not executed) |
 | `ios-validation.yml` | ios-native (unsigned simulator build); ios-rust with `rust=true` (compile-only) |
@@ -555,10 +591,81 @@ request, and a reviewer sees the addition.
 
 `.github/ci-matrix.json` is the one concern table for Linux. Each concern has a `timeout`
 (minutes) and one or more of: `always`, `paths`, `rust_packages` or `rust_package_glob`,
-`full_only` (dropped by the quick profile) and `opt_in` (the dispatch input that enables it).
-Top-level `rules` list build-wide paths (`full_if_any_changed`) and `docs_only` paths.
+`full_only` (dropped by the quick profile), `long_pole` (see below) and `opt_in` (the dispatch input
+that enables it). Top-level `rules` list build-wide paths (`full_if_any_changed`) and `docs_only` paths.
 
-The Linux dispatcher reads the table; the `plan` job builds the concern list, and the
+**Planning is a step of the first job, not a job.** On Linux and Windows the concern lists are computed by
+the `plan` step of `validate-input`, the job that already checks out the control plane, verifies the dispatch
+identity and refuses a duplicate. A separate planning job is one more runner to wait for: on a full pool the
+6-second `Plan Windows concerns` job queued 569 s and every Windows concern waited behind it (survey 8.7). The
+step holds no source, token or environment and emits the same lists as before; the downstream jobs read
+`needs.validate-input.outputs.*`. macOS already plans in its first job (`plan`, which also holds its dispatch
+identity checks), so it has no extra hop.
+
+**Concurrency caps on the short jobs.** The hosted pool is 20 runners, measured full (survey 8.5), shared by
+Linux, Windows, the live proofs and Android; macOS has its own five. The long poles (Linux 5, Windows 5) hold
+10 runners for the whole set, so every other group is capped with `strategy.max-parallel` and the long-pole
+jobs are not: live proofs 6 of 13 arms (`live-proofs.yml`, pinned by `check-live-proof-fanout.rb`), Linux short
+jobs 5, Windows TypeScript jobs 2 and Windows short Rust jobs 2. The numbers come from the survey's runner
+minutes: the capped groups still finish well inside the long poles (Linux short about 150 runner-minutes over
+5 is 30 minutes against a pole near 40; Windows TypeScript about 52 over 2 is 26 against a pole near 50;
+Windows short Rust about 35 over 2 is 18; the live arms about 209 over 6 is 35 plus queue against Windows near
+58), and the instantaneous demand at dispatch falls from 58 jobs to 27, so a second-wave short job always
+queues behind a long pole that was queued at the start. macOS is not capped: it is a separate pool, and its
+long poles already fill its five runners first. A cap is a ceiling, not a reservation; if a measured set shows
+a capped group finishing after the long poles, raise that cap, not the others.
+
+**`rust-app` is three hash shards on Linux and Windows and two on macOS.** The crate-test concern for `taurine-app`,
+`taurine-desktop` and `taurine-mobile` runs as `rust-app-1`, `-2` and `-3`, each `cargo nextest run --partition
+hash:K/3` over the same package list and profile (K from the concern name). A hash partition assigns each
+test to exactly one shard from a stable hash of its binary and name, so the three together run every test
+once and none twice, and a test added later lands in one shard without anyone moving it (the earlier
+`count:N/2` split by position). Each shard compiles in full, so compile is paid three times; the saving is the
+test run (about 2 x 270 s of 810 s on Linux, 2 x 290 s of 884 s on Windows) and the better packing of the
+pool, not the compile. Doctests, which nextest does not run, ride with shard 1 only, so they run once.
+`NEXTEST_REQUIRE_TESTS` turns an empty partition into a failure (`--no-tests=fail`) instead of a silent
+pass. The Linux `rust-app-openvpn-check` (about 3 minutes, a separate `cargo check --features openvpn`) moved
+from shard 1 (survey 8.6: it sat on the longer shard) to shard 3: with three shards the fixed work is the only
+known input to the balance, shard 1 already carries the doctests, and shard 2 saves the compiled-dependency
+cache on main, whose contents the check must not enlarge. Move it with one line if a green set shows shard 3
+the longest.
+
+Discovery proof. The partitions are one nextest feature applied to one command, so what can go wrong is the
+shape around it, and `test-rust-app-shards.sh` pins that shape on the real tree and on mutated copies: all
+three platform composites run one arm for `rust-app-1|rust-app-2|rust-app-3` with partition
+`hash:${CONCERN##*-}/3` and no `count:` partition, the doctest branch and the other branch run one package list,
+`ci-matrix.json` holds exactly shards 1 to 3 (each a long pole with the same crates and a 60-minute budget),
+the Windows and macOS planners and the Result lists name exactly the three shards, and the privileged package
+setup knows shard 3. Dropping, renaming, miscounting or repeating a shard fails that script. Per-test proof
+that the three partitions cover the whole list is nextest's own guarantee for `hash:`; this control plane has
+no source to list tests from, and a cross-job count would pass compiled or source-derived data between jobs,
+which the no-source-artifact rule forbids.
+
+Budgets. The three-way jobs are shorter than the two-way ones (compile unchanged, the test run a third), so no
+timeout was raised. Cold untrusted estimates from survey 8.5 to 8.7, against the unchanged limits and the
+80% rule: Linux about 45 s setup + 1,581 s compile (worst measured) + 600 s tests (a third of 1,788 s) + 173 s
+openvpn check on shard 3, about 40 minutes of 60 (67%); Windows about 65 s + 2,487 s compile + 512 s tests (a
+third of 1,536 s), about 51 minutes of 110 (46%, 56 minutes with a 10% compile spread, 51%); macOS about 43 minutes
+compile + 6 minutes tests + setup, about 50 minutes of 100 (these macOS figures are for a third shard that macOS does
+not run). macOS stays at two `hash:K/2` shards by decision: its pool is five runners, and a third shard would add about
+43 runner-minutes of compile to a set already bound by pool work divided by five. It keeps the doctests on shard 1 and
+`NEXTEST_REQUIRE_TESTS`; the openvpn check is Linux-only, so it has no placement on macOS (the shim is tested by
+`rust-ovpn`). Revisit once a measured macOS set shows headroom.
+
+**Long poles run in their own jobs.** GitHub starts matrix entries in no promised order, and the
+hosted pool is about 20 runners shared by every workflow of a set (Taurine survey 8.5, 8.7), so a
+long Rust job listed first could still start last. The concerns flagged `long_pole` (`rust-app-*`,
+`rust-db`, `rust-packaging`) therefore run in separate dispatcher jobs with no dependency on the short
+jobs. On Linux they are `validate-long-main` and `validate-long-untrusted`; on macOS the same names; on
+Windows `validate-rust-long-main` and `validate-rust-long-untrusted`. They are defined first in the
+file and are the same reusable concern call as the short jobs, with the same `cache-mode` halves, the same
+`cache-audit` need on `untrusted` and the same secret handling. The planner (and `select-concerns` on a
+`base_sha` run) publishes `matrix` (the whole selection, which the Result job still requires), `long_matrix`
+and `short_matrix`; a half with no concern is skipped by its job's `if`, never an empty matrix. Timings,
+`cache-audit-after` and Result need every half, and their job-name pattern accepts the `long` jobs, so no
+concern can leave the verdict.
+
+The Linux dispatcher reads the table; the `plan` step of `validate-input` builds the concern list, and the
 `select-concerns` composite narrows it when a `base_sha` is supplied. It runs after checkout
 with history and the token already revoked, diffs `base_sha` to `source_sha`, and selects:
 
@@ -601,8 +708,8 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `visual` | Linux | Adds the Playwright `e2e-visual` tier; leave off until baselines for Linux exist |
 | `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
-| `only` | Linux, macOS, Windows | Comma-separated concern names for a surgical re-run of exactly those concerns. Every other concern is reported as "not selected", so the verdict is PASS (partial) and the run never admits a merge. On Linux it is mutually exclusive with `base_sha` (refused together); an unknown name, or a Rust concern named while `rust=false` on macOS or Windows, stops the run in the plan job. A Linux opt-in concern named in `only` must also have its own input enabled (`visual`, `gitleaks_history`), or the Result fails because a required concern did not run |
-| `suite_selection` | Linux | The reviewed source-side classifier's suite selection request (single-line JSON, identity-bound). The plan job computes the exact selection with `select-suites.rb` and fails closed to the complete set when the selector rejects the request; the carried selection is a shadow review - the complete set runs and each bound concern reports what a partial selection would have run. Mutually exclusive with `base_sha` and `only` |
+| `only` | Linux, macOS, Windows | Comma-separated concern names for a surgical re-run of exactly those concerns. Every other concern is reported as "not selected", so the verdict is PASS (partial) and the run never admits a merge. On Linux it is mutually exclusive with `base_sha` (refused together); an unknown name, or a Rust concern named while `rust=false` on macOS or Windows, stops the run in the planning step (the `plan` step of `validate-input` on Linux and Windows, the `plan` job on macOS). A Linux opt-in concern named in `only` must also have its own input enabled (`visual`, `gitleaks_history`), or the Result fails because a required concern did not run |
+| `suite_selection` | Linux | The reviewed source-side classifier's suite selection request (single-line JSON, identity-bound). The plan step (in `validate-input`) computes the exact selection with `select-suites.rb` and fails closed to the complete set when the selector rejects the request; the carried selection is a shadow review - the complete set runs and each bound concern reports what a partial selection would have run. Mutually exclusive with `base_sha` and `only` |
 | `selection-mode` | Internal result input | Each dispatcher supplies the reviewed full/partial decision; it is never inferred from the final job list |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |
@@ -629,8 +736,17 @@ Partial runs (quick profile, `base_sha`, `only`, `rust=false`) never admit a mer
 always a PASS (full) on the exact 40-character source SHA: the full set of concerns, all green.
 
 Always confirm the summary names the exact 40-character SHA you requested before attributing a
-result to a commit. A `Timings` job beside it tabulates durations against committed baselines and
-warns, without failing, when a job is more than 25% and two minutes slower.
+result to a commit. A `Timings` job beside it tabulates each concern's queue time (job start minus job
+creation, the wait for a runner), duration and baseline, and warns, without failing, when a job is more than
+25% and two minutes slower. Runs from `main` restore the compiled-dependency caches and runs from the
+`untrusted` ref restore none, so the table has two baselines: `baseline-seconds` for `main` and
+`baseline-seconds-untrusted` for `untrusted`. When an untrusted baseline is supplied an untrusted run is judged
+against it alone, and a concern missing from it is listed without a comparison, never against the warm `main`
+number (survey 8.6: four of six drift flags were that effect). Linux and Windows carry untrusted baselines taken
+from the cold sets in survey 8.5 to 8.7 (the `rust-app` shards have none until a green set re-bases them after
+the 3-way split); macOS has none yet and keeps the `main` baseline. The queue column is what makes ordering and
+the concurrency caps measurable: a long pole whose queue is more than a minute is a failed ordering.
+`test-timings-table.sh` holds the fixtures.
 
 ## The weekly run and drift
 

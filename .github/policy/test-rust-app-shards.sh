@@ -19,13 +19,6 @@
 #   - the privileged package setup knows all three.
 # Run from the repository root (the policy workflow does).
 set -euo pipefail
-# Wave C step A: this test lands before the tree it judges. It is enforced once the policy workflow
-# runs it (the step arrives with Wave C); in a tree whose workflow does not run it yet there is nothing
-# for it to hold, so it says so and passes. A tree that DOES run it is held to every assertion below.
-if ! grep -qF 'bash .github/policy/test-rust-app-shards.sh' .github/workflows/validate-public-changes.yml 2>/dev/null; then
-  echo 'rust-app shards: skipped, the policy workflow of this tree does not run this test yet'
-  exit 0
-fi
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 

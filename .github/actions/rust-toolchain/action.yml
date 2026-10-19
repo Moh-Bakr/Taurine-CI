@@ -169,6 +169,9 @@ runs:
             echo 'CARGO_PROFILE_DEV_DEBUG=0'
             echo 'CARGO_PROFILE_TEST_DEBUG=0'
           } >> "${GITHUB_ENV}"
+          # Rust 1.90 and later already use rust-lld by default on x86_64 Linux (gnu), so on a current
+          # toolchain the explicit flag below is redundant and harmless; it keeps an older toolchain on
+          # lld, and the runner's own `ld.lld` is the one it names.
           # Link with lld. RUSTFLAGS replaces, rather than merges with, any
           # `build.rustflags` a cargo config in the checkout sets, so the flag is
           # applied only when no checked-out cargo config sets rustflags of its own;

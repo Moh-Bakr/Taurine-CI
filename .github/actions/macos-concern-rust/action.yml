@@ -215,15 +215,19 @@ runs:
               cargo test --locked --no-fail-fast "${rust_ovpn_packages[@]/#/--package=}"
             ;;
           rust-app-1|rust-app-2)
-            # Two nextest partitions of the same package set, as on Linux and Windows: measured
-            # on macOS, the single concern compiled for 34 minutes and ran tests for 16, so each
-            # leg compiles in full and runs half the tests. `count:N/2` splits deterministically;
-            # no compiled output crosses between the jobs. Doctests ride with partition 1.
-            export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
+            # Two nextest partitions of the same package set, as before the Linux and Windows
+            # concerns went to three (survey 8.5-4): macOS stays at two because its pool is five
+            # runners and each shard repeats a 43 minute cold compile, so a third shard adds about
+            # 43 runner-minutes to a set already bound by pool work divided by five. `hash:K/2` assigns
+            # every test to exactly one shard from a stable hash of its binary and name, so none is
+            # dropped or run twice; no compiled output crosses between the jobs. `NEXTEST_REQUIRE_TESTS`
+            # makes an empty partition a failure. Doctests ride with shard 1 only. The openvpn check is
+            # Linux-only (macOS tests the shim in `rust-ovpn`). test-rust-app-shards.sh pins this.
+            export NEXTEST_PARTITION="hash:${CONCERN##*-}/2"
             if [[ "${CONCERN}" == rust-app-1 ]]; then
-              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              NEXTEST_REQUIRE_TESTS=true rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
             else
-              NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              NEXTEST_REQUIRE_TESTS=true NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
             fi
             ;;
           rust-packaging)

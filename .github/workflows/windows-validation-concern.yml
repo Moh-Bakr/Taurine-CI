@@ -123,7 +123,7 @@ jobs:
         uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
 
       # The shells carry the OpenSSL door, so every Rust concern that compiles taurine-app
-      # (rust-app-1/2, rust-packaging) and the door's own concerns build the vendored OpenSSL
+      # (rust-app-1/2/3, rust-packaging) and the door's own concerns build the vendored OpenSSL
       # 3.5 from source. openssl-src runs `perl Configure` with OPENSSL_SRC_PERL first: Git's
       # msys perl (first on the bash PATH) lacks the Win32 modules OpenSSL's MSVC build needs,
       # so the image's Strawberry Perl is named explicitly, job-wide, before any project code.
@@ -219,6 +219,38 @@ jobs:
         with:
           patch-diagnostics: 'true'
 
+      # GNU tar for the cache restores and saves (research finding 8). The cache action runs tar from PATH
+      # and on a Windows runner finds the system BSD tar first, which restores slowly; when the first
+      # `tar` on PATH is GNU tar it uses that, and it then compresses with zstd. Git for Windows ships GNU
+      # tar on the runner image. Its `usr/bin` directory also holds `link.exe`, `find` and `sort`, which
+      # would shadow the Windows tools for any process that resolves them from PATH; the concern steps run
+      # under Git Bash, which already resolves its tools from that directory first, and rustc finds the
+      # MSVC linker through Visual Studio, not PATH (and the crate-test concerns link with rust-lld), but
+      # that is reasoning, not a measurement: the first protected run after this change is the check, and
+      # removing this one step undoes it. Nothing is downloaded and nothing but the image's own
+      # `usr/bin` is named. The step needs the reviewed main and protected-ancestor terms the restores
+      # carry, so the untrusted ref (which restores nothing) is unchanged, and it runs after the source
+      # checkout has revoked its token, so no step before revocation is touched. If the image's tar is
+      # not GNU tar the step changes nothing and says so: it is an optimisation, never a gate.
+      # Consequence, recorded on purpose: the compression method is part of the cache version, so the
+      # first protected Windows run after this change misses every cache once, then restores as before.
+      - name: Put the image's GNU tar ahead of the Windows tar for the cache steps
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gnu_dir='C:\Program Files\Git\usr\bin'
+          gnu_tar='/c/Program Files/Git/usr/bin/tar.exe'
+          version="$("${gnu_tar}" --version 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+          if [[ "${version}" != 'tar (GNU tar)'* ]]; then
+            echo 'gnu-tar: the image has no GNU tar at the Git for Windows path; the cache steps keep the default tar'
+            echo '- GNU tar: not found on the image; cache steps use the default tar' >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          printf '%s\n' "${gnu_dir}" >> "${GITHUB_PATH}"
+          echo "gnu-tar: ${version}"
+          echo "- GNU tar for the cache steps: ${version}" >> "${GITHUB_STEP_SUMMARY}"
+
       # Third-party crate sources only: cargo's registry index, the downloaded
       # `.crate` archives and the git dependency databases. Never `target/`, never
       # an extracted source tree, never anything under the checked-out private
@@ -306,7 +338,7 @@ jobs:
       # from the untrusted ref, whose scope main never reads), that is protected code only. Every
       # restore, strip and save step carries both top-level terms and the cache policy enforces it. The
       # locate step only computes the key and keeps the target directory outside the private checkout.
-      # One group per measured compile-bound concern family: rust-app (the two shards share one
+      # One group per measured compile-bound concern family: rust-app (the three shards share one
       # build), rust-db (measured 953 s compile against 124 s of tests), rust-domain and
       # rust-packaging. Each single-job group is its own designated saver. rust-ovpn stays outside
       # on purpose (its vcpkg dependency build, not the cargo target directory, dominates it) and

@@ -247,20 +247,22 @@ runs:
               deferred_results+=("rust-ovpn-tests|failed: not run (the vcpkg dependency install failed)")
             fi
             ;;
-          rust-app-1|rust-app-2)
-            # Two nextest partitions of the same package set, as on Linux: measured on
-            # Windows, the single concern's compile took 36 minutes and the test run 19, so
-            # each leg compiles in full and runs half the tests. `count:N/2` splits
-            # deterministically; no compiled output crosses between the jobs. Doctests ride
-            # with partition 1.
-            export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
+          rust-app-1|rust-app-2|rust-app-3)
+            # Three nextest partitions of the same package set, as on Linux (survey 8.5-4, 7.7): measured
+            # on Windows, the single concern's compile took 36 minutes and the test run 19, so each shard
+            # compiles in full (about 41 minutes cold) and runs a third of the tests. `hash:K/3` assigns
+            # every test to exactly one shard from a stable hash of its binary and name, so none is
+            # dropped or run twice; no compiled output crosses between the jobs. `NEXTEST_REQUIRE_TESTS`
+            # makes an empty partition a failure. Doctests ride with shard 1 only.
+            # test-rust-app-shards.sh pins this.
+            export NEXTEST_PARTITION="hash:${CONCERN##*-}/3"
             # The command tier both shells call and the two shells' own unit tests.
             # Tauri's `test` feature drives the commands through its mock runtime, so
             # no window or WebView2 process is started.
             if [[ "${CONCERN}" == rust-app-1 ]]; then
-              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              NEXTEST_REQUIRE_TESTS=true rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
             else
-              NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              NEXTEST_REQUIRE_TESTS=true NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
             fi
             ;;
           rust-packaging)

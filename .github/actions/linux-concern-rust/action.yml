@@ -225,32 +225,38 @@ runs:
             run_deferred rust-net-tests \
               cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
             ;;
-          rust-app-1|rust-app-2)
-            # Two nextest partitions of the same package set (measured: the single concern ran
-            # over 1.8x the next slowest). `count:N/2` splits deterministically; no artifact
-            # crosses between the jobs. Doctests and the openvpn check ride with partition 1: partition
-            # 2 measured slower on the same tests (39227442004), so neither runs twice and the extra
-            # work sits on the faster shard.
-            export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
+          rust-app-1|rust-app-2|rust-app-3)
+            # Three nextest partitions of the same package set (survey 8.5-4, 7.7). `hash:K/3` assigns
+            # every test to exactly one of the three shards from a stable hash of its binary and name, so
+            # no test is dropped and none runs twice, whatever tests are added, and no compiled output
+            # crosses between the jobs. Each shard compiles in full (about 25 minutes cold) and runs a
+            # third of the tests. `NEXTEST_REQUIRE_TESTS` makes an empty partition a failure instead of a
+            # silent pass (`--no-tests=fail`). Doctests ride with shard 1 only, so they run once; the
+            # openvpn check rides with shard 3 (below). test-rust-app-shards.sh pins all of this.
+            export NEXTEST_PARTITION="hash:${CONCERN##*-}/3"
             # The command tier both shells call, and the two shells' own unit
             # tests. Tauri's `test` feature drives the commands through its
             # mock runtime, so no display or WebView process is started; the
             # webkit2gtk install above is only what the crates link.
             if [[ "${CONCERN}" == rust-app-1 ]]; then
-              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              NEXTEST_REQUIRE_TESTS=true rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
             else
-              NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              NEXTEST_REQUIRE_TESTS=true NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
             fi
             # The `openvpn` feature of taurine-app links the vendored openvpn3 C++ shim; no
             # test build enables it. A library check compiles it (the C++ build runs, the
-            # system libraries above are the ones openvpn3 needs).
+            # system libraries above are the ones openvpn3 needs). It is a separate `cargo check`
+            # of about 3 minutes, kept off the shard that carries the doctests and off
+            # `rust-app-2`, the shard that saves the compiled-dependency cache on main, so the cache
+            # never holds its output. With three hash shards the fixed work is the one input to
+            # the balance that is known: put it on shard 3.
             #
             # Known unverified lane, recorded rather than hidden: taurine-app's
             # `dbx-breadth` feature is NOT built anywhere. Its forked database clients and
-            # OpenSSL only resolve inside dbx-core's own workspace; enabling it from the
-            # root workspace is deliberately off, so a change that only breaks that feature
+            # OpenSSL only resolve inside dbx-core's own workspace; enabling it from the root
+            # workspace is deliberately off, so a change that only breaks that feature
             # is not caught by this CI.
-            if [[ "${CONCERN}" == rust-app-1 ]]; then
+            if [[ "${CONCERN}" == rust-app-3 ]]; then
               run_deferred rust-app-openvpn-check \
                 cargo check --locked --lib --package taurine-app --features openvpn
             fi

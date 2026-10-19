@@ -81,6 +81,14 @@ jobs:
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # The concern lists the other jobs schedule from. They are computed here, in the first job of the
+    # run, because a separate planning job is one more runner to wait for: with the shared pool full
+    # the 6-second `Plan Windows concerns` job queued 569 s and every Windows concern waited behind it
+    # (survey 8.7). This job holds no source, token or environment; it only emits lists.
+    outputs:
+      ts_matrix: ${{ steps.plan.outputs.ts_matrix }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
+      rust_long_matrix: ${{ steps.plan.outputs.rust_long_matrix }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -140,43 +148,9 @@ jobs:
         run: ruby .github/policy/refuse-duplicate-dispatch.rb
 
 
-      - name: Report the Rust concern cadence
-        shell: bash
-        env:
-          RUST_REQUESTED: ${{ inputs.rust }}
-        run: |
-          set -euo pipefail
-          {
-            echo '## Windows Rust concerns'
-            echo
-            if [[ "${RUST_REQUESTED}" == true ]]; then
-              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging run in the validate-rust jobs.'
-            else
-              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
-            fi
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-  # Builds the concern matrices from the `rust` and `only` inputs, mirroring the macOS
-  # plan. It holds no source, token or environment: it only emits the lists of concerns
-  # to schedule, so an unrequested or filtered concern never gets a runner at all.
-  plan:
-    permissions:
-      contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
-    needs: validate-input
-    name: Plan Windows concerns
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      ts_matrix: ${{ steps.plan.outputs.ts_matrix }}
-      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
-    steps:
-      - name: Check out public control plane
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
+      # Builds the concern matrices from the `rust` and `only` inputs, mirroring the macOS plan, and
+      # reports the Rust cadence: the lists of concerns to schedule, so an unrequested or filtered
+      # concern never gets a runner at all.
       - name: Select the concerns and report the Rust cadence
         id: plan
         shell: bash
@@ -186,7 +160,7 @@ jobs:
         run: |
           set -euo pipefail
           ts='["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]'
-          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
+          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-app-3","rust-packaging","rust-tls-openssl"]'
           if [[ "${RUST_REQUESTED}" == true ]]; then
             rust_selected="${rust}"
             known="$(jq -cn --argjson t "${ts}" --argjson r "${rust}" '$t + $r')"
@@ -221,14 +195,19 @@ jobs:
             ts_selected="${ts}"
           fi
           echo "ts_matrix=$(jq -cn --argjson c "${ts_selected}" '{concern: $c}')" >> "${GITHUB_OUTPUT}"
-          echo "rust_matrix=$(jq -cn --argjson c "${rust_selected}" '{concern: $c}')" >> "${GITHUB_OUTPUT}"
+          # The Rust concerns split into the long poles (their own dispatcher jobs, defined first, so
+          # they claim runners before the short ones) and the rest: rust_long_matrix and rust_matrix.
+          # Together they are exactly the filtered list; the Result job requires the whole list.
+          rust_long='["rust-db","rust-app-1","rust-app-2","rust-app-3","rust-packaging"]'
+          echo "rust_long_matrix=$(jq -cn --argjson c "${rust_selected}" --argjson l "${rust_long}" '{concern: [$c[] | select(. as $x | $l | index($x) != null)]}')" >> "${GITHUB_OUTPUT}"
+          echo "rust_matrix=$(jq -cn --argjson c "${rust_selected}" --argjson l "${rust_long}" '{concern: [$c[] | select(. as $x | $l | index($x) == null)]}')" >> "${GITHUB_OUTPUT}"
           {
             echo '## Windows Rust concerns'
             echo
             if [[ "${RUST_REQUESTED}" == true ]]; then
-              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging run in the validate-rust jobs.'
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2, rust-app-3 and rust-packaging run in the validate-rust jobs.'
             else
-              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2, rust-app-3 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
             fi
             if [[ "${only_list}" != '[]' ]]; then
               echo "- Only filter active: $(jq -r 'join(", ")' <<<"${only_list}"). Every other concern is not selected; the verdict cannot be PASS (full), which is the only verdict that admits a merge."
@@ -266,11 +245,15 @@ jobs:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    needs: [validate-input, plan]
+    needs: validate-input
     strategy:
       fail-fast: false
-      # The TypeScript concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.ts_matrix) }}
+      # The TypeScript concerns, filtered by the validate-input job (the `only` input).
+      # At most 2 at a time (survey 8.7): the six TypeScript concerns are about 52 runner-minutes, 26 minutes
+      # on 2 runners, far inside the Windows long poles (about 50 minutes cold), and they leave runners for
+      # the long poles queued at the same moment.
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.validate-input.outputs.ts_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: write
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -286,11 +269,15 @@ jobs:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success'
-    needs: [validate-input, plan, cache-audit]
+    needs: [validate-input, cache-audit]
     strategy:
       fail-fast: false
-      # The TypeScript concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.ts_matrix) }}
+      # The TypeScript concerns, filtered by the validate-input job (the `only` input).
+      # At most 2 at a time (survey 8.7): the six TypeScript concerns are about 52 runner-minutes, 26 minutes
+      # on 2 runners, far inside the Windows long poles (about 50 minutes cold), and they leave runners for
+      # the long poles queued at the same moment.
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.validate-input.outputs.ts_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: read
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -315,15 +302,63 @@ jobs:
   # that needs Perl and NASM on MSVC for code with no Windows-only
   # paths. This OS compiles the `cfg(windows)` storage and credential
   # paths through the `rust-domain` library check.
+  # The long Rust poles (rust-app-*, rust-db, rust-packaging) in their own jobs, defined first and with
+  # no dependency on the short Rust or TypeScript jobs, so they are the first runners claimed.
+  # GitHub does not honour matrix list order (Taurine survey 8.5). Same reusable concern workflow,
+  # secrets and cache-mode halves as the jobs below; an empty half is skipped by its if.
+  validate-rust-long-main:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust && join(fromJSON(needs.validate-input.outputs.rust_long_matrix).concern, '') != ''
+    needs: validate-input
+    strategy:
+      fail-fast: false
+      # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      matrix: ${{ fromJSON(needs.validate-input.outputs.rust_long_matrix) }}
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    cache-mode: write
+    uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
+      windows_image: ${{ inputs.windows_image }}
+
+  validate-rust-long-untrusted:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && inputs.rust && needs.cache-audit.result == 'success' && join(fromJSON(needs.validate-input.outputs.rust_long_matrix).concern, '') != ''
+    needs: [validate-input, cache-audit]
+    strategy:
+      fail-fast: false
+      # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      matrix: ${{ fromJSON(needs.validate-input.outputs.rust_long_matrix) }}
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    cache-mode: read
+    uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
+      windows_image: ${{ inputs.windows_image }}
+
+  # The Rust concerns that are not long poles.
   validate-rust-main:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust
-    needs: [validate-input, plan]
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust && join(fromJSON(needs.validate-input.outputs.rust_matrix).concern, '') != ''
+    needs: validate-input
     strategy:
       fail-fast: false
-      # The Rust crate-test concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.rust_matrix) }}
+      # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      # At most 2 at a time (survey 8.7): rust-domain, rust-net, rust-ovpn and rust-tls-openssl are about
+      # 35 runner-minutes, 18 minutes on 2 runners, inside the long poles. The long Rust jobs are not capped.
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.validate-input.outputs.rust_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: write
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -338,12 +373,15 @@ jobs:
   validate-rust-untrusted:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && inputs.rust && needs.cache-audit.result == 'success'
-    needs: [validate-input, plan, cache-audit]
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && inputs.rust && needs.cache-audit.result == 'success' && join(fromJSON(needs.validate-input.outputs.rust_matrix).concern, '') != ''
+    needs: [validate-input, cache-audit]
     strategy:
       fail-fast: false
-      # The Rust crate-test concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.rust_matrix) }}
+      # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      # At most 2 at a time (survey 8.7): rust-domain, rust-net, rust-ovpn and rust-tls-openssl are about
+      # 35 runner-minutes, 18 minutes on 2 runners, inside the long poles. The long Rust jobs are not capped.
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.validate-input.outputs.rust_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: read
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -359,7 +397,7 @@ jobs:
   # blocked save would only log as a warning is reported here (a detector, not a lock).
   cache-audit-after:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}
-    needs: [cache-audit, validate-untrusted, validate-rust-untrusted]
+    needs: [cache-audit, validate-untrusted, validate-rust-long-untrusted, validate-rust-untrusted]
     name: Audit the untrusted cache scope after the run
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -391,7 +429,7 @@ jobs:
   # listed without a comparison; update the table when a run is a new normal.
   timings:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate-main, validate-untrusted, validate-rust-main, validate-rust-untrusted]
+    needs: [validate-main, validate-untrusted, validate-rust-long-main, validate-rust-long-untrusted, validate-rust-main, validate-rust-untrusted]
     name: Timings
     runs-on: ubuntu-24.04
     # Reporting only: a queued, slow or cancelled timings job must never fail a run whose
@@ -415,7 +453,12 @@ jobs:
           mode: table
           label: Windows
           baseline-seconds: '{"rust-app-1":2740,"rust-app-2":2740,"rust-db":1851,"rust-domain":708,"rust-ovpn":759,"rust-net":595,"rust-packaging":1213,"rust-tls-openssl":464,"desktop-shard-1":1061,"desktop-shard-2":929,"desktop-quality":321,"mobile":287,"contracts":136,"bundle-budget":220}'
-          name-pattern: '^validate(-rust)?-(main|untrusted) \(.+\) / Windows (?<concern>.+)$'
+          # Untrusted runs compile cold (no cache restore): their own baseline is the one cold untrusted
+          # set measured in survey 8.7 (a single sample, so treat a flag near the line as noise). The
+          # rust-app shards have none: the 3-way split changes their cost, so they are listed without a
+          # comparison until a green untrusted set re-bases them.
+          baseline-seconds-untrusted: '{"rust-db":2690,"desktop-shard-1":1242,"desktop-shard-2":760,"rust-packaging":1215,"rust-ovpn":648,"rust-domain":512,"rust-net":480,"rust-tls-openssl":471,"desktop-quality":354,"bundle-budget":228,"mobile":211,"contracts":266}'
+          name-pattern: '^validate(-rust)?(-long)?-(main|untrusted) \(.+\) / Windows (?<concern>.+)$'
           github-token: ${{ github.token }}
 
   # One verdict for the dispatch: every possible concern is listed, those that did not
@@ -423,7 +466,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate-main, validate-untrusted, validate-rust-main, validate-rust-untrusted, cache-audit, cache-audit-after]
+    needs: [validate-main, validate-untrusted, validate-rust-long-main, validate-rust-long-untrusted, validate-rust-main, validate-rust-untrusted, cache-audit, cache-audit-after]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -442,9 +485,9 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: Windows
-          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
-          required-concerns: ${{ inputs.rust && '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]' || '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]' }}
-          name-pattern: '^validate(-rust)?-(main|untrusted) \(.+\) / Windows (?<concern>.+)$'
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-app-3","rust-packaging","rust-tls-openssl"]'
+          required-concerns: ${{ inputs.rust && '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-app-3","rust-packaging","rust-tls-openssl"]' || '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]' }}
+          name-pattern: '^validate(-rust)?(-long)?-(main|untrusted) \(.+\) / Windows (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
           github-token: ${{ github.token }}

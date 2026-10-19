@@ -220,6 +220,11 @@ jobs:
     needs: [plan]
     strategy:
       fail-fast: false
+      # At most 6 of the 13 arms at once (survey 8.7): the arms are the largest group of short jobs of a
+      # set (13 runners for 13 to 23 minutes) and took 13 of the 20 shared runners together with Android
+      # and Linux's head start, so Linux's `rust-app-2` queued 487 s (survey 8.5). Six arms run about 2.2
+      # waves of 14 to 23 minutes, ending near 45 minutes, inside the Windows pole (58 minutes cold).
+      max-parallel: 6
       matrix:
         arm: ${{ fromJSON(needs.plan.outputs.arms) }}
     # Kept as ./ : the policy matches this exact form for protected reusable calls.

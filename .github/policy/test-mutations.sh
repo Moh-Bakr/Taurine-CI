@@ -200,7 +200,7 @@ pol_to_guarded="$(ruby -e 'm = File.read(ARGV[0]).match(/    if: \$\{\{ always\(
 composite_revoke='        if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 weekly_revoke='          if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 
-mutation '1. the Linux concern no longer needs the pre-flight job' "${linux}" '    needs: [validate-input, plan, select]' '    needs: [plan, select]'
+mutation '1. the Linux concern no longer needs the pre-flight job' "${linux}" '    needs: [validate-input, select]' '    needs: [select]'
 mutation '1. source-read no longer needs the pre-flight job' .github/workflows/source-read.yml '    needs: validate-input
 ' ''
 mutation '1. the Linux concern runs past a failed pre-flight' "${linux}" "needs.validate-input.result == 'success' &&" ''
@@ -301,7 +301,8 @@ mutation '12. the Linux untrusted half loses cache-mode read' "${linux}" '    ca
 mutation '12. the Linux untrusted half granted write' "${linux}" '    cache-mode: read
     uses: ./.github/workflows/linux-validation-concern.yml' '    cache-mode: write
     uses: ./.github/workflows/linux-validation-concern.yml'
-mutation '12. the Linux untrusted half runs without the audit' "${linux}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' }}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}"
+mutation '12. the Linux long-pole untrusted half runs without the audit' "${linux}" "needs.validate-input.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' && join(fromJSON(needs.select.outputs.long_matrix || needs.validate-input.outputs.long_matrix).concern, '') != '' }}" "needs.validate-input.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && join(fromJSON(needs.select.outputs.long_matrix || needs.validate-input.outputs.long_matrix).concern, '') != '' }}"
+mutation '12. the Linux short untrusted half runs without the audit' "${linux}" "needs.validate-input.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' && join(fromJSON(needs.select.outputs.short_matrix || needs.validate-input.outputs.short_matrix).concern, '') != '' }}" "needs.validate-input.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && join(fromJSON(needs.select.outputs.short_matrix || needs.validate-input.outputs.short_matrix).concern, '') != '' }}"
 mutation '12. the Linux audit no longer limited to untrusted' "${linux}" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
     needs: [validate-input]" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && needs.validate-input.result == 'success' }}
     needs: [validate-input]"
@@ -342,7 +343,8 @@ mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    us
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
 
 # 13. The audits reach the verdict, and an untrusted restore waits for macOS (docs/untrusted-readonly-cache.md).
-mutation '13. the Linux result no longer needs the after-audit' "${linux}" '    needs: [plan, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [plan, validate-main, validate-untrusted, select]'
+mutation '13. the Linux result no longer needs the after-audit' "${linux}" '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select]'
+mutation '13. the Linux after-audit no longer waits for the long-pole untrusted half' "${linux}" '    needs: [cache-audit, validate-long-untrusted, validate-untrusted]' '    needs: [cache-audit, validate-untrusted]'
 mutation '13. the Windows result stops passing blocking-failures' "${windows}" "          blocking-failures: " "          selection-note: "
 mutation '13. run-result ignores the blocking count' .github/actions/run-result/action.yml '        if [[ "${blocking}" -gt 0 ]]; then
           # A check outside' '        if [[ "${blocking}" == never ]]; then
@@ -652,8 +654,8 @@ mutation '14. an untrusted cargo-source restore while macOS is not enforced' .gi
 mutation '14. the macOS untrusted half granted write' .github/workflows/macos-validation.yml '    cache-mode: read
     # Kept as ./' '    cache-mode: write
     # Kept as ./'
-mutation '14. the macOS concern called without the split' .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"'
-    needs: [plan, cache-audit]' '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"'
+mutation '14. the macOS concern called without the split' .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '"'"''"'"') != '"'"''"'"'
+    needs: [plan, cache-audit]' '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '"'"''"'"') != '"'"''"'"'
     needs: [plan]'
 # 15. The macOS classification and the dispatcher rules read the parsed structure, not indentation.
 mutation '15. classification falls back to an indentation grep' .github/policy/workflow-lists.sh '[[ "$(ruby "${workflow_lists_dir}/classify-workflow.rb" "${file}")" == dispatcher ]]' '! grep -qE '"'"'^    environment:'"'"' "${file}"'

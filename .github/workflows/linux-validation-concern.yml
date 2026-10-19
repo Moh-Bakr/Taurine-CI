@@ -234,6 +234,21 @@ jobs:
           set -euo pipefail
           ruby .github/policy/suite-contract.rb .github/ci-matrix.json "${CONCERN}" "${GITHUB_WORKSPACE}/src" >> "${GITHUB_OUTPUT}"
 
+      # Early suite-ownership check, on data only, in the same window as the contract above: after the
+      # token is revoked and root is dropped, before any dependency install, build or test. The plan step
+      # holds no source (a source-bearing planning job would be one more runner on the critical path),
+      # so the first place a candidate can be refused is the start of each concern job. It reads the
+      # generated ownership manifest and the tracked file NAMES, opens no test file and runs no project
+      # script, and refuses a test file no suite owns in seconds instead of at the end of a 25 to 60
+      # minute job. The trusted collector's own check at the end is unchanged. Only counts and a reason
+      # class are printed; no path is ever logged (docs/how-ci-works.md, "Early suite-ownership check").
+      - name: Refuse test files with no suite owner before any build
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          ruby .github/policy/refuse-unowned-tests.rb "${GITHUB_WORKSPACE}/src"
+
       - name: Set up Node.js and install the locked JavaScript dependencies
         if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-security' || inputs.concern == 'rust-packaging'
         # Kept as ./ : the policy matches this exact form for local actions.

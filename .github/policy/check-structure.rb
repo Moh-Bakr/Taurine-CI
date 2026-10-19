@@ -94,19 +94,19 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/workflows/linux-validation-concern.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
    ".github/workflows/linux-validation.yml" =>
-    [{"tier" => "protected-dispatch", "triggers" => ["workflow_dispatch"], "jobs" => ["cache-audit", "cache-audit-after", "result", "select", "timings", "validate-input", "validate-long-main", "validate-long-untrusted", "validate-main", "validate-untrusted"]},
-     {"tier" => "protected-dispatch",
+    {"tier" => "protected-dispatch",
      "triggers" => ["workflow_dispatch"],
      "jobs" =>
       ["cache-audit",
        "cache-audit-after",
-       "plan",
        "result",
        "select",
        "timings",
        "validate-input",
+       "validate-long-main",
+       "validate-long-untrusted",
        "validate-main",
-       "validate-untrusted"]}],
+       "validate-untrusted"]},
    ".github/workflows/live-proof-arm.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["prove"]},
    ".github/workflows/live-proofs.yml" =>
@@ -116,8 +116,7 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/workflows/macos-validation-concern.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
    ".github/workflows/macos-validation.yml" =>
-    [{"tier" => "protected-source", "triggers" => ["workflow_dispatch"], "jobs" => ["cache-audit", "cache-audit-after", "plan", "result", "timings", "validate-long-main", "validate-long-untrusted", "validate-main", "validate-untrusted"]},
-     {"tier" => "protected-source",
+    {"tier" => "protected-source",
      "triggers" => ["workflow_dispatch"],
      "jobs" =>
       ["cache-audit",
@@ -125,8 +124,10 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
        "plan",
        "result",
        "timings",
+       "validate-long-main",
+       "validate-long-untrusted",
        "validate-main",
-       "validate-untrusted"]}],
+       "validate-untrusted"]},
    ".github/workflows/orchestrate-validation.yml" =>
     {"tier" => "protected-source",
      "triggers" => ["workflow_dispatch"],
@@ -150,9 +151,12 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
      "triggers" => ["workflow_dispatch"],
      "jobs" => ["source-read", "validate-input"]},
    ".github/workflows/validate-public-changes.yml" =>
-    {"tier" => "policy",
-     "triggers" => ["pull_request", "push", "workflow_dispatch"],
-     "jobs" => ["base-pass", "policy", "policy-evidence", "policy-fixtures", "policy-mutations", "policy-structure"]},
+    [{"tier" => "policy",
+      "triggers" => ["pull_request", "push", "workflow_dispatch"],
+      "jobs" => ["base-pass", "policy", "policy-evidence", "policy-fixtures", "policy-mutations", "policy-structure"]},
+     {"tier" => "policy",
+      "triggers" => ["pull_request", "push", "workflow_dispatch"],
+      "jobs" => ["base-pass", "policy"]}],
    ".github/workflows/weekly-validation.yml" =>
     {"tier" => "public",
      "triggers" => ["schedule", "workflow_dispatch"],
@@ -160,20 +164,20 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
    ".github/workflows/windows-validation-concern.yml" =>
     {"tier" => "protected-reusable", "triggers" => ["workflow_call"], "jobs" => ["validate"]},
    ".github/workflows/windows-validation.yml" =>
-    [{"tier" => "protected-dispatch", "triggers" => ["workflow_dispatch"], "jobs" => ["cache-audit", "cache-audit-after", "result", "timings", "validate-input", "validate-main", "validate-rust-long-main", "validate-rust-long-untrusted", "validate-rust-main", "validate-rust-untrusted", "validate-untrusted"]},
-     {"tier" => "protected-dispatch",
+    {"tier" => "protected-dispatch",
      "triggers" => ["workflow_dispatch"],
      "jobs" =>
       ["cache-audit",
        "cache-audit-after",
-       "plan",
        "result",
        "timings",
        "validate-input",
        "validate-main",
+       "validate-rust-long-main",
+       "validate-rust-long-untrusted",
        "validate-rust-main",
        "validate-rust-untrusted",
-       "validate-untrusted"]}]},
+       "validate-untrusted"]}},
  "actions" =>
   {".github/actions/android-emulator-tests/action.yml" => "present",
    ".github/actions/android-sdk-setup/action.yml" => "present",

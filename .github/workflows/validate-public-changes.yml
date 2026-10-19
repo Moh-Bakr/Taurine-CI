@@ -346,6 +346,28 @@ jobs:
         shell: bash
         run: bash .github/policy/test-all-locks-audit.sh
 
+      # Added after the last reviewed step on purpose: a step the base commit's table does not know yet is
+      # accepted as an extra only after the last pinned step of its job (check-policy-steps.rb).
+      - name: Test the Timings table's queue column and per-ref baselines
+        shell: bash
+        run: bash .github/policy/test-timings-table.sh
+
+      - name: Prove the three-way rust-app split is complete on every platform
+        shell: bash
+        run: bash .github/policy/test-rust-app-shards.sh
+
+      - name: Test the early suite-ownership check on synthetic repositories
+        shell: bash
+        run: bash .github/policy/test-suite-ownership-check.sh
+
+      - name: Require the Wave C policy tests and the early ownership step to stay wired
+        shell: bash
+        run: ruby .github/policy/check-wave-c-wiring.rb
+
+      - name: Test the Wave C wiring check on synthetic trees
+        shell: bash
+        run: bash .github/policy/test-wave-c-wiring.sh
+
   # Shard 3: the case-evidence contract, producers and Playwright parity tests.
   # Needs no other job: it runs beside the base pass and holds no authority;
   # only `policy` decides the required check.
