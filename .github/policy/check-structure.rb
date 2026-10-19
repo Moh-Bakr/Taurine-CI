@@ -104,6 +104,8 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
        "select",
        "timings",
        "validate-input",
+       "validate-long-main",
+       "validate-long-untrusted",
        "validate-main",
        "validate-untrusted"]},
    ".github/workflows/live-proof-arm.yml" =>
@@ -123,6 +125,8 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
        "plan",
        "result",
        "timings",
+       "validate-long-main",
+       "validate-long-untrusted",
        "validate-main",
        "validate-untrusted"]},
    ".github/workflows/orchestrate-validation.yml" =>
@@ -171,6 +175,8 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
        "timings",
        "validate-input",
        "validate-main",
+       "validate-rust-long-main",
+       "validate-rust-long-untrusted",
        "validate-rust-main",
        "validate-rust-untrusted",
        "validate-untrusted"]}},

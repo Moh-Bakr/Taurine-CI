@@ -555,8 +555,21 @@ request, and a reviewer sees the addition.
 
 `.github/ci-matrix.json` is the one concern table for Linux. Each concern has a `timeout`
 (minutes) and one or more of: `always`, `paths`, `rust_packages` or `rust_package_glob`,
-`full_only` (dropped by the quick profile) and `opt_in` (the dispatch input that enables it).
-Top-level `rules` list build-wide paths (`full_if_any_changed`) and `docs_only` paths.
+`full_only` (dropped by the quick profile), `long_pole` (see below) and `opt_in` (the dispatch input
+that enables it). Top-level `rules` list build-wide paths (`full_if_any_changed`) and `docs_only` paths.
+
+**Long poles run in their own jobs.** GitHub starts matrix entries in no promised order, and the
+hosted pool is about 20 runners shared by every workflow of a set (Taurine survey 8.5, 8.7), so a
+long Rust job listed first could still start last. The concerns flagged `long_pole` (`rust-app-*`,
+`rust-db`, `rust-packaging`) therefore run in separate dispatcher jobs with no dependency on the short
+jobs. On Linux they are `validate-long-main` and `validate-long-untrusted`; on macOS the same names; on
+Windows `validate-rust-long-main` and `validate-rust-long-untrusted`. They are defined first in the
+file and are the same reusable concern call as the short jobs, with the same `cache-mode` halves, the same
+`cache-audit` need on `untrusted` and the same secret handling. The planner (and `select-concerns` on a
+`base_sha` run) publishes `matrix` (the whole selection, which the Result job still requires), `long_matrix`
+and `short_matrix`; a half with no concern is skipped by its job's `if`, never an empty matrix. Timings,
+`cache-audit-after` and Result need every half, and their job-name pattern accepts the `long` jobs, so no
+concern can leave the verdict.
 
 The Linux dispatcher reads the table; the `plan` job builds the concern list, and the
 `select-concerns` composite narrows it when a `base_sha` is supplied. It runs after checkout

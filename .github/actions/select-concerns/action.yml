@@ -36,6 +36,12 @@ outputs:
   matrix:
     description: JSON object with the selected concern list
     value: ${{ steps.select.outputs.matrix }}
+  long_matrix:
+    description: JSON object with the selected long-pole concerns (the table's long_pole flag)
+    value: ${{ steps.select.outputs.long_matrix }}
+  short_matrix:
+    description: JSON object with the selected concerns that are not long poles
+    value: ${{ steps.select.outputs.short_matrix }}
   selection:
     description: full or partial
     value: ${{ steps.select.outputs.selection }}
@@ -214,8 +220,15 @@ runs:
             if wanted:
                 concerns = list(concerns) + wanted
                 reason = reason + '; explicitly requested: ' + ', '.join(wanted)
+            # The same selection split by the table's long_pole flag, so the dispatcher can run
+            # the long poles in their own job (they claim runners first) without a second
+            # source of truth: `matrix` stays the whole selection and is what the Result job requires.
+            long_names = [c for c in concerns if cfg['concerns'][platform][c].get('long_pole')]
+            short_names = [c for c in concerns if c not in long_names]
             with open(out, 'a') as f:
                 f.write('matrix=' + json.dumps({'concern': concerns}, separators=(',', ':')) + '\n')
+                f.write('long_matrix=' + json.dumps({'concern': long_names}, separators=(',', ':')) + '\n')
+                f.write('short_matrix=' + json.dumps({'concern': short_names}, separators=(',', ':')) + '\n')
                 f.write('selection=' + selection + '\n')
                 f.write('reason=' + reason + '\n')
             print(f'selection: {selection} ({reason}); {len(concerns)} of {len(allc)} concerns')

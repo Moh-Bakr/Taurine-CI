@@ -79,6 +79,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      long_matrix: ${{ steps.plan.outputs.long_matrix }}
+      short_matrix: ${{ steps.plan.outputs.short_matrix }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -162,6 +164,12 @@ jobs:
             fi
             candidates="$(jq -c --argjson only "${only_list}" '[.[] | select(. as $c | ($only | index($c)) != null)]' <<<"${candidates}")"
           fi
+          # The same list split into the long Rust poles (their own dispatcher jobs, defined first,
+          # so they claim the scarce macOS runners before the short jobs) and the rest. `matrix`
+          # stays the whole list: the Result job requires it.
+          long='["rust-db","rust-app-1","rust-app-2","rust-packaging"]'
+          echo "long_matrix=$(jq -cn --argjson c "${candidates}" --argjson l "${long}" '{concern: [$c[] | select(. as $x | $l | index($x) != null)]}')" >> "${GITHUB_OUTPUT}"
+          echo "short_matrix=$(jq -cn --argjson c "${candidates}" --argjson l "${long}" '{concern: [$c[] | select(. as $x | $l | index($x) == null)]}')" >> "${GITHUB_OUTPUT}"
           {
             echo '## macOS Rust concerns'
             echo
@@ -204,10 +212,57 @@ jobs:
           github-token: ${{ github.token }}
           phase: before
 
+  # The long Rust poles (rust-app-*, rust-db, rust-packaging) in their own jobs, defined first and with
+  # no dependency on the short jobs, so they are the first runners claimed on the five-slot macOS
+  # pool. GitHub does not honour matrix list order (Taurine survey 8.5). Same reusable concern
+  # workflow, secrets and cache-mode halves as the short jobs below; an empty half is skipped by its if.
+  validate-long-main:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '') != ''
+    needs: plan
+    strategy:
+      fail-fast: false
+      # The long-pole concerns from the `plan` job (rust-app-*, rust-db, rust-packaging): only when the
+      # dispatch set rust=true, so an empty list skips the job.
+      matrix: ${{ fromJSON(needs.plan.outputs.long_matrix) }}
+    cache-mode: write
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    uses: ./.github/workflows/macos-validation-concern.yml  # zizmor: ignore[self-repository]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
+      flavor: ${{ inputs.flavor }}
+
+  validate-long-untrusted:
+    permissions:
+      contents: read
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '') != ''
+    needs: [plan, cache-audit]
+    strategy:
+      fail-fast: false
+      # The long-pole concerns from the `plan` job (rust-app-*, rust-db, rust-packaging): only when the
+      # dispatch set rust=true, so an empty list skips the job.
+      matrix: ${{ fromJSON(needs.plan.outputs.long_matrix) }}
+    cache-mode: read
+    # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
+    uses: ./.github/workflows/macos-validation-concern.yml  # zizmor: ignore[self-repository]
+    # Exactly the reviewed source-reader key is passed, by name; no other secret reaches the callee.
+    secrets:
+      SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      concern: ${{ matrix.concern }}
+      flavor: ${{ inputs.flavor }}
+
+  # The concerns that are not long poles.
   validate-main:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && join(fromJSON(needs.plan.outputs.short_matrix).concern, '') != ''
     needs: plan
     strategy:
       fail-fast: false
@@ -222,7 +277,7 @@ jobs:
       # not have, and its vendored OpenSSL is a from-source C build with no
       # macOS-only code. This OS compiles the keyring half through the
       # `rust-domain` library check.
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.short_matrix) }}
     cache-mode: write
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/macos-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -237,7 +292,7 @@ jobs:
   validate-untrusted:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success'
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' && join(fromJSON(needs.plan.outputs.short_matrix).concern, '') != ''
     needs: [plan, cache-audit]
     strategy:
       fail-fast: false
@@ -252,7 +307,7 @@ jobs:
       # not have, and its vendored OpenSSL is a from-source C build with no
       # macOS-only code. This OS compiles the keyring half through the
       # `rust-domain` library check.
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.short_matrix) }}
     cache-mode: read
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     uses: ./.github/workflows/macos-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -268,7 +323,7 @@ jobs:
   # blocked save would only log as a warning is reported here (a detector, not a lock).
   cache-audit-after:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success' }}
-    needs: [cache-audit, validate-untrusted]
+    needs: [cache-audit, validate-long-untrusted, validate-untrusted]
     name: Audit the untrusted cache scope after the run
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -291,7 +346,7 @@ jobs:
 
   timings:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') }}
-    needs: [validate-main, validate-untrusted]
+    needs: [validate-long-main, validate-long-untrusted, validate-main, validate-untrusted]
     name: Timings
     runs-on: ubuntu-24.04
     # Reporting only: a queued, slow or cancelled timings job must never fail a run whose
@@ -315,7 +370,7 @@ jobs:
           mode: table
           label: macOS
           baseline-seconds: '{"rust-app-1":2600,"rust-app-2":2600,"rust-db":1287,"rust-domain":772,"rust-ovpn":229,"rust-net":160,"rust-packaging":1009,"rust-tls-openssl":71,"desktop-shard-1":532,"desktop-shard-2":629,"desktop-quality":235,"mobile":182,"bundle-budget":145,"orchestrate-skill":241}'
-          name-pattern: '^validate-(main|untrusted) \(.+\) / macOS (?<concern>.+) validation$'
+          name-pattern: '^validate(-long)?-(main|untrusted) \(.+\) / macOS (?<concern>.+) validation$'
           github-token: ${{ github.token }}
 
   # One verdict for the dispatch: every possible concern is listed, those that did not
@@ -323,7 +378,7 @@ jobs:
   # did not succeed. PASS (full) is the only verdict that admits a merge.
   result:
     if: ${{ always() && github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted') && needs.plan.result == 'success' }}
-    needs: [plan, validate-main, validate-untrusted, cache-audit, cache-audit-after]
+    needs: [plan, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, cache-audit, cache-audit-after]
     name: Result
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -344,7 +399,7 @@ jobs:
           label: macOS
           expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}
-          name-pattern: '^validate-(main|untrusted) \(.+\) / macOS (?<concern>.+) validation$'
+          name-pattern: '^validate(-long)?-(main|untrusted) \(.+\) / macOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}
           selection-mode: ${{ inputs.rust && 'full' || 'partial' }}
           github-token: ${{ github.token }}

@@ -3070,6 +3070,7 @@
       "rust-db": {
         "rust_package_glob": "taurine-db*",
         "full_only": true,
+        "long_pole": true,
         "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
@@ -3092,6 +3093,7 @@
           "taurine-mobile"
         ],
         "full_only": true,
+        "long_pole": true,
         "timeout": 60,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
@@ -3103,6 +3105,7 @@
           "taurine-mobile"
         ],
         "full_only": true,
+        "long_pole": true,
         "timeout": 60,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
@@ -3185,6 +3188,7 @@
         "rust_packages": [
           "taurine-desktop"
         ],
+        "long_pole": true,
         "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
