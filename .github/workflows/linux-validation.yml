@@ -477,6 +477,10 @@ jobs:
     needs: [validate-input, select]
     strategy:
       fail-fast: false
+      # The short jobs run at most 5 at a time (survey 8.5, 8.7): about 150 runner-minutes over 5 runners
+      # is 30 minutes, inside the Linux long poles (about 40 minutes cold), and 5 of the 20 shared
+      # runners at the moment the long poles are queued. The long jobs above are not capped.
+      max-parallel: 5
       matrix: ${{ fromJSON(needs.select.outputs.short_matrix || needs.validate-input.outputs.short_matrix) }}
     cache-mode: write
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -500,6 +504,10 @@ jobs:
     needs: [validate-input, select, cache-audit]
     strategy:
       fail-fast: false
+      # The short jobs run at most 5 at a time (survey 8.5, 8.7): about 150 runner-minutes over 5 runners
+      # is 30 minutes, inside the Linux long poles (about 40 minutes cold), and 5 of the 20 shared
+      # runners at the moment the long poles are queued. The long jobs above are not capped.
+      max-parallel: 5
       matrix: ${{ fromJSON(needs.select.outputs.short_matrix || needs.validate-input.outputs.short_matrix) }}
     cache-mode: read
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]

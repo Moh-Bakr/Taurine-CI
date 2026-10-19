@@ -249,6 +249,10 @@ jobs:
     strategy:
       fail-fast: false
       # The TypeScript concerns, filtered by the validate-input job (the `only` input).
+      # At most 2 at a time (survey 8.7): the six TypeScript concerns are about 52 runner-minutes, 26 minutes
+      # on 2 runners, far inside the Windows long poles (about 50 minutes cold), and they leave runners for
+      # the long poles queued at the same moment.
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.validate-input.outputs.ts_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: write
@@ -269,6 +273,10 @@ jobs:
     strategy:
       fail-fast: false
       # The TypeScript concerns, filtered by the validate-input job (the `only` input).
+      # At most 2 at a time (survey 8.7): the six TypeScript concerns are about 52 runner-minutes, 26 minutes
+      # on 2 runners, far inside the Windows long poles (about 50 minutes cold), and they leave runners for
+      # the long poles queued at the same moment.
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.validate-input.outputs.ts_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: read
@@ -347,6 +355,9 @@ jobs:
     strategy:
       fail-fast: false
       # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      # At most 2 at a time (survey 8.7): rust-domain, rust-net, rust-ovpn and rust-tls-openssl are about
+      # 35 runner-minutes, 18 minutes on 2 runners, inside the long poles. The long Rust jobs are not capped.
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.validate-input.outputs.rust_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: write
@@ -367,6 +378,9 @@ jobs:
     strategy:
       fail-fast: false
       # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      # At most 2 at a time (survey 8.7): rust-domain, rust-net, rust-ovpn and rust-tls-openssl are about
+      # 35 runner-minutes, 18 minutes on 2 runners, inside the long poles. The long Rust jobs are not capped.
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.validate-input.outputs.rust_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: read

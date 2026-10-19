@@ -566,6 +566,19 @@ step holds no source, token or environment and emits the same lists as before; t
 `needs.validate-input.outputs.*`. macOS already plans in its first job (`plan`, which also holds its dispatch
 identity checks), so it has no extra hop.
 
+**Concurrency caps on the short jobs.** The hosted pool is 20 runners, measured full (survey 8.5), shared by
+Linux, Windows, the live proofs and Android; macOS has its own five. The long poles (Linux 5, Windows 5) hold
+10 runners for the whole set, so every other group is capped with `strategy.max-parallel` and the long-pole
+jobs are not: live proofs 6 of 13 arms (`live-proofs.yml`, pinned by `check-live-proof-fanout.rb`), Linux short
+jobs 5, Windows TypeScript jobs 2 and Windows short Rust jobs 2. The numbers come from the survey's runner
+minutes: the capped groups still finish well inside the long poles (Linux short about 150 runner-minutes over
+5 is 30 minutes against a pole near 40; Windows TypeScript about 52 over 2 is 26 against a pole near 50;
+Windows short Rust about 35 over 2 is 18; the live arms about 209 over 6 is 35 plus queue against Windows near
+58), and the instantaneous demand at dispatch falls from 58 jobs to 27, so a second-wave short job always
+queues behind a long pole that was queued at the start. macOS is not capped: it is a separate pool, and its
+long poles already fill its five runners first. A cap is a ceiling, not a reservation; if a measured set shows
+a capped group finishing after the long poles, raise that cap, not the others.
+
 **Long poles run in their own jobs.** GitHub starts matrix entries in no promised order, and the
 hosted pool is about 20 runners shared by every workflow of a set (Taurine survey 8.5, 8.7), so a
 long Rust job listed first could still start last. The concerns flagged `long_pole` (`rust-app-*`,

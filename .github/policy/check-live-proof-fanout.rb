@@ -41,6 +41,9 @@ PROVE_JOB = {
   'needs' => ['plan'],
   'strategy' => {
     'fail-fast' => false,
+    # The arms share the hosted pool with the long Rust poles of Linux and Windows: six at a time, never
+    # unbounded (survey 8.7), and never fewer than the roster can finish inside the Windows pole.
+    'max-parallel' => 6,
     'matrix' => { 'arm' => '${{ fromJSON(needs.plan.outputs.arms) }}' }
   },
   'uses' => './.github/workflows/live-proof-arm.yml',
