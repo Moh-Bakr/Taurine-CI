@@ -241,7 +241,7 @@ runs:
                 resolved="$(command -v "${dll}" 2>/dev/null || true)"
                 wp="$(timeout 10 cmd //c "where ${dll}" 2>/dev/null | head -1 | tr -d '\r' | sed -E 's#\\[^\\]*$##; s#\\#/#g' | cut -c1-80)"
                 case "${wp}" in
-                  [Cc]:/Program\ Files*|[Cc]:/hostedtoolcache*|[Cc]:/Windows*|[Cc]:/Strawberry*) where_out="PATH:${wp}" ;;
+                  [Cc]:/Program\ Files*|[Cc]:/hostedtoolcache*|[Cc]:/Windows*|[Cc]:/Strawberry*) where_out="PATH ${wp}" ;;
                   *) where_out='PATH (other)' ;;
                 esac
               fi
@@ -257,7 +257,7 @@ runs:
             done <"${dlls}"
           done <"${cand}"
           if [[ -s "${out}" ]]; then
-            tr -cd 'A-Za-z0-9_.@?$ ()!/\n-' <"${out}" | cut -c1-120 | sed 's/^/    /' | head -20
+            tr -cd 'A-Za-z0-9_.@?$ ()!/\n-' <"${out}" | sed 's/^/    /' | cut -c1-120 | head -20
           else
             echo '    none found by name; the mismatch is not in an imported function of a resolved DLL (check delay-loaded or forwarded exports)'
           fi
