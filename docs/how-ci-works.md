@@ -438,6 +438,37 @@ matrix legs to a sibling job. The generator refuses anything that is not the val
 reviewed shape and reports honestly when no evidence was collected. Existing concern coverage stays authoritative: the evidence pipeline
 observes, it does not yet narrow what a concern executes.
 
+### Early suite-ownership check
+
+The trusted evidence collector refuses a test no suite owns (`ownership_unowned`), but it runs at the end of a
+concern job, so a candidate that adds or renames a test file without regenerating the private ownership manifest
+(`scripts/ci/suite-ownership.json`) was found 25 to 60 minutes late. `check-suite-ownership.rb` runs the same rule on
+data only at the START of every Linux concern job, as the step "Refuse test files with no suite owner before any
+build", straight after the suite-contract snapshot.
+
+It is a concern-job step and not part of the plan because the plan step holds no source: a source-bearing planning
+job would be a runner on the critical path of every dispatch (the survey measured a 6-second plan queueing 569 s),
+and a refusal would still arrive only after the planner. Each concern job refuses within seconds of its checkout,
+which is before any dependency install, build or test, so a bad candidate fails every job in about the first minute
+instead of at the end of the longest one.
+
+What it does. It runs after the token is revoked and root is dropped (the source-checkout and drop-root steps stay
+before it, and `test-suite-ownership-check.sh` pins that order). It reads the manifest as JSON and the tracked file names
+from `git ls-files` (with `safe.directory` on the command line only); no test file is opened and no project script,
+config, hook or package manager runs. Every tracked `*.test.*` or `*.spec.*` source must match at least one suite's
+`include` glob, with exactly the collector's glob semantics (`**` crosses directories, `*` stays in a segment; the
+fixture proves the two implementations agree). A tracked file list has no base commit, so "added or renamed" cannot be
+told from "existing": the check covers every tracked test file, a superset that catches any added or renamed file the
+manifest does not cover. Three trees are exempt by reviewed prefix because no Linux suite runs them: `skills/` (the
+orchestrate skill's own suite), `vendor/` and `taurine-mobile/tests/e2e/` (the mobile journeys); everything else is
+in scope, so a new test area fails closed. A source with no manifest (an older revision) is skipped with a note, and a
+manifest that cannot be read fails closed with a fixed reason class (`manifest_shape`, `manifest_glob`, `file_list`).
+
+What it prints. Only fixed words and counts: the number of test files checked, the number with no owner and the reason
+class `ownership_unowned`, in the log and the step summary. No path, pattern or file name ever leaves the job (the rule
+in the private `ci-feature-suites.md`); to list the files, run the private ownership audit locally. It does not replace
+the collector: overlap between two suites, and ownership as the runner discovers it, are still decided at the end.
+
 ### Keeping untrusted in sync with main (manual, by design)
 
 `untrusted` runs with the `source-read` environment, so whoever can change it can change code

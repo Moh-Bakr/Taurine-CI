@@ -214,6 +214,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-rust-app-shards.sh
 
+      - name: Test the early suite-ownership check on synthetic repositories
+        shell: bash
+        run: bash .github/policy/test-suite-ownership-check.sh
+
       # The reviewed candidate universe and coverage dispositions are immutable public policy.
       - name: Test the feature-suite catalog contract
         shell: bash
