@@ -891,6 +891,12 @@ expect_fail 'a coloured hook line is refused' "mobile_build_hooks_log_check '${h
 printf '\033[1m\033[32m    Running\033[0m beforeBuild\033[0mCommand x\n' >"${hooklog}"
 expect_fail 'a colour code inside the hook name is refused' "mobile_build_hooks_log_check '${hooklog}'" 'build hook running'
 expect_fail 'a missing build log is refused' "mobile_build_hooks_log_check '${work}/no-such.log'" 'build log is missing'
+# A large log with the hook line first, under pipefail: the early match must not be lost to the
+# writer's SIGPIPE (an early `grep -q` exit made the check pass on 5 of 5 tries).
+{ printf '     Running beforeBuildCommand `npm run build`\n'; for _ in $(seq 1 2000); do printf '%0100d\n' 0; done; } >"${hooklog}"
+for _ in 1 2 3; do cat "${hooklog}"; done >"${hooklog}.big"; for _ in 1 2 3; do cat "${hooklog}.big" "${hooklog}.big" >"${hooklog}.x"; mv "${hooklog}.x" "${hooklog}.big"; done
+expect_fail 'a hook line at the start of a large log is refused under pipefail' "set -o pipefail; mobile_build_hooks_log_check '${hooklog}.big'" 'build hook running'
+rm -f "${hooklog}.big"
 rm -f "${hooklog}"
 # What the frontend step (job user, outside the checkout) could plant: Gradle user-home init or
 # properties, and any cargo config (CI writes none).

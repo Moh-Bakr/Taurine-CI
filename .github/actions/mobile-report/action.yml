@@ -434,11 +434,15 @@ runs:
         # mobile_build_hooks_log_check <build log>: detective control. The CLI is started with both
         # hooks switched off; if its log still shows either hook running, the override stopped
         # working (a CLI change, a config merge) and the build is refused. Colour codes are removed
-        # first; the match is on the CLI's own message (`Running beforeBuildCommand ...`).
+        # first; the match is on the CLI's own message (`Running beforeBuildCommand ...`). The log is
+        # read in full before matching: `grep -q` in a pipeline would stop at the first match, and
+        # under pipefail the writer's SIGPIPE would turn an early hook line into a pass.
         mobile_build_hooks_log_check() {
-          local log="$1"
+          local log="$1" clean
           [[ -f "${log}" ]] || { echo 'build-hooks: FAILED - the build log is missing' >&2; return 1; }
-          if sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "${log}" | tr -d '\r' | grep -qE 'Running before(Build|Bundle)Command'; then
+          clean="$(sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "${log}" | tr -d '\r')" ||
+            { echo 'build-hooks: FAILED - the build log could not be read' >&2; return 1; }
+          if grep -qE 'Running before(Build|Bundle)Command' <<<"${clean}"; then
             echo 'build-hooks: FAILED - the build log shows a Tauri build hook running although both are switched off' >&2
             return 1
           fi
