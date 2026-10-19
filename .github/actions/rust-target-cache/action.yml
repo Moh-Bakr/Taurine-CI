@@ -92,6 +92,25 @@ runs:
       # The value written to the environment file is a path built from HOME, never input.
       run: |  # zizmor: ignore[github-env]
         set -euo pipefail
+        # Second line of defence behind the policy that pins every step before this one: PATH holds only
+        # absolute entries, and every tool this step runs resolves outside the private checkout and the
+        # runner temp directory, so nothing planted ahead of it on PATH can stand in for it.
+        workspace_real="$(cd "${GITHUB_WORKSPACE}" && pwd -P)"
+        temp_real="$(cd "${RUNNER_TEMP}" && pwd -P)"
+        IFS=: read -r -a path_entries <<< "${PATH}"
+        for entry in "${path_entries[@]}"; do
+          case "${entry}" in
+            /* | [A-Za-z]:*) ;;
+            *) echo 'target-cache: PATH holds a relative or empty entry' >&2; exit 1 ;;
+          esac
+        done
+        for tool in rustc git date awk tr cat xargs env sort grep cut dirname; do
+          location="$(command -v "${tool}")" || { echo "target-cache: ${tool} not found" >&2; exit 1; }
+          resolved="$(cd "$(dirname "${location}")" && pwd -P)"
+          case "${resolved}/" in
+            "${workspace_real}/"* | "${temp_real}/"*) echo "target-cache: ${tool} resolves inside the checkout or the temp directory" >&2; exit 1 ;;
+          esac
+        done
         sha256_text() {
           if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
         }
@@ -105,6 +124,12 @@ runs:
           mkdir -p "${dir}"
           echo "CARGO_TARGET_DIR=${dir}" >> "${GITHUB_ENV}"
         fi
+        # Only the three reviewed locations (the Linux scratch disk, the Windows short path, the home
+        # directory default); anything else is refused, whoever set it.
+        case "${dir}" in
+          /mnt/cargo-target | 'C:\ct' | "${HOME}/cargo-target") ;;
+          *) echo 'target-cache: the target directory is not one of the reviewed locations' >&2; exit 1 ;;
+        esac
         if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -m "${dir}")"; fi
         case "$(cd "$(dirname "${dir}")" && pwd -P)/" in
           "$(cd "${GITHUB_WORKSPACE}/src" && pwd -P)/"*) echo 'target-cache: the target directory is inside the private checkout' >&2; exit 1 ;;

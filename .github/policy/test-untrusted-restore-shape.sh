@@ -74,8 +74,10 @@ build_reviewed() { # dir
   mkdir -p "${d}/.github/workflows" "${d}/docs"
   cp ".github/workflows/${concern}" ".github/workflows/${caller}" "${d}/.github/workflows/"
   cp docs/untrusted-readonly-cache.md "${d}/docs/"
-  mkdir -p "${d}/.github/actions/rust-target-cache"
+  mkdir -p "${d}/.github/actions/rust-target-cache" "${d}/.github/actions/verify-cargo-cache" "${d}/.github/actions/rust-toolchain"
   cp "${composite}" "${d}/${composite}"
+  cp .github/actions/verify-cargo-cache/action.yml "${d}/.github/actions/verify-cargo-cache/"
+  cp .github/actions/rust-toolchain/action.yml "${d}/.github/actions/rust-toolchain/"
   local c="${d}/.github/workflows/${concern}" l="${d}/.github/workflows/${caller}"
   # A tree that already carries the reviewed restores (the change that introduces them) is its own
   # reviewed shape: nothing is added, and the same weakenings are applied to its real steps.
@@ -86,6 +88,27 @@ build_reviewed() { # dir
   # Both callers pass the flag as a literal false (the callee default is never relied on).
   swap "${l}" '      concern: ${{ matrix.concern }}' '      untrusted_readonly_cache: false
       concern: ${{ matrix.concern }}' all
+  # Steps that run private-source code (`npm ci`, the vendor fetch) belong after the restores, not before
+  # the producers of their path and key: move them to just before the Playwright install, after every restore and strip.
+  ruby -e '
+    path = ARGV.fetch(0); lines = File.read(path, encoding: "UTF-8").lines
+    step_at = ->(name) { lines.index { |x| x.start_with?("      - name: #{name}") } or abort "untrusted restore fixture: step #{name} not found" }
+    first_of = lambda do |i| # the step line, widened upwards over its own comment lines
+      i -= 1 while i > 0 && lines[i - 1].start_with?("      #")
+      i
+    end
+    names = ["Set up Node.js and install the locked JavaScript dependencies", "Fetch pinned vendored sources"]
+    moved = names.map do |name|
+      from = first_of.call(step_at.call(name))
+      to = step_at.call(name) + 1
+      to += 1 until to >= lines.length || lines[to].start_with?("      - name:") || lines[to].start_with?("      #")
+      block = lines.slice!(from...to)
+      block
+    end
+    anchor = first_of.call(step_at.call("Install the pinned Playwright browser"))
+    lines.insert(anchor, *moved.flatten)
+    File.write(path, lines.join)
+  ' "${c}"
 }
 
 run_policy() { # dir [files...]; env passes through
@@ -384,6 +407,119 @@ out="$(run_policy "${disk}" ".github/workflows/${caller}" ".github/workflows/${c
 no_composite="${work}/no-composite"; rm -rf "${no_composite}"; cp -R "${reviewed}" "${no_composite}"; rm "${no_composite}/${composite}"
 out="$(run_policy "${no_composite}" ".github/workflows/${caller}" ".github/workflows/${concern}")" && { echo 'the restore without the composite among the checked files should fail' >&2; exit 1; }
 [[ "${out}" == *'which could not be read'* ]] || { echo "a missing composite failed with the wrong message: ${out}" >&2; exit 1; }
+
+# Everything before the producers is on a reviewed allowlist: project-code steps, unpinned run steps, a
+# changed pinned step, tools redirected through env, container or defaults, and an altered pinned action.
+allow_msg='is not on the reviewed allowlist'
+home_anchor='      - name: Locate Cargo home for the third-party source cache'
+insert_mutant 'a project-code install before the producers' "${allow_msg}" "${c}" "${home_anchor}" '      - name: Install the JavaScript dependencies early
+        shell: bash
+        run: npm ci
+'
+insert_mutant 'the vendor fetch before the producers' "${allow_msg}" "${c}" "${home_anchor}" '      - name: Fetch pinned vendored sources early
+        shell: bash
+        run: bash scripts/vendor-openvpn3.sh fetch
+'
+insert_mutant 'the node-setup action before the producers' "${allow_msg}" "${c}" "${home_anchor}" '      - name: Set up Node.js early
+        uses: ./.github/actions/node-setup
+'
+insert_mutant 'a pinned run step name with a different body' "${allow_msg}" "${c}" "${home_anchor}" '      - name: Validate protected call input
+        shell: bash
+        run: echo "PATH=/tmp/evil:${PATH}" >> "${GITHUB_ENV}"
+'
+insert_mutant 'an unpinned third-party action before the producers' "${allow_msg}" "${c}" "${home_anchor}" '      - name: Early third-party action
+        uses: actions/setup-node@v4
+'
+for key in PATH BASH_ENV HOME CARGO_HOME RUSTUP_TOOLCHAIN RUSTC_WRAPPER NODE_OPTIONS ENV; do
+  mutant "a job env sets ${key}" "sets ${key}" "${c}" '    environment: source-read
+' "    environment: source-read
+    env:
+      ${key}: /tmp/evil
+"
+  mutant "a workflow env sets ${key}" "workflow env sets ${key}" "${c}" '  SOURCE_REPOSITORY_NAME: Taurine
+' "  SOURCE_REPOSITORY_NAME: Taurine
+  ${key}: /tmp/evil
+"
+done
+mutant 'a step env sets RUSTUP_TOOLCHAIN on the toolchain step' 'sets RUSTUP_TOOLCHAIN' "${c}" '        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
+' '        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
+        env:
+          RUSTUP_TOOLCHAIN: /tmp/evil
+'
+mutant 'the job container changed' 'container must be absent or exactly the reviewed' "${c}" "container: \${{ inputs.concern == 'e2e-visual' &&" "container: \${{ inputs.concern == 'rust-db' &&"
+mutant 'the job container replaced by an image' 'container must be absent or exactly the reviewed' "${c}" "    container: \${{ inputs.concern == 'e2e-visual'" '    container: ubuntu:latest
+    x-unused: \${{ inputs.concern == '"'"'e2e-visual'"'"'' 
+mutant 'the job defaults gain a shell' 'defaults must be absent or exactly' "${c}" '    defaults:
+      run:
+        working-directory: src' '    defaults:
+      run:
+        working-directory: src
+        shell: sh'
+mutant 'a workflow-level defaults' 'workflow-level `defaults` must not exist' "${c}" 'permissions: {}
+
+env:' 'permissions: {}
+
+defaults:
+  run:
+    shell: sh
+
+env:'
+mutant 'the toolchain action file altered' "${allow_msg}" ".github/actions/rust-toolchain/action.yml" 'Per-OS setup for the Rust concerns' 'Per-OS planted setup for the Rust concerns'
+mutant 'the toolchain step gains a with key' "${allow_msg}" "${c}" "          concern: \${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" "          concern: \${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
+          extra: x"
+
+# Composite steps after locate are covered by the whole-file pin.
+mutant 'the helper step writes GITHUB_ENV' 'whole file must match the reviewed content hash' "${composite}" '        mkdir -p "${RUNNER_TEMP}/taurine-ci"' '        mkdir -p "${RUNNER_TEMP}/taurine-ci"
+        echo "RUSTFLAGS=-Cplanted" >> "${GITHUB_ENV}"'
+mutant 'the helper step gains an if that skips it' 'whole file must match the reviewed content hash' "${composite}" '    - name: Install the compiled dependency cache helpers
+' '    - name: Install the compiled dependency cache helpers
+      if: ${{ inputs.mode == '"'"'never'"'"' }}
+'
+mutant 'a strip step gains continue-on-error' 'whole file must match the reviewed content hash' "${composite}" '    - name: Prove the compiled dependency cache holds no workspace crate
+' '    - name: Prove the compiled dependency cache holds no workspace crate
+      continue-on-error: true
+'
+
+# A hash-pinned cache verifier may sit between cargo-home and its untrusted restore; a changed file, an
+# extra with key, an env or a wrong directory is refused.
+verify_step='      - name: Verify restored crate archives (early)
+        if: ${{ inputs.concern == '"'"'rust-db'"'"' }}
+        uses: ./.github/actions/verify-cargo-cache
+        with:
+          sources-dir: ${{ steps.cargo-home.outputs.dir }}
+          cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}
+          os-label: Linux
+'
+sources_anchor='      - name: Restore cached third-party crate sources (untrusted, read-only)'
+v_ok="${work}/verify-ok"; rm -rf "${v_ok}"; cp -R "${reviewed}" "${v_ok}"
+printf '%s\n' "${verify_step}" > "${work}/inserted.yml"
+insert_before "${v_ok}/${c}" "${sources_anchor}" "${work}/inserted.yml"
+expect_pass 'a hash-pinned verifier between cargo-home and the untrusted restore' "${v_ok}"
+v_bad="${work}/verify-bad"; rm -rf "${v_bad}"; cp -R "${v_ok}" "${v_bad}"
+ruby -e 'f = ARGV.fetch(0); t = File.read(f, encoding: "UTF-8"); File.write(f, t.sub(/\Aname: /) { "name: planted " })' "${v_bad}/.github/actions/verify-cargo-cache/action.yml"
+cmp -s "${v_ok}/.github/actions/verify-cargo-cache/action.yml" "${v_bad}/.github/actions/verify-cargo-cache/action.yml" && { echo 'untrusted restore fixture: the verifier file was not changed' >&2; exit 1; }
+expect_fail 'a verifier whose action file hash does not match' "${v_bad}" "${allow_msg}"
+verify_variant() { # label from to
+  local d="${work}/verify-$1"
+  rm -rf "${d}"; cp -R "${v_ok}" "${d}"
+  swap "${d}/${c}" "$2" "$3" first
+  expect_fail "the pinned verifier with a changed $1" "${d}" "${allow_msg}"
+}
+verify_variant with-key '          os-label: Linux' '          os-label: Linux
+          extra: x'
+verify_variant env '        uses: ./.github/actions/verify-cargo-cache' '        uses: ./.github/actions/verify-cargo-cache
+        env:
+          X: y'
+verify_variant dir '          sources-dir: ${{ steps.cargo-home.outputs.dir }}' '          sources-dir: /tmp/elsewhere'
+verify_variant hit '          cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}' '          cache-hit: "true"'
+
+# The check is per job: a producer that lives in another job does not satisfy a restore here.
+other_job="${work}/other-job"; rm -rf "${other_job}"; cp -R "${reviewed}" "${other_job}"
+swap "${other_job}/${c}" '        id: cargo-home
+' '        id: cargo-home-renamed
+'
+printf '\n  other:\n    runs-on: ubuntu-24.04\n    steps:\n      - id: cargo-home\n        shell: bash\n        run: echo hi\n' >> "${other_job}/${c}"
+expect_fail 'the producer lives in another job' "${other_job}" 'needs exactly one step with id cargo-home (found 0)'
 
 # The flag's workflow_call route is exactly on.workflow_call.inputs.<flag>: the same key under outputs or
 # secrets, or any deeper path, is another mention and is refused.

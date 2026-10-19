@@ -485,39 +485,59 @@ def spike_gate(caller_path, name, failures)
   failures << "#{where}: the spike record in this change differs from the merged base record; it may not be altered in the diff that flips the flag" if base.length == 1 && base.first != tree.first
 end
 
-# N2b: the untrusted restore's path and key are outputs of two producer steps, so those steps are pinned
-# too (a restore whose path or key comes from an unpinned step is only as reviewed as that step).
-#  - `cargo-home`: the plain `run` step that writes the Cargo home directory, whole body pinned.
-#  - `cargo-target`: the local rust-target-cache composite in `locate` mode, with exactly the four
-#    reviewed `with` keys and no other step key (no env, no continue-on-error). Its group and features
-#    are free here because the composite itself refuses anything but fixed lower-case labels.
-#  - the composite: its `dir` and `key` outputs are exactly the `locate` step's outputs, and that step
-#    (shell, working directory, env and run, not its name or condition) hashes to LOCATE_STEP_SHA256.
-#    Changing that step is a reviewed change of this constant, in the same pull request.
+# N2b: what an untrusted restore's path, key and environment depend on. The restore reads outputs of two
+# producer steps (`cargo-home`, `cargo-target`), and anything that runs earlier in the job on the untrusted
+# ref can change what those steps compute (the environment and path files, shims on PATH, the target
+# directory, the toolchain that private source selects). So, for every job that carries a reviewed
+# untrusted restore:
+#  - every step that runs before the later producer is on a reviewed allowlist (reviewed_prefix_step?):
+#    the control-plane checkout, the shared local actions, the pinned plain `run` steps, the producers,
+#    steps gated to main alone (they never run on the untrusted ref), and the toolchain, cache-verify and
+#    target-cache local actions, each only with a whole-file hash that is pinned and `with` values that are
+#    the reviewed ones. No step that runs private-source code (`npm ci`, the vendor fetch) may precede them.
+#  - the job and the workflow set no PATH, BASH_ENV, ENV, HOME, CARGO_*, RUSTC*, RUSTUP_* or NODE_OPTIONS
+#    (`env:`), the container is exactly the reviewed digest-pinned expression and `defaults` is exactly
+#    the reviewed `run.working-directory: src` (a different container or default shell/directory would
+#    change what every step runs in).
+#  - the producer steps and the steps between a producer and its restore pass the same allowlist, per job.
+#  - the rust-target-cache composite is pinned as a whole file, with `locate` its first step.
+# Changing a pinned file is a reviewed change of the constants below, in the same pull request.
 CARGO_HOME_PIN = {
   'id' => 'cargo-home', 'shell' => 'bash',
   'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
 }.freeze
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
-LOCATE_STEP_SHA256 = 'b2b5808bd0fae32e972af866f809044edb1be92d21e3c9ac5ee4bbf087f2808a'.freeze
-
-# Local actions that may sit between a producer step and its untrusted restore, by the sha256 of the
-# canonical JSON of their whole action.yml. Changing one is a reviewed change of this table.
-INTERMEDIATE_ACTION_SHA256 = {
-  'verify-cargo-cache' => '6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a'
+RUST_TARGET_CACHE_FILE_SHA256 = 'ce7e2e04649e7ea6630916bbf0d78a48e7f46d0f20c8ed59489424764140a62e'.freeze
+LOCATE_STEP_SHA256 = '795e5554bcdecf6290e4bf1c76b3db36f19d88927b5fc90ae26801599e618501'.freeze
+# Whole action.yml hashes (canonical JSON of the parsed file) of the local actions that may run before an
+# untrusted restore. Two are listed where an open pull request changes the file; the first (this
+# repository's) is removed once that pull request has landed.
+LOCAL_ACTION_FILE_SHA256 = {
+  'verify-cargo-cache' => %w[
+    483f07957076d89b401ac26ce30b91c9f940b36a1d9c820680b7e29cffd456b8
+    6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a
+  ],
+  'rust-toolchain' => %w[
+    9ae7bf89268ef23edc1dbc6831e77a3dd85ed98a049caa1e326b85beebc0091c
+    04d9056e51c8ae6fbfd85ca149ca71e38d291809131a00a28a2444161a3cbda0
+  ],
+  'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256]
 }.freeze
-
-def local_action_hash(path, docs, name)
-  rel = ".github/actions/#{name}/action.yml"
-  doc = docs.find { |k, _| k.end_with?(rel) }&.last
-  unless doc.is_a?(Hash)
-    root = File.dirname(File.dirname(File.dirname(path)))
-    file = File.join(root, rel)
-    file = rel unless File.file?(file)
-    doc = File.file?(file) ? (load(file) rescue nil) : nil
-  end
-  doc.is_a?(Hash) ? Digest::SHA256.hexdigest(JSON.generate(canonical_json(doc))) : nil
-end
+# Shared local actions of the control plane that run before project code, allowed by name.
+PREFIX_LOCAL_ACTIONS = %w[timings source-checkout egress-audit root-setup drop-root sanitize concern-report shell-artefact scan-concern].freeze
+# The plain `run` steps ahead of the producers, by name; each is allowed only with a pinned body (the whole
+# step but its name hashes to a listed value).
+PREFIX_RUN_STEP_SHA256 = {
+  'Validate protected call input' => %w[624c9205f6916c4655ad74b5696f61106a738aa4a132bcd2b48c2be5f308b90d],
+  'Install jq and Ruby in the visual container' => %w[31b233667e9d4321de83ef2d88b058544421b485da66a0b7f121935b6dc25b16],
+  'Select the egress mode' => %w[40289952cb6c982cc79cd49ea9fbbe9a8e96833c5918b8f7e71ad8d6b3d7ee8a],
+  'Read the suite contract for this concern' => %w[6ea7f99c7b3ff6f95440e3e1636ecf867b0a9a47338519a328a9905950870995]
+}.freeze
+REVIEWED_CONTAINER_SHA256 = '1681a3dd8f4a7b43784aac2160f99c2524bc5af526d87cf8dc0ecb11ee1e4f49'.freeze
+REVIEWED_DEFAULTS = { 'run' => { 'working-directory' => 'src' } }.freeze
+FORBIDDEN_ENV_KEY = /\A(PATH|BASH_ENV|ENV|HOME|CARGO_.*|RUSTC.*|RUSTUP_.*|NODE_OPTIONS)\z/i
+PINNED_CHECKOUT = %r{\Aactions/checkout@[0-9a-f]{40}\z}
+CACHE_HIT_REF = /\A\$\{\{ steps\.[a-z0-9-]+\.outputs\.cache-hit \}\}\z/
 
 def canonical_json(value)
   case value
@@ -527,39 +547,134 @@ def canonical_json(value)
   end
 end
 
+def canonical_hash(value)
+  Digest::SHA256.hexdigest(JSON.generate(canonical_json(value)))
+end
+
+# The parsed action.yml of a local action: from the files given, else from the workflow's own tree.
+def local_action_doc(path, docs, name)
+  rel = ".github/actions/#{name}/action.yml"
+  doc = docs.find { |k, _| k.end_with?(rel) }&.last
+  return doc if doc.is_a?(Hash)
+  root = File.dirname(File.dirname(File.dirname(path)))
+  file = File.join(root, rel)
+  file = rel unless File.file?(file)
+  File.file?(file) ? (load(file) rescue nil) : nil
+end
+
+def local_action_hash(path, docs, name)
+  doc = local_action_doc(path, docs, name)
+  doc.is_a?(Hash) ? canonical_hash(doc) : nil
+end
+
+# A hash-pinned local action step with only the reviewed keys and `with` values (no env, no
+# continue-on-error, no other step key), or false.
+def pinned_local_action_step?(path, docs, st)
+  action = st['uses'].to_s
+  return false unless action.start_with?('./.github/actions/')
+  name = action.delete_prefix('./.github/actions/')
+  wanted = LOCAL_ACTION_FILE_SHA256[name]
+  return false unless wanted && (st.keys - %w[name id if uses with]).empty?
+  return false unless wanted.include?(local_action_hash(path, docs, name))
+  with = st['with']
+  with = {} if with.nil?
+  return false unless with.is_a?(Hash)
+  case name
+  when 'rust-toolchain'
+    with == { 'concern' => "${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" }
+  when 'verify-cargo-cache'
+    with.keys.sort == %w[cache-hit os-label sources-dir] && with['sources-dir'] == '${{ steps.cargo-home.outputs.dir }}' &&
+      with['cache-hit'].to_s.match?(CACHE_HIT_REF) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
+  else # rust-target-cache: a mode and the reviewed inputs, nothing else
+    (with.keys - %w[mode group features dir cache-hit os-label]).empty? && %w[locate restored save].include?(with['mode']) &&
+      with.fetch('dir', '${{ steps.cargo-target.outputs.dir }}') == '${{ steps.cargo-target.outputs.dir }}' &&
+      (!with.key?('cache-hit') || with['cache-hit'].to_s.match?(CACHE_HIT_REF)) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
+  end
+end
+
+def reviewed_prefix_step?(path, docs, st)
+  return true if %w[cargo-home cargo-target].include?(st['id']) # their exact shape is checked on its own
+  return true if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted') # never runs on the untrusted ref
+  return true if reviewed_untrusted_restore?(st)
+  action = st['uses'].to_s
+  return true if action.match?(PINNED_CHECKOUT) && (st.keys - %w[name id if uses with]).empty?
+  if action.empty? && st.key?('run')
+    wanted = PREFIX_RUN_STEP_SHA256[st['name'].to_s]
+    return !wanted.nil? && wanted.include?(canonical_hash(st.reject { |k, _| k == 'name' }))
+  end
+  name = action.delete_prefix('./.github/actions/')
+  # The egress audit alone is best-effort by design (continue-on-error); no other shared action may be.
+  allowed_keys = %w[name id if uses with] + (name == 'egress-audit' ? %w[continue-on-error] : [])
+  return true if action.start_with?('./.github/actions/') && PREFIX_LOCAL_ACTIONS.include?(name) && (st.keys - allowed_keys).empty?
+  pinned_local_action_step?(path, docs, st)
+end
+
 def producer_step_failures(path, doc, docs, failures)
-  steps = (doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}).values.flat_map { |job| job.is_a?(Hash) ? steps_of(job) : [] }.grep(Hash)
-  one = lambda do |id|
-    found = steps.select { |st| st['id'] == id }
-    failures << "#{path}: the untrusted restore needs exactly one step with id #{id} (found #{found.length})" unless found.length == 1
-    found.length == 1 ? found.first : nil
+  jobs = doc['jobs'].is_a?(Hash) ? doc['jobs'] : {}
+  restores = [['cargo-sources-untrusted', 'cargo-home'], ['cargo-target-cache-untrusted', 'cargo-target']]
+  bad_env = lambda do |where, env|
+    next unless env.is_a?(Hash)
+    env.each_key { |k| failures << "#{path}: #{where} sets #{k}, which could redirect the untrusted restore's tools or paths" if k.to_s.match?(FORBIDDEN_ENV_KEY) }
   end
-  if (home = one.call('cargo-home'))
-    rest = home.reject { |k, _| %w[name if].include?(k) }
-    failures << "#{path}: step cargo-home differs from the pinned shape its untrusted restore path depends on" unless rest == CARGO_HOME_PIN
+  bad_env.call('the workflow env', doc['env'])
+  failures << "#{path}: a workflow-level `defaults` must not exist beside an untrusted restore" if doc.key?('defaults')
+  jobs.each do |job_name, job|
+    next unless job.is_a?(Hash)
+    steps = steps_of(job).grep(Hash)
+    next unless steps.any? { |st| restores.any? { |rid, _| st['id'] == rid } }
+    bad_env.call("job #{job_name} env", job['env'])
+    container = job['container']
+    unless container.nil? || (container.is_a?(String) && Digest::SHA256.hexdigest(container) == REVIEWED_CONTAINER_SHA256)
+      failures << "#{path}: job #{job_name}: the container must be absent or exactly the reviewed digest-pinned expression"
+    end
+    unless job['defaults'].nil? || job['defaults'] == REVIEWED_DEFAULTS
+      failures << "#{path}: job #{job_name}: defaults must be absent or exactly the reviewed run.working-directory: src"
+    end
+    one = lambda do |id|
+      found = steps.select { |st| st['id'] == id }
+      failures << "#{path}: job #{job_name}: the untrusted restore needs exactly one step with id #{id} (found #{found.length})" unless found.length == 1
+      found.length == 1 ? found.first : nil
+    end
+    if (home = one.call('cargo-home'))
+      rest = home.reject { |k, _| %w[name if].include?(k) }
+      failures << "#{path}: step cargo-home differs from the pinned shape its untrusted restore path depends on" unless rest == CARGO_HOME_PIN
+    end
+    if (target = one.call('cargo-target'))
+      with = target['with']
+      shape_ok = (target.keys - %w[name id if uses with]).empty? && target['uses'].to_s == TARGET_CACHE_ACTION && with.is_a?(Hash) &&
+                 with.keys.sort == %w[features group mode os-label] && with['mode'] == 'locate' &&
+                 with['os-label'].is_a?(String) && with['os-label'].match?(/\A[A-Za-z]+\z/)
+      failures << "#{path}: step cargo-target differs from the pinned rust-target-cache locate shape its untrusted restore path and key depend on" unless shape_ok
+    end
+    ids = steps.map { |st| st['id'] }
+    last = restores.map { |_, pid| ids.index(pid) }.compact.max || 0
+    steps.first(last).each do |st|
+      bad_env.call("step #{st['name'].inspect} env", st['env'])
+      next if reviewed_prefix_step?(path, docs, st)
+      failures << "#{path}: job #{job_name}: step #{st['name'].inspect} runs before the producers of the untrusted restore and is not on the reviewed allowlist (it could change the environment, PATH or files their outputs depend on; project-code steps belong after the restores)"
+    end
+    restores.each do |rid, pid|
+      ri = ids.index(rid)
+      pi = ids.index(pid)
+      next if ri.nil? || pi.nil?
+      failures << "#{path}: job #{job_name}: step #{pid} must run before the untrusted restore #{rid} that uses its outputs" if pi > ri
+      next if pi > ri
+      steps[(pi + 1)...ri].each do |st|
+        next if reviewed_prefix_step?(path, docs, st)
+        failures << "#{path}: job #{job_name}: step #{st['name'].inspect} sits between #{pid} and the untrusted restore #{rid}: it must be gated to main alone or be a reviewed, hash-pinned step"
+      end
+    end
   end
-  if (target = one.call('cargo-target'))
-    with = target['with']
-    keys_ok = (target.keys - %w[name id if uses with]).empty?
-    shape_ok = keys_ok && target['uses'].to_s == TARGET_CACHE_ACTION && with.is_a?(Hash) &&
-               with.keys.sort == %w[features group mode os-label] && with['mode'] == 'locate' &&
-               with['os-label'].is_a?(String) && with['os-label'].match?(/\A[A-Za-z]+\z/)
-    failures << "#{path}: step cargo-target differs from the pinned rust-target-cache locate shape its untrusted restore path and key depend on" unless shape_ok
-  end
-  # The composite is read from the files given, or else from the same tree as the workflow (the
-  # workflow policy passes workflows only), so a restore never goes unchecked for want of the file.
-  action_path = docs.keys.find { |k| k.end_with?('.github/actions/rust-target-cache/action.yml') }
-  composite = action_path && docs[action_path]
-  unless composite.is_a?(Hash)
-    root = File.dirname(File.dirname(File.dirname(path)))
-    action_path = File.join(root, '.github', 'actions', 'rust-target-cache', 'action.yml')
-    action_path = '.github/actions/rust-target-cache/action.yml' unless File.file?(action_path)
-    composite = File.file?(action_path) ? (load(action_path) rescue nil) : nil
-  end
+
+  # The composite behind `cargo-target`: read from the files given, or else from the workflow's own tree
+  # (the workflow policy passes workflows only).
+  composite = local_action_doc(path, docs, 'rust-target-cache')
   unless composite.is_a?(Hash)
     failures << "#{path}: the untrusted restore depends on the rust-target-cache composite, which could not be read"
     return
   end
+  action_path = '.github/actions/rust-target-cache/action.yml'
+  failures << "#{action_path}: the whole file must match the reviewed content hash its untrusted restore depends on (every step after locate runs before the restore reads the outputs)" unless canonical_hash(composite) == RUST_TARGET_CACHE_FILE_SHA256
   outputs = composite['outputs']
   outputs_ok = outputs.is_a?(Hash) && outputs.keys.sort == %w[dir key] &&
                outputs['dir'].is_a?(Hash) && outputs['dir']['value'] == '${{ steps.locate.outputs.dir }}' &&
@@ -573,46 +688,18 @@ def producer_step_failures(path, doc, docs, failures)
     failures << "#{action_path}: expected exactly one step with id locate, and no other-case look-alike (found #{look_alikes.length})"
     return
   end
-  # STRUCTURAL: `locate` is the first step of the composite. Nothing that could change how it computes dir
-  # and key (a step that writes the environment or path files by any means, plants a shim in a directory on
-  # PATH, or pre-creates the target directory) can then run before it, whatever it names or hides. This is the
-  # control; the name check below is defence in depth only.
+  # STRUCTURAL: `locate` is the first step of the composite, so nothing in it can run before it. The
+  # whole-file hash above covers the steps after it; this keeps the rule explicit and the message clear.
   if composite_steps.first.equal?(locate.first)
     body = locate.first.reject { |k, _| %w[name if id].include?(k) }
-    digest = Digest::SHA256.hexdigest(JSON.generate(canonical_json(body)))
-    failures << "#{action_path}: the locate step no longer matches the reviewed content hash its untrusted restore depends on" unless digest == LOCATE_STEP_SHA256
+    failures << "#{action_path}: the locate step no longer matches the reviewed content hash its untrusted restore depends on" unless canonical_hash(body) == LOCATE_STEP_SHA256
   else
     failures << "#{action_path}: the locate step must be the first step of the composite (index 0): any step before it could change how it computes dir and key"
   end
-  composite_steps.each_with_index do |st, index|
-    next unless index > 0 && st['id'].to_s != 'locate' && composite_steps.index { |x| x['id'] == 'locate' } > index
-    label = st['name'].to_s.inspect
-    failures << "#{action_path}: step #{label} runs before the locate step and may not write GITHUB_ENV or GITHUB_PATH" if JSON.generate(st).match?(/GITHUB_(ENV|PATH)/i)
-  end
-
-  # The steps between a producer and its untrusted restore run before the restore reads the outputs, and
-  # on the untrusted ref they could change the environment, PATH or files the restore step uses. Each must
-  # be gated to main alone (so it never runs on the untrusted ref) or be a local action whose whole file
-  # hash is pinned (INTERMEDIATE_ACTION_SHA256).
-  sources = [['cargo-sources-untrusted', 'cargo-home'], ['cargo-target-cache-untrusted', 'cargo-target']]
-  sources.each do |restore_id, producer_id|
-    ri = steps.index { |st| st['id'] == restore_id }
-    pi = steps.index { |st| st['id'] == producer_id }
-    next if ri.nil? || pi.nil?
-    if pi > ri
-      failures << "#{path}: step #{producer_id} must run before the untrusted restore #{restore_id} that uses its outputs"
-      next
-    end
-    steps[(pi + 1)...ri].each do |st|
-      expr = st['if'].to_s
-      next if requires?(st['if'], MAIN) && !expr.include?('untrusted')
-      action = st['uses'].to_s
-      name = action.start_with?('./.github/actions/') ? action.delete_prefix('./.github/actions/') : nil
-      want = name && INTERMEDIATE_ACTION_SHA256[name]
-      have = want && local_action_hash(path, docs, name)
-      next if want && have == want
-      failures << "#{path}: step #{st['name'].inspect} sits between #{producer_id} and the untrusted restore #{restore_id}: it must be gated to main alone or be a local action with a pinned content hash"
-    end
+  # Defence in depth only: no other step may name the runner's environment or path files.
+  composite_steps.each do |st|
+    next if st.equal?(locate.first)
+    failures << "#{action_path}: step #{st['name'].to_s.inspect} may not write GITHUB_ENV or GITHUB_PATH" if JSON.generate(st).match?(/GITHUB_(ENV|PATH)/i)
   end
 end
 
