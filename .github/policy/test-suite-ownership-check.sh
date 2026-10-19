@@ -94,12 +94,12 @@ commit_all "${repo}"
 run_check "${repo}"; expect_rc exempt 0
 expect_text exempt '1 test file(s) checked'
 
-# 5. A source with no ownership manifest (an older revision) is skipped, not failed.
+# 5. A source with no ownership manifest fails closed (a source that deletes the manifest must not skip the gate).
 repo="$(new_repo nomanifest)"
 add_file "${repo}" taurine-desktop/tests/e2e/x.spec.ts
 commit_all "${repo}"
-run_check "${repo}"; expect_rc nomanifest 0
-expect_text nomanifest 'skipped'
+run_check "${repo}"; expect_rc nomanifest 1
+expect_text nomanifest 'reason manifest_missing'
 
 # 6. A manifest the check cannot read fails closed with a fixed reason class.
 for bad in 'not json' '[]' '{"suites":[]}' '{"suites":{"a":{"include":"x"}}}' '{"suites":{"a":{"include":[1]}}}' \
