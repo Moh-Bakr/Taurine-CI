@@ -52,14 +52,20 @@ end
 # brace expansion.
 def glob_regex(glob)
   source = glob.split('**', -1).map do |segment|
-    segment.gsub('*', '[^/]*').gsub('.', '\.')
+    segment.split('*', -1).map { |literal| Regexp.escape(literal) }.join('[^/]*')
   end.join('.*')
   Regexp.new("\\A#{source}\\z")
+rescue RegexpError
+  # Never the pattern or the error text: only a fixed reason class leaves this script.
+  raise CollectionError, 'manifest_glob'
 end
+
+# A manifest glob is plain path characters and `*`; anything else is refused before a pattern is built.
+GLOB_CHARS = %r{\A[A-Za-z0-9_./*@+-]+\z}
 
 def matches_include?(patterns, relative_path)
   patterns.any? do |glob|
-    raise CollectionError, 'manifest_glob' unless glob.is_a?(String) && !glob.empty? && glob.ascii_only?
+    raise CollectionError, 'manifest_glob' unless glob.is_a?(String) && glob.match?(GLOB_CHARS)
     regex = glob_regex(glob)
     regex.match?(relative_path)
   end

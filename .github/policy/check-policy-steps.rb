@@ -160,6 +160,8 @@ __END__
 ["policy-fixtures","Test the Timings table's queue column and per-ref baselines","bash .github/policy/test-timings-table.sh",{}]
 ["policy-fixtures","Prove the three-way rust-app split is complete on every platform","bash .github/policy/test-rust-app-shards.sh",{}]
 ["policy-fixtures","Test the early suite-ownership check on synthetic repositories","bash .github/policy/test-suite-ownership-check.sh",{}]
+["policy-fixtures","Require the Wave C policy tests and the early ownership step to stay wired","ruby .github/policy/check-wave-c-wiring.rb",{}]
+["policy-fixtures","Test the Wave C wiring check on synthetic trees","bash .github/policy/test-wave-c-wiring.sh",{}]
 ["policy-fixtures","Test the feature-suite catalog contract","bash .github/policy/test-suite-catalog.sh",{}]
 ["policy-fixtures","Test the exact suite-selection policy on synthetic changes","bash .github/policy/test-suite-selection.sh",{}]
 ["policy-fixtures","Test the sanitized feature-suite evidence contract","bash .github/policy/test-suite-evidence.sh",{}]

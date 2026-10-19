@@ -462,7 +462,12 @@ told from "existing": the check covers every tracked test file, a superset that 
 manifest does not cover. Three trees are exempt by reviewed prefix because no Linux suite runs them: `skills/` (the
 orchestrate skill's own suite), `vendor/` and `taurine-mobile/tests/e2e/` (the mobile journeys); everything else is
 in scope, so a new test area fails closed. A source with no manifest (an older revision) is skipped with a note, and a
-manifest that cannot be read fails closed with a fixed reason class (`manifest_shape`, `manifest_glob`, `file_list`).
+manifest that cannot be read fails closed with a fixed reason class (`manifest_shape`, `manifest_glob`, `file_list`, or `internal` for anything
+unforeseen, which prints nothing of the error). The manifest must be a plain file (read with `lstat`: a symbolic link, directory or device is
+refused), and a glob may contain only letters, digits and `_ . / * @ + -`: anything else is refused as `manifest_glob` before a pattern is built,
+so no glob text can reach the regular-expression compiler or a log. The trusted collector holds the same rule. File names are matched as raw bytes,
+so a name that is not valid text is counted or ignored like any other. `check-wave-c-wiring.rb` fails a tree in the Wave C shape that drops any of the
+three policy tests or this step.
 
 What it prints. Only fixed words and counts: the number of test files checked, the number with no owner and the reason
 class `ownership_unowned`, in the log and the step summary. No path, pattern or file name ever leaves the job (the rule

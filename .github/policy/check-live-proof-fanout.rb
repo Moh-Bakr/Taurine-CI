@@ -184,6 +184,11 @@ if dispatcher
     failures << "#{DISPATCHER}: jobs.prove differs from the reviewed fan-out in #{differing.sort.join(', ')}; " \
                 'the matrix must be exactly the plan arms, with no include, exclude or filter'
   end
+  # Hash equality treats 6.0 as 6, so the cap's type is held separately: an integer, never a float.
+  cap = prove.is_a?(Hash) && prove['strategy'].is_a?(Hash) ? prove['strategy']['max-parallel'] : nil
+  unless cap.is_a?(Integer)
+    failures << "#{DISPATCHER}: jobs.prove differs from the reviewed fan-out in strategy; max-parallel must be the integer 6, not #{cap.class}"
+  end
 end
 
 if arm_workflow

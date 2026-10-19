@@ -82,6 +82,7 @@ reject 'prove fail-fast' "${dispatcher}" 'reviewed fan-out in strategy' "${prove
 reject 'prove concurrency cap removed' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"].delete(\"max-parallel\")"
 reject 'prove concurrency cap raised' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = 13"
 reject 'prove concurrency cap lowered' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = 2"
+reject 'prove concurrency cap as a float' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = 6.0"
 reject 'prove job condition weakened' "${dispatcher}" 'reviewed fan-out in if' "${prove}[\"if\"] = \"always()\""
 reject 'prove job condition skips an arm' "${dispatcher}" 'reviewed fan-out in if' "${prove}[\"if\"] += \" && inputs.engine != 'pg-dbx'\""
 reject 'prove engine pinned' "${dispatcher}" 'reviewed fan-out in with' "${prove}[\"with\"][\"engine\"] = \"doris\""

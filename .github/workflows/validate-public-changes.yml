@@ -343,6 +343,14 @@ jobs:
         shell: bash
         run: bash .github/policy/test-suite-ownership-check.sh
 
+      - name: Require the Wave C policy tests and the early ownership step to stay wired
+        shell: bash
+        run: ruby .github/policy/check-wave-c-wiring.rb
+
+      - name: Test the Wave C wiring check on synthetic trees
+        shell: bash
+        run: bash .github/policy/test-wave-c-wiring.sh
+
   # The base commit's policy run against this pull request's tree, and the fixtures that test the
   # step that runs it, in base-policy.yml (see its header). `policy` requires this call's result.
   base-pass:

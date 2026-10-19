@@ -86,7 +86,11 @@ sha="$(change docs/a.md)"
 expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-security'
 check_split docs
 sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app-1,rust-app-2,rust-app-3,scan-security'
+# The app shards the selection must name are the shard rows of this tree's own table, exactly: a table with
+# three shards must select three, never a list written for another table.
+table_shards="$(jq -r '[.concerns.linux | keys[] | select(test("^rust-app-[0-9]+$"))] | join(",")' .github/ci-matrix.json)"
+[[ "${table_shards}" == 'rust-app-1,rust-app-2,rust-app-3' ]] || { echo "selector case 'crate': the table's app shards are '${table_shards}', not rust-app-1 to rust-app-3" >&2; exit 1; }
+expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" "partial contracts,rust-domain,${table_shards},scan-security"
 check_split crate
 sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
 expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-security'
