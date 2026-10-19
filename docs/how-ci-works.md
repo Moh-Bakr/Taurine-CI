@@ -1284,7 +1284,7 @@ starts with its own checkout; every step of the former single job runs in exactl
 | `policy-structure` | repository, lint, universal, structure, step table, workflows, sizes, policy and rule N fixtures | 15 min | about 370 s; 2.4x headroom |
 | `policy-fixtures` | the remaining fixture and unit tests, the aggregate-layout test | 25 min | about 100 s, plus the aggregate-layout test (about 140 cases; roughly 12 minutes measured on a busy 10-core Mac; not in that run); about 14 min in all, 1.8x headroom. Parallelising that test's cases is the next speed-up |
 | `policy-evidence` | case-evidence contract, producers, assets and Playwright parity | 10 min | about 36 s |
-| `policy-mutations` | `test-mutations.sh` | 20 min | about 470 s; 2.5x headroom |
+| `policy-mutations` | `test-mutations.sh` | 25 min | about 470 s; 3x headroom (25 because main's `test-policy-aggregate.sh` anchors on that value) |
 | `policy` (aggregate) | the two guards | 5 min | seconds once its `needs` end |
 
 The guards fail unless every `needs.<job>.result` is `success`, so a failed, skipped, cancelled or
