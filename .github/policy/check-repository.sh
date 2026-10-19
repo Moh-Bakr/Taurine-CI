@@ -40,7 +40,9 @@ while IFS= read -r -d '' path; do
   if [[ "$path" =~ ^\.github/policy/case-evidence-assets/[a-z0-9][a-z0-9-]*(\.(config|spec))?\.(cjs|json)$ ]]; then
     continue
   fi
-  if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt ]]; then
+  # .github/CODEOWNERS is the one reviewed ownership file (exact path, matched in the sweep below too);
+  # CODEOWNERS anywhere else still trips the forbidden-name sweep.
+  if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt || "$path" == .github/CODEOWNERS ]]; then
     continue
   fi
   # Flat documentation guides: markdown directly under docs/, nothing else.
@@ -92,7 +94,7 @@ while IFS= read -r -d '' record; do
   fi
 done < <(git ls-files -s -z -- .github/policy/case-evidence-assets)
 
-if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' \
+if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' -e '.github/CODEOWNERS' \
   | grep -vE '^\.github/policy/case-evidence-assets/[a-z0-9][a-z0-9-]*(\.(config|spec))?\.json$' \
   | grep -E "$forbidden_path_re|$forbidden_name_re"; then
   echo "The public repository contains a forbidden source, credential, or starter-document path." >&2

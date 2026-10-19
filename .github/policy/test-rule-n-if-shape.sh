@@ -9,7 +9,7 @@ trap 'rm -rf "${work}"' EXIT
 checker=.github/policy/check-cache-mode.rb
 shape_msg='has a block-scalar or multiline if'
 cp .github/policy/cache-expression.rb "${work}/cache-expression.rb"
-stage_2_msg="awaits the owner's Stage 2 decision"
+stage_2_msg="is not the reviewed read-only untrusted restore"
 
 fixture() { # file, if-lines, action (optional), job-key (optional)
   printf 'name: f\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  %s:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Cache fixture\n%s        uses: %s\n        with:\n          path: /tmp/x\n          key: k\n' \
@@ -51,7 +51,7 @@ ruby -e '
   mutated = text.sub(/      if block_scalar_ifs\.fetch\(path\).*?      end\n/m, "")
   abort "the if-shape refusal block was not found" unless mutated != text
   mutated = mutated.sub("CacheExpression.top_terms(value)", "CacheExpression.top_terms(value.is_a?(String) ? value.strip : value)")
-  abort "the copy lost rule N" unless mutated.include?("awaits the owner\x27s Stage 2 decision")
+  abort "the copy lost rule N" unless mutated.include?("is not the reviewed read-only untrusted restore")
   File.write(ARGV.fetch(1), mutated)
 ' "${checker}" "${work}/copy.rb"
 fixture "${work}/untrusted.yml" "${untrusted_if}"
