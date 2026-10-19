@@ -429,7 +429,6 @@ mutant 'the generated mobile project no longer skipped' config ' -o -path ./taur
 mkdir -p "${src}/taurine-mobile/src-tauri/generated"; printf '{}\n' >"${src}/taurine-mobile/src-tauri/generated/tauri.conf.json"
 expect_fail 'a nested config in a look-alike directory' 'refuse_build_feature_overrides' 'outside the shells'
 rm -rf "${src}/taurine-mobile/src-tauri/generated" "${src}/taurine-mobile/src-tauri/gen"
-rm -r "${src}/taurine-mobile/src-tauri/sub"
 printf '{"bundle":{"externalBin":["bin/sidecar"]}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
 expect_fail 'a sidecar' 'refuse_build_feature_overrides' 'a sidecar'
 rm "${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
