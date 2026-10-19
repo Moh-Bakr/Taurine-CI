@@ -284,6 +284,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh
 
+      - name: Test the duplicate-dispatch guard against synthetic runs
+        shell: bash
+        run: bash .github/policy/test-dispatch-dedup.sh
+
       # The roster the plan step selects is exactly what runs: no matrix filter, literal output
       # or skipped arm step between them.
       - name: Pin the live-proof fan-out from roster to arm runs

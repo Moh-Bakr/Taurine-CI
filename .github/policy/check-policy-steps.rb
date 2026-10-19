@@ -179,6 +179,7 @@ __END__
 ["policy-evidence","Test the pinned Playwright parity producer against a fake runner","bash .github/policy/test-playwright-pinned-parity-producer.sh",{}]
 ["policy-evidence","Test the case-evidence admission reconciliation","bash .github/policy/test-case-evidence-admission.sh",{}]
 ["policy-fixtures","Test canonical dispatch identity and input defaults","bash .github/policy/test-dispatch-identity.sh",{}]
+["policy-fixtures","Test the duplicate-dispatch guard against synthetic runs","bash .github/policy/test-dispatch-dedup.sh",{}]
 ["policy-fixtures","Pin the live-proof fan-out from roster to arm runs","ruby .github/policy/check-live-proof-fanout.rb",{}]
 ["policy-fixtures","Test the live-proof fan-out pin on arm-dropping fixtures","bash .github/policy/test-live-proof-fanout.sh",{}]
 ["policy-fixtures","Test live-proof roster selection and JSON validity","bash .github/policy/test-live-roster.sh",{}]
