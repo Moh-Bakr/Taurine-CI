@@ -511,39 +511,22 @@ RUST_TARGET_CACHE_FILE_SHA256 = 'cc34296f12a3b2738141e4524237b468886e849f28f38fa
 LOCATE_STEP_SHA256 = 'a720fafbcd5d2cab767e59e6b11a7433e7fcbb8e7d2861f6111060b2d6bb167a'.freeze
 # Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
 # untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing
-# in the same reviewed pull request. A name lists TWO OR MORE hashes only where an open pull request changes
-# that file; the FIRST hash in such a pair is this repository's (main's) and must be removed once the pull
-# request(s) named beside it have landed:
-#   rust-toolchain:     #365 (04d9056e...), Wave C ci/speed-wave-c (3e991c0a...). Once both land the merged
-#                       file hashes to a third value that replaces all three.
-#   verify-cargo-cache: #365 (6c38bdfe...).
-#   timings:            Wave C (ff475be9...).
-#   root-setup:         Wave C (81fa9779...).
+# in the same reviewed pull request. Each name lists exactly the hash of the file as it is in this tree:
+# batch 2 merged #365 and Wave C into rust-toolchain (verify-cargo-cache is #365's, timings is Wave C's),
+# #360 (scan-lint) and Wave C into root-setup, and the keyed test ids into source-checkout, sanitize and
+# concern-report. A pull request that changes one of these files replaces its hash here, in the same change.
 LOCAL_ACTION_FILE_SHA256 = {
-  'timings' => %w[
-    9d2a363af0af7877c4a0428c907bbd0445d9c43b0e6db2f033bd339f814fb860
-    ff475be9ed8faa47c3a218041c71505a17f0944fc4d32b9f25b08ae61fd59922
-  ],
-  'source-checkout' => %w[bcab0702e94fc10fa410a5d8875215dffc03189e557780f86662da4c1796fff0],
+  'timings' => %w[ff475be9ed8faa47c3a218041c71505a17f0944fc4d32b9f25b08ae61fd59922],
+  'source-checkout' => %w[ac95c29654593720210baa620edc335ecf49f33864f9d96deed73f1f296317b3],
   'egress-audit' => %w[c6c3ff33427b869f38f3dc83800ae92143233b2137922d67d2a2f75aa32f74b5],
-  'root-setup' => %w[
-    92b689e1af931693bb99211a35383fd69879bccf77e1885045fc743675d97d41
-    81fa977997b32fbbe67028b272812e88e2164ef2ff9d9a7debe927811b116154
-  ],
+  'root-setup' => %w[1f288c476f7598e3fd583b8116994c429c01e3dc30376ea2df1ae9e2affe1dce],
   'drop-root' => %w[2562fdd5b283364bb839c3a547dce05bbea76438ea47c2be5f7efe26942579dc],
-  'sanitize' => %w[2de2e7da83f5011c724bf34f0096be6c703a0180272fbf7ff2eb2c96df075024],
-  'concern-report' => %w[d993053f802c03335cc09ce4a4b182b02e468d00202835673d50b4ffdb279435],
+  'sanitize' => %w[d93ddb3dcd9012ddadc5c347d83a3f9775e175729156c0457bf377cf30aaa737],
+  'concern-report' => %w[49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
   'shell-artefact' => %w[dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184],
-  'scan-concern' => %w[6a70b55ba6b730efcf8f74999261c46119243ce9eada546b46c73bc8d59327cd],
-  'verify-cargo-cache' => %w[
-    483f07957076d89b401ac26ce30b91c9f940b36a1d9c820680b7e29cffd456b8
-    6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a
-  ],
-  'rust-toolchain' => %w[
-    9ae7bf89268ef23edc1dbc6831e77a3dd85ed98a049caa1e326b85beebc0091c
-    04d9056e51c8ae6fbfd85ca149ca71e38d291809131a00a28a2444161a3cbda0
-    3e991c0add6d3eacb52be1ac122a916fb9a1ae473d664aafda89d901d564a5c2
-  ],
+  'scan-concern' => %w[4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
+  'verify-cargo-cache' => %w[6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a],
+  'rust-toolchain' => %w[abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec],
   'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256]
 }.freeze
 # The exact `with` of each shared local action (the canonical JSON of the step's whole `with`, an absent
@@ -625,7 +608,7 @@ def pinned_local_action_step?(path, docs, st)
   when *PREFIX_ACTION_WITH_SHA256.keys
     PREFIX_ACTION_WITH_SHA256[name].include?(canonical_hash(with))
   when 'rust-toolchain'
-    with == { 'concern' => "${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" }
+    with == { 'concern' => "${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}" }
   when 'verify-cargo-cache'
     with.keys.sort == %w[cache-hit os-label sources-dir] && with['sources-dir'] == '${{ steps.cargo-home.outputs.dir }}' &&
       with['cache-hit'].to_s.match?(CACHE_HIT_REF) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
