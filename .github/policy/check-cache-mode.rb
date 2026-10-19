@@ -570,7 +570,7 @@ PREFIX_ACTION_WITH_SHA256 = {
   'scan-concern' => %w[71c7bea029bd1a9231abf6373a5d518bb45d2fa2cb449b10adb0dc01484dda5f],
   'root-setup' => %w[422c143f47d2ac7910b7348b5b4e00f68ccbf86e5f9cfa1d51d350d089bb2b92],
   'drop-root' => %w[7fea94b67beba935a17fd01ddee06f63266769df67633ff6f39a64eddb434652],
-  'sanitize' => %w[4bae990159024f93d9848b12344a7f1d92577dca0ee2aa9916b03c4196a06478],
+  'sanitize' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a],
   'concern-report' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a],
   'shell-artefact' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a]
 }.freeze
