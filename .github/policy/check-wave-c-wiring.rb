@@ -42,6 +42,13 @@ if index.nil?
 else
   step = concern[index]
   problems << 'the ownership step is conditional or tolerated' if step.key?('if') || step.key?('continue-on-error')
+  # The step is the reviewed command and nothing else: a substring match would pass `... || true` or an `echo` prefix.
+  reviewed_run = "set -euo pipefail\nruby .github/policy/refuse-unowned-tests.rb \"${GITHUB_WORKSPACE}/src\""
+  problems << 'the ownership step must run exactly the reviewed command' unless step['run'].to_s.sub(/\n\z/, '') == reviewed_run
+  problems << 'the ownership step must use shell: bash' unless step['shell'] == 'bash'
+  extra = step.keys - %w[name shell working-directory run]
+  problems << "the ownership step carries keys beyond name, shell, working-directory and run: #{extra.sort.join(', ')}" unless extra.empty?
+  problems << 'the ownership step must run in the workspace' if step.key?('working-directory') && step['working-directory'] != '${{ github.workspace }}'
   checkout = concern.index { |s| s.is_a?(Hash) && s['uses'].to_s == './.github/actions/source-checkout' }
   drop = concern.index { |s| s.is_a?(Hash) && s['uses'].to_s == './.github/actions/drop-root' }
   problems << 'the ownership step must follow the source checkout and the root drop' unless checkout && drop && checkout < drop && drop < index
