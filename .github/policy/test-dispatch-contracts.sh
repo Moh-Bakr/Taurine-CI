@@ -379,6 +379,18 @@ if (cd "${work}/strict-mode" && bash .github/policy/check-concern-table.sh) >"${
 fi
 grep -qF 'run-result must use its reviewed explicit selection mode' "${work}/strict-mode.stderr"
 
+# The Result job must need every validate job: dropping any one from the Linux Result `needs` is refused.
+for dropped in validate-long-main validate-long-untrusted validate-main validate-untrusted; do
+  rm -rf "${work}/needs-mode"; mkdir -p "${work}/needs-mode"
+  cp -R .github "${work}/needs-mode/"
+  NEEDS_DROP="${dropped}" ruby -e 'path=ARGV.fetch(0); text=File.read(path, encoding: "UTF-8"); line=text[/^    needs: \[validate-input, validate-long-main[^\n]*\]$/] or abort("the Result needs line is not where the fixture expects it"); File.write(path, text.sub(line, line.sub(", #{ENV.fetch("NEEDS_DROP")}", "")))' \
+    "${work}/needs-mode/.github/workflows/linux-validation.yml"
+  if (cd "${work}/needs-mode" && bash .github/policy/check-concern-table.sh) >"${work}/needs-mode.stdout" 2>"${work}/needs-mode.stderr"; then
+    echo "a Result job that no longer needs ${dropped} passed the concern table check" >&2; exit 1
+  fi
+  grep -qF "the Result job must need every validate job (missing: ${dropped})" "${work}/needs-mode.stderr" || { echo "wrong rejection for a Result job without ${dropped}" >&2; cat "${work}/needs-mode.stderr" >&2; exit 1; }
+done
+
 # PG8 must use the exact source SHA validation step before dispatch identity.
 mutate_pg8_source_validator() {
   local mutation="$1"

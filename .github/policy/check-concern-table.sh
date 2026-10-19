@@ -89,6 +89,14 @@ mode_by_workflow.each do |path, allowed_modes|
     warn "#{path}: partial mode must require every concern in its selected matrix"
     exit 1
   end
+  # The Result job must wait for every validate job (validate, validate-*, the planning job validate-input aside): a validate job it does not need
+  # could fail or never run without the verdict noticing.
+  validate_jobs = parsed.fetch('jobs').keys.select { |name| (name == 'validate' || name.start_with?('validate-')) && name != 'validate-input' }
+  missing = validate_jobs - Array(parsed.fetch('jobs').fetch('result')['needs'])
+  unless missing.empty?
+    warn "#{path}: the Result job must need every validate job (missing: #{missing.sort.join(', ')})"
+    exit 1
+  end
   required_needs = needs_by_workflow[path] || []
   unless (required_needs - Array(parsed.fetch('jobs').fetch('result')['needs'])).empty?
     warn "#{path}: Result must depend on the jobs that supply its selected concern list"
