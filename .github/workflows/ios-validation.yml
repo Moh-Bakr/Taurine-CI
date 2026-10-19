@@ -335,6 +335,7 @@ jobs:
               refuse_openssl_overrides || exit 1
               openssl_door_gate ios-sim-build-openssl-door-only taurine-mobile aarch64-apple-ios-sim || exit 1
               verify_door_crate_sources || exit 1
+              mobile_tauri_hooks_check || exit 1
               mobile_run ios-build tauri_cli taurine-mobile ios build --ci --no-sign --target aarch64-sim
               # beforeBuildCommand ran in between: the refusals run again on what the build left,
               # and the door crates cargo built from must still equal their verified archives.

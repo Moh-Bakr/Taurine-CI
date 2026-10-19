@@ -284,6 +284,8 @@ jobs:
               openssl_door_gate android-arm64-v8a-openssl-door-only-prebuild taurine-mobile aarch64-linux-android || exit 1
               verify_door_crate_sources || exit 1
               gradle_wrapper_check || exit 1
+              mobile_android_gradle_pin_check after-init || exit 1
+              mobile_tauri_hooks_check || exit 1
               android_bindgen_env
               mobile_run android-debug-build tauri_cli taurine-mobile android build --apk --debug --target aarch64
               # beforeBuildCommand ran in between: the refusals run again on what the build left,

