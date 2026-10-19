@@ -442,7 +442,7 @@ observes, it does not yet narrow what a concern executes.
 
 The trusted evidence collector refuses a test no suite owns (`ownership_unowned`), but it runs at the end of a
 concern job, so a candidate that adds or renames a test file without regenerating the private ownership manifest
-(`scripts/ci/suite-ownership.json`) was found 25 to 60 minutes late. `check-suite-ownership.rb` runs the same rule on
+(`scripts/ci/suite-ownership.json`) was found 25 to 60 minutes late. `refuse-unowned-tests.rb` runs the same rule on
 data only at the START of every Linux concern job, as the step "Refuse test files with no suite owner before any
 build", straight after the suite-contract snapshot.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixtures for the fail-fast suite-ownership check (check-suite-ownership.rb).
+# Fixtures for the fail-fast suite-ownership check (refuse-unowned-tests.rb).
 #
 # The check runs at the start of every Linux concern job, after the token is revoked and root is
 # dropped and before any project command, on data only: the generated ownership manifest and the
@@ -13,7 +13,7 @@
 #   - uses the collector's glob semantics exactly (`*` stays in a segment, `**` crosses).
 # Run from the repository root (the policy workflow does).
 set -euo pipefail
-script="${PWD}/.github/policy/check-suite-ownership.rb"
+script="${PWD}/.github/policy/refuse-unowned-tests.rb"
 collector="${PWD}/.github/policy/collect-suite-evidence.rb"
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
@@ -163,7 +163,7 @@ ruby -ryaml -e '
   check = at.call("Refuse test files with no suite owner before any build")
   step = steps.fetch(check)
   abort "the ownership step must run for every concern, unconditionally and never tolerated" if step.key?("if") || step.key?("continue-on-error")
-  abort "the ownership step must run exactly the reviewed command" unless step["run"].to_s.include?("ruby .github/policy/check-suite-ownership.rb \"${GITHUB_WORKSPACE}/src\"") && step["shell"] == "bash"
+  abort "the ownership step must run exactly the reviewed command" unless step["run"].to_s.include?("ruby .github/policy/refuse-unowned-tests.rb \"${GITHUB_WORKSPACE}/src\"") && step["shell"] == "bash"
   checkout = steps.index { |s| s["uses"].to_s == "./.github/actions/source-checkout" } or abort "no source checkout"
   drop = steps.index { |s| s["uses"].to_s == "./.github/actions/drop-root" } or abort "no drop-root"
   abort "the ownership check must follow the source checkout and the root drop" unless checkout < drop && drop < check

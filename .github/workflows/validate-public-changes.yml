@@ -206,18 +206,6 @@ jobs:
         shell: bash
         run: bash .github/policy/test-run-result.sh
 
-      - name: Test the Timings table's queue column and per-ref baselines
-        shell: bash
-        run: bash .github/policy/test-timings-table.sh
-
-      - name: Prove the three-way rust-app split is complete on every platform
-        shell: bash
-        run: bash .github/policy/test-rust-app-shards.sh
-
-      - name: Test the early suite-ownership check on synthetic repositories
-        shell: bash
-        run: bash .github/policy/test-suite-ownership-check.sh
-
       # The reviewed candidate universe and coverage dispositions are immutable public policy.
       - name: Test the feature-suite catalog contract
         shell: bash
@@ -340,6 +328,20 @@ jobs:
       - name: Check the egress allow-list
         shell: bash
         run: bash .github/policy/check-egress-allowlist.sh
+
+      # Added after the last reviewed step on purpose: a step the base commit's table does not know yet is
+      # accepted as an extra only after the last pinned step of its job (check-policy-steps.rb).
+      - name: Test the Timings table's queue column and per-ref baselines
+        shell: bash
+        run: bash .github/policy/test-timings-table.sh
+
+      - name: Prove the three-way rust-app split is complete on every platform
+        shell: bash
+        run: bash .github/policy/test-rust-app-shards.sh
+
+      - name: Test the early suite-ownership check on synthetic repositories
+        shell: bash
+        run: bash .github/policy/test-suite-ownership-check.sh
 
   # The base commit's policy run against this pull request's tree, and the fixtures that test the
   # step that runs it, in base-policy.yml (see its header). `policy` requires this call's result.

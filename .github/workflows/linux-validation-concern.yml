@@ -247,7 +247,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          ruby .github/policy/check-suite-ownership.rb "${GITHUB_WORKSPACE}/src"
+          ruby .github/policy/refuse-unowned-tests.rb "${GITHUB_WORKSPACE}/src"
 
       - name: Set up Node.js and install the locked JavaScript dependencies
         if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-security' || inputs.concern == 'rust-packaging'

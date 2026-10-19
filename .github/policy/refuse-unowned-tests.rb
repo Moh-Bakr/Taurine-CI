@@ -29,7 +29,7 @@
 # without an owner and a reason class. No path, pattern or source text is ever printed. To list the
 # files, run the private ownership audit locally.
 #
-# Usage: ruby check-suite-ownership.rb <repo-root>
+# Usage: ruby refuse-unowned-tests.rb <repo-root>
 # Exit 0: every test file is owned, or the source carries no ownership manifest (an older revision).
 # Exit 1: a test file has no owner, or the manifest is unreadable (fail closed).
 require 'json'
