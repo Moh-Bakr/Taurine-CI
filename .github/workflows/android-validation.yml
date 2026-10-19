@@ -285,6 +285,9 @@ jobs:
               # what they link, not what they execute).
               mobile_tauri_hooks_check || exit 1
               mobile_run android-frontend-build mobile_frontend_build taurine-mobile android true
+              # The frontend build ran as the job user and can write outside the checkout: refuse a
+              # planted Gradle init/properties or cargo config before anything reads them.
+              mobile_frontend_host_check || exit 1
               # Before the build: no Tauri config may add features or a runner the door gate
               # cannot see, no OpenSSL override may bypass the vendored build, and the door-only
               # gate runs on the built ABI's graph. The build runs the Tauri CLI directly with
@@ -299,6 +302,7 @@ jobs:
               mobile_tauri_hooks_check || exit 1
               android_bindgen_env
               mobile_run android-debug-build mobile_tauri_build taurine-mobile android build --apk --debug --target aarch64
+              mobile_build_hooks_log_check "${RUNNER_TEMP}/android-debug-build.log" || exit 1
               # Gradle's Rust phase ran in between: the refusals run again on what the build left,
               # and the door crates cargo built from must still equal their verified archives.
               refuse_build_feature_overrides || exit 1

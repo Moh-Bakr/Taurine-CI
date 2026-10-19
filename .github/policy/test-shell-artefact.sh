@@ -815,6 +815,20 @@ gradle_generated; printf 'apply from: "evil.gradle"\n' >>"${aroot}/tauri.setting
 expect_fail 'an apply line in the generated settings is refused' 'mobile_android_generated_gradle_check' 'a line the pinned CLI template does not emit'
 gradle_generated; sed -i.bak 's|^}$|  implementation(files("/tmp/evil.jar"))\n}|' "${aroot}/app/tauri.build.gradle.kts"; rm -f "${aroot}/app/tauri.build.gradle.kts.bak"
 expect_fail 'a file dependency in tauri.build.gradle.kts is refused' 'mobile_android_generated_gradle_check' 'tauri.build.gradle.kts: a line the pinned CLI template does not emit'
+# Maven coordinates: only the groups the pinned CLI and the tracked plugins emit.
+gradle_generated; sed -i.bak 's|^}$|  implementation("com.evil:backdoor:1.0")\n}|' "${aroot}/app/tauri.build.gradle.kts"; rm -f "${aroot}/app/tauri.build.gradle.kts.bak"
+expect_fail 'a dependency from a foreign Maven group is refused' 'mobile_android_generated_gradle_check' 'tauri.build.gradle.kts: a line the pinned CLI template does not emit'
+gradle_generated; sed -i.bak 's|^}$|  implementation("androidxevil:backdoor:1.0")\n}|' "${aroot}/app/tauri.build.gradle.kts"; rm -f "${aroot}/app/tauri.build.gradle.kts.bak"
+expect_fail 'a group that only starts like androidx is refused' 'mobile_android_generated_gradle_check' 'tauri.build.gradle.kts: a line the pinned CLI template does not emit'
+gradle_generated; sed -i.bak 's|^}$|  implementation("com.google.evil:backdoor:1.0")\n}|' "${aroot}/app/tauri.build.gradle.kts"; rm -f "${aroot}/app/tauri.build.gradle.kts.bak"
+expect_fail 'com.google outside com.google.android is refused' 'mobile_android_generated_gradle_check' 'tauri.build.gradle.kts: a line the pinned CLI template does not emit'
+gradle_generated; sed -i.bak 's|^}$|  implementation("com.google.android.material:material:1.12.0")\n  implementation("app.tauri:tauri-android:2.0.0")\n}|' "${aroot}/app/tauri.build.gradle.kts"; rm -f "${aroot}/app/tauri.build.gradle.kts.bak"
+expect_pass 'the com.google.android and app.tauri groups are accepted' 'mobile_android_generated_gradle_check'
+# A git checkout is not an accepted projectDir root (registry source only).
+mkdir -p "${work}/cargo-home/git/checkouts/x-0000/abc"
+gradle_generated; printf "include ':tauri-plugin-evil'\nproject(':tauri-plugin-evil').projectDir = new File(\"%s/git/checkouts/x-0000/abc/android\")\n" "${work}/cargo-home" >>"${aroot}/tauri.settings.gradle"
+expect_fail 'a projectDir in a cargo git checkout is refused' 'mobile_android_generated_gradle_check' 'outside cargo'
+gradle_generated
 gradle_generated; printf '  implementation(project(":evil"))\n' >>"${aroot}/app/tauri.build.gradle.kts"
 expect_fail 'a project dependency on another project is refused' 'mobile_android_generated_gradle_check' 'tauri.build.gradle.kts: a line the pinned CLI template does not emit'
 gradle_generated; printf 'tauri.android.versionName=1$(touch /tmp/x)\n' >>"${aroot}/app/tauri.properties"
@@ -840,6 +854,67 @@ printf 'x\n' >"${gitcase}/taurine-mobile/src-tauri/gen/android/buildSrc/build.gr
 git -C "${gitcase}" init -q . && git -C "${gitcase}" add taurine-mobile/src-tauri/gen/android/local.properties
 expect_pass 'reset leaves a tracked local.properties in place' "cd '${gitcase}' && ${bsp} mobile_build_phase_reset android && [[ -f taurine-mobile/src-tauri/gen/android/local.properties ]]"
 rm -rf "${gitcase}"
+# Reset refuses a link in the path before any removal (the sentinel behind the link must survive).
+gradle_tracked; gradle_pins; gradle_generated
+sentinel_dir="${work}/reset-target"; rm -rf "${sentinel_dir}"; mkdir -p "${sentinel_dir}/android/app" "${sentinel_dir}/apple"
+printf 'keep\n' >"${sentinel_dir}/android/tauri.settings.gradle"; printf 'keep\n' >"${sentinel_dir}/android/app/tauri.build.gradle.kts"; printf 'keep\n' >"${sentinel_dir}/apple/keep"
+rm -rf "${aroot}"; ln -s "${sentinel_dir}/android" "${aroot}"
+expect_fail 'reset refuses a symlinked gen/android' "mobile_build_phase_reset android" 'gen/android is a link'
+[[ -f "${sentinel_dir}/android/tauri.settings.gradle" && -f "${sentinel_dir}/android/app/tauri.build.gradle.kts" ]] || fail 'reset removed a file behind a symlinked gen/android'
+rm -f "${aroot}"; gradle_tracked; gradle_pins; gradle_generated
+real_gen="${work}/gen-real"; mv "${gen}" "${real_gen}"; ln -s "${sentinel_dir}" "${gen}"
+expect_fail 'reset refuses a symlinked gen' "mobile_build_phase_reset android" 'gen is a link'
+[[ -f "${sentinel_dir}/android/tauri.settings.gradle" ]] || fail 'reset removed a file behind a symlinked gen'
+rm -f "${gen}"; mv "${real_gen}" "${gen}"
+stsrc="${src}/taurine-mobile/src-tauri"; real_st="${work}/st-real"; mv "${stsrc}" "${real_st}"; ln -s "${real_st}" "${stsrc}"
+expect_fail 'reset refuses a symlinked src-tauri' "mobile_build_phase_reset android" 'src-tauri is a link'
+[[ -f "${real_st}/gen/android/tauri.settings.gradle" ]] || fail 'reset removed a file behind a symlinked src-tauri'
+rm -f "${stsrc}"; mv "${real_st}" "${stsrc}"
+real_tm="${work}/tm-real"; mv "${src}/taurine-mobile" "${real_tm}"; ln -s "${real_tm}" "${src}/taurine-mobile"
+expect_fail 'reset refuses a symlinked taurine-mobile' "mobile_build_phase_reset android" 'taurine-mobile is a link'
+[[ -f "${real_tm}/src-tauri/gen/android/tauri.settings.gradle" ]] || fail 'reset removed a file behind a symlinked taurine-mobile'
+rm -f "${src}/taurine-mobile"; mv "${real_tm}" "${src}/taurine-mobile"
+rm -rf "${gen}/apple"; ln -s "${sentinel_dir}/apple" "${gen}/apple"
+expect_fail 'reset refuses a symlinked gen/apple (iOS)' "mobile_build_phase_reset ios" 'gen/apple is a link'
+[[ -f "${sentinel_dir}/apple/keep" ]] || fail 'reset removed a file behind a symlinked gen/apple'
+rm -f "${gen}/apple"; rm -rf "${sentinel_dir}"; mkdir -p "${gen}/apple"
+# Detective control: a build log that shows a Tauri hook running is refused (plain and coloured).
+hooklog="${work}/hook.log"
+printf '        Info Something\n    Compiling x v1\n     Running DevCommand\n' >"${hooklog}"
+expect_pass 'a build log with no hook line passes' "mobile_build_hooks_log_check '${hooklog}'"
+printf '     Running beforeBuildCommand `npm run build`\n' >"${hooklog}"
+expect_fail 'a log showing beforeBuildCommand running is refused' "mobile_build_hooks_log_check '${hooklog}'" 'build hook running'
+printf '     Running beforeBundleCommand `sh x.sh`\r\n' >"${hooklog}"
+expect_fail 'a CRLF log showing beforeBundleCommand running is refused' "mobile_build_hooks_log_check '${hooklog}'" 'build hook running'
+printf '\033[1m\033[32m    Running\033[0m beforeBuildCommand `npm run build`\n' >"${hooklog}"
+expect_fail 'a coloured hook line is refused' "mobile_build_hooks_log_check '${hooklog}'" 'build hook running'
+printf '\033[1m\033[32m    Running\033[0m beforeBuild\033[0mCommand x\n' >"${hooklog}"
+expect_fail 'a colour code inside the hook name is refused' "mobile_build_hooks_log_check '${hooklog}'" 'build hook running'
+expect_fail 'a missing build log is refused' "mobile_build_hooks_log_check '${work}/no-such.log'" 'build log is missing'
+rm -f "${hooklog}"
+# What the frontend step (job user, outside the checkout) could plant: Gradle user-home init or
+# properties, and any cargo config (CI writes none).
+hh="${work}/home"; rm -rf "${hh}/.gradle" "${hh}/.cargo" "${work}/cargo-home/config" "${work}/cargo-home/config.toml" "${work}/gradle-home"
+expect_pass 'a clean user home passes the frontend host check' 'mobile_frontend_host_check'
+for planted in init.d/a.gradle init.gradle init.gradle.kts gradle.properties; do
+  mkdir -p "${hh}/.gradle/$(dirname "${planted}")"; printf 'x\n' >"${hh}/.gradle/${planted}"
+  expect_fail "a planted ~/.gradle/${planted} is refused" 'mobile_frontend_host_check' 'Gradle user-home file'
+  rm -rf "${hh}/.gradle"
+done
+mkdir -p "${work}/gradle-home"; printf 'org.gradle.jvmargs=-javaagent:/tmp/x\n' >"${work}/gradle-home/gradle.properties"
+expect_fail 'a gradle.properties in GRADLE_USER_HOME is refused' "export GRADLE_USER_HOME='${work}/gradle-home'; mobile_frontend_host_check" 'Gradle user-home file: gradle.properties'
+rm -rf "${work}/gradle-home"
+mkdir -p "${work}/gradle-home/init.d"
+expect_fail 'an init.d in GRADLE_USER_HOME is refused' "export GRADLE_USER_HOME='${work}/gradle-home'; mobile_frontend_host_check" 'Gradle user-home file: init.d'
+rm -rf "${work}/gradle-home"
+mkdir -p "${hh}/.cargo"; printf '[build]\nrustc-wrapper = "x"\n' >"${hh}/.cargo/config.toml"
+expect_fail 'a planted ~/.cargo/config.toml is refused' 'mobile_frontend_host_check' 'cargo config exists that CI did not write'
+rm -rf "${hh}/.cargo"; printf '[build]\n' >"${work}/cargo-home/config"
+expect_fail 'a planted CARGO_HOME/config is refused' 'mobile_frontend_host_check' 'cargo config exists that CI did not write'
+rm -f "${work}/cargo-home/config"; printf '[build]\n' >"${work}/cargo-home/config.toml"
+expect_fail 'a planted CARGO_HOME/config.toml is refused' 'mobile_frontend_host_check' 'cargo config exists that CI did not write'
+rm -f "${work}/cargo-home/config.toml"
+expect_pass 'the host check passes again once cleaned' 'mobile_frontend_host_check'
 # The four real pins are in the library, and the workflows call the checks around init and the build.
 for h in 780ee423777541b6d7a4f75d7d8da188dc1a92860f70fea09015b03d2e1594c2 f8d6b8ac33de9acbe318595de7be4500fec1009f8ea0edc508fd998cc15294c5 580de86208e48edae2206e167da024f17794269d296ad46a94d001c6809ba2cb 99856053f245337d20d308dbeaf9cd7250ad0c186ebbb6866ab46a6e7005ee19; do
   grep -qF "'${h}  " "${mobile_lib}" || fail "a Gradle build-logic hash is not pinned (${h:0:8})"
@@ -915,6 +990,28 @@ done
 for wf in android ios; do
   awk -v wf="${wf}" '/mobile_run .*-frontend-build/ { f = NR } /^[[:space:]]*refuse_build_feature_overrides \|\| exit 1/ && !r { r = NR } END { exit !(f && r && f < r) }' ".github/workflows/${wf}-validation.yml" || fail "${wf}-native does not run the frontend build before the first refusal"
 done
+# ORDER, not just presence: per native step the config check, then the frontend build, then the
+# host check, then (re-checks that judge what Gradle/Xcode will build) the build-phase check, the
+# Gradle pin (Android) and the second hooks check, then the hooks-off CLI build, then the log check.
+# A deleted or reordered call fails. Line numbers are compared; each call must be on a line of its own.
+for wf in android ios; do
+  awk -v wf="${wf}" '
+    /^[[:space:]]*mobile_tauri_hooks_check \|\| exit 1/ { if (!f) h1 = NR; else if (!b) h2 = NR }
+    /^[[:space:]]*mobile_run .*-frontend-build mobile_frontend_build/ { f = NR }
+    /^[[:space:]]*mobile_frontend_host_check \|\| exit 1/ { hc = NR }
+    $0 ~ "^[[:space:]]*mobile_build_phase_check " wf " \\|\\| exit 1" { ph = NR }
+    /^[[:space:]]*mobile_android_gradle_pin_check after-init \|\| exit 1/ { pin = NR }
+    /^[[:space:]]*mobile_run (android-debug-build|ios-build) mobile_tauri_build / { b = NR }
+    /^[[:space:]]*mobile_build_hooks_log_check "\$\{RUNNER_TEMP\}\/(android-debug-build|ios-build)\.log" \|\| exit 1/ && b { lg = NR }
+    END {
+      if (wf == "ios") pin = hc + 1   # no Gradle on iOS
+      ok = h1 && f && hc && ph && pin && h2 && b && lg && h1 < f && f < hc && hc < ph && hc < pin && hc < h2 && ph < b && pin < b && h2 < b && b < lg
+      exit !ok
+    }' ".github/workflows/${wf}-validation.yml" || fail "${wf}-native does not run: hooks check, frontend build, host check, build-phase check, second hooks check, hooks-off build, log check, in that order"
+done
+grep -qE '^[[:space:]]*mobile_build_phase_check ios \|\| exit 1' .github/workflows/ios-validation.yml || fail 'ios-native does not re-check the Xcode build phase before the build'
+[[ "$(grep -cE '^[[:space:]]*mobile_tauri_hooks_check \|\| exit 1' .github/workflows/ios-validation.yml)" -ge 2 ]] || fail 'ios-native does not run the hooks check a second time'
+[[ "$(grep -cE '^[[:space:]]*mobile_tauri_hooks_check \|\| exit 1' .github/workflows/android-validation.yml)" -ge 2 ]] || fail 'android-native does not run the hooks check a second time'
 yml="${gen}/apple/project.yml"
 lsp='$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)'
 project_yml() {

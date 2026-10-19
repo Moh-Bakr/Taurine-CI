@@ -477,7 +477,13 @@ runs:
           return "${rc}"
         }
         mobile_build_phase_reset() {
-          local platform="$1" gen=taurine-mobile/src-tauri/gen
+          local platform="$1" gen=taurine-mobile/src-tauri/gen link
+          # A link in the path would send the removals below outside the checkout.
+          for link in taurine-mobile taurine-mobile/src-tauri "${gen}" "${gen}/android" "${gen}/apple"; do
+            if [[ -L "${link}" ]]; then
+              echo "build-phase: FAILED - ${link} is a link" >&2; return 1
+            fi
+          done
           case "${platform}" in
             android)
               # Only the generated callback is removed (init regenerates it from the pinned CLI).
