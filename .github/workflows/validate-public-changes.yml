@@ -215,6 +215,14 @@ jobs:
         shell: bash
         run: bash .github/policy/test-extractors.sh
 
+      - name: Test the rustfmt enforcement default against a stub cargo
+        shell: bash
+        run: bash .github/policy/test-lint-enforce.sh
+
+      - name: Test the all-locks advisory helper wiring and reporting against a stub
+        shell: bash
+        run: bash .github/policy/test-all-locks-audit.sh
+
       - name: Test the cargo-deny step's exit-code labels and counts against a stub
         shell: bash
         run: bash .github/policy/test-scan-deny.sh

@@ -148,6 +148,8 @@ __END__
 ["policy-fixtures","Test the OpenSSL door's shell checks","bash .github/policy/test-shell-artefact.sh",{}]
 ["policy-fixtures","Test the compiled dependency cache strip against hostile outputs","bash .github/policy/test-rust-target-cache.sh",{}]
 ["policy-fixtures","Test the failure-detail extractors against fixtures","bash .github/policy/test-extractors.sh",{}]
+["policy-fixtures","Test the rustfmt enforcement default against a stub cargo","bash .github/policy/test-lint-enforce.sh",{}]
+["policy-fixtures","Test the all-locks advisory helper wiring and reporting against a stub","bash .github/policy/test-all-locks-audit.sh",{}]
 ["policy-fixtures","Test the cargo-deny step's exit-code labels and counts against a stub","bash .github/policy/test-scan-deny.sh",{}]
 ["policy-fixtures","Test unsound advisory enforcement and protected reporting against a stub","bash .github/policy/test-cargo-audit.sh",{}]
 ["policy-fixtures","Test that the base-pass step is found in either public policy workflow","bash .github/policy/test-base-pass-locate.sh",{}]
