@@ -79,6 +79,17 @@ reject 'prove matrix includes an extra arm' "${dispatcher}" 'jobs.prove differs'
 reject 'prove matrix from a literal list' "${dispatcher}" 'jobs.prove differs' "${matrix}[\"arm\"] = \"\${{ fromJSON('[\\\"doris\\\"]') }}\""
 reject 'prove matrix with a second axis' "${dispatcher}" 'jobs.prove differs' "${matrix}[\"shard\"] = [1]"
 reject 'prove fail-fast' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"fail-fast\"] = true"
+# Wave C step A: the arms may be capped at exactly six at a time (the uncapped job is the other reviewed shape);
+# any other cap, in any form, is refused.
+reset_fixture
+mutate "${dispatcher}" "${prove}[\"strategy\"][\"max-parallel\"] = 6"
+ruby .github/policy/check-live-proof-fanout.rb "${work}/tree" >/dev/null
+reject 'prove cap raised' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = 13"
+reject 'prove cap lowered' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = 2"
+reject 'prove cap zero' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = 0"
+reject 'prove cap as text' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = \"6\""
+reject 'prove cap as an expression' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = \"\${{ inputs.cap }}\""
+reject 'prove cap beside fail-fast' "${dispatcher}" 'reviewed fan-out in strategy' "${prove}[\"strategy\"][\"max-parallel\"] = 6; ${prove}[\"strategy\"][\"fail-fast\"] = true"
 reject 'prove job condition weakened' "${dispatcher}" 'reviewed fan-out in if' "${prove}[\"if\"] = \"always()\""
 reject 'prove job condition skips an arm' "${dispatcher}" 'reviewed fan-out in if' "${prove}[\"if\"] += \" && inputs.engine != 'pg-dbx'\""
 reject 'prove engine pinned' "${dispatcher}" 'reviewed fan-out in with' "${prove}[\"with\"][\"engine\"] = \"doris\""

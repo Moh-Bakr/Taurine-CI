@@ -76,7 +76,11 @@ all="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null) | 
 sha="$(change docs/a.md)"
 expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-security'
 sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-domain,rust-app-1,rust-app-2,scan-security'
+# Wave C step A: a crate under the app shards selects two shards (the current table) or three (the Wave C
+# table); either list exactly, never a partial one.
+crate_got="$(selected "$(parent_of "${sha}")" "${sha}")"
+( expect crate "${crate_got}" 'partial contracts,rust-domain,rust-app-1,rust-app-2,scan-security' ) 2>/dev/null \
+  || expect crate "${crate_got}" 'partial contracts,rust-domain,rust-app-1,rust-app-2,rust-app-3,scan-security'
 sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
 expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-security'
 sha="$(change taurine-desktop/src/a.ts)"

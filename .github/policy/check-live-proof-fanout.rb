@@ -51,6 +51,11 @@ PROVE_JOB = {
     'config' => '${{ toJSON(fromJSON(needs.plan.outputs.roster)[matrix.arm]) }}'
   }
 }.freeze
+# Wave C step A: the same job with the arms capped at six at a time (`strategy.max-parallel: 6`), so the 13 arms
+# cannot take the hosted pool from the long Rust poles. The two shapes are exact: the uncapped job above (the
+# current tree) and this one (the Wave C tree). Any other cap (a different number, a string, an expression), or
+# any other strategy key, matches neither.
+PROVE_JOB_CAPPED = PROVE_JOB.merge('strategy' => PROVE_JOB['strategy'].merge('max-parallel' => 6)).freeze
 # The arm workflow's workflow-level environment and its job, apart from the steps.
 ARM_WORKFLOW_ENV = {
   'SOURCE_REPOSITORY_ID' => '1330267721',
@@ -175,9 +180,10 @@ if dispatcher
   # section 4.1). Any other value, or any other extra key, still differs.
   prove = jobs['prove']
   prove = prove.reject { |key, _| key == 'cache-mode' } if prove.is_a?(Hash) && prove['cache-mode'] == 'none'
-  if prove != PROVE_JOB
+  if prove != PROVE_JOB && prove != PROVE_JOB_CAPPED
     actual = prove.is_a?(Hash) ? prove : {}
-    differing = (PROVE_JOB.keys | actual.keys).reject { |key| PROVE_JOB[key] == actual[key] }
+    reviewed = actual.dig('strategy').is_a?(Hash) && actual['strategy'].key?('max-parallel') ? PROVE_JOB_CAPPED : PROVE_JOB
+    differing = (reviewed.keys | actual.keys).reject { |key| reviewed[key] == actual[key] }
     failures << "#{DISPATCHER}: jobs.prove differs from the reviewed fan-out in #{differing.sort.join(', ')}; " \
                 'the matrix must be exactly the plan arms, with no include, exclude or filter'
   end

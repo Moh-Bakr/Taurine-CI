@@ -293,7 +293,7 @@ expect_policy_rejects 'a duplicate-dispatch guard that cannot fail'
 # concern must survive an empty set-difference, while an opt-in concern with its input off
 # and an unknown name still fail closed.
 reset_fixture
-ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("plan").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
+ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); jobs=workflow.fetch("jobs"); step=(jobs["plan"] || jobs.fetch("validate-input")).fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
   .github/workflows/linux-validation.yml "${work}/plan.sh"
 mkdir -p "${work}/plan-work/.github"
 cp .github/ci-matrix.json "${work}/plan-work/.github/ci-matrix.json"
@@ -313,6 +313,20 @@ run_plan() {
 run_plan 'visual only filter' true e2e-visual success
 ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "wrong planned matrix" unless JSON.parse(out.fetch("matrix")) == {"concern"=>["e2e-visual"]}; expected=JSON.parse(out.fetch("expected")); abort "visual absent from expected roster" unless expected.include?("e2e-visual"); abort "mandatory roster reduced" unless expected.length == JSON.parse(File.read(ARGV.fetch(1))).fetch("concerns").fetch("linux").count { |_, row| row["opt_in"].nil? } + 1; abort "opt-in identity missing" unless JSON.parse(out.fetch("optin")) == ["e2e-visual"]' \
   "${work}/plan.out" .github/ci-matrix.json
+# The plan also publishes the list split by the table's long_pole flag: long and short are disjoint,
+# together exactly `matrix` (the Result job requires it), and the long half is exactly the flagged concerns.
+split_plan_check() {
+  ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; whole=JSON.parse(out.fetch("matrix")).fetch("concern"); long=JSON.parse(out.fetch("long_matrix")).fetch("concern"); short=JSON.parse(out.fetch("short_matrix")).fetch("concern"); flagged=JSON.parse(File.read(ARGV.fetch(1))).fetch("concerns").fetch("linux").select { |_, row| row["long_pole"] }.keys; abort "#{ARGV.fetch(2)}: split lists are not the planned matrix" unless (long + short).sort == whole.sort && (long & short).empty?; abort "#{ARGV.fetch(2)}: long half is not the flagged concerns" unless long == whole.select { |c| flagged.include?(c) } && short.none? { |c| flagged.include?(c) }; abort "#{ARGV.fetch(2)}: expected #{ARGV.fetch(3)} long concerns" unless long.length == ARGV.fetch(3).to_i' "${work}/plan.out" .github/ci-matrix.json "$1" "$2"
+}
+# Wave C step A: only a plan that publishes the split is held to it (the current plan does not).
+if grep -q '^long_matrix=' "${work}/plan.out"; then
+  split_plan_check 'visual only' 0
+  run_plan 'full list' false '' success
+  split_plan_check 'full list' "$(jq '[.concerns.linux[] | select(.opt_in == null and .long_pole == true)] | length' .github/ci-matrix.json)"
+  run_plan 'one long pole' false rust-db success
+  split_plan_check 'one long pole' 1
+  ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "an only run of a long pole left a short job" unless JSON.parse(out.fetch("short_matrix")) == {"concern"=>[]}' "${work}/plan.out"
+fi
 run_plan 'visual opt-in disabled' false e2e-visual reject
 grep -qF 'only: not a concern of this dispatch' "${work}/plan.stderr"
 run_plan 'unknown concern' true e2e-not-reviewed reject
@@ -329,7 +343,7 @@ grep -Fq "inputs.only == ''" .github/workflows/linux-validation.yml || { echo 'o
 
 # Reproduce the actual Windows Plan step with the valid optional Rust concern.
 # jq -r is required because jq -c represents an empty set-difference as `""`.
-ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("plan").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
+ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); jobs=workflow.fetch("jobs"); step=(jobs["plan"] || jobs.fetch("validate-input")).fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
   .github/workflows/windows-validation.yml "${work}/windows-plan.sh"
 run_windows_plan() {
   local label="$1" rust="$2" only="$3" expected_status="$4" status=0
@@ -344,9 +358,17 @@ run_windows_plan() {
   fi
 }
 run_windows_plan 'full Windows Rust matrix' true '' success
+if grep -q "^rust_long_matrix=" "${work}/windows-plan.out"; then
+ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; long=JSON.parse(out.fetch("rust_long_matrix")); short=JSON.parse(out.fetch("rust_matrix")); abort "wrong Windows long-pole matrix" unless long == {"concern"=>%w[rust-db rust-app-1 rust-app-2 rust-app-3 rust-packaging]}; abort "wrong full Windows Rust matrix" unless short.keys == ["concern"] && (short["concern"] + long["concern"]).sort == %w[rust-domain rust-db rust-net rust-ovpn rust-app-1 rust-app-2 rust-app-3 rust-packaging rust-tls-openssl].sort && (short["concern"] + long["concern"]).uniq.length == 9 && (short["concern"] & long["concern"]).empty?' "${work}/windows-plan.out"
+else
 ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "wrong full Windows Rust matrix" unless JSON.parse(out.fetch("rust_matrix")).then { |m| m.keys == ["concern"] && m["concern"].sort == %w[rust-domain rust-db rust-net rust-ovpn rust-app-1 rust-app-2 rust-packaging rust-tls-openssl].sort && m["concern"].uniq.length == m["concern"].length }' "${work}/windows-plan.out"
+fi
 run_windows_plan 'filtered Windows Rust concern' true rust-db success
+if grep -q "^rust_long_matrix=" "${work}/windows-plan.out"; then
+ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "valid rust-db concern was not selected as a long pole" unless JSON.parse(out.fetch("rust_long_matrix")) == {"concern"=>["rust-db"]} && JSON.parse(out.fetch("rust_matrix")) == {"concern"=>[]}' "${work}/windows-plan.out"
+else
 ruby -rjson -e 'out=File.readlines(ARGV.fetch(0)).to_h { |line| key,value=line.chomp.split("=",2); [key,value] }; abort "valid rust-db concern was not selected" unless JSON.parse(out.fetch("rust_matrix")) == {"concern"=>["rust-db"]}' "${work}/windows-plan.out"
+fi
 run_windows_plan 'unknown Windows concern' true rust-not-reviewed reject
 grep -qF 'only: not a Windows concern of this dispatch' "${work}/windows-plan.stderr"
 run_windows_plan 'Rust concern while Rust disabled' false rust-db reject
