@@ -327,6 +327,16 @@ jobs:
           }
           case "${CONCERN}" in
             ios-native)
+              # The frontend build is source code (the shell's own `npm run build`, with its Vite
+              # config), which the CLI would run between the last check and Xcode. CI runs it first
+              # and starts the CLI with both build hooks switched off, so every check below judges
+              # the tree Xcode then builds. Not covered: Cargo build.rs scripts, which run inside
+              # Xcode's Rust build phase.
+              mobile_tauri_hooks_check || exit 1
+              mobile_run ios-frontend-build mobile_frontend_build taurine-mobile ios false
+              # The frontend build ran as the job user and can write outside the checkout: refuse a
+              # planted Gradle init/properties or cargo config before anything reads them.
+              mobile_frontend_host_check || exit 1
               # Before the build: no Tauri config may add features or a runner the door gate
               # cannot see, no OpenSSL override may bypass the vendored build, and the door-only
               # gate runs on the built target's graph. The build runs the Tauri CLI directly with
@@ -335,8 +345,11 @@ jobs:
               refuse_openssl_overrides || exit 1
               openssl_door_gate ios-sim-build-openssl-door-only taurine-mobile aarch64-apple-ios-sim || exit 1
               verify_door_crate_sources || exit 1
-              mobile_run ios-build tauri_cli taurine-mobile ios build --ci --no-sign --target aarch64-sim
-              # beforeBuildCommand ran in between: the refusals run again on what the build left,
+              mobile_build_phase_check ios || exit 1
+              mobile_tauri_hooks_check || exit 1
+              mobile_run ios-build mobile_tauri_build taurine-mobile ios build --ci --no-sign --target aarch64-sim
+              mobile_build_hooks_log_check "${RUNNER_TEMP}/ios-build.log" || exit 1
+              # Xcode's Rust phase ran in between: the refusals run again on what the build left,
               # and the door crates cargo built from must still equal their verified archives.
               refuse_build_feature_overrides || exit 1
               refuse_openssl_overrides || exit 1

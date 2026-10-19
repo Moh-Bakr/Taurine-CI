@@ -257,8 +257,10 @@ jobs:
           # The Rust build phase (gen/android/buildSrc) is removed first and must come back from
           # CI's init calling the CLI's tauri.js directly (shell-config, mobile_build_phase_*).
           (cd .. && mobile_build_phase_reset android)
+          (cd .. && mobile_android_gradle_pin_check before-init)
           mobile_run android-init tauri_cli . android init --ci --skip-targets-install
           (cd .. && mobile_build_phase_check android)
+          (cd .. && mobile_android_gradle_pin_check after-init)
           if grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle; then
             echo 'Android metadata contains a developer-local path' >&2
             exit 1
@@ -275,6 +277,17 @@ jobs:
           source "${RUNNER_TEMP}/taurine-ci/shell-artefact.sh"
           case "${CONCERN}" in
             android-native)
+              # The frontend build is source code (the shell's own `npm run build`, with its Vite
+              # config), which the CLI would run between the last check and Gradle. CI runs it
+              # first and starts the CLI with both build hooks switched off, so every check below
+              # judges the tree Gradle then builds. Not covered: Cargo build.rs scripts, which run
+              # inside Gradle's Rust build phase (the door gate and the crate verification limit
+              # what they link, not what they execute).
+              mobile_tauri_hooks_check || exit 1
+              mobile_run android-frontend-build mobile_frontend_build taurine-mobile android true
+              # The frontend build ran as the job user and can write outside the checkout: refuse a
+              # planted Gradle init/properties or cargo config before anything reads them.
+              mobile_frontend_host_check || exit 1
               # Before the build: no Tauri config may add features or a runner the door gate
               # cannot see, no OpenSSL override may bypass the vendored build, and the door-only
               # gate runs on the built ABI's graph. The build runs the Tauri CLI directly with
@@ -284,9 +297,13 @@ jobs:
               openssl_door_gate android-arm64-v8a-openssl-door-only-prebuild taurine-mobile aarch64-linux-android || exit 1
               verify_door_crate_sources || exit 1
               gradle_wrapper_check || exit 1
+              mobile_build_phase_check android || exit 1
+              mobile_android_gradle_pin_check after-init || exit 1
+              mobile_tauri_hooks_check || exit 1
               android_bindgen_env
-              mobile_run android-debug-build tauri_cli taurine-mobile android build --apk --debug --target aarch64
-              # beforeBuildCommand ran in between: the refusals run again on what the build left,
+              mobile_run android-debug-build mobile_tauri_build taurine-mobile android build --apk --debug --target aarch64
+              mobile_build_hooks_log_check "${RUNNER_TEMP}/android-debug-build.log" || exit 1
+              # Gradle's Rust phase ran in between: the refusals run again on what the build left,
               # and the door crates cargo built from must still equal their verified archives.
               refuse_build_feature_overrides || exit 1
               refuse_openssl_overrides || exit 1

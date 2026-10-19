@@ -481,14 +481,27 @@ runs:
           return "${rc}"
         }
         mobile_build_phase_reset() {
-          local platform="$1" gen=taurine-mobile/src-tauri/gen
+          local platform="$1" gen=taurine-mobile/src-tauri/gen link
+          # A link in the path would send the removals below outside the checkout.
+          for link in taurine-mobile taurine-mobile/src-tauri "${gen}" "${gen}/android" "${gen}/apple"; do
+            if [[ -L "${link}" ]]; then
+              echo "build-phase: FAILED - ${link} is a link" >&2; return 1
+            fi
+          done
           case "${platform}" in
             android)
               # Only the generated callback is removed (init regenerates it from the pinned CLI).
               # The rest of buildSrc (Gradle build script, Rust plugin) stays and is verified
               # against a pinned hash list: removing it made the CLI template's newer AGP replace
               # the tracked one, and that AGP refuses the pinned Gradle wrapper.
-              rm -f "${gen}/android/tauri.settings.gradle"
+              rm -f "${gen}/android/tauri.settings.gradle" "${gen}/android/app/tauri.build.gradle.kts"
+              # An untracked local.properties (sdk.dir/ndk.dir) is deleted; a tracked one stays
+              # for mobile_android_gradle_pin_check (mobile-report library) to refuse. The
+              # workflow runs that check right after this reset and after init: it is not called
+              # from here so the reset/check pair keeps the contract main's fixtures assert.
+              if [[ -e "${gen}/android/local.properties" ]] && ! git ls-files --error-unmatch -- "${gen}/android/local.properties" >/dev/null 2>&1; then
+                rm -f "${gen}/android/local.properties"
+              fi
               if [[ -d "${gen}/android/buildSrc" ]]; then
                 find "${gen}/android/buildSrc" -type f -name BuildTask.kt -delete
               fi
