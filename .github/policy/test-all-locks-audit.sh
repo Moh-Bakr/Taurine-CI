@@ -2,6 +2,10 @@
 # Exercise the all-locks advisory helper wiring and its protected reporting with a stub helper.
 # The real helper, scanner, Cargo and network are never used. Run from the repository root.
 set -euo pipefail
+# The fixtures hold UTF-8 text and ruby reads it: force a UTF-8 locale whatever the caller exports
+# (macOS has no C.UTF-8, hosted Linux may lack en_US.UTF-8).
+if locale -a 2>/dev/null | grep -qix 'C\.UTF-8\|C\.utf8'; then export LC_ALL=C.UTF-8; else export LC_ALL=en_US.UTF-8; fi
+export LANG="${LC_ALL}"
 dir="$(mktemp -d)"
 trap 'rm -rf "${dir}"' EXIT
 export RUNNER_TEMP="${dir}/runner"
@@ -33,7 +37,10 @@ ruby -e '
   print text[start...stop]
 ' "${dir}/step.sh" > "${dir}/block.sh"
 cat > "${dir}/run.sh" <<'RUN'
-set -euo pipefail
+set -eo pipefail
+# bash before 4.4 treats an empty array as unbound under set -u (the block reads ${deferred_results[*]}
+# before anything is appended), so -u is applied only where the real step's bash (5.x) honours it.
+if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then set -u; fi
 source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
 source "${RUNNER_TEMP}/taurine-ci/report.sh"
 if [[ "${STUB_INSTALL}" == failed ]]; then deferred_results+=("cargo-audit-install|failed: stub"); deferred_failed=1; fi
