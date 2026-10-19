@@ -2,14 +2,14 @@
 # Test the keyed failing-test identities against fixtures (owner decision 2026-10-18, option A)
 #
 # A public log may identify a FAILING test only as `failed-test-id: <16 hex>`, an HMAC of its file
-# and title under a seed held in the private source. This test runs the extractors of the shared
+# and title under a key held in the private source. This test runs the extractors of the shared
 # sanitize and concern-report libraries over synthetic failure output and proves, for every
 # runner shape: the published lines match one fixed grammar; no title, file, binary, thread name,
 # assertion text or secret reaches the output; an id is stable across runs, timings and wrappers
-# and differs between tests and between seeds; the ruby and python3 implementations agree on a
-# pinned vector; every failure mode of the seed (absent, malformed, a symlink, an unreadable
-# tool) prints counts only; and the source-checkout step that snapshots the seed accepts only its
-# fixed format, masks the seed and never prints it.
+# and differs between tests and between keys; the ruby and python3 implementations agree on a
+# pinned vector; every failure mode of the key (absent, malformed, a symlink, an unreadable
+# tool) prints counts only; and the source-checkout step that snapshots the key accepts only its
+# fixed format, masks the key and never prints it.
 # Run from the repository root (the policy workflow runs test-extractors.sh, which calls this).
 set -euo pipefail
 base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
@@ -20,12 +20,12 @@ awk "/cat > .*sanitize.sh.* <<'TCI_SANITIZE_LIBRARY'/{on=1; next} /^        TCI_
 awk "/cat > .*report.sh.* <<'TCI_REPORT_LIBRARY'/{on=1; next} /^        TCI_REPORT_LIBRARY/{on=0} on" .github/actions/concern-report/action.yml | sed -E 's/^        //' > "${dir}/report.sh"
 [[ -s "${dir}/lib.sh" && -s "${dir}/report.sh" ]] || { echo 'the sanitize or report library was not found' >&2; exit 1; }
 
-# A synthetic seed (never a real one): the bytes 0x00..0x1f, key id k7.
-seed_hex='000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'
+# A synthetic key (never a real one): the bytes 0x00..0x1f, key id k7.
+key_hex='000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'
 other_hex='ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100'
-printf 'seed-id=k7\nseed=%s\n' "${seed_hex}" > "${dir}/rt/taurine-ci/test-id-seed"
+printf 'key-id=k7\nkey=%s\n' "${key_hex}" > "${dir}/rt/taurine-ci/test-id-key"
 
-# Pinned vectors: HMAC-SHA256(seed, "taurine-test-id/v1" 0x1f kind 0x1f file 0x1f title)[0:16].
+# Pinned vectors: HMAC-SHA256(key, "taurine-test-id/v1" 0x1f kind 0x1f file 0x1f title)[0:16].
 v_rust=7e68f94581f747d5       # rust    taurine-db::tests            queries::it_works
 v_rust_name=c84f015d593f51d9  # rust-name (no file)                   queries::it_works
 v_js=4f5080e98f1c1f0f         # js      taurine-desktop/src/a.test.ts Suite > does a thing
@@ -33,9 +33,9 @@ v_e2e=02b2c1599dc6923c        # e2e     e2e/a.spec.ts                 t
 v_file=907b4a6102d0271d       # file    taurine-db/tests/x.rs         (empty title)
 v_utf8=d4069f93924f080f       # js      taurine-desktop/src/é.test.ts ünï > ✓
 
-grammar='^(test-id-key: k[0-9]{1,4}|failed-test-id: [0-9a-f]{16} status=(fail|signal|timeout|leak|flaky)|failed-tests-unidentified: [0-9]+|failed-test-ids: unavailable \(no keyed seed or HMAC tool\); failing tests: [0-9]+)$'
+grammar='^(test-id-key: k[0-9]{1,4}|failed-test-id: [0-9a-f]{16} status=(fail|signal|timeout|leak|flaky)|failed-tests-unidentified: [0-9]+|failed-test-ids: unavailable \(no keyed key or HMAC tool\); failing tests: [0-9]+)$'
 fail() { echo "keyed test ids: $*" >&2; exit 1; }
-run() { # run <seed rt dir> <script...>: a clean shell with both libraries sourced
+run() { # run <key rt dir> <script...>: a clean shell with both libraries sourced
   local rt="$1"; shift
   RUNNER_TEMP="${rt}" bash -c 'set -euo pipefail; source "$1/lib.sh"; source "$1/report.sh"; shift; eval "$1"' _ "${dir}" "$*"
 }
@@ -56,22 +56,22 @@ printf 'rust\ttaurine-db::tests\tqueries::it_works\nrust-name\t\tqueries::it_wor
 printf '%s\n' "${v_rust}" "${v_rust_name}" "${v_js}" "${v_e2e}" "${v_file}" "${v_utf8}" > "${dir}/vec.expected"
 implementations=0
 if command -v ruby >/dev/null 2>&1; then
-  RUBY_OUT="$(run "${dir}/rt" 'ruby -e "${TCI_TEST_ID_RUBY}" "${TCI_TEST_ID_SEED}" < "'"${dir}"'/vec.tsv"')"
+  RUBY_OUT="$(run "${dir}/rt" 'ruby -e "${TCI_TEST_ID_RUBY}" "${TCI_TEST_ID_KEY}" < "'"${dir}"'/vec.tsv"')"
   [[ "${RUBY_OUT}" == "$(cat "${dir}/vec.expected")" ]] || fail "the ruby implementation disagrees with the pinned vectors"
   implementations=$((implementations + 1))
 fi
 if command -v python3 >/dev/null 2>&1; then
-  PY_OUT="$(run "${dir}/rt" 'python3 -I -c "${TCI_TEST_ID_PYTHON}" "${TCI_TEST_ID_SEED}" < "'"${dir}"'/vec.tsv"')"
+  PY_OUT="$(run "${dir}/rt" 'python3 -I -c "${TCI_TEST_ID_PYTHON}" "${TCI_TEST_ID_KEY}" < "'"${dir}"'/vec.tsv"')"
   [[ "${PY_OUT}" == "$(cat "${dir}/vec.expected")" ]] || fail "the python3 implementation disagrees with the pinned vectors"
   implementations=$((implementations + 1))
 fi
 [[ "${implementations}" -ge 1 ]] || fail 'neither ruby nor python3 is available to test the HMAC'
 
-# --- 2. A different seed gives different ids (the seed, not the name, decides the id).
-mkdir -p "${dir}/rt2/taurine-ci"; printf 'seed-id=k8\nseed=%s\n' "${other_hex}" > "${dir}/rt2/taurine-ci/test-id-seed"
+# --- 2. A different key gives different ids (the key, not the name, decides the id).
+mkdir -p "${dir}/rt2/taurine-ci"; printf 'key-id=k8\nkey=%s\n' "${other_hex}" > "${dir}/rt2/taurine-ci/test-id-key"
 out2="$(run "${dir}/rt2" 'tci_hmac_ids < "'"${dir}"'/vec.tsv"')"
-[[ "${out2}" != "$(cat "${dir}/vec.expected")" ]] || fail 'two different seeds produced the same ids'
-[[ "$(sort -u <<<"${out2}" | wc -l | tr -d ' ')" == 6 ]] || fail 'distinct tests collided under another seed'
+[[ "${out2}" != "$(cat "${dir}/vec.expected")" ]] || fail 'two different keys produced the same ids'
+[[ "$(sort -u <<<"${out2}" | wc -l | tr -d ' ')" == 6 ]] || fail 'distinct tests collided under another key'
 
 # --- 3. cargo-nextest: ANSI colour, timings, the progress counter and a retry line change nothing.
 esc=$'\033'
@@ -154,25 +154,43 @@ out="$(run "${dir}/rt0" 'panic_summary "'"${dir}"'/panic.log"')"
 has "${out}" 'file-id=unavailable  line=12'
 no_leak "${out}" 'queries|it_works|secret|SECRET|[xy]\.rs|alice'
 
-# --- 6. Vitest: the project prefix, ANSI, a failed file load and the double print of a failure.
+# --- 6. Vitest: paths are relative to the app root (as the real runner prints them), the project
+# prefix, ANSI, a failed file load and the double print of a failure.
 cat > "${dir}/vitest.log" <<LOG
-${esc}[31m FAIL ${esc}[0m taurine-desktop/src/a.test.ts > Suite > does a thing
+${esc}[31m FAIL ${esc}[0m src/a.test.ts > Suite > does a thing
 AssertionError: expected 'SECRETRECEIVED' to be 'SECRETEXPECTED'
- FAIL  |desktop| taurine-desktop/src/a.test.ts > Suite > does a thing
- FAIL  taurine-desktop/src/broken.test.ts [ taurine-desktop/src/broken.test.ts ]
- FAIL  taurine-desktop/src/é.test.ts > ünï > ✓
+ FAIL  |desktop| src/a.test.ts > Suite > does a thing
+ FAIL  src/broken.test.ts [ src/broken.test.ts ]
+ FAIL  src/é.test.ts > ünï > ✓
+ FAIL  ../packages/x/src/b.test.ts > Shared > works
  Test Files  2 failed | 3 passed (5)
       Tests  3 failed | 40 passed (43)
 LOG
-out="$(run "${dir}/rt" 'test_failures "'"${dir}"'/vitest.log" 2>&1')"
+out="$(run "${dir}/rt" 'test_failures "'"${dir}"'/vitest.log" taurine-desktop/ 2>&1')"
 grep -vE '^( Test Files| *Tests) ' <<<"${out}" > "${dir}/vitest.ids"
 only_grammar "$(cat "${dir}/vitest.ids")"
 has "${out}" "failed-test-id: ${v_js} status=fail"
 has "${out}" "failed-test-id: ${v_utf8} status=fail"
-[[ "$(grep -c '^failed-test-id:' <<<"${out}")" == 3 ]] || fail "expected three vitest ids (the repeat is one), got: ${out}"
+v_shared="$(printf 'js\tpackages/x/src/b.test.ts\tShared > works\n' | run "${dir}/rt" 'tci_hmac_ids')"
+has "${out}" "failed-test-id: ${v_shared} status=fail"
+[[ "$(grep -c '^failed-test-id:' <<<"${out}")" == 4 ]] || fail "expected four vitest ids (the repeat is one), got: ${out}"
 has "${out}" 'Test Files  2 failed | 3 passed (5)'
 has "${out}" 'Tests  3 failed | 40 passed (43)'
-no_leak "${out}" 'a\.test|broken|Suite|does a thing|SECRET|desktop|AssertionError|ünï'
+no_leak "${out}" 'a\.test|broken|Suite|does a thing|SECRET|desktop|AssertionError|ünï|Shared|works'
+
+# --- 6b. nextest with retries as the real runner prints them: only `TRY n FAIL (i/n) binary name`
+# for the last attempt of a failing test; a test that passed on a retry has a FLAKY line instead.
+cat > "${dir}/nextest-try.log" <<LOG
+TRY 1 FAIL (3/5) taurine-db-engine::dbx_route_dial the_kill_switch_refuses
+TRY 2 FAIL (3/5) taurine-db-engine::dbx_route_dial the_kill_switch_refuses
+TRY 1 FAIL (4/5) taurine-db::tests queries::flaky_one
+FLAKY 2/3 [   0.5s] (4/5) taurine-db::tests queries::flaky_one
+LOG
+out="$(run "${dir}/rt" 'nextest_failures "'"${dir}"'/nextest-try.log"')"
+only_grammar "${out}"
+[[ "$(grep -c '^failed-test-id:' <<<"${out}")" == 2 ]] || fail "the retry log must give one failing and one flaky id, got: ${out}"
+grep -qE 'status=fail' <<<"${out}" && grep -qE 'status=flaky' <<<"${out}" || fail 'the retry statuses are wrong'
+no_leak "${out}" 'dbx_route|kill_switch|queries|flaky_one|taurine-db'
 
 # --- 7. Playwright: ids from the JSON report only; counts for the console; a tab in a title is unidentified.
 printf '{"suites":[{"specs":[{"title":"t","file":"e2e/a.spec.ts","line":3,"tests":[{"projectName":"visual","status":"unexpected","results":[{"error":{"message":"Screenshot comparison failed:\\n  1234 pixels (ratio 0.02) are different. SECRETTEXT"}}]},{"projectName":"critical","status":"unexpected","results":[{"error":{"message":"Error: expect(locator).toHaveText(expected)\\nLocator: getByRole(heading)\\nExpected string: Welcome\\nReceived string: Loading"}}]}]},{"title":"has\\ttab","file":"e2e/b.spec.ts","line":1,"tests":[{"projectName":"critical","status":"flaky","results":[]}]},{"title":"fine","file":"e2e/c.spec.ts","line":1,"tests":[{"projectName":"critical","status":"expected","results":[]}]}]}]}' > "${dir}/pw.json"
@@ -188,62 +206,102 @@ out="$(run "${dir}/rt" 'playwright_failures "'"${dir}"'/pw.log"')"
 has "${out}" 'failing spec lines in the console output: 2'
 no_leak "${out}" 'a\.spec|SECRET|critical|boom'
 
-# --- 8. Fail closed: no seed, a malformed seed and a symlinked seed print counts only.
+# --- 8. Fail closed: no key, a malformed key and a symlinked key print counts only.
 for mode in absent malformed symlink emptyfile; do
   rt="${dir}/rt-${mode}"; mkdir -p "${rt}/taurine-ci"
   case "${mode}" in
-    malformed) printf 'seed-id=k7\nseed=not-hex\n' > "${rt}/taurine-ci/test-id-seed" ;;
-    symlink) ln -s "${dir}/rt/taurine-ci/test-id-seed" "${rt}/taurine-ci/test-id-seed" ;;
-    emptyfile) : > "${rt}/taurine-ci/test-id-seed" ;;
+    malformed) printf 'key-id=k7\nkey=not-hex\n' > "${rt}/taurine-ci/test-id-key" ;;
+    symlink) ln -s "${dir}/rt/taurine-ci/test-id-key" "${rt}/taurine-ci/test-id-key" ;;
+    emptyfile) : > "${rt}/taurine-ci/test-id-key" ;;
   esac
   out="$(run "${rt}" 'nextest_failures "'"${dir}"'/nextest.log"; test_failures "'"${dir}"'/vitest.log" 2>&1')"
-  has "${out}" 'failed-test-ids: unavailable (no keyed seed or HMAC tool); failing tests: '
-  if grep -q 'failed-test-id: ' <<<"${out}"; then fail "an id was printed without a usable seed (${mode})"; fi
+  has "${out}" 'failed-test-ids: unavailable (no keyed key or HMAC tool); failing tests: '
+  if grep -q 'failed-test-id: ' <<<"${out}"; then fail "an id was printed without a usable key (${mode})"; fi
   no_leak "${out}" 'queries|it_works|a\.test|Suite|crash_in|taurine-db'
 done
 
 # --- 9. The source-checkout step: fixed format only, masked, never printed, no file otherwise.
 ruby -ryaml -e '
   doc = YAML.safe_load(File.read(".github/actions/source-checkout/action.yml"), aliases: false)
-  step = doc["runs"]["steps"].find { |st| st["name"].to_s.start_with?("Snapshot the keyed test-ID seed") } or abort("the seed snapshot step is missing")
+  step = doc["runs"]["steps"].find { |st| st["name"].to_s.start_with?("Snapshot the keyed test-ID key") } or abort("the key snapshot step is missing")
   File.write(ARGV[0], step["run"])
-  abort("the seed step must not interpolate an expression") if step["run"].include?("$" + "{{")
+  abort("the key step must not interpolate an expression") if step["run"].include?("$" + "{{")
 ' "${dir}/snapshot.sh"
-snapshot() { # snapshot <name> <content>: run the step against a checkout holding that seed file
+snapshot() { # snapshot <name> <content>: run the step against a checkout holding that key file
   local name="$1" content="$2" ws="${dir}/ws-$1"
   mkdir -p "${ws}/src/scripts/ci" "${ws}/rt"
-  if [[ "${content}" != '@none' && "${content}" != '@symlink' && "${content}" != '@big' ]]; then printf '%b' "${content}" > "${ws}/src/scripts/ci/test-id-seed.txt"; fi
-  [[ "${content}" != '@symlink' ]] || ln -s "${dir}/rt/taurine-ci/test-id-seed" "${ws}/src/scripts/ci/test-id-seed.txt"
-  [[ "${content}" != '@big' ]] || { printf 'taurine-test-id-seed v1\nseed-id: k1\nseed: %s\n' "${seed_hex}" > "${ws}/src/scripts/ci/test-id-seed.txt"; head -c 5000 /dev/zero | tr '\0' 'a' >> "${ws}/src/scripts/ci/test-id-seed.txt"; }
-  (cd "${ws}" && GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" CHECKOUT_PATH=src bash "${dir}/snapshot.sh") > "${ws}/out.txt" 2>&1 || fail "the seed step failed for ${name}"
+  if [[ "${content}" != '@none' && "${content}" != '@symlink' && "${content}" != '@big' ]]; then printf '%b' "${content}" > "${ws}/src/scripts/ci/test-id-key.txt"; fi
+  [[ "${content}" != '@symlink' ]] || ln -s "${dir}/rt/taurine-ci/test-id-key" "${ws}/src/scripts/ci/test-id-key.txt"
+  [[ "${content}" != '@big' ]] || { printf 'taurine-test-id-key v1\nkey-id: k1\nkey: %s\n' "${key_hex}" > "${ws}/src/scripts/ci/test-id-key.txt"; head -c 5000 /dev/zero | tr '\0' 'a' >> "${ws}/src/scripts/ci/test-id-key.txt"; }
+  (cd "${ws}" && GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" CHECKOUT_PATH=src bash "${dir}/snapshot.sh") > "${ws}/out.txt" 2>&1 || fail "the key step failed for ${name}"
 }
-good="taurine-test-id-seed v1\nseed-id: k7\nseed: ${seed_hex}\n"
+good="taurine-test-id-key v1\nkey-id: k7\nkey: ${key_hex}\n"
 snapshot good "${good}"
-[[ -f "${dir}/ws-good/rt/taurine-ci/test-id-seed" ]] || fail 'a well-formed seed was not snapshotted'
-[[ "$(cat "${dir}/ws-good/rt/taurine-ci/test-id-seed")" == "$(printf 'seed-id=k7\nseed=%s' "${seed_hex}")" ]] || fail 'the snapshot is not the normalised seed'
-[[ "$(grep -c "${seed_hex}" "${dir}/ws-good/out.txt")" == 1 ]] || fail 'the seed must appear exactly once in the step output (its add-mask command)'
-grep -qxF "::add-mask::${seed_hex}" "${dir}/ws-good/out.txt" || fail 'the seed was not masked'
-snapshot crlf "taurine-test-id-seed v1\r\nseed-id: k7\r\nseed: ${seed_hex}\r\n"
-[[ -f "${dir}/ws-crlf/rt/taurine-ci/test-id-seed" ]] || fail 'a CRLF seed file was refused'
-mode="$(stat -f '%Lp' "${dir}/ws-good/rt/taurine-ci/test-id-seed" 2>/dev/null || stat -c '%a' "${dir}/ws-good/rt/taurine-ci/test-id-seed")"
+[[ -f "${dir}/ws-good/rt/taurine-ci/test-id-key" ]] || fail 'a well-formed key was not snapshotted'
+[[ "$(cat "${dir}/ws-good/rt/taurine-ci/test-id-key")" == "$(printf 'key-id=k7\nkey=%s' "${key_hex}")" ]] || fail 'the snapshot is not the normalised key'
+[[ "$(grep -c "${key_hex}" "${dir}/ws-good/out.txt")" == 1 ]] || fail 'the key must appear exactly once in the step output (its add-mask command)'
+grep -qxF "::add-mask::${key_hex}" "${dir}/ws-good/out.txt" || fail 'the key was not masked'
+snapshot crlf "taurine-test-id-key v1\r\nkey-id: k7\r\nkey: ${key_hex}\r\n"
+[[ -f "${dir}/ws-crlf/rt/taurine-ci/test-id-key" ]] || fail 'a CRLF key file was refused'
+mode="$(stat -f '%Lp' "${dir}/ws-good/rt/taurine-ci/test-id-key" 2>/dev/null || stat -c '%a' "${dir}/ws-good/rt/taurine-ci/test-id-key")"
 [[ "${mode}" == 600 ]] || fail "the snapshot mode is ${mode}, not 600"
 snapshot none '@none'
 snapshot symlink '@symlink'
 snapshot big '@big'
 # a symlinked scripts/ci directory pointing outside the checkout steers nothing
 mkdir -p "${dir}/ws-dirlink/src/scripts" "${dir}/ws-dirlink/rt" "${dir}/outside"
-printf 'taurine-test-id-seed v1\nseed-id: k7\nseed: %s\n' "${seed_hex}" > "${dir}/outside/test-id-seed.txt"
+printf 'taurine-test-id-key v1\nkey-id: k7\nkey: %s\n' "${key_hex}" > "${dir}/outside/test-id-key.txt"
 ln -s "${dir}/outside" "${dir}/ws-dirlink/src/scripts/ci"
-(cd "${dir}/ws-dirlink" && RUNNER_TEMP="${dir}/ws-dirlink/rt" CHECKOUT_PATH=src bash "${dir}/snapshot.sh") > "${dir}/ws-dirlink/out.txt" 2>&1 || fail 'the seed step failed for a symlinked directory'
-[[ ! -e "${dir}/ws-dirlink/rt/taurine-ci/test-id-seed" ]] || fail 'a seed behind a symlinked directory was snapshotted'
-snapshot badid "taurine-test-id-seed v1\nseed-id: ../x\nseed: ${seed_hex}\n"
-snapshot shortseed "taurine-test-id-seed v1\nseed-id: k7\nseed: ${seed_hex:0:62}\n"
-snapshot upper "taurine-test-id-seed v1\nseed-id: k7\nseed: $(tr 'a-f' 'A-F' <<<"${seed_hex}")\n"
-snapshot extra "taurine-test-id-seed v1\nseed-id: k7\nseed: ${seed_hex}\nextra: line\n"
-snapshot inject "taurine-test-id-seed v1\nseed-id: k7\nseed: ${seed_hex}\n::set-env name=X::y\n"
-snapshot header "taurine-test-id-seed v2\nseed-id: k7\nseed: ${seed_hex}\n"
-for name in none symlink big badid shortseed upper extra inject header; do
-  [[ ! -e "${dir}/ws-${name}/rt/taurine-ci/test-id-seed" ]] || fail "a seed file in the wrong format (${name}) was snapshotted"
-  if grep -q "${seed_hex}" "${dir}/ws-${name}/out.txt"; then fail "the seed reached the step output for ${name}"; fi
+(cd "${dir}/ws-dirlink" && RUNNER_TEMP="${dir}/ws-dirlink/rt" CHECKOUT_PATH=src bash "${dir}/snapshot.sh") > "${dir}/ws-dirlink/out.txt" 2>&1 || fail 'the key step failed for a symlinked directory'
+[[ ! -e "${dir}/ws-dirlink/rt/taurine-ci/test-id-key" ]] || fail 'a key behind a symlinked directory was snapshotted'
+snapshot badid "taurine-test-id-key v1\nkey-id: ../x\nkey: ${key_hex}\n"
+snapshot shortkey "taurine-test-id-key v1\nkey-id: k7\nkey: ${key_hex:0:62}\n"
+snapshot upper "taurine-test-id-key v1\nkey-id: k7\nkey: $(tr 'a-f' 'A-F' <<<"${key_hex}")\n"
+snapshot extra "taurine-test-id-key v1\nkey-id: k7\nkey: ${key_hex}\nextra: line\n"
+snapshot inject "taurine-test-id-key v1\nkey-id: k7\nkey: ${key_hex}\n::set-env name=X::y\n"
+snapshot header "taurine-test-id-key v2\nkey-id: k7\nkey: ${key_hex}\n"
+for name in none symlink big badid shortkey upper extra inject header; do
+  [[ ! -e "${dir}/ws-${name}/rt/taurine-ci/test-id-key" ]] || fail "a key file in the wrong format (${name}) was snapshotted"
+  if grep -q "${key_hex}" "${dir}/ws-${name}/out.txt"; then fail "the key reached the step output for ${name}"; fi
 done
-echo "keyed test ids: ${implementations} HMAC implementation(s) agree with the pinned vectors; extractors, fail-closed paths and the seed snapshot step checked"
+# --- 10. The test-identity inventory: failed and flaky entries are keyed ids, never titles or paths,
+# both from the collector's records and from the fallback that reads the runner report.
+ruby -ryaml -e '
+  doc = YAML.safe_load(File.read(".github/actions/linux-test-identities/action.yml"), aliases: false)
+  step = doc["runs"]["steps"].find { |st| st["name"].to_s.start_with?("Publish test identities") } or abort("the identities step is missing")
+  # The step lowercases the SHA with a bash 4 expansion; the SHA here is already lower-case, so the
+  # expansion is dropped to let the fixture run under the bash 3.2 of a macOS developer machine.
+  File.write(ARGV[0], step["run"].gsub("${REQUESTED_SOURCE_SHA,,}", "${REQUESTED_SOURCE_SHA}"))
+' "${dir}/identities.sh"
+identities() { # identities <name> <collector: ok|fail>: run the step against a fake workspace
+  local name="$1" mode="$2" ws="${dir}/id-$1"
+  mkdir -p "${ws}/src/taurine-desktop/node_modules/.bin" "${ws}/src/scripts/ci" "${ws}/rt/taurine-ci" "${ws}/rt/test-ids"
+  (cd "${ws}/src" && git init -q . && git -c user.email=a@b -c user.name=t commit -q --allow-empty -m x)
+  cp "${dir}/rt/taurine-ci/test-id-key" "${ws}/rt/taurine-ci/test-id-key"
+  cp "${dir}/lib.sh" "${ws}/rt/taurine-ci/sanitize.sh"
+  cp "${dir}/pw.json" "${ws}/rt/test-ids/e2e-critical.json"
+  : > "${ws}/summary.md"
+  if [[ "${mode}" == ok ]]; then
+    cat > "${ws}/src/taurine-desktop/node_modules/.bin/vite-node" <<'STUB'
+#!/usr/bin/env bash
+printf '### Tests exercised by this run\n\n- 3 tests in 1 files.\n'
+printf 'js\ttaurine-desktop/src/a.test.ts\tSuite > does a thing\tfail\njs\ttaurine-desktop/src/b.test.ts\tflaky one\tflaky\n' > "${TAURINE_TEST_IDS_DIR}/failed-records.tsv"
+STUB
+  else
+    printf '#!/usr/bin/env bash\nexit 1\n' > "${ws}/src/taurine-desktop/node_modules/.bin/vite-node"
+  fi
+  chmod +x "${ws}/src/taurine-desktop/node_modules/.bin/vite-node"
+  (cd "${ws}/src" && GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" CONCERN=desktop-shard-1 \
+    REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/identities.sh") > "${ws}/out.txt" 2>&1 || { sed -n 1,20p "${ws}/out.txt" >&2; fail "the identities step failed (${name})"; }
+}
+identities collector ok
+out="$(cat "${dir}/id-collector/summary.md")"
+has "${out}" "failed-test-id: ${v_js} status=fail"
+grep -qE 'failed-test-id: [0-9a-f]{16} status=flaky' <<<"${out}" || fail 'the collector flaky record was not keyed'
+no_leak "${out}" 'a\.test|b\.test|Suite|does a thing|flaky one'
+identities fallback fail
+out="$(cat "${dir}/id-fallback/summary.md")"
+has "${out}" "failed-test-id: ${v_e2e} status=fail"
+has "${out}" 'failed-tests-unidentified: 1'
+no_leak "${out}" 'a\.spec|b\.spec|Locator|Welcome|Loading|SECRET|has.tab|FAIL \['
+echo "keyed test ids: ${implementations} HMAC implementation(s) agree with the pinned vectors; extractors, fail-closed paths and the key snapshot step checked"

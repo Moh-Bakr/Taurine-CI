@@ -193,24 +193,24 @@ runs:
 
         # KEYED FAILING-TEST IDENTITIES (owner decision 2026-10-18, option A).
         # The only thing a public log says about WHICH test failed is `failed-test-id: <16 hex>`:
-        # the first 8 bytes of HMAC-SHA256(seed, "taurine-test-id/v1" 0x1f kind 0x1f file 0x1f
-        # title), the seed being a random value held only in the private source (read by the
-        # source-checkout action into TCI_TEST_ID_SEED before any project code runs, and masked).
+        # the first 8 bytes of HMAC-SHA256(key, "taurine-test-id/v1" 0x1f kind 0x1f file 0x1f
+        # title), the key being a random value held only in the private source (read by the
+        # source-checkout action into TCI_TEST_ID_KEY before any project code runs, and masked).
         # Test titles, file paths, binary names, panic messages and assertion text are never
         # printed by the summaries below; the local helper `ci-failed-tests` in the private
         # repository maps an id back to a test. The hashing happens HERE, in reviewed control-plane
-        # code, so the seed is never handed to project code or a project-side reporter, and the
+        # code, so the key is never handed to project code or a project-side reporter, and the
         # published grammar is fixed by this file, not by anything the project can print. Fail
-        # closed: with no seed, no HMAC tool or a malformed seed the summaries print counts only.
-        TCI_TEST_ID_SEED="${RUNNER_TEMP:-/nonexistent}/taurine-ci/test-id-seed"
+        # closed: with no key, no HMAC tool or a malformed key the summaries print counts only.
+        TCI_TEST_ID_KEY="${RUNNER_TEMP:-/nonexistent}/taurine-ci/test-id-key"
         # Both interpreters implement the same function; the policy fixtures prove they agree.
-        # The seed file is read by path, so the seed is never in an argument list.
+        # The key file is read by path, so the key is never in an argument list.
         TCI_TEST_ID_RUBY='require "openssl"
         rows = File.binread(ARGV[0]).split("\n")
-        kid = rows[0].to_s[/\Aseed-id=(k[0-9]{1,4})\z/, 1]
-        seed = rows[1].to_s[/\Aseed=([0-9a-f]{64})\z/, 1]
-        exit 2 unless kid && seed && rows.length == 2
-        key = [seed].pack("H*")
+        kid = rows[0].to_s[/\Akey-id=(k[0-9]{1,4})\z/, 1]
+        keyhex = rows[1].to_s[/\Akey=([0-9a-f]{64})\z/, 1]
+        exit 2 unless kid && keyhex && rows.length == 2
+        key = [keyhex].pack("H*")
         STDIN.binmode
         lines = STDIN.read.split("\n", -1)
         lines.pop if lines.last == ""
@@ -226,8 +226,8 @@ runs:
         end'
         TCI_TEST_ID_PYTHON='import hashlib, hmac, re, sys
         rows = open(sys.argv[1], "rb").read().decode("ascii", "replace").splitlines()
-        m1 = re.fullmatch(r"seed-id=(k[0-9]{1,4})", rows[0]) if len(rows) == 2 else None
-        m2 = re.fullmatch(r"seed=([0-9a-f]{64})", rows[1]) if len(rows) == 2 else None
+        m1 = re.fullmatch(r"key-id=(k[0-9]{1,4})", rows[0]) if len(rows) == 2 else None
+        m2 = re.fullmatch(r"key=([0-9a-f]{64})", rows[1]) if len(rows) == 2 else None
         if not (m1 and m2):
             sys.exit(2)
         key = bytes.fromhex(m2.group(1))
@@ -249,13 +249,13 @@ runs:
 
         # stdin: lines of `kind<TAB>file<TAB>title`; stdout: one line per input line, the 16-hex id
         # or `-` when the line cannot be identified (a control character, bad UTF-8, a bad kind).
-        # Returns non-zero with no output when the seed or an interpreter is unavailable.
+        # Returns non-zero with no output when the key or an interpreter is unavailable.
         tci_hmac_ids() {
-          [[ -f "${TCI_TEST_ID_SEED}" && ! -L "${TCI_TEST_ID_SEED}" ]] || return 1
+          [[ -f "${TCI_TEST_ID_KEY}" && ! -L "${TCI_TEST_ID_KEY}" ]] || return 1
           if command -v ruby >/dev/null 2>&1; then
-            ruby -e "${TCI_TEST_ID_RUBY}" "${TCI_TEST_ID_SEED}"
+            ruby -e "${TCI_TEST_ID_RUBY}" "${TCI_TEST_ID_KEY}"
           elif command -v python3 >/dev/null 2>&1; then
-            python3 -I -c "${TCI_TEST_ID_PYTHON}" "${TCI_TEST_ID_SEED}"
+            python3 -I -c "${TCI_TEST_ID_PYTHON}" "${TCI_TEST_ID_KEY}"
           else
             return 1
           fi
@@ -274,10 +274,10 @@ runs:
           if [[ "${total}" -eq 0 ]]; then rm -f "${in}"; return 0; fi
           ids="$(cut -f1-3 "${in}" | tci_hmac_ids 2>/dev/null)" || ids=''
           if [[ -z "${ids}" || "$(printf '%s\n' "${ids}" | grep -c '')" -ne "${total}" ]]; then
-            echo "failed-test-ids: unavailable (no keyed seed or HMAC tool); failing tests: ${total}"
+            echo "failed-test-ids: unavailable (no keyed key or HMAC tool); failing tests: ${total}"
             rm -f "${in}"; return 0
           fi
-          echo "test-id-key: $(sed -n 's/^seed-id=//p' "${TCI_TEST_ID_SEED}" | head -n 1)"
+          echo "test-id-key: $(sed -n 's/^key-id=//p' "${TCI_TEST_ID_KEY}" | head -n 1)"
           paste -d'\t' <(printf '%s\n' "${ids}") <(cut -f4 "${in}") |
             awk -F'\t' '$1 ~ /^[0-9a-f]{16}$/ && $2 ~ /^(fail|signal|timeout|leak|flaky)$/ && !seen[$0]++ { printf "failed-test-id: %s status=%s\n", $1, $2 }' | sort | head -80
           unidentified="$(printf '%s\n' "${ids}" | grep -c '^-$' || true)"
@@ -360,12 +360,18 @@ runs:
           tr -d '\r' <"$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' |
             sed -E 's/^[[:space:]]+//; s/\[ *[0-9.]+s\] +//; s/\( *[0-9]+\/[0-9]+\) +//' |
             awk '
+              function status(w) { if (w == "FAIL") return "fail"; if (w == "TIMEOUT") return "timeout"; if (w == "LEAK") return "leak"; return "signal" }
               $1 ~ /^(FAIL|SIGABRT|SIGSEGV|SIGBUS|SIGKILL|TIMEOUT|LEAK)$/ && NF == 3 {
-                st = "signal"
-                if ($1 == "FAIL") st = "fail"; else if ($1 == "TIMEOUT") st = "timeout"; else if ($1 == "LEAK") st = "leak"
-                printf "rust\t%s\t%s\t%s\n", $2, $3, st; next
+                printed[$2 SUBSEP $3] = 1
+                printf "rust\t%s\t%s\t%s\n", $2, $3, status($1); next
               }
-              $1 == "FLAKY" && NF == 4 { printf "rust\t%s\t%s\tflaky\n", $3, $4 }
+              $1 == "FLAKY" && NF == 4 { flaky[$3 SUBSEP $4] = 1; printf "rust\t%s\t%s\tflaky\n", $3, $4; next }
+              # With retries a log may carry only `TRY n FAIL ...` lines for the last attempt: a test
+              # with such a line, no final status line and no FLAKY line failed.
+              $1 == "TRY" && $2 ~ /^[0-9]+$/ && $3 ~ /^(FAIL|SIGABRT|SIGSEGV|SIGBUS|SIGKILL|TIMEOUT|LEAK)$/ && NF == 5 { tries[$4 SUBSEP $5] = status($3) }
+              END {
+                for (k in tries) if (!(k in printed) && !(k in flaky)) { split(k, kv, SUBSEP); printf "rust\t%s\t%s\t%s\n", kv[1], kv[2], tries[k] }
+              }
             ' | awk '!seen[$0]++' | head -80
         }
 

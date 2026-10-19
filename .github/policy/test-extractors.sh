@@ -23,7 +23,7 @@ bash -c '
   if grep -qE "hunter2|a::b|tests/x\.rs" <<<"${out}"; then echo "a panic leaked its test name, path or message" >&2; exit 1; fi
   out="$(playwright_json_failures "$1/pw.json")"
   # Keyed failing-test ids (see test-keyed-test-ids.sh): the spec file, the title, the locator and
-  # the expected and received values are never published, with or without a seed.
+  # the expected and received values are never published, with or without a key.
   grep -qF "1 screenshot mismatch" <<<"${out}"
   grep -qF "1234 pixels differ" <<<"${out}"
   if grep -qE "a\.spec|Locator|getByRole|Welcome|Received string|Loading|SECRETTEXT" <<<"${out}"; then echo "a Playwright failure leaked its spec, title or assertion" >&2; exit 1; fi

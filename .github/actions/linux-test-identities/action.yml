@@ -54,10 +54,10 @@ runs:
             echo "### Tests exercised by this run"
             echo
             echo "Test inventory unavailable: the collector did not complete."
-            # Fallback from the runner's own JSON reports, so a failing run still names its
-            # failing specs: counts per status and, for each non-passing test, its project,
-            # repo-relative spec file:line and title. The collector's own error is reduced to
-            # fixed class names (an Error type or ERR_ code), never its message.
+            # Fallback from the runner's own JSON reports: counts per status, and for each
+            # non-passing test a record the keyed-id step below hashes (never a title or path).
+            # The collector's own error is reduced to fixed class names (an Error type or ERR_
+            # code), never its message.
             echo
             echo "collector error class: $(grep -ohE '\b[A-Z][A-Za-z]*Error\b|\bERR_[A-Z_]+\b' "${RUNNER_TEMP}/test-ids/collector-private.log" 2>/dev/null | head -1 || true)"
             for report in "${RUNNER_TEMP}"/test-ids/*.json; do
@@ -65,13 +65,38 @@ runs:
               echo
               echo "#### $(basename "${report}" .json) (fallback, from the runner report)"
               jq -r '
+                def safe($v): if ($v | test("[\\x00-\\x1f\\x7f]")) then "\u0001" else $v end;
                 [ (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
-                  | { status: ($t.status // "?"), project: ($t.projectName // "?"), file: ($s.file // "?"), line: ($s.line // 0), title: ($s.title // "?") } ] as $all
-                | "- tests: \($all | length); " + ([$all | group_by(.status)[] | "\(.[0].status) \(length)"] | join(", ")),
-                  ($all[] | select(.status != "expected" and .status != "skipped") | "- FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))")
+                  | { status: ($t.status // "?"), file: safe($s.file // "?"), title: safe($s.title // "?") } ] as $all
+                | "- tests: \($all | length); " + ([$all | group_by(.status)[] | "\(.[0].status) \(length)"] | join(", "))
               ' "${report}" 2>/dev/null | sed -E 's#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g' | cut -c1-220 | head -80 || true
+              # A failing or flaky test is identified by keyed id only (see the sanitize library).
+              jq -r '
+                def safe($v): if ($v | test("[\\x00-\\x1f\\x7f]")) then "\u0001" else $v end;
+                (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
+                  | select(($t.status // "") != "expected" and ($t.status // "") != "skipped")
+                  | "e2e\t\(safe($s.file // "?"))\t\(safe($s.title // "?"))\t\(if ($t.status // "") == "flaky" then "flaky" else "fail" end)"
+              ' "${report}" 2>/dev/null >> "${RUNNER_TEMP}/test-ids/failed-records.tsv" || true
             done
           } > "${section_file}"
+        fi
+        # Failed and flaky tests: the collector (or the fallback above) wrote records, never
+        # titles, and the keyed ids are computed here, in the control plane, with the key the
+        # source-checkout action snapshotted before any project code ran.
+        records="${RUNNER_TEMP}/test-ids/failed-records.tsv"
+        if [[ -s "${records}" ]]; then
+          {
+            echo
+            echo "#### Failed or flaky tests (keyed ids; titles and paths are never published)"
+            echo
+            echo '```'
+            if [[ -f "${RUNNER_TEMP}/taurine-ci/sanitize.sh" ]]; then
+              ( source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"; head -n 2000 "${records}" | tci_failed_ids ) || echo 'failed-test-ids: unavailable (the id library failed)'
+            else
+              echo "failed-test-ids: unavailable (no keyed id library); failing tests: $(grep -c '' "${records}" || true)"
+            fi
+            echo '```'
+          } >> "${section_file}"
         fi
         cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
         cat "${section_file}"
