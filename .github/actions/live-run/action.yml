@@ -90,8 +90,7 @@ runs:
               panic_summary "${suite_log}" >&2 || true
             fi
             if (( skips > 0 )); then
-              echo "REFUSED: ${pkg} reported SKIPPED — an unrun test is not a pass; the lines were:" >&2
-              grep 'SKIPPED' "${suite_log}" | cut -c1-200 | head -10 >&2 || true
+              echo "REFUSED: ${pkg} reported SKIPPED — an unrun test is not a pass (${skips} line(s); their text is withheld)" >&2
             fi
           done < "${RUNNER_TEMP}/suites.txt"
           echo "${overall}" > "${RUNNER_TEMP}/lab-overall.txt"

@@ -45,7 +45,7 @@ runs:
         proof_count() { grep -cE "^  $1  " "${log}" || true; }
         outcomes="proof checks: $(proof_count PASS) PASS, $(proof_count SKIP) SKIP, $(proof_count FAIL) FAIL, $(proof_count INVL) INVL"
         proof_ids="$(grep -E '^  (FAIL|INVL)  ' "${log}" | sed -E 's/^  (FAIL|INVL)  +//; s/[[:space:]]+$//' | awk -v e="${ENGINE}" '{ printf "proof\t%s\t%s\tfail\n", e, $0 }' | tci_failed_ids || true)"
-        header_pub="$(printf '%s\n' "${header}" | sed -nE 's/^([a-z0-9]+).* ([0-9]+) checks: ([0-9]+) passed.*, ([0-9]+) failed, ([0-9]+) invalid.*$/\1: \2 checks: \3 passed, \4 failed, \5 invalid/p' | head -n 1)"
+        header_pub="$(printf '%s\n' "${header}" | sed -nE 's/^([a-z0-9_-]+).* ([0-9]+) checks: ([0-9]+) passed, ([0-9]+) failed, ([0-9]+) skipped, ([0-9]+) invalid.*$/\1: \2 checks: \3 passed, \4 failed, \5 skipped, \6 invalid/p' | head -n 1)"
         [[ -n "${header_pub}" || -z "${header}" ]] || header_pub='(report header not in its fixed shape; counts withheld)'
         result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
         test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 | sed -E 's/^test [a-z_]+ \.\.\. FAILED$/test (name withheld) ... FAILED/' || true)"

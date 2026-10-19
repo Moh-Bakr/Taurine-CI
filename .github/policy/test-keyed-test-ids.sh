@@ -430,4 +430,44 @@ no_leak "${out}" 'some_lowercase_secret'
 mode="$(stat -f '%Lp' "${dir}/ws-good/rt/taurine-ci" 2>/dev/null || stat -c '%a' "${dir}/ws-good/rt/taurine-ci")"
 [[ "${mode}" == 700 ]] || fail "the key directory mode is ${mode}, not 700"
 [[ ! -s "${dir}/ws-big/out.txt" ]] || grep -q 'does not match its fixed format' "${dir}/ws-big/out.txt" || fail 'an oversize key file did not fail closed with the fixed message'
+# --- 17. The real live-proof header (conformance report.rs: `<id> — N checks: P passed, F failed, S skipped, I invalid`)
+# is published as counts; a hostile first word or trailing text is not.
+printf '%s\n' 'pg_tls — 12 checks: 10 passed, 1 failed, 1 skipped, 0 invalid' '  PASS  connect_ok' > "${ws}/rt/live-proof.log"
+: > "${ws}/summary.md"
+(cd "${ws}/src" && PATH="${ws}/bin:${PATH}" GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" ENGINE=pg REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/live-summary.sh") > "${ws}/out.txt" 2>&1 || true
+out="$(cat "${ws}/summary.md")"
+has "${out}" 'pg_tls: 12 checks: 10 passed, 1 failed, 1 skipped, 0 invalid'
+printf '%s\n' 'pg — 3 checks: 1 passed, 1 failed, 1 skipped, 0 invalid for customer-ACME' > "${ws}/rt/live-proof.log"
+: > "${ws}/summary.md"
+(cd "${ws}/src" && PATH="${ws}/bin:${PATH}" GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" ENGINE=pg REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/live-summary.sh") > "${ws}/out.txt" 2>&1 || true
+no_leak "$(cat "${ws}/summary.md")" 'customer|ACME'
+
+# --- 18. Coverage-gate and cargo resolution errors: no crate, package or spec name, only counts and fixed text.
+cat > "${dir}/gate.log" <<'LOG'
+error: workspace member secret-crate-one is tested by no Linux Rust concern
+error: workspace member $(touch_pwned)-two is tested by no Linux Rust concern
+error: no matching package named `secretpkg` found
+error: package ID specification `secretspec@1.0.0` did not match any packages
+error: failed to select a version for the requirement `secretdep = "^9"`
+LOG
+out="$(run "${dir}/rt" 'cargo_test_detail "'"${dir}"'/gate.log" 2>&1')"
+has "${out}" 'error: workspace member (name withheld) is tested by no Rust concern'
+has "${out}" 'workspace members tested by no concern: 2'
+has "${out}" 'error: failed to select (details withheld)'
+no_leak "${out}" 'secret|pwned|touch_'
+[[ "$(grep -c 'workspace member (name withheld)' <<<"${out}")" == 1 ]] || fail 'the fixed gate line must print once'
+
+# --- 19. A tests-by-status fallback line is published only with the known status words.
+printf '### Tests exercised by this run\n\n- tests: 4; expected 3, unexpected 1\n' > "${dir}/inv-fb.md"
+out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-fb.md" ""')"
+has "${out}" '- tests: 4; expected 3, unexpected 1'
+printf '### Tests exercised by this run\n\n- tests: 4; expected 3, customer-ACME 1\n' > "${dir}/inv-fb2.md"
+out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-fb2.md" ""')"
+has "${out}" 'withheld'
+no_leak "${out}" 'customer|ACME'
+
+# --- 20. Every vite-node invocation of the collector uses the one path the private repository declares.
+n="$(git grep -hE 'node_modules/\.bin/vite-node' -- .github/actions .github/workflows | grep -vcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' || true)"
+[[ "${n}" == 0 ]] || fail "a vite-node invocation does not use taurine-desktop/node_modules/.bin/vite-node (${n})"
+[[ "$(git grep -hcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' -- .github/actions .github/workflows | paste -sd+ - | bc)" -ge 3 ]] || fail 'the collector invocations were not found'
 echo "keyed test ids: ${implementations} HMAC implementation(s) agree with the pinned vectors; extractors, fail-closed paths and the key snapshot step checked"
