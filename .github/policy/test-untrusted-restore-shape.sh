@@ -300,9 +300,13 @@ flag_mutant 'the flag as an expression' 'must be a literal true or false' "\${{ 
 mutant 'the callee default true' 'literal default false' "${c}" '        default: false
         type: boolean' '        default: true
         type: boolean'
-mutant 'the flag referenced from an env value' 'outside the reviewed routes' "${c}" '      - name: Report concern duration
-        if: ${{ always() }}' '      - name: Report concern duration
-        if: ${{ always() }}
+# On a step that carries no env of its own, in this tree or in a tree another fixture has already
+# given an env to the duration step (a second env key is a duplicate key, refused before the rule runs).
+mutant 'the flag referenced from an env value' 'outside the reviewed routes' "${c}" '      - name: Report observed egress
+        if: always()
+        continue-on-error: true' '      - name: Report observed egress
+        if: always()
+        continue-on-error: true
         env:
           X: ${{ inputs.untrusted_readonly_cache }}'
 mutant 'the flag referenced from another step condition' 'outside the reviewed routes' "${c}" '      - name: Fetch pinned vendored sources
