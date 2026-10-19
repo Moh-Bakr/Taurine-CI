@@ -78,6 +78,98 @@ outputs:
 runs:
   using: composite
   steps:
+    # `locate` is deliberately the first step: nothing may run before it that could change how it computes
+    # the directory and key (the untrusted restore policy requires index 0 and pins the step by hash). The
+    # helper installer follows it; only the other modes use the helpers, and locate does not.
+    - name: Locate the compiled dependency cache
+      id: locate
+      if: ${{ inputs.mode == 'locate' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/src
+      env:
+        GROUP: ${{ inputs.group }}
+        FEATURES: ${{ inputs.features }}
+      # The value written to the environment file is a path built from HOME, never input.
+      run: |  # zizmor: ignore[github-env]
+        set -euo pipefail
+        # Second line of defence behind the policy that pins every step before this one: PATH holds only
+        # absolute entries, and every tool this step runs resolves outside the private checkout and the
+        # runner temp directory, so nothing planted ahead of it on PATH can stand in for it.
+        workspace_real="$(cd "${GITHUB_WORKSPACE}" && pwd -P)"
+        temp_real="$(cd "${RUNNER_TEMP}" && pwd -P)"
+        IFS=: read -r -a path_entries <<< "${PATH}"
+        for entry in "${path_entries[@]}"; do
+          case "${entry}" in
+            /* | [A-Za-z]:*) ;;
+            *) echo 'target-cache: PATH holds a relative or empty entry' >&2; exit 1 ;;
+          esac
+        done
+        for tool in rustup rustc git date awk tr cat xargs env sort grep cut dirname; do
+          location="$(command -v "${tool}")" || { echo "target-cache: ${tool} not found" >&2; exit 1; }
+          resolved="$(cd "$(dirname "${location}")" && pwd -P)"
+          case "${resolved}/" in
+            "${workspace_real}/"* | "${temp_real}/"*) echo "target-cache: ${tool} resolves inside the checkout or the temp directory" >&2; exit 1 ;;
+          esac
+        done
+        # The compiler is the one rustup selects, run by its own path, and it must be an installed toolchain:
+        # `rustup which` run in the checkout honours a `path` override in src/rust-toolchain.toml, which
+        # would name a binary the checkout supplies. Windows prints the toolchain with backslashes, so both
+        # paths are normalised with cygpath where it exists (Git Bash).
+        rustc_path="$(rustup which rustc)"
+        rustup_home="${RUSTUP_HOME:-${HOME}/.rustup}"
+        if command -v cygpath >/dev/null 2>&1; then
+          rustc_path="$(cygpath -u "${rustc_path}")"
+          rustup_home="$(cygpath -u "${rustup_home}")"
+        fi
+        rustc_dir="$(cd "$(dirname "${rustc_path}")" && pwd -P)"
+        rustup_home_real="$(cd "${rustup_home}" && pwd -P)"
+        case "${rustc_dir}/" in
+          "${workspace_real}/"* | "${temp_real}/"*) echo 'target-cache: the selected compiler is inside the checkout or the temp directory' >&2; exit 1 ;;
+        esac
+        case "${rustc_dir}/" in
+          "${rustup_home_real}/toolchains/"*) ;;
+          *) echo 'target-cache: the selected compiler is not an installed rustup toolchain' >&2; exit 1 ;;
+        esac
+        sha256_text() {
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
+        }
+        [[ "${GROUP}" =~ ^[a-z0-9-]+$ && "${FEATURES}" =~ ^[a-z0-9+-]+$ ]] || { echo 'target-cache: group and features must be fixed labels' >&2; exit 1; }
+        # The target directory is always outside the private checkout, so the cache path can
+        # never name private source. Linux and Windows set it in the toolchain step; when
+        # nothing set it (macOS), it moves to the runner's home for this build.
+        dir="${CARGO_TARGET_DIR:-}"
+        if [[ -z "${dir}" ]]; then
+          dir="${HOME}/cargo-target"
+          mkdir -p "${dir}"
+          echo "CARGO_TARGET_DIR=${dir}" >> "${GITHUB_ENV}"
+        fi
+        # Only the three reviewed locations (the Linux scratch disk, the Windows short path, the home
+        # directory default); anything else is refused, whoever set it.
+        case "${dir}" in
+          /mnt/cargo-target | 'C:\ct' | "${HOME}/cargo-target") ;;
+          *) echo 'target-cache: the target directory is not one of the reviewed locations' >&2; exit 1 ;;
+        esac
+        if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -m "${dir}")"; fi
+        case "$(cd "$(dirname "${dir}")" && pwd -P)/" in
+          "$(cd "${GITHUB_WORKSPACE}/src" && pwd -P)/"*) echo 'target-cache: the target directory is inside the private checkout' >&2; exit 1 ;;
+        esac
+        # The exact key. Every input a cached artefact depends on is part of it: OS, arch and
+        # runner image; the build and its feature set; the exact rustc (version, commit,
+        # host and LLVM); the lockfile; every tracked cargo manifest, cargo config and
+        # toolchain file (feature selections live there); and the cargo, compiler and
+        # native-library environment. The ISO week rotates every key weekly, so any entry,
+        # including a poisoned one, outlives its week by at most the one save it took.
+        week="$(date -u +%G-W%V)"
+        rustc_version="$("${rustc_path}" -V | awk '{ print $2 }')"
+        toolchain="$("${rustc_path}" -vV | tr -d '\r' | sha256_text | cut -c1-12)"
+        lock="$(tr -d '\r' < Cargo.lock | sha256_text | cut -c1-16)"
+        manifests="$(git ls-files -z -- '*Cargo.toml' '.cargo/config.toml' '.cargo/config' 'rust-toolchain.toml' 'rust-toolchain' | xargs -0 cat | tr -d '\r' | sha256_text | cut -c1-16)"
+        environment="$(env | LC_ALL=C sort | grep -E '^(CARGO_INCREMENTAL|CARGO_PROFILE_[A-Z_]+|CARGO_BUILD_[A-Z_]+|CARGO_ENCODED_RUSTFLAGS|CARGO_TARGET_DIR|RUSTFLAGS|RUSTDOCFLAGS|RUSTC_WRAPPER|CC|CXX|CFLAGS|CXXFLAGS|LDFLAGS|LIBCLANG_PATH|PKG_CONFIG_PATH|MACOSX_DEPLOYMENT_TARGET|VCPKG_ROOT|OPENSSL_[A-Z_]+|LIBSQLITE3_FLAGS)=' | tr -d '\r' | sha256_text | cut -c1-12 || true)"
+        key="cargo-target-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS:-image}-${GROUP}-${FEATURES}-rustc${rustc_version}-${toolchain}-${week}-lock${lock}-manifests${manifests}-env${environment}"
+        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
+        echo "key=${key}" >> "${GITHUB_OUTPUT}"
+        echo "target-cache: key ${key}"
+
     - name: Install the compiled dependency cache helpers
       shell: bash
       working-directory: ${{ github.workspace }}
@@ -311,51 +403,6 @@ runs:
           if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
         }
         HELPERS
-
-    - name: Locate the compiled dependency cache
-      id: locate
-      if: ${{ inputs.mode == 'locate' }}
-      shell: bash
-      working-directory: ${{ github.workspace }}/src
-      env:
-        GROUP: ${{ inputs.group }}
-        FEATURES: ${{ inputs.features }}
-      # The value written to the environment file is a path built from HOME, never input.
-      run: |  # zizmor: ignore[github-env]
-        set -euo pipefail
-        sha256_text() {
-          if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
-        }
-        [[ "${GROUP}" =~ ^[a-z0-9-]+$ && "${FEATURES}" =~ ^[a-z0-9+-]+$ ]] || { echo 'target-cache: group and features must be fixed labels' >&2; exit 1; }
-        # The target directory is always outside the private checkout, so the cache path can
-        # never name private source. Linux and Windows set it in the toolchain step; when
-        # nothing set it (macOS), it moves to the runner's home for this build.
-        dir="${CARGO_TARGET_DIR:-}"
-        if [[ -z "${dir}" ]]; then
-          dir="${HOME}/cargo-target"
-          mkdir -p "${dir}"
-          echo "CARGO_TARGET_DIR=${dir}" >> "${GITHUB_ENV}"
-        fi
-        if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -m "${dir}")"; fi
-        case "$(cd "$(dirname "${dir}")" && pwd -P)/" in
-          "$(cd "${GITHUB_WORKSPACE}/src" && pwd -P)/"*) echo 'target-cache: the target directory is inside the private checkout' >&2; exit 1 ;;
-        esac
-        # The exact key. Every input a cached artefact depends on is part of it: OS, arch and
-        # runner image; the build and its feature set; the exact rustc (version, commit,
-        # host and LLVM); the lockfile; every tracked cargo manifest, cargo config and
-        # toolchain file (feature selections live there); and the cargo, compiler and
-        # native-library environment. The ISO week rotates every key weekly, so any entry,
-        # including a poisoned one, outlives its week by at most the one save it took.
-        week="$(date -u +%G-W%V)"
-        rustc_version="$(rustc -V | awk '{ print $2 }')"
-        toolchain="$(rustc -vV | tr -d '\r' | sha256_text | cut -c1-12)"
-        lock="$(tr -d '\r' < Cargo.lock | sha256_text | cut -c1-16)"
-        manifests="$(git ls-files -z -- '*Cargo.toml' '.cargo/config.toml' '.cargo/config' 'rust-toolchain.toml' 'rust-toolchain' | xargs -0 cat | tr -d '\r' | sha256_text | cut -c1-16)"
-        environment="$(env | LC_ALL=C sort | grep -E '^(CARGO_INCREMENTAL|CARGO_PROFILE_[A-Z_]+|CARGO_BUILD_[A-Z_]+|CARGO_ENCODED_RUSTFLAGS|CARGO_TARGET_DIR|RUSTFLAGS|RUSTDOCFLAGS|RUSTC_WRAPPER|CC|CXX|CFLAGS|CXXFLAGS|LDFLAGS|LIBCLANG_PATH|PKG_CONFIG_PATH|MACOSX_DEPLOYMENT_TARGET|VCPKG_ROOT|OPENSSL_[A-Z_]+|LIBSQLITE3_FLAGS)=' | tr -d '\r' | sha256_text | cut -c1-12 || true)"
-        key="cargo-target-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS:-image}-${GROUP}-${FEATURES}-rustc${rustc_version}-${toolchain}-${week}-lock${lock}-manifests${manifests}-env${environment}"
-        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
-        echo "key=${key}" >> "${GITHUB_OUTPUT}"
-        echo "target-cache: key ${key}"
 
     - name: Strip workspace crates from the restored dependency cache
       if: ${{ inputs.mode == 'restored' }}

@@ -40,7 +40,9 @@ while IFS= read -r -d '' path; do
   if [[ "$path" =~ ^\.github/policy/case-evidence-assets/[a-z0-9][a-z0-9-]*(\.(config|spec))?\.(cjs|json)$ ]]; then
     continue
   fi
-  if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt ]]; then
+  # .github/CODEOWNERS is the one reviewed ownership file (exact path, matched in the sweep below too);
+  # CODEOWNERS anywhere else still trips the forbidden-name sweep.
+  if [[ "$path" == .github/ci-matrix.json || "$path" == .github/dependabot.yml || "$path" == .github/tool-pins.json || "$path" == .github/egress-allowlist.txt || "$path" == .github/CODEOWNERS ]]; then
     continue
   fi
   # Flat documentation guides: markdown directly under docs/, nothing else.
@@ -53,6 +55,18 @@ while IFS= read -r -d '' path; do
   echo "Unexpected tracked path in the public CI repository: $path" >&2
   exit 1
 done < <(git ls-files -z)
+
+# The files admitted by exact path above are plain data too: a tracked symlink or an executable file at
+# one of those paths would pass the name rules while pointing elsewhere or being runnable. Read the git
+# mode from the index and accept only a regular, non-executable file (100644).
+while IFS= read -r -d '' record; do
+  mode="${record%% *}"
+  exact="${record#*$'\t'}"
+  if [[ "$mode" != '100644' ]]; then
+    echo "Exact-path files must be plain non-executable regular files: $exact has git mode $mode" >&2
+    exit 1
+  fi
+done < <(git ls-files -s -z -- .github/ci-matrix.json .github/dependabot.yml .github/tool-pins.json .github/egress-allowlist.txt .github/CODEOWNERS)
 
 # The assets in that directory are not inert data: the reporter is JavaScript
 # the pinned runner loads on the hosted runner. A tracked symlink would pass
@@ -92,7 +106,7 @@ while IFS= read -r -d '' record; do
   fi
 done < <(git ls-files -s -z -- .github/policy/case-evidence-assets)
 
-if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' \
+if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' -e '.github/CODEOWNERS' \
   | grep -vE '^\.github/policy/case-evidence-assets/[a-z0-9][a-z0-9-]*(\.(config|spec))?\.json$' \
   | grep -E "$forbidden_path_re|$forbidden_name_re"; then
   echo "The public repository contains a forbidden source, credential, or starter-document path." >&2

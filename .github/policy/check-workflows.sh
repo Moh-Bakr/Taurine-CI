@@ -75,7 +75,7 @@ ruby "${policy}/check-cache-mode.rb" "${cache_mode_files[@]}"
 ruby "${policy}/check-dispatch-contracts.rb"
 ruby "${policy}/check-suite-catalog.rb"
 
-if find . -type f -not -path './.git' -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/policy/*' -not -path './.github/ci-matrix.json' -not -path './.github/dependabot.yml' -not -path './.github/tool-pins.json' -not -path './.github/egress-allowlist.txt' -not \( -path './docs/*.md' -not -path './docs/*/*' \) -not -name '.gitignore' -print -quit | grep -q .; then
+if find . -type f -not -path './.git' -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/policy/*' -not -path './.github/ci-matrix.json' -not -path './.github/dependabot.yml' -not -path './.github/tool-pins.json' -not -path './.github/egress-allowlist.txt' -not -path './.github/CODEOWNERS' -not \( -path './docs/*.md' -not -path './docs/*/*' \) -not -name '.gitignore' -print -quit | grep -q .; then
   echo "Only workflow files (and an optional .gitignore) may be tracked at this bootstrap phase." >&2
   exit 1
 fi

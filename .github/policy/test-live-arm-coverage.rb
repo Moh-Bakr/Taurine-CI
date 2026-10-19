@@ -24,7 +24,9 @@ class LiveArmCoverageTest < Minitest::Test
   end
 
   def entry(arm)
-    { 'engine' => arm, 'report' => true, 'blurb' => 'fixture' }
+    base = { 'engine' => arm, 'report' => true, 'blurb' => 'fixture' }
+    rows = G::REQUIRED_SUITE_ROWS[arm]
+    rows ? base.merge('suites' => ['taurine-db-postgres live_catalog'] + rows) : base
   end
 
   def write_tree(roster: G::REQUIRED_ARMS.map { |arm| entry(arm) }, options: G::REQUIRED_ARMS,
@@ -54,20 +56,80 @@ class LiveArmCoverageTest < Minitest::Test
     G.evaluate(@root)['status']
   end
 
-  def test_required_set_is_the_full_thirteen_arm_roster
-    assert_equal 13, G::REQUIRED_ARMS.length
+  def test_required_set_is_the_full_twelve_arm_roster
+    assert_equal 12, G::REQUIRED_ARMS.length
     assert_equal G::REQUIRED_ARMS.uniq, G::REQUIRED_ARMS
-    assert_includes G::REQUIRED_ARMS, 'pg-dbx'
+    refute_includes G::REQUIRED_ARMS, 'pg-dbx' # merged into the postgres arm
+    assert_includes G::REQUIRED_ARMS, 'postgres'
     assert_includes G::REQUIRED_ARMS, 'tls-legacy'
     refute G.const_defined?(:BASELINE_ENGINES), 'no waivable subset may exist'
+  end
+
+  # The only two reviewed shapes: the merged twelve, and the legacy thirteen that still lists pg-dbx.
+  def test_the_two_reviewed_shapes_differ_only_by_pg_dbx
+    assert_equal 13, G::LEGACY_ARMS.length
+    assert_equal G::LEGACY_ARMS - ['pg-dbx'], G::MERGED_ARMS
+    assert_equal G::MERGED_ARMS, G::REQUIRED_ARMS
   end
 
   def test_the_real_repository_passes
     report = G.evaluate(REPO_ROOT)
     assert_equal 'ok', report['status'], report.inspect
-    assert_equal [13, 13, 13], report.values_at('required_count', 'registered_count', 'contract_count')
+    count = report['registered_count']
+    assert_includes [12, 13], count
+    assert_equal [count, count, count], report.values_at('required_count', 'registered_count', 'contract_count')
     assert_empty report['missing']
     assert_empty report['unrequired']
+  end
+
+  def legacy_roster
+    G::LEGACY_ARMS.map { |arm| entry(arm) }
+  end
+
+  def test_the_legacy_thirteen_arm_shape_still_passes_without_the_evidence_row
+    write_tree(roster: G::LEGACY_ARMS.map { |a| { 'engine' => a, 'report' => true, 'blurb' => 'fixture' } }, options: G::LEGACY_ARMS)
+    report = G.evaluate(@root)
+    assert_equal 'ok', report['status'], report.inspect
+    assert_equal [13, 13, 13], report.values_at('required_count', 'registered_count', 'contract_count')
+  end
+
+  def test_the_roster_alone_selects_the_shape_never_the_contract
+    # A merged roster with the legacy contract, and a legacy roster with the merged contract, are both refused.
+    write_tree(options: G::LEGACY_ARMS)
+    report = G.evaluate(@root)
+    assert_equal ['contract_mismatch', ['pg-dbx']], report.values_at('status', 'unrequired')
+    write_tree(roster: legacy_roster, options: G::MERGED_ARMS)
+    report = G.evaluate(@root)
+    assert_equal ['contract_mismatch', ['pg-dbx']], report.values_at('status', 'missing')
+  end
+
+  def test_no_other_roster_than_the_two_reviewed_shapes_passes
+    [G::MERGED_ARMS, G::LEGACY_ARMS].each do |shape|
+      shape.each do |arm|
+        next if arm == 'pg-dbx' # the legacy shape minus pg-dbx is the merged shape, which carries the row
+
+        write_tree(roster: (shape - [arm]).map { |a| entry(a) }, options: shape - [arm])
+        refute_equal 'ok', status, "#{shape.length} arms minus #{arm}"
+      end
+    end
+    # postgres is required in both shapes: it carries the Dbx evidence once pg-dbx is gone.
+    write_tree(roster: (G::MERGED_ARMS - ['postgres'] + ['pg-dbx']).map { |a| entry(a) })
+    assert_equal 'roster_mismatch', status
+    write_tree(roster: (G::LEGACY_ARMS - ['postgres']).map { |a| entry(a) })
+    assert_equal 'roster_mismatch', status
+  end
+
+  def test_a_roster_cannot_shed_pg_dbx_without_the_postgres_evidence_row
+    rows = G::REQUIRED_SUITE_ROWS.fetch('postgres')
+    plain = G::MERGED_ARMS.map { |a| { 'engine' => a, 'report' => true, 'blurb' => 'fixture' } }
+    write_tree(roster: plain)
+    report = G.evaluate(@root)
+    assert_equal 'missing_evidence_row', report['status']
+    assert_includes report['reason'], rows.first
+    write_tree(roster: plain.map { |e| e['engine'] == 'postgres' ? e.merge('suites' => rows + rows) : e })
+    assert_equal 'missing_evidence_row', status
+    write_tree(roster: plain.map { |e| e['engine'] == 'postgres' ? e.merge('suites' => ['taurine-db-conformance dbx_pg_live']) : e })
+    assert_equal 'missing_evidence_row', status
   end
 
   def test_a_complete_fixture_passes
@@ -115,7 +177,7 @@ class LiveArmCoverageTest < Minitest::Test
   end
 
   def test_a_duplicate_arm_entry_is_refused_even_when_the_set_matches
-    write_tree(roster: (G::REQUIRED_ARMS + ['pg-dbx']).map { |a| entry(a) })
+    write_tree(roster: (G::REQUIRED_ARMS + ['mysql']).map { |a| entry(a) })
     assert_equal 'duplicate_arm', status
   end
 
@@ -134,7 +196,7 @@ class LiveArmCoverageTest < Minitest::Test
   end
 
   def test_a_malformed_arm_identifier_is_invalid_input
-    ['PG-DBX', 'pg_dbx', '', '-pg', "pg-dbx\n", 7, nil].each do |bad|
+    ['PG-DBX', 'pg_dbx', '', '-pg', "mysql\n", 7, nil].each do |bad|
       roster = G::REQUIRED_ARMS.map { |a| entry(a) }
       roster[7]['engine'] = bad
       write_tree(roster: roster)
@@ -226,12 +288,12 @@ class LiveArmCoverageTest < Minitest::Test
     assert_equal 0, status.exitstatus
     assert_equal 'ok', JSON.parse(out)['status']
 
-    write_tree(roster: (G::REQUIRED_ARMS - ['pg-dbx']).map { |a| entry(a) })
+    write_tree(roster: (G::REQUIRED_ARMS - ['mysql']).map { |a| entry(a) })
     out, _err, status = run_guard(@root)
     assert_equal 1, status.exitstatus
     report = JSON.parse(out)
     assert_equal 'roster_mismatch', report['status']
-    assert_equal ['pg-dbx'], report['missing']
+    assert_equal ['mysql'], report['missing']
 
     out, _err, status = run_guard(@root, 'extra')
     assert_equal 1, status.exitstatus
@@ -336,18 +398,18 @@ class LiveArmCoverageTest < Minitest::Test
     write_tree(roster: roster)
     report = G.evaluate(@root)
     assert_equal 'unknown_roster_key', report['status']
-    assert_equal "live-proofs.yml: key 'optional' in arm 'pg-dbx'", report['reason']
-    assert_equal [13, 13], report.values_at('registered_count', 'contract_count')
+    assert_equal "live-proofs.yml: key 'optional' in arm 'mysql'", report['reason']
+    assert_equal [12, 12], report.values_at('registered_count', 'contract_count')
 
-    roster[7] = entry('pg-dbx').merge("bad key\n::error::" => 1)
+    roster[7] = entry('mysql').merge("bad key\n::error::" => 1)
     write_tree(roster: roster)
-    assert_equal "live-proofs.yml: key '(unprintable)' in arm 'pg-dbx'", G.evaluate(@root)['reason']
+    assert_equal "live-proofs.yml: key '(unprintable)' in arm 'mysql'", G.evaluate(@root)['reason']
   end
 
   def test_comparison_failures_still_list_the_arms_and_say_where
-    write_tree(roster: (G::REQUIRED_ARMS - ['pg-dbx']).map { |a| entry(a) })
+    write_tree(roster: (G::REQUIRED_ARMS - ['mysql']).map { |a| entry(a) })
     report = G.evaluate(@root)
-    assert_equal ['roster_mismatch', ['pg-dbx'], 'live-proofs.yml: roster differs from the required set'],
+    assert_equal ['roster_mismatch', ['mysql'], 'live-proofs.yml: roster differs from the required set'],
                  report.values_at('status', 'missing', 'reason')
 
     write_tree(options: G::REQUIRED_ARMS - ['tls-legacy'])
@@ -355,8 +417,8 @@ class LiveArmCoverageTest < Minitest::Test
     assert_equal ['contract_mismatch', ['tls-legacy'], 'ci-matrix.json: engine options differ from the required set'],
                  report.values_at('status', 'missing', 'reason')
 
-    write_tree(roster: (G::REQUIRED_ARMS + ['pg-dbx']).map { |a| entry(a) })
-    assert_equal 'live-proofs.yml: repeated arm pg-dbx', G.evaluate(@root)['reason']
+    write_tree(roster: (G::REQUIRED_ARMS + ['mysql']).map { |a| entry(a) })
+    assert_equal 'live-proofs.yml: repeated arm mysql', G.evaluate(@root)['reason']
   end
 
   def test_the_cli_reports_a_usage_error_with_a_reason

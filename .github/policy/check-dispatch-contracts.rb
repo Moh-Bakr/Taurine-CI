@@ -33,7 +33,14 @@ SHA40 = { 'type' => 'string', 'required' => true, 'format' => 'sha40', 'digest_i
 DISPATCH_KEY = { 'type' => 'string', 'required' => true, 'format' => 'sha256', 'digest_include' => false }.freeze
 BOOLEAN_FALSE = { 'type' => 'boolean', 'required' => false, 'default' => false, 'digest_include' => true }.freeze
 STRING_DEFAULT_EMPTY = { 'type' => 'string', 'required' => false, 'default' => '', 'digest_include' => true }.freeze
-LIVE_ENGINE_ROSTER = %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion].freeze
+# The live-proofs engine roster has two reviewed shapes while the `pg-dbx` arm is merged into `postgres`
+# (see check-live-arm-coverage.rb, which also holds the postgres arm to the Dbx evidence row once the
+# arm is gone). The merged twelve is the end state. The legacy thirteen, still listing `pg-dbx`, is
+# accepted only so a tree that predates the merge keeps passing. Both are exact and ordered; any other
+# list, including a subset or the same arms in another order, is refused.
+LIVE_ENGINE_ROSTER = %w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls tls-legacy bastion].freeze
+LEGACY_LIVE_ENGINE_ROSTER = %w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion].freeze
+LIVE_PROOFS_WORKFLOW = '.github/workflows/live-proofs.yml'
 EXPECTED_INPUTS = {
   '.github/workflows/linux-validation.yml' => {
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY,
@@ -56,7 +63,7 @@ EXPECTED_INPUTS = {
   '.github/workflows/android-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE },
   '.github/workflows/ios-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY, 'rust' => BOOLEAN_FALSE },
   '.github/workflows/orchestrate-validation.yml' => { 'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY },
-  '.github/workflows/live-proofs.yml' => {
+  LIVE_PROOFS_WORKFLOW => {
     'engine' => { 'type' => 'string', 'required' => true, 'format' => 'engine-selection',
                   'options' => LIVE_ENGINE_ROSTER, 'digest_include' => true },
     'source_sha' => SHA40, 'dispatch_key' => DISPATCH_KEY
@@ -165,7 +172,15 @@ workflows = contract['workflows'] || {}
 unless COMPATIBLE_WORKFLOW_SETS.include?(workflows.keys.sort)
   failures << '.github/ci-matrix.json: dispatch workflow set must match the exact deployed PG8 set'
 end
-EXPECTED_INPUTS.each do |path, expected_inputs|
+# Only the exact legacy roster selects the legacy schema; anything else is judged against the merged one.
+expected_all = EXPECTED_INPUTS
+if workflows.dig(LIVE_PROOFS_WORKFLOW, 'inputs', 'engine', 'options') == LEGACY_LIVE_ENGINE_ROSTER
+  live = EXPECTED_INPUTS.fetch(LIVE_PROOFS_WORKFLOW)
+  expected_all = EXPECTED_INPUTS.merge(
+    LIVE_PROOFS_WORKFLOW => live.merge('engine' => live.fetch('engine').merge('options' => LEGACY_LIVE_ENGINE_ROSTER))
+  )
+end
+expected_all.each do |path, expected_inputs|
   actual_inputs = workflows.dig(path, 'inputs')
   matches = actual_inputs == expected_inputs
   failures << ".github/ci-matrix.json: #{path} input contract differs from the reviewed schema" unless matches

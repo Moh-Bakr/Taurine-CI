@@ -30,19 +30,33 @@ arms="$(sed -n 's/^arms=//p' "${work}/output")"
   echo 'live roster fixture: planning step omitted roster or arms' >&2
   exit 1
 }
+# The roster has two reviewed shapes while pg-dbx is merged into postgres. The legacy thirteen lists
+# pg-dbx as its own arm; the merged twelve has no pg-dbx arm and the postgres arm carries the Dbx
+# evidence row exactly once. Whichever the tree declares must be exactly one of them.
+legacy13='["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"]'
+merged12='["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"]'
+dbx_row='taurine-db-conformance dbx_pg_live,dbx_shadow_pg'
+if jq -e 'has("pg-dbx")' <<< "${roster}" >/dev/null; then
+  arm_count=13
+  jq -e --argjson want "${legacy13}" --arg row "${dbx_row}" '
+    (keys | sort) == ($want | sort) and (."pg-dbx".suites == [$row])
+  ' <<< "${roster}" >/dev/null
+  jq -e --argjson selected "${arms}" --argjson want "${legacy13}" '$selected == $want' <<< "${roster}" >/dev/null
+else
+  arm_count=12
+  jq -e --argjson want "${merged12}" --arg row "${dbx_row}" '
+    (keys | sort) == ($want | sort) and ((.postgres.suites // []) | map(select(. == $row)) | length) == 1
+  ' <<< "${roster}" >/dev/null
+  jq -e --argjson selected "${arms}" --argjson want "${merged12}" '$selected == $want' <<< "${roster}" >/dev/null
+fi
 jq -e '
   type == "object" and
-  (keys | sort) == (["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"] | sort) and
-  (."pg-dbx".suites == ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"]) and
   (.pgtls.suites == ["taurine-db-postgres live_tls", "taurine-db-conformance dbx_pg_tls_live dbx_tls_", "taurine-db-conformance dbx_pg_mtls_live dbx_pg_mtls_"]) and
   ((.pgtls.cargo_features == ["taurine-db-dbx/dbx-pg", "taurine-db-dbx/legacy-tls"] or
     .pgtls.cargo_features == ["taurine-db-engine/dbx-pg", "taurine-db-dbx/legacy-tls"])) and
   (."tls-legacy".suites == ["taurine-db-conformance dbx_pg_tls_live legacy"]) and
   (."tls-legacy".cargo_features == ["taurine-db-dbx/legacy-tls"]) and
   (all(.[]; (.engine | type) == "string" and (.report | type) == "boolean" and (.blurb | type) == "string"))
-' <<< "${roster}" >/dev/null
-jq -e --argjson selected "${arms}" '
-  $selected == ["doris", "starrocks", "db2", "informix", "rocketmq", "iris", "postgres", "pg-dbx", "mysql", "mssql", "pgtls", "tls-legacy", "bastion"]
 ' <<< "${roster}" >/dev/null
 contract_arms="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options' .github/ci-matrix.json)"
 [[ "${contract_arms}" == "${arms}" ]] || {
@@ -281,9 +295,9 @@ done
 ruby -e '
   path = ARGV.fetch(0)
   script = File.read(path)
-  needle = %q|{"engine": "pg-dbx"|
-  abort "live roster fixture: pg-dbx entry missing" unless script.scan(needle).length == 1
-  File.write(ARGV.fetch(1), script.sub(needle, "# invalid JSON before pg-dbx\n            #{needle}"))
+  needle = %q|{"engine": "postgres"|
+  abort "live roster fixture: postgres entry missing" unless script.scan(needle).length == 1
+  File.write(ARGV.fetch(1), script.sub(needle, "# invalid JSON before postgres\n            #{needle}"))
 ' "${work}/plan.sh" "${work}/invalid.sh"
 if RUNNER_TEMP="${work}" GITHUB_OUTPUT="${work}/invalid-output" \
   REQUESTED_ENGINE=all REQUESTED_SOURCE_SHA="${source_sha}" \
@@ -296,7 +310,7 @@ grep -q 'parse error' "${work}/invalid-stderr" || {
   exit 1
 }
 
-echo 'live roster: extracted plan selects all 13 arms; arm schema binds exact DBX TLS tests and feature'
+echo "live roster: extracted plan selects all ${arm_count} arms; arm schema binds exact DBX TLS tests and feature"
 if [[ "${LIVE_ROSTER_HOST_PREFIX_CHILD:-}" != 1 ]]; then
   hosted_temp="${work}/hosted-prefix/home/runner/work/_temp"
   mkdir -p "${hosted_temp}"
