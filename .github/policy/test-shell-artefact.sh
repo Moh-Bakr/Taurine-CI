@@ -107,7 +107,12 @@ case "${crate}" in
     [[ "${crate}" == tokio-openssl && -n "${FAKE_MYSQL_PARENT:-}" ]] && printf '1taurine-mysql-async v0.1.0 (path)\n'
     [[ "${crate}" == tokio-openssl && -n "${FAKE_TOKIO_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'
     true ;;
-  openssl-src) printf '0openssl-src v300.5.5+3.5.5\n'; [[ -n "${FAKE_SRC_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'; true ;;
+  openssl-src)
+    printf '0openssl-src v300.5.5+3.5.5\n'
+    # FAKE_SRC_DOOR gives the real shape: openssl-sys's `vendored` and the door's build-dependency.
+    [[ -n "${FAKE_SRC_DOOR:-}" ]] && printf '1openssl-sys v0.9.117\n1taurine-tls-openssl v0.1.0 (path)\n'
+    [[ -n "${FAKE_SRC_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'
+    true ;;
   *) echo "error: package ID specification \`${crate}\` did not match any packages" >&2; exit 101 ;;
 esac
 STUB
@@ -806,7 +811,9 @@ expect_fail 'unparseable dep-info (real cargo)' "$(toy_check "${work}/t-door")" 
 grep -qF 'built_graph_check "android-${abi}-built-graph"' .github/workflows/android-validation.yml || fail 'android-native does not judge the built graph'
 grep -qF 'built_graph_check ios-arm64-sim-built-graph' .github/workflows/ios-validation.yml || fail 'ios-native does not judge the built graph'
 grep -qF 'built_graph_check "${os}-desktop-built-graph"' .github/actions/shell-artefact/action.yml || fail 'the desktop check does not judge the built graph'
+expect_pass 'openssl-src built by openssl-sys and the door build-dependency' 'FAKE_SRC_DOOR=1 openssl_door_gate g taurine-mobile -'
 expect_fail 'a non-door crate building openssl-src (S1 gate)' 'FAKE_SRC_BAD=1 openssl_door_gate g taurine-mobile -' 'evil-sys depends on openssl-src outside the OpenSSL door'
+expect_fail 'a non-door crate beside the door building openssl-src (S1 gate)' 'FAKE_SRC_DOOR=1 FAKE_SRC_BAD=1 openssl_door_gate g taurine-mobile -' 'evil-sys depends on openssl-src outside the OpenSSL door'
 
 # ---- G2: a cross build reads the host profile for build-dependencies (real cargo) ------------
 # openssl-src is a registry crate here (a vendored directory source standing in for crates.io),
