@@ -1097,8 +1097,8 @@ pull-request code does run there, and it could rewrite a later base script on di
 process behind to act later. The base pass is therefore isolated further:
 
 - **Its own job, in its own workflow.** It runs as `base-policy` in `base-policy.yml`, called by
-  the entrypoint, separate from the checks in `policy`, so nothing the pull request's own policy
-  scripts export there reaches it. `policy` declares `needs: [base-pass]`, the call, and fails
+  the entrypoint, separate from the policy shards, so nothing the pull request's own policy
+  scripts export there reaches it. `policy` declares `needs` on the call (and the shards), and fails
   unless the whole workflow succeeded. Inside it, `base-policy-result` requires the fixtures job
   to have passed on every event and the base-policy job on a pull request, so a skipped base pass
   fails.
@@ -1270,6 +1270,27 @@ sole trigger is `workflow_call`, with no other trigger, secret, artifact, cache 
 `base-pass-workflow.sh`, in whichever of the two files holds it and only when exactly one does
 (`test-base-pass-locate.sh`). `test-base-policy-result.sh` holds the rules that keep the base pass on
 the required check: the guards pass only on success, and `policy` needs the call that needs both jobs.
+
+### The policy gate is an aggregate over four shards
+
+`policy` (the required check "Validate workflow policy") runs no checkout and none of the pull
+request's scripts: two guards only. It needs the base pass and four shard jobs that need nothing
+else, so all of them run at once and the gate costs the longest of them, not their sum. Each shard
+starts with its own checkout; every step of the former single job runs in exactly one shard, and
+`check-policy-steps.rb` pins which one.
+
+| Job | Steps | Timeout | Basis (recent green run 39271687193, summed step times) |
+| --- | --- | --- | --- |
+| `policy-structure` | repository, lint, universal, structure, step table, workflows, sizes, policy and rule N fixtures | 15 min | about 370 s; 2.4x headroom |
+| `policy-fixtures` | the remaining fixture and unit tests, the aggregate-layout test | 25 min | about 100 s, plus the aggregate-layout test (about 140 cases; roughly 12 minutes measured on a busy 10-core Mac; not in that run); about 14 min in all, 1.8x headroom. Parallelising that test's cases is the next speed-up |
+| `policy-evidence` | case-evidence contract, producers, assets and Playwright parity | 10 min | about 36 s |
+| `policy-mutations` | `test-mutations.sh` | 20 min | about 470 s; 2.5x headroom |
+| `policy` (aggregate) | the two guards | 5 min | seconds once its `needs` end |
+
+The guards fail unless every `needs.<job>.result` is `success`, so a failed, skipped, cancelled or
+dropped shard cannot pass. `test-policy-aggregate.sh` proves the checkers refuse each weakening of
+that layout. A budget that a green run exceeds 80% of is a defect (ci-speed.md); the timeouts
+above leave over 100% headroom on measured durations because hosted runner speed varies.
 
 ## Accepted residual risks
 

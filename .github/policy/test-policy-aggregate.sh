@@ -3,8 +3,7 @@
 # this pull request's own policy runs in four shard jobs beside the base pass. This test proves the
 # checkers (test-base-policy-result.sh, check-strict-structure.rb, check-policy-steps.rb) accept that
 # layout and refuse each way of weakening it, including a shard that borrows the required check's name
-# and a step that is dropped, rewritten or moved to another shard. While the entrypoint is still the
-# single-job layout the fixture is derived from it; once it has the shards it is used as it stands.
+# and a step that is dropped, rewritten or moved to another shard. The fixture is the real entrypoint.
 # Run from the repository root.
 set -euo pipefail
 
@@ -14,12 +13,9 @@ trap 'rm -rf -- "${tmp}"' EXIT
 entry=.github/workflows/validate-public-changes.yml
 fail() { echo "policy aggregate: $*" >&2; exit 1; }
 
-# The fixture: the real entrypoint, or the single-job entrypoint sharded by shard-policy-entry.rb.
-if grep -q '^  policy-structure:$' "${root}/${entry}"; then
-  cp "${root}/${entry}" "${tmp}/entry.yml"
-else
-  ruby "${root}/.github/policy/shard-policy-entry.rb" "${root}/${entry}" > "${tmp}/entry.yml"
-fi
+# The fixture: the real entrypoint, which is the sharded layout.
+grep -q '^  policy-structure:$' "${root}/${entry}" || fail 'the entrypoint is not the sharded layout'
+cp "${root}/${entry}" "${tmp}/entry.yml"
 
 # check FILE: all three checkers, run on a tree whose entrypoint is FILE; non-zero when any refuses it.
 check() {
@@ -27,7 +23,9 @@ check() {
   cp -R "${root}/.github/policy" "${tmp}/tree/.github/policy"
   cp "${root}/.github/workflows/base-policy.yml" "${tmp}/tree/.github/workflows/"
   cp "$1" "${tmp}/tree/${entry}"
-  ( cd "${tmp}/tree" && bash .github/policy/test-base-policy-result.sh && ruby .github/policy/check-strict-structure.rb && ruby .github/policy/check-policy-steps.rb ) > "${tmp}/out" 2>&1
+  # The two fast checkers run first and the slow one (about twenty seconds) last: a weakening either fast checker
+  # refuses never pays for it, and one only it can catch still reaches it.
+  ( cd "${tmp}/tree" && ruby .github/policy/check-strict-structure.rb && ruby .github/policy/check-policy-steps.rb && bash .github/policy/test-base-policy-result.sh ) > "${tmp}/out" 2>&1
 }
 check "${tmp}/entry.yml" || { cat "${tmp}/out" >&2; fail 'the aggregate layout was refused'; }
 echo 'accepted  the aggregate layout'
@@ -127,12 +125,12 @@ mutate 'a policy-fixtures step made conditional' '      - name: Test the environ
 '
 mutate 'a shard loses its own checkout' '    name: Policy mutations
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - name: Check out public policy repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1' '    name: Policy mutations
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - name: Check out public policy repository
         run: echo skipped'
