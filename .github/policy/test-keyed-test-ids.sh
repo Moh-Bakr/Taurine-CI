@@ -421,6 +421,10 @@ done
 # The fixed separators themselves are ASCII-checked after removal, so the good fixture still passes.
 out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-good.md" ""')"
 has "${out}" 'skipped one'
+# A sed that fails in the ASCII check withholds the section: it must not read as clean.
+out="$(run "${dir}/rt" 'sed() { return 1; }; tci_publish_inventory "'"${dir}"'/inv-good.md" ""')"
+has "${out}" 'Test inventory withheld'
+no_leak "${out}" 'skipped one'
 # A grep that errors (status 2) withholds the section instead of reading as "no secret".
 out="$(run "${dir}/rt" 'grep() { if [[ "$1" == -qiE ]]; then return 2; fi; command grep "$@"; }; tci_publish_inventory "'"${dir}"'/inv-good.md" ""')"
 has "${out}" 'Test inventory withheld'
