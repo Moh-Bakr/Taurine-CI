@@ -2,8 +2,10 @@ name: Concern timings
 description: >
   Three modes. start records the job's start time and the runner image; report
   writes the job's own duration to its summary; table (run in a separate job with
-  actions: read) tabulates every matching job of the run against a committed
-  baseline and warns, never fails, when one is more than 25% and two minutes slower.
+  actions: read) tabulates every matching job of the run with its queue time (job
+  start minus job creation) and its duration against a committed baseline, and warns,
+  never fails, when one is more than 25% and two minutes slower. Runs from main and
+  from the untrusted ref have separate baselines: untrusted runs restore no cache.
 
 inputs:
   mode:
@@ -14,7 +16,11 @@ inputs:
     required: false
     default: ''
   baseline-seconds:
-    description: JSON object of concern name to baseline seconds (table mode)
+    description: JSON object of concern name to baseline seconds for runs from main, which restore the compiled-dependency caches (table mode). Also used for an untrusted run when no untrusted baseline is given
+    required: false
+    default: '{}'
+  baseline-seconds-untrusted:
+    description: JSON object of concern name to baseline seconds for runs from the untrusted ref, which restore no cache and so compile cold (table mode). When given, an untrusted run is compared with this object alone; a concern missing from it is listed without a comparison, never against the warm main baseline
     required: false
     default: '{}'
   name-pattern:
@@ -57,32 +63,54 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         LABEL: ${{ inputs.label }}
         BASELINE_SECONDS: ${{ inputs.baseline-seconds }}
+        BASELINE_SECONDS_UNTRUSTED: ${{ inputs.baseline-seconds-untrusted }}
         NAME_PATTERN: ${{ inputs.name-pattern }}
       run: |
         set -euo pipefail
+        # Which baseline this run is judged against. An untrusted run restores no cache, so its jobs
+        # compile cold and run far longer than the warm main baseline (survey 8.6: four of six drift
+        # flags were this effect alone); when an untrusted baseline is supplied it is used alone.
+        baseline="${BASELINE_SECONDS}"
+        baseline_name='main'
+        if [[ "${GITHUB_REF}" == refs/heads/untrusted && "${BASELINE_SECONDS_UNTRUSTED}" != '{}' && -n "${BASELINE_SECONDS_UNTRUSTED}" ]]; then
+          baseline="${BASELINE_SECONDS_UNTRUSTED}"
+          baseline_name='untrusted (cold, no cache)'
+        fi
+        # Queue is the job's start minus its creation: the time it waited for a runner once it could
+        # run. A job without a creation time shows `-`. Names, times and conclusions only.
         rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
           | jq -r --arg re "${NAME_PATTERN}" '.jobs[]
             | select(.started_at != null and .completed_at != null)
             | select(.name | test($re))
             | [(.name | capture($re).concern), (.conclusion // "unknown"),
-               (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)]
+               (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor),
+               (if .created_at == null then "-" else (((.started_at | fromdateiso8601) - (.created_at | fromdateiso8601)) | if . < 0 then 0 else . end | tostring) end)]
             | @tsv' | sort)"
         {
           echo "## ${LABEL} timings"
           echo
-          echo '| Concern | Duration | Baseline | Conclusion |'
-          echo '| --- | --- | --- | --- |'
+          echo "Baseline: ${baseline_name}. Queue is job start minus job creation."
+          echo
+          echo '| Concern | Queue | Duration | Baseline | Conclusion |'
+          echo '| --- | --- | --- | --- | --- |'
         } >> "${GITHUB_STEP_SUMMARY}"
-        while IFS=$'\t' read -r concern conclusion seconds; do
+        longest_queue=0
+        while IFS=$'\t' read -r concern conclusion seconds queue; do
           [[ -n "${concern}" ]] || continue
-          base="$(jq -r --arg c "${concern}" '.[$c] // empty' <<<"${BASELINE_SECONDS}")"
+          base="$(jq -r --arg c "${concern}" '.[$c] // empty' <<<"${baseline}")"
           shown='none'
           if [[ -n "${base}" ]]; then
             shown="$((base / 60))m$(printf '%02d' $((base % 60)))s"
             if (( seconds > base * 125 / 100 && seconds > base + 120 )); then
-              echo "::warning title=Slow job::${LABEL} ${concern} took $((seconds / 60))m$((seconds % 60))s against a baseline of ${shown} (more than 25% slower)"
+              echo "::warning title=Slow job::${LABEL} ${concern} took $((seconds / 60))m$((seconds % 60))s against a ${baseline_name} baseline of ${shown} (more than 25% slower)"
               shown="${shown} (SLOWER)"
             fi
           fi
-          printf '| %s | %dm%02ds | %s | %s |\n' "${concern}" $((seconds / 60)) $((seconds % 60)) "${shown}" "${conclusion}" >> "${GITHUB_STEP_SUMMARY}"
+          queue_shown='-'
+          if [[ "${queue}" =~ ^[0-9]+$ ]]; then
+            queue_shown="$((queue / 60))m$(printf '%02d' $((queue % 60)))s"
+            (( queue > longest_queue )) && longest_queue="${queue}"
+          fi
+          printf '| %s | %s | %dm%02ds | %s | %s |\n' "${concern}" "${queue_shown}" $((seconds / 60)) $((seconds % 60)) "${shown}" "${conclusion}" >> "${GITHUB_STEP_SUMMARY}"
         done <<<"${rows}"
+        printf '\nLongest queue: %dm%02ds.\n' $((longest_queue / 60)) $((longest_queue % 60)) >> "${GITHUB_STEP_SUMMARY}"

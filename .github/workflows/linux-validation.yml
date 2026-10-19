@@ -584,6 +584,12 @@ jobs:
           mode: table
           label: Linux
           baseline-seconds: '{"rust-app-1":1981,"rust-app-2":2100,"rust-db":839,"rust-dbx":603,"rust-domain":186,"rust-net":124,"rust-packaging":999,"rust-tls-openssl":45,"taurine-cli":206,"scan-security":853,"desktop-shard-1":626,"desktop-shard-2":701,"desktop-quality":161,"mobile-quality":146,"frontend-build-budget":118,"contracts":95,"e2e-critical":744,"e2e-a11y":356,"e2e-regression-1":892,"e2e-regression-2":852,"e2e-regression-3":891,"e2e-regression-4":734,"e2e-visual":192}'
+          # Runs from the untrusted ref restore no cache, so they compile cold: they are compared with their
+          # own baseline, the mean of the two cold untrusted full sets measured in survey 8.5 and 8.6
+          # (rust-tls-openssl 125 s is the legacy-tls pass, not the 45 s of the pre-pass main baseline).
+          # The rust-app shards have none: the 3-way split changes their cost, so they are listed without a
+          # comparison until a green untrusted set re-bases them.
+          baseline-seconds-untrusted: '{"rust-db":1300,"rust-tls-openssl":125,"contracts":150,"e2e-critical":1050,"e2e-regression-1":750,"e2e-regression-2":740,"e2e-regression-3":640,"e2e-regression-4":1010,"e2e-a11y":440,"e2e-visual":220,"rust-net":130,"rust-domain":215,"taurine-cli":242,"rust-dbx":500,"rust-packaging":910,"scan-security":910,"desktop-shard-1":710,"desktop-shard-2":775,"desktop-quality":155,"mobile-quality":145,"frontend-build-budget":125}'
           name-pattern: '^validate(-long)?-(main|untrusted) \(.+\) / Linux (?<concern>.+)$'
           github-token: ${{ github.token }}
 

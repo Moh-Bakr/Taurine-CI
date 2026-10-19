@@ -663,8 +663,17 @@ Partial runs (quick profile, `base_sha`, `only`, `rust=false`) never admit a mer
 always a PASS (full) on the exact 40-character source SHA: the full set of concerns, all green.
 
 Always confirm the summary names the exact 40-character SHA you requested before attributing a
-result to a commit. A `Timings` job beside it tabulates durations against committed baselines and
-warns, without failing, when a job is more than 25% and two minutes slower.
+result to a commit. A `Timings` job beside it tabulates each concern's queue time (job start minus job
+creation, the wait for a runner), duration and baseline, and warns, without failing, when a job is more than
+25% and two minutes slower. Runs from `main` restore the compiled-dependency caches and runs from the
+`untrusted` ref restore none, so the table has two baselines: `baseline-seconds` for `main` and
+`baseline-seconds-untrusted` for `untrusted`. When an untrusted baseline is supplied an untrusted run is judged
+against it alone, and a concern missing from it is listed without a comparison, never against the warm `main`
+number (survey 8.6: four of six drift flags were that effect). Linux and Windows carry untrusted baselines taken
+from the cold sets in survey 8.5 to 8.7 (the `rust-app` shards have none until a green set re-bases them after
+the 3-way split); macOS has none yet and keeps the `main` baseline. The queue column is what makes ordering and
+the concurrency caps measurable: a long pole whose queue is more than a minute is a failed ordering.
+`test-timings-table.sh` holds the fixtures.
 
 ## The weekly run and drift
 

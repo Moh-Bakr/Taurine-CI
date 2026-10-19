@@ -206,6 +206,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-run-result.sh
 
+      - name: Test the Timings table's queue column and per-ref baselines
+        shell: bash
+        run: bash .github/policy/test-timings-table.sh
+
       # The reviewed candidate universe and coverage dispositions are immutable public policy.
       - name: Test the feature-suite catalog contract
         shell: bash

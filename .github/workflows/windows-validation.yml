@@ -453,6 +453,11 @@ jobs:
           mode: table
           label: Windows
           baseline-seconds: '{"rust-app-1":2740,"rust-app-2":2740,"rust-db":1851,"rust-domain":708,"rust-ovpn":759,"rust-net":595,"rust-packaging":1213,"rust-tls-openssl":464,"desktop-shard-1":1061,"desktop-shard-2":929,"desktop-quality":321,"mobile":287,"contracts":136,"bundle-budget":220}'
+          # Untrusted runs compile cold (no cache restore): their own baseline is the one cold untrusted
+          # set measured in survey 8.7 (a single sample, so treat a flag near the line as noise). The
+          # rust-app shards have none: the 3-way split changes their cost, so they are listed without a
+          # comparison until a green untrusted set re-bases them.
+          baseline-seconds-untrusted: '{"rust-db":2690,"desktop-shard-1":1242,"desktop-shard-2":760,"rust-packaging":1215,"rust-ovpn":648,"rust-domain":512,"rust-net":480,"rust-tls-openssl":471,"desktop-quality":354,"bundle-budget":228,"mobile":211,"contracts":266}'
           name-pattern: '^validate(-rust)?(-long)?-(main|untrusted) \(.+\) / Windows (?<concern>.+)$'
           github-token: ${{ github.token }}
 

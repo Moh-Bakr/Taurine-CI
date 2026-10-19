@@ -45,6 +45,12 @@ timing = wf['jobs']['timings']['steps'].find { |st| st['uses'].to_s == './.githu
 JSON.parse(timing['with']['baseline-seconds']).each_key do |name|
   problems << "baseline for #{name}: no such concern in ci-matrix.json" unless full.key?(name)
 end
+# The untrusted baseline (cold runs, no cache restore) names real concerns too, and every value is a
+# positive number of seconds.
+JSON.parse(timing['with']['baseline-seconds-untrusted'] || '{}').each do |name, seconds|
+  problems << "untrusted baseline for #{name}: no such concern in ci-matrix.json" unless full.key?(name)
+  problems << "untrusted baseline for #{name}: not a positive number of seconds" unless seconds.is_a?(Integer) && seconds.positive?
+end
 unless problems.empty?
   warn problems.join("\n")
   exit 1

@@ -370,6 +370,9 @@ jobs:
           mode: table
           label: macOS
           baseline-seconds: '{"rust-app-1":2600,"rust-app-2":2600,"rust-db":1287,"rust-domain":772,"rust-ovpn":229,"rust-net":160,"rust-packaging":1009,"rust-tls-openssl":71,"desktop-shard-1":532,"desktop-shard-2":629,"desktop-quality":235,"mobile":182,"bundle-budget":145,"orchestrate-skill":241}'
+          # No untrusted baseline yet: no cold untrusted macOS set has been measured, so an untrusted run
+          # keeps the main baseline above (the timings action falls back when none is given). Add
+          # baseline-seconds-untrusted from the first measured cold set.
           name-pattern: '^validate(-long)?-(main|untrusted) \(.+\) / macOS (?<concern>.+) validation$'
           github-token: ${{ github.token }}
 

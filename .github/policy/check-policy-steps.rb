@@ -157,6 +157,7 @@ __END__
 ["policy-fixtures","Check the concern table against the dispatcher","bash .github/policy/check-concern-table.sh",{}]
 ["policy-fixtures","Test the concern selector on a synthetic repository","bash .github/policy/test-selector.sh",{}]
 ["policy-fixtures","Test explicit run-result selection mode","bash .github/policy/test-run-result.sh",{}]
+["policy-fixtures","Test the Timings table's queue column and per-ref baselines","bash .github/policy/test-timings-table.sh",{}]
 ["policy-fixtures","Test the feature-suite catalog contract","bash .github/policy/test-suite-catalog.sh",{}]
 ["policy-fixtures","Test the exact suite-selection policy on synthetic changes","bash .github/policy/test-suite-selection.sh",{}]
 ["policy-fixtures","Test the sanitized feature-suite evidence contract","bash .github/policy/test-suite-evidence.sh",{}]
