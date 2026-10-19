@@ -284,10 +284,6 @@ jobs:
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh
 
-      - name: Test the duplicate-dispatch guard against synthetic runs
-        shell: bash
-        run: bash .github/policy/test-dispatch-dedup.sh
-
       # The roster the plan step selects is exactly what runs: no matrix filter, literal output
       # or skipped arm step between them.
       - name: Pin the live-proof fan-out from roster to arm runs
@@ -371,6 +367,10 @@ jobs:
       - name: Test the Wave C wiring check on synthetic trees
         shell: bash
         run: bash .github/policy/test-wave-c-wiring.sh
+
+      - name: Test the duplicate-dispatch guard against synthetic runs
+        shell: bash
+        run: bash .github/policy/test-dispatch-dedup.sh
 
   # Shard 3: the case-evidence contract, producers and Playwright parity tests.
   # Needs no other job: it runs beside the base pass and holds no authority;
