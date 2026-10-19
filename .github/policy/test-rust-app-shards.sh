@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Discovery proof for the three-way `rust-app` split (survey 8.5-4 and 7.7).
+# Discovery proof for the `rust-app` hash shards (survey 8.5-4 and 7.7): three on Linux and Windows, two on macOS.
 #
-# `rust-app` runs the same package set in three jobs per platform, each a nextest `hash:K/3` partition.
+# `rust-app` runs the same package set in three jobs on Linux and Windows and two on macOS (its five-runner pool
+# cannot pay a third 43 minute compile), each a nextest `hash:K/N` partition.
 # The hash partition assigns every test to exactly one of the three from a stable hash of its binary and
 # name, so the three together run every test once and none twice, provided the three jobs are the three
 # partitions of ONE command: same packages, same profile, same filters, partition numbers 1 to 3 of 3,
@@ -29,22 +30,24 @@ problems = []
 read = ->(path) { File.read(File.join(root, path), encoding: 'UTF-8') }
 
 SHARDS = %w[rust-app-1 rust-app-2 rust-app-3].freeze
-ARM_HEADER = "          rust-app-1|rust-app-2|rust-app-3)\n"
-PARTITION = %q(export NEXTEST_PARTITION="hash:${CONCERN##*-}/3")
+MACOS_SHARDS = %w[rust-app-1 rust-app-2].freeze
+HEADERS = { 'linux' => "          rust-app-1|rust-app-2|rust-app-3)\n", 'windows' => "          rust-app-1|rust-app-2|rust-app-3)\n", 'macos' => "          rust-app-1|rust-app-2)\n" }.freeze
+COUNTS = { 'linux' => 3, 'windows' => 3, 'macos' => 2 }.freeze
 PACKAGES = '"${rust_app_packages[@]/#/--package=}"'
 FIRST = %(if [[ "${CONCERN}" == rust-app-1 ]]; then\n              NEXTEST_REQUIRE_TESTS=true rust_tests rust-app-tests #{PACKAGES}\n            else\n              NEXTEST_REQUIRE_TESTS=true NEXTEST_DOCTESTS=skip rust_tests rust-app-tests #{PACKAGES}\n            fi)
 
 %w[linux macos windows].each do |os|
   path = ".github/actions/#{os}-concern-rust/action.yml"
   text = read.call(path)
-  start = text.index(ARM_HEADER)
+  start = text.index(HEADERS.fetch(os))
   if start.nil?
-    problems << "#{path}: no case arm for exactly #{SHARDS.join(', ')}"
+    problems << "#{path}: no case arm for exactly the #{COUNTS.fetch(os)} #{os} shards"
     next
   end
+  partition = %(export NEXTEST_PARTITION="hash:${CONCERN##*-}/#{COUNTS.fetch(os)}")
   arm = text[start..][/\A.*?\n            ;;\n/m].to_s
   problems << "#{path}: the arm does not end where expected" if arm.empty?
-  problems << "#{path}: the partition is not exactly hash:${CONCERN##*-}/3" unless arm.scan(/NEXTEST_PARTITION=/).length == 1 && arm.include?(PARTITION)
+  problems << "#{path}: the partition is not exactly hash:${CONCERN##*-}/#{COUNTS.fetch(os)}" unless arm.scan(/NEXTEST_PARTITION=/).length == 1 && arm.include?(partition)
   problems << "#{path}: a count: partition is left behind" if text.include?('count:${CONCERN##*-}')
   problems << "#{path}: the shard branches must run one package list, require tests, and keep the doctests on shard 1 only" unless arm.include?(FIRST)
   problems << "#{path}: rust-app-tests must run in exactly the two branches" unless arm.scan('rust_tests rust-app-tests').length == 2
@@ -55,6 +58,7 @@ FIRST = %(if [[ "${CONCERN}" == rust-app-1 ]]; then\n              NEXTEST_REQUI
     problems << "#{path}: the openvpn check belongs to Linux only" unless openvpn.zero?
   end
   problems << "#{path}: another arm still names a rust-app shard" if text.sub(arm, '').match?(/rust-app-[0-9]\)/)
+  problems << "#{path}: a third shard crept into the two-shard macOS arm" if os == 'macos' && arm.include?('rust-app-3')
 end
 
 table = JSON.parse(read.call('.github/ci-matrix.json')).fetch('concerns').fetch('linux')
@@ -74,12 +78,13 @@ end
   long = text[/^\s+(?:rust_)?long='(\[[^\n]*\])'$/, 1]
   problems << "#{path}: no rust list in the planner" unless rust
   problems << "#{path}: no long-pole list in the planner" unless long
+  expected_shards = path.include?('macos') ? MACOS_SHARDS : SHARDS
   rust_names = JSON.parse(rust || '[]')
   long_names = JSON.parse(long || '[]')
-  problems << "#{path}: the planner lists #{rust_names.grep(/rust-app/).inspect}" unless rust_names.grep(/rust-app/) == SHARDS
-  problems << "#{path}: the long-pole list lists #{long_names.grep(/rust-app/).inspect}" unless long_names.grep(/rust-app/) == SHARDS
+  problems << "#{path}: the planner lists #{rust_names.grep(/rust-app/).inspect}" unless rust_names.grep(/rust-app/) == expected_shards
+  problems << "#{path}: the long-pole list lists #{long_names.grep(/rust-app/).inspect}" unless long_names.grep(/rust-app/) == expected_shards
   expected = text[/expected-concerns: '(\[[^\n]*\])'/, 1]
-  problems << "#{path}: the Result list names #{JSON.parse(expected).grep(/rust-app/).inspect}" unless expected && JSON.parse(expected).grep(/rust-app/) == SHARDS
+  problems << "#{path}: the Result list names #{JSON.parse(expected).grep(/rust-app/).inspect}" unless expected && JSON.parse(expected).grep(/rust-app/) == expected_shards
 end
 windows = read.call('.github/workflows/windows-validation.yml')
 required = windows[/required-concerns: \$\{\{ inputs\.rust && '(\[[^\n]*?\])' \|\|/, 1]
@@ -89,7 +94,7 @@ setup = read.call('.github/actions/root-setup/action.yml')
 problems << 'root-setup does not install the native packages for rust-app-3' unless setup.include?('rust-app|rust-app-1|rust-app-2|rust-app-3|rust-packaging)')
 
 if problems.empty?
-  puts 'rust-app shards: three hash partitions of one command on every platform, every shard present once'
+  puts 'rust-app shards: hash partitions of one command per platform (three on Linux and Windows, two on macOS), every shard present once'
 else
   problems.each { |p| warn p }
   exit 1
@@ -116,6 +121,8 @@ macos_action=.github/actions/macos-concern-rust/action.yml
 tree m; mutate m "${linux}" 'hash:${CONCERN##*-}/3' 'hash:${CONCERN##*-}/2'; expect_fail 'a partition counted out of two' m
 tree m; mutate m "${windows_action}" 'hash:${CONCERN##*-}/3' 'count:${CONCERN##*-}/3'; expect_fail 'a count partition on Windows' m
 tree m; mutate m "${macos_action}" 'NEXTEST_DOCTESTS=skip ' ''; expect_fail 'doctests run on every macOS shard' m
+tree m; mutate m "${macos_action}" 'hash:${CONCERN##*-}/2' 'hash:${CONCERN##*-}/3'; expect_fail 'macOS counted out of three' m
+tree m; mutate m "${macos_action}" 'rust-app-1|rust-app-2)' 'rust-app-1|rust-app-2|rust-app-3)'; expect_fail 'a third macOS shard arm' m
 tree m; mutate m "${linux}" 'NEXTEST_REQUIRE_TESTS=true NEXTEST_DOCTESTS=skip' 'NEXTEST_DOCTESTS=skip'; expect_fail 'an empty Linux partition could pass' m
 tree m; mutate m "${linux}" '"${CONCERN}" == rust-app-3 ]]; then' '"${CONCERN}" == rust-app-2 ]]; then'; expect_fail 'the openvpn check moved to the cache-saving shard' m
 tree m; mutate m "${linux}" 'cargo check --locked --lib --package taurine-app --features openvpn' 'cargo check --locked --lib --package taurine-app --features openvpn
@@ -123,7 +130,8 @@ tree m; mutate m "${linux}" 'cargo check --locked --lib --package taurine-app --
 tree m; mutate m "${windows_action}" 'rust-app-1|rust-app-2|rust-app-3)' 'rust-app-1|rust-app-2)'; expect_fail 'a Windows shard without an arm' m
 tree m; mutate m .github/ci-matrix.json '"rust-app-3": {' '"rust-app-4": {'; expect_fail 'a renamed shard in the table' m
 tree m; mutate m .github/workflows/windows-validation.yml '"rust-app-1","rust-app-2","rust-app-3","rust-packaging"]' '"rust-app-1","rust-app-2","rust-packaging"]'; expect_fail 'a shard dropped from a Windows list' m
-tree m; mutate m .github/workflows/macos-validation.yml 'long='"'"'["rust-db","rust-app-1","rust-app-2","rust-app-3","rust-packaging"]' 'long='"'"'["rust-db","rust-app-1","rust-app-2","rust-packaging"]'; expect_fail 'a shard dropped from the macOS long-pole list' m
+tree m; mutate m .github/workflows/macos-validation.yml 'long='"'"'["rust-db","rust-app-1","rust-app-2","rust-packaging"]' 'long='"'"'["rust-db","rust-app-1","rust-packaging"]'; expect_fail 'a shard dropped from the macOS long-pole list' m
+tree m; mutate m .github/workflows/macos-validation.yml 'long='"'"'["rust-db","rust-app-1","rust-app-2","rust-packaging"]' 'long='"'"'["rust-db","rust-app-1","rust-app-2","rust-app-3","rust-packaging"]'; expect_fail 'a third shard in the macOS long-pole list' m
 tree m; mutate m .github/actions/root-setup/action.yml 'rust-app-2|rust-app-3|rust-packaging)' 'rust-app-2|rust-packaging)'; expect_fail 'the native packages missing for shard 3' m
 tree m; ruby -rjson -e 'p = ARGV[0]; d = JSON.parse(File.read(p)); d["concerns"]["linux"]["rust-app-3"]["rust_packages"] = ["taurine-app"]; File.write(p, JSON.pretty_generate(d))' "${work}/m/.github/ci-matrix.json"; expect_fail 'shard 3 testing different crates' m
 

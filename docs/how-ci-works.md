@@ -539,7 +539,7 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
 | Workflow | Concerns |
 | --- | --- |
 | `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2/3, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and the opt-in e2e-visual and scan-history |
-| `macos-validation.yml` and `macos-validation-concern.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2/3, rust-packaging, rust-tls-openssl |
+| `macos-validation.yml` and `macos-validation-concern.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2, rust-packaging, rust-tls-openssl |
 | `windows-validation.yml` and `windows-validation-concern.yml` | The same app concerns plus contracts; Rust concerns with `rust=true`; `windows_image` selects `windows-2022` (default) or `windows-2025` |
 | `android-validation.yml` | android-native (debug build for aarch64); android-rust with `rust=true` (compile-only mobile test targets, not executed) |
 | `ios-validation.yml` | ios-native (unsigned simulator build); ios-rust with `rust=true` (compile-only) |
@@ -610,7 +610,7 @@ queues behind a long pole that was queued at the start. macOS is not capped: it 
 long poles already fill its five runners first. A cap is a ceiling, not a reservation; if a measured set shows
 a capped group finishing after the long poles, raise that cap, not the others.
 
-**`rust-app` is three hash shards on every platform.** The crate-test concern for `taurine-app`,
+**`rust-app` is three hash shards on Linux and Windows and two on macOS.** The crate-test concern for `taurine-app`,
 `taurine-desktop` and `taurine-mobile` runs as `rust-app-1`, `-2` and `-3`, each `cargo nextest run --partition
 hash:K/3` over the same package list and profile (K from the concern name). A hash partition assigns each
 test to exactly one shard from a stable hash of its binary and name, so the three together run every test
@@ -641,9 +641,11 @@ timeout was raised. Cold untrusted estimates from survey 8.5 to 8.7, against the
 80% rule: Linux about 45 s setup + 1,581 s compile (worst measured) + 600 s tests (a third of 1,788 s) + 173 s
 openvpn check on shard 3, about 40 minutes of 60 (67%); Windows about 65 s + 2,487 s compile + 512 s tests (a
 third of 1,536 s), about 51 minutes of 110 (46%, 56 minutes with a 10% compile spread, 51%); macOS about 43 minutes
-compile + 6 minutes tests + setup, about 50 minutes of 100. macOS gains the least: its pool is five runners, and the
-third shard adds about 43 runner-minutes of compile to a set that was already bound by pool work divided by five, so
-measure the macOS set before keeping the third shard there.
+compile + 6 minutes tests + setup, about 50 minutes of 100 (these macOS figures are for a third shard that macOS does
+not run). macOS stays at two `hash:K/2` shards by decision: its pool is five runners, and a third shard would add about
+43 runner-minutes of compile to a set already bound by pool work divided by five. It keeps the doctests on shard 1 and
+`NEXTEST_REQUIRE_TESTS`; the openvpn check is Linux-only, so it has no placement on macOS (the shim is tested by
+`rust-ovpn`). Revisit once a measured macOS set shows headroom.
 
 **Long poles run in their own jobs.** GitHub starts matrix entries in no promised order, and the
 hosted pool is about 20 runners shared by every workflow of a set (Taurine survey 8.5, 8.7), so a

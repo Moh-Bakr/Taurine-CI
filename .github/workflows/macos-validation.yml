@@ -138,7 +138,7 @@ jobs:
         run: |
           set -euo pipefail
           base='["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill"]'
-          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-app-3","rust-packaging","rust-tls-openssl"]'
+          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           if [[ "${RUST_REQUESTED}" == true ]]; then
             candidates="$(jq -cn --argjson b "${base}" --argjson r "${rust}" '$b + $r')"
           else
@@ -167,7 +167,7 @@ jobs:
           # The same list split into the long Rust poles (their own dispatcher jobs, defined first,
           # so they claim the scarce macOS runners before the short jobs) and the rest. `matrix`
           # stays the whole list: the Result job requires it.
-          long='["rust-db","rust-app-1","rust-app-2","rust-app-3","rust-packaging"]'
+          long='["rust-db","rust-app-1","rust-app-2","rust-packaging"]'
           echo "long_matrix=$(jq -cn --argjson c "${candidates}" --argjson l "${long}" '{concern: [$c[] | select(. as $x | $l | index($x) != null)]}')" >> "${GITHUB_OUTPUT}"
           echo "short_matrix=$(jq -cn --argjson c "${candidates}" --argjson l "${long}" '{concern: [$c[] | select(. as $x | $l | index($x) == null)]}')" >> "${GITHUB_OUTPUT}"
           {
@@ -175,10 +175,10 @@ jobs:
             echo
             if [[ "${RUST_REQUESTED}" == true ]]; then
               echo "matrix={\"concern\":${candidates}}" >> "${GITHUB_OUTPUT}"
-              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2, rust-app-3 and rust-packaging are scheduled.'
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging are scheduled.'
             else
               echo "matrix={\"concern\":${candidates}}" >> "${GITHUB_OUTPUT}"
-              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2, rust-app-3 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
             fi
             if [[ "${only_list}" != '[]' ]]; then
               echo "- Only filter active: $(jq -r 'join(", ")' <<<"${only_list}"). Every other concern is not selected; the verdict cannot be PASS (full), which is the only verdict that admits a merge."
@@ -267,7 +267,7 @@ jobs:
     strategy:
       fail-fast: false
       # The concern list comes from the `plan` job: the TypeScript concerns always,
-      # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2/3,
+      # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2,
       # one runner each so a slow one cannot hold the others back) only when the
       # dispatch set rust=true. They are the macOS counterparts of the Linux
       # rust-* concerns. rust-dbx is not repeated here: the dbx member crates'
@@ -297,7 +297,7 @@ jobs:
     strategy:
       fail-fast: false
       # The concern list comes from the `plan` job: the TypeScript concerns always,
-      # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2/3,
+      # plus the Rust crate-test concerns (rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2,
       # one runner each so a slow one cannot hold the others back) only when the
       # dispatch set rust=true. They are the macOS counterparts of the Linux
       # rust-* concerns. rust-dbx is not repeated here: the dbx member crates'
@@ -400,7 +400,7 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: macOS
-          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-app-3","rust-packaging","rust-tls-openssl"]'
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","bundle-budget","orchestrate-skill","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
           required-concerns: ${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}
           name-pattern: '^validate(-long)?-(main|untrusted) \(.+\) / macOS (?<concern>.+) validation$'
           source-sha: ${{ inputs.source_sha }}

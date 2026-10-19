@@ -237,7 +237,7 @@ jobs:
       # from the untrusted ref, whose scope main never reads), that is protected code only. Every
       # restore, strip and save step carries both top-level terms and the cache policy enforces it. The
       # locate step only computes the key and keeps the target directory outside the private checkout.
-      # One group per measured compile-bound concern family: rust-app (the three shards share one
+      # One group per measured compile-bound concern family: rust-app (the two shards share one
       # build), rust-db (measured 1016 s compile against 133 s of tests), rust-domain and
       # rust-packaging. Each single-job group is its own designated saver. Short concerns
       # (rust-net, rust-ovpn) and rust-tls-openssl (its own Cargo.lock, which the strip and
