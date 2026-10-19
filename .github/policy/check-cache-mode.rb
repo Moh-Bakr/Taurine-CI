@@ -528,10 +528,18 @@ def producer_step_failures(path, doc, docs, failures)
                with['os-label'].is_a?(String) && with['os-label'].match?(/\A[A-Za-z]+\z/)
     failures << "#{path}: step cargo-target differs from the pinned rust-target-cache locate shape its untrusted restore path and key depend on" unless shape_ok
   end
+  # The composite is read from the files given, or else from the same tree as the workflow (the
+  # workflow policy passes workflows only), so a restore never goes unchecked for want of the file.
   action_path = docs.keys.find { |k| k.end_with?('.github/actions/rust-target-cache/action.yml') }
   composite = action_path && docs[action_path]
   unless composite.is_a?(Hash)
-    failures << "#{path}: the untrusted restore depends on the rust-target-cache composite, which was not among the files checked"
+    root = File.dirname(File.dirname(File.dirname(path)))
+    action_path = File.join(root, '.github', 'actions', 'rust-target-cache', 'action.yml')
+    action_path = '.github/actions/rust-target-cache/action.yml' unless File.file?(action_path)
+    composite = File.file?(action_path) ? (load(action_path) rescue nil) : nil
+  end
+  unless composite.is_a?(Hash)
+    failures << "#{path}: the untrusted restore depends on the rust-target-cache composite, which could not be read"
     return
   end
   outputs = composite['outputs']

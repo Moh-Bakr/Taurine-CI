@@ -308,9 +308,15 @@ mutant 'the composite gains an output' "outputs must be exactly the locate step'
   dir:'
 mutant 'the composite locate step changed' 'no longer matches the reviewed content hash' "${composite}" '        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"' '        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
         echo "dir=/tmp/planted" >> "${GITHUB_OUTPUT}"'
-no_composite="${work}/no-composite"; rm -rf "${no_composite}"; cp -R "${reviewed}" "${no_composite}"
+# The workflow policy passes workflows only: the composite is then read from the tree, and still checked.
+out="$(run_policy "${reviewed}" ".github/workflows/${caller}" ".github/workflows/${concern}")" || { echo "the workflows alone (composite read from the tree) should pass: ${out}" >&2; exit 1; }
+disk="${work}/disk-composite"; rm -rf "${disk}"; cp -R "${reviewed}" "${disk}"
+swap "${disk}/${composite}" 'value: ${{ steps.locate.outputs.key }}' 'value: ${{ inputs.group }}'
+out="$(run_policy "${disk}" ".github/workflows/${caller}" ".github/workflows/${concern}")" && { echo 'a changed composite read from the tree should fail' >&2; exit 1; }
+[[ "${out}" == *"outputs must be exactly the locate step's outputs"* ]] || { echo "a composite read from the tree failed with the wrong message: ${out}" >&2; exit 1; }
+no_composite="${work}/no-composite"; rm -rf "${no_composite}"; cp -R "${reviewed}" "${no_composite}"; rm "${no_composite}/${composite}"
 out="$(run_policy "${no_composite}" ".github/workflows/${caller}" ".github/workflows/${concern}")" && { echo 'the restore without the composite among the checked files should fail' >&2; exit 1; }
-[[ "${out}" == *'was not among the files checked'* ]] || { echo "a missing composite failed with the wrong message: ${out}" >&2; exit 1; }
+[[ "${out}" == *'which could not be read'* ]] || { echo "a missing composite failed with the wrong message: ${out}" >&2; exit 1; }
 
 # The flag's workflow_call route is exactly on.workflow_call.inputs.<flag>: the same key under outputs or
 # secrets, or any deeper path, is another mention and is refused.
