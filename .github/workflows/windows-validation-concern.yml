@@ -219,6 +219,38 @@ jobs:
         with:
           patch-diagnostics: 'true'
 
+      # GNU tar for the cache restores and saves (research finding 8). actions/cache runs tar from PATH
+      # and on a Windows runner finds the system BSD tar first, which restores slowly; when the first
+      # `tar` on PATH is GNU tar it uses that, and it then compresses with zstd. Git for Windows ships GNU
+      # tar on the runner image. Its `usr/bin` directory also holds `link.exe`, `find` and `sort`, which
+      # would shadow the Windows tools for any process that resolves them from PATH; the concern steps run
+      # under Git Bash, which already resolves its tools from that directory first, and rustc finds the
+      # MSVC linker through Visual Studio, not PATH (and the crate-test concerns link with rust-lld), but
+      # that is reasoning, not a measurement: the first protected run after this change is the check, and
+      # removing this one step undoes it. Nothing is downloaded and nothing but the image's own
+      # `usr/bin` is named. The step needs the reviewed main and protected-ancestor terms the restores
+      # carry, so the untrusted ref (which restores nothing) is unchanged, and it runs after the source
+      # checkout has revoked its token, so no step before revocation is touched. If the image's tar is
+      # not GNU tar the step changes nothing and says so: it is an optimisation, never a gate.
+      # Consequence, recorded on purpose: the compression method is part of the cache version, so the
+      # first protected Windows run after this change misses every cache once, then restores as before.
+      - name: Put the image's GNU tar ahead of the Windows tar for the cache steps
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && startsWith(inputs.concern, 'rust-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gnu_dir='C:\Program Files\Git\usr\bin'
+          gnu_tar='/c/Program Files/Git/usr/bin/tar.exe'
+          version="$("${gnu_tar}" --version 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+          if [[ "${version}" != 'tar (GNU tar)'* ]]; then
+            echo 'gnu-tar: the image has no GNU tar at the Git for Windows path; the cache steps keep the default tar'
+            echo '- GNU tar: not found on the image; cache steps use the default tar' >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          printf '%s\n' "${gnu_dir}" >> "${GITHUB_PATH}"
+          echo "gnu-tar: ${version}"
+          echo "- GNU tar for the cache steps: ${version}" >> "${GITHUB_STEP_SUMMARY}"
+
       # Third-party crate sources only: cargo's registry index, the downloaded
       # `.crate` archives and the git dependency databases. Never `target/`, never
       # an extracted source tree, never anything under the checked-out private
