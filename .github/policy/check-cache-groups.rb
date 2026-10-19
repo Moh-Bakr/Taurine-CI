@@ -73,6 +73,8 @@ SOURCES = {
   }
 }.freeze
 
+# Local composites (.github/actions/*) are not scanned here; they rely on the composite "no cache" rule
+# in check-workflows.sh (check_composite_action).
 cache_uses = ->(step) { step['uses'].to_s.strip.downcase.start_with?('actions/cache') }
 target_cache_uses = ->(step) { step['uses'].to_s.downcase.include?('rust-target-cache') }
 path_set = ->(step) { step.dig('with', 'path').to_s.lines.map(&:strip).reject(&:empty?) }
@@ -129,6 +131,13 @@ ARGV.each do |path|
   end
   doc = YAML.safe_load(text, aliases: false) || {}
   steps = (doc['jobs'] || {}).values.flat_map { |job| job.is_a?(Hash) ? Array(job['steps']) : [] }.select { |s| s.is_a?(Hash) }
+  # Step keys are read case-sensitively below, GitHub reads them case-insensitively: refuse any step key
+  # (or key of a cache step's `with`) that is not all lower-case, so `Uses:` or `With:` cannot hide a step.
+  steps.each do |s|
+    bad = s.keys.select { |k| k.is_a?(String) && k != k.downcase }
+    bad += s['with'].keys.select { |k| k.is_a?(String) && k != k.downcase } if s['with'].is_a?(Hash) && s['uses'].to_s.downcase.include?('cache')
+    failures << "#{path}: step #{s['name'].inspect} has the key #{bad.first.inspect}, which is not all lower-case (keys are read case-insensitively by GitHub)" unless bad.empty?
+  end
   # Positive identification: every cache step is a compiled-cache step unless it is exactly a reviewed
   # crate-sources step; a path pattern decides nothing (aliased paths cannot hide a step).
   compiled = steps.select { |s| (cache_uses.call(s) || target_cache_uses.call(s)) && !crate_sources.call(s, base) }

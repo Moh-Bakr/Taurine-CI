@@ -760,6 +760,26 @@ mutation '20c. a combined actions/cache step selected for the door with an alias
           key: door
 
 ${sources_anchor}"
+# 20c (case-insensitive keys): GitHub reads step keys case-insensitively, so a `Uses:` door step, a
+# duplicate `With:` beside the pinned crate-sources step, and an `IF:` on a compiled step are all refused.
+mutation '20c. a door-selected cache step written with a capitalised Uses key' "${windows_concern}" "${sources_anchor}" "      - name: Capitalised compiled restore
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        Uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ runner.temp }}/cargo-target
+          key: door
+
+${sources_anchor}"
+mutation '20c. a duplicate With mapping beside the pinned crate-sources step' "${windows_concern}" "          restore-keys: |
+            cargo-sources-v3-\${{ runner.os }}-
+" "          restore-keys: |
+            cargo-sources-v3-\${{ runner.os }}-
+        With:
+          path: \${{ runner.temp }}/cargo-target
+"
+mutation '20c. an upper-case IF on the compiled restore' "${windows_concern}" "        id: cargo-target-cache
+        if: " "        id: cargo-target-cache
+        IF: "
 mutation '20c. the crate-sources restore widened to a second path' "${windows_concern}" "            \${{ steps.cargo-home.outputs.dir }}/registry/cache
           key: cargo-sources-v3" "            \${{ steps.cargo-home.outputs.dir }}/registry/cache
             \${{ runner.temp }}/cargo-target

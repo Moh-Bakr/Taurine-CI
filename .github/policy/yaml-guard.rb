@@ -27,8 +27,9 @@ module YamlGuard
         if k.is_a?(Psych::Nodes::Scalar)
           key = key_of(k)
         found << "#{path.join('.')}: a YAML merge key (<<) is not accepted: Psych and GitHub may resolve it differently" if k.value == '<<'
-          found << "#{path.join('.')}: the key #{k.value.inspect} appears twice" if seen.key?(key)
-          seen[key] = true
+          folded = key.is_a?(String) ? key.downcase : key # GitHub reads keys case-insensitively
+          found << "#{path.join('.')}: the key #{k.value.inspect} appears twice (keys are compared case-insensitively)" if seen.key?(folded)
+          seen[folded] = true
         end
         duplicate_keys(v, path + [k.respond_to?(:value) ? k.value : '?'], found)
       end
