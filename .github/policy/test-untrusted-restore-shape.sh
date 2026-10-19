@@ -74,10 +74,11 @@ build_reviewed() { # dir
   mkdir -p "${d}/.github/workflows" "${d}/docs"
   cp ".github/workflows/${concern}" ".github/workflows/${caller}" "${d}/.github/workflows/"
   cp docs/untrusted-readonly-cache.md "${d}/docs/"
-  mkdir -p "${d}/.github/actions/rust-target-cache" "${d}/.github/actions/verify-cargo-cache" "${d}/.github/actions/rust-toolchain"
-  cp "${composite}" "${d}/${composite}"
-  cp .github/actions/verify-cargo-cache/action.yml "${d}/.github/actions/verify-cargo-cache/"
-  cp .github/actions/rust-toolchain/action.yml "${d}/.github/actions/rust-toolchain/"
+  local action
+  for action in rust-target-cache verify-cargo-cache rust-toolchain timings source-checkout egress-audit root-setup drop-root sanitize concern-report shell-artefact scan-concern; do
+    mkdir -p "${d}/.github/actions/${action}"
+    cp ".github/actions/${action}/action.yml" "${d}/.github/actions/${action}/"
+  done
   local c="${d}/.github/workflows/${concern}" l="${d}/.github/workflows/${caller}"
   # A tree that already carries the reviewed restores (the change that introduces them) is its own
   # reviewed shape: nothing is added, and the same weakenings are applied to its real steps.
@@ -467,6 +468,51 @@ env:'
 mutant 'the toolchain action file altered' "${allow_msg}" ".github/actions/rust-toolchain/action.yml" 'Per-OS setup for the Rust concerns' 'Per-OS planted setup for the Rust concerns'
 mutant 'the toolchain step gains a with key' "${allow_msg}" "${c}" "          concern: \${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" "          concern: \${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
           extra: x"
+
+# Every shared local action that runs ahead of the producers is pinned as a whole file and by its exact
+# `with`; a changed file, an added input or a changed value is refused.
+for action in timings source-checkout egress-audit root-setup drop-root sanitize concern-report shell-artefact scan-concern verify-cargo-cache rust-toolchain; do
+  d="${work}/action-${action}"; rm -rf "${d}"; cp -R "${reviewed}" "${d}"
+  ruby -e 'f = ARGV.fetch(0); t = File.read(f, encoding: "UTF-8"); n = t.sub(/\Aname: /) { "name: planted " }; abort "untrusted restore fixture: no name line in #{f}" if n == t; File.write(f, n)' "${d}/.github/actions/${action}/action.yml"
+  if [[ "${action}" == verify-cargo-cache ]]; then
+    # only reached from a step between cargo-home and its restore
+    printf '%s\n' "      - name: Verify restored crate archives (early)
+        uses: ./.github/actions/verify-cargo-cache
+        with:
+          sources-dir: \${{ steps.cargo-home.outputs.dir }}
+          cache-hit: \${{ steps.cargo-sources.outputs.cache-hit }}
+          os-label: Linux
+" > "${work}/inserted.yml"
+    insert_before "${d}/${c}" '      - name: Restore cached third-party crate sources (untrusted, read-only)' "${work}/inserted.yml"
+  fi
+  expect_fail "the ${action} action file altered" "${d}" "${allow_msg}"
+done
+with_mutant() { # label from to
+  mutant "$1" "${allow_msg}" "${c}" "$2" "$3"
+}
+with_mutant 'source-checkout gains a path input' "          check-protected-ancestry: 'true'" "          check-protected-ancestry: 'true'
+          path: ."
+with_mutant 'source-checkout ancestry check turned off' "          check-protected-ancestry: 'true'" "          check-protected-ancestry: 'false'"
+with_mutant 'timings given another mode' '          mode: start' '          mode: end'
+with_mutant 'drop-root keeps root in the container' "          container-root: \${{ inputs.concern == 'e2e-visual' }}" '          container-root: true'
+with_mutant 'root-setup given another concern' '          concern: ${{ inputs.concern }}' '          concern: rust-db'
+with_mutant 'egress audit given another phase' '          phase: enforce' '          phase: stop'
+with_mutant 'the control-plane checkout gains a path' '          persist-credentials: false' '          persist-credentials: false
+          path: elsewhere'
+with_mutant 'the control-plane checkout gains a repository' '          persist-credentials: false' '          persist-credentials: false
+          repository: someone/else'
+with_mutant 'the control-plane checkout gains a ref' '          persist-credentials: false' '          persist-credentials: false
+          ref: refs/heads/other'
+with_mutant 'the control-plane checkout gains a token' '          persist-credentials: false' '          persist-credentials: false
+          token: ${{ secrets.OTHER }}'
+with_mutant 'the control-plane checkout keeps credentials' '          persist-credentials: false' '          persist-credentials: true'
+mutant 'a job gains services' 'services must be absent beside an untrusted restore' "${c}" '    environment: source-read
+' '    environment: source-read
+    services:
+      db:
+        image: postgres
+'
+mutant 'the locate step stops using the rustup-selected compiler' 'no longer matches the reviewed content hash' "${composite}" '        rustc_path="$(rustup which rustc)"' '        rustc_path="$(command -v rustc)"'
 
 # Composite steps after locate are covered by the whole-file pin.
 mutant 'the helper step writes GITHUB_ENV' 'whole file must match the reviewed content hash' "${composite}" '        mkdir -p "${RUNNER_TEMP}/taurine-ci"' '        mkdir -p "${RUNNER_TEMP}/taurine-ci"

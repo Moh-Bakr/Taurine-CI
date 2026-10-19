@@ -104,13 +104,32 @@ runs:
             *) echo 'target-cache: PATH holds a relative or empty entry' >&2; exit 1 ;;
           esac
         done
-        for tool in rustc git date awk tr cat xargs env sort grep cut dirname; do
+        for tool in rustup rustc git date awk tr cat xargs env sort grep cut dirname; do
           location="$(command -v "${tool}")" || { echo "target-cache: ${tool} not found" >&2; exit 1; }
           resolved="$(cd "$(dirname "${location}")" && pwd -P)"
           case "${resolved}/" in
             "${workspace_real}/"* | "${temp_real}/"*) echo "target-cache: ${tool} resolves inside the checkout or the temp directory" >&2; exit 1 ;;
           esac
         done
+        # The compiler is the one rustup selects, run by its own path, and it must be an installed toolchain:
+        # `rustup which` run in the checkout honours a `path` override in src/rust-toolchain.toml, which
+        # would name a binary the checkout supplies. Windows prints the toolchain with backslashes, so both
+        # paths are normalised with cygpath where it exists (Git Bash).
+        rustc_path="$(rustup which rustc)"
+        rustup_home="${RUSTUP_HOME:-${HOME}/.rustup}"
+        if command -v cygpath >/dev/null 2>&1; then
+          rustc_path="$(cygpath -u "${rustc_path}")"
+          rustup_home="$(cygpath -u "${rustup_home}")"
+        fi
+        rustc_dir="$(cd "$(dirname "${rustc_path}")" && pwd -P)"
+        rustup_home_real="$(cd "${rustup_home}" && pwd -P)"
+        case "${rustc_dir}/" in
+          "${workspace_real}/"* | "${temp_real}/"*) echo 'target-cache: the selected compiler is inside the checkout or the temp directory' >&2; exit 1 ;;
+        esac
+        case "${rustc_dir}/" in
+          "${rustup_home_real}/toolchains/"*) ;;
+          *) echo 'target-cache: the selected compiler is not an installed rustup toolchain' >&2; exit 1 ;;
+        esac
         sha256_text() {
           if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
         }
@@ -141,8 +160,8 @@ runs:
         # native-library environment. The ISO week rotates every key weekly, so any entry,
         # including a poisoned one, outlives its week by at most the one save it took.
         week="$(date -u +%G-W%V)"
-        rustc_version="$(rustc -V | awk '{ print $2 }')"
-        toolchain="$(rustc -vV | tr -d '\r' | sha256_text | cut -c1-12)"
+        rustc_version="$("${rustc_path}" -V | awk '{ print $2 }')"
+        toolchain="$("${rustc_path}" -vV | tr -d '\r' | sha256_text | cut -c1-12)"
         lock="$(tr -d '\r' < Cargo.lock | sha256_text | cut -c1-16)"
         manifests="$(git ls-files -z -- '*Cargo.toml' '.cargo/config.toml' '.cargo/config' 'rust-toolchain.toml' 'rust-toolchain' | xargs -0 cat | tr -d '\r' | sha256_text | cut -c1-16)"
         environment="$(env | LC_ALL=C sort | grep -E '^(CARGO_INCREMENTAL|CARGO_PROFILE_[A-Z_]+|CARGO_BUILD_[A-Z_]+|CARGO_ENCODED_RUSTFLAGS|CARGO_TARGET_DIR|RUSTFLAGS|RUSTDOCFLAGS|RUSTC_WRAPPER|CC|CXX|CFLAGS|CXXFLAGS|LDFLAGS|LIBCLANG_PATH|PKG_CONFIG_PATH|MACOSX_DEPLOYMENT_TARGET|VCPKG_ROOT|OPENSSL_[A-Z_]+|LIBSQLITE3_FLAGS)=' | tr -d '\r' | sha256_text | cut -c1-12 || true)"

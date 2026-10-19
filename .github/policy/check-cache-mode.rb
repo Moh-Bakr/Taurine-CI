@@ -507,12 +507,34 @@ CARGO_HOME_PIN = {
   'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
 }.freeze
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
-RUST_TARGET_CACHE_FILE_SHA256 = 'ce7e2e04649e7ea6630916bbf0d78a48e7f46d0f20c8ed59489424764140a62e'.freeze
-LOCATE_STEP_SHA256 = '795e5554bcdecf6290e4bf1c76b3db36f19d88927b5fc90ae26801599e618501'.freeze
-# Whole action.yml hashes (canonical JSON of the parsed file) of the local actions that may run before an
-# untrusted restore. Two are listed where an open pull request changes the file; the first (this
-# repository's) is removed once that pull request has landed.
+RUST_TARGET_CACHE_FILE_SHA256 = 'cc34296f12a3b2738141e4524237b468886e849f28f38fac777fd3a8293982b0'.freeze
+LOCATE_STEP_SHA256 = 'a720fafbcd5d2cab767e59e6b11a7433e7fcbb8e7d2861f6111060b2d6bb167a'.freeze
+# Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
+# untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing
+# in the same reviewed pull request. A name lists TWO OR MORE hashes only where an open pull request changes
+# that file; the FIRST hash in such a pair is this repository's (main's) and must be removed once the pull
+# request(s) named beside it have landed:
+#   rust-toolchain:     #365 (04d9056e...), Wave C ci/speed-wave-c (3e991c0a...). Once both land the merged
+#                       file hashes to a third value that replaces all three.
+#   verify-cargo-cache: #365 (6c38bdfe...).
+#   timings:            Wave C (ff475be9...).
+#   root-setup:         Wave C (81fa9779...).
 LOCAL_ACTION_FILE_SHA256 = {
+  'timings' => %w[
+    9d2a363af0af7877c4a0428c907bbd0445d9c43b0e6db2f033bd339f814fb860
+    ff475be9ed8faa47c3a218041c71505a17f0944fc4d32b9f25b08ae61fd59922
+  ],
+  'source-checkout' => %w[bcab0702e94fc10fa410a5d8875215dffc03189e557780f86662da4c1796fff0],
+  'egress-audit' => %w[c6c3ff33427b869f38f3dc83800ae92143233b2137922d67d2a2f75aa32f74b5],
+  'root-setup' => %w[
+    92b689e1af931693bb99211a35383fd69879bccf77e1885045fc743675d97d41
+    81fa977997b32fbbe67028b272812e88e2164ef2ff9d9a7debe927811b116154
+  ],
+  'drop-root' => %w[2562fdd5b283364bb839c3a547dce05bbea76438ea47c2be5f7efe26942579dc],
+  'sanitize' => %w[2de2e7da83f5011c724bf34f0096be6c703a0180272fbf7ff2eb2c96df075024],
+  'concern-report' => %w[d993053f802c03335cc09ce4a4b182b02e468d00202835673d50b4ffdb279435],
+  'shell-artefact' => %w[dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184],
+  'scan-concern' => %w[6a70b55ba6b730efcf8f74999261c46119243ce9eada546b46c73bc8d59327cd],
   'verify-cargo-cache' => %w[
     483f07957076d89b401ac26ce30b91c9f940b36a1d9c820680b7e29cffd456b8
     6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a
@@ -520,11 +542,26 @@ LOCAL_ACTION_FILE_SHA256 = {
   'rust-toolchain' => %w[
     9ae7bf89268ef23edc1dbc6831e77a3dd85ed98a049caa1e326b85beebc0091c
     04d9056e51c8ae6fbfd85ca149ca71e38d291809131a00a28a2444161a3cbda0
+    3e991c0add6d3eacb52be1ac122a916fb9a1ae473d664aafda89d901d564a5c2
   ],
   'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256]
 }.freeze
-# Shared local actions of the control plane that run before project code, allowed by name.
-PREFIX_LOCAL_ACTIONS = %w[timings source-checkout egress-audit root-setup drop-root sanitize concern-report shell-artefact scan-concern].freeze
+# The exact `with` of each shared local action (the canonical JSON of the step's whole `with`, an absent
+# `with` counting as {}), by name. egress-audit appears in two phases; timings only at the start of the job.
+PREFIX_ACTION_WITH_SHA256 = {
+  'timings' => %w[d40321da9156f08b91b3fc4365a68317b0172bb0838462cc27c054e4a0391fe4],
+  'source-checkout' => %w[ca094fba0d5cf639b86a79a80a9606c6ae3627b276405e107804327def4c2251],
+  'egress-audit' => %w[
+    0425e778b9fce98006d5531cb64bb8bb50a56c8cad1a75093d899733921fc6b7
+    a010edbb307c54ebe97a693ad92bfe06f9298824825a0284b11936d465f7475f
+  ],
+  'scan-concern' => %w[71c7bea029bd1a9231abf6373a5d518bb45d2fa2cb449b10adb0dc01484dda5f],
+  'root-setup' => %w[422c143f47d2ac7910b7348b5b4e00f68ccbf86e5f9cfa1d51d350d089bb2b92],
+  'drop-root' => %w[7fea94b67beba935a17fd01ddee06f63266769df67633ff6f39a64eddb434652],
+  'sanitize' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a],
+  'concern-report' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a],
+  'shell-artefact' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a]
+}.freeze
 # The plain `run` steps ahead of the producers, by name; each is allowed only with a pinned body (the whole
 # step but its name hashes to a listed value).
 PREFIX_RUN_STEP_SHA256 = {
@@ -537,6 +574,8 @@ REVIEWED_CONTAINER_SHA256 = '1681a3dd8f4a7b43784aac2160f99c2524bc5af526d87cf8dc0
 REVIEWED_DEFAULTS = { 'run' => { 'working-directory' => 'src' } }.freeze
 FORBIDDEN_ENV_KEY = /\A(PATH|BASH_ENV|ENV|HOME|CARGO_.*|RUSTC.*|RUSTUP_.*|NODE_OPTIONS)\z/i
 PINNED_CHECKOUT = %r{\Aactions/checkout@[0-9a-f]{40}\z}
+# The control-plane checkout: a pinned commit with exactly these inputs (no repository, path, ref or token).
+CHECKOUT_WITH = { 'fetch-depth' => 1, 'persist-credentials' => false }.freeze
 CACHE_HIT_REF = /\A\$\{\{ steps\.[a-z0-9-]+\.outputs\.cache-hit \}\}\z/
 
 def canonical_json(value)
@@ -574,12 +613,16 @@ def pinned_local_action_step?(path, docs, st)
   return false unless action.start_with?('./.github/actions/')
   name = action.delete_prefix('./.github/actions/')
   wanted = LOCAL_ACTION_FILE_SHA256[name]
-  return false unless wanted && (st.keys - %w[name id if uses with]).empty?
+  # The egress audit alone is best-effort by design (continue-on-error); no other action may be.
+  allowed_keys = %w[name id if uses with] + (name == 'egress-audit' ? %w[continue-on-error] : [])
+  return false unless wanted && (st.keys - allowed_keys).empty?
   return false unless wanted.include?(local_action_hash(path, docs, name))
   with = st['with']
   with = {} if with.nil?
   return false unless with.is_a?(Hash)
   case name
+  when *PREFIX_ACTION_WITH_SHA256.keys
+    PREFIX_ACTION_WITH_SHA256[name].include?(canonical_hash(with))
   when 'rust-toolchain'
     with == { 'concern' => "${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" }
   when 'verify-cargo-cache'
@@ -597,15 +640,11 @@ def reviewed_prefix_step?(path, docs, st)
   return true if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted') # never runs on the untrusted ref
   return true if reviewed_untrusted_restore?(st)
   action = st['uses'].to_s
-  return true if action.match?(PINNED_CHECKOUT) && (st.keys - %w[name id if uses with]).empty?
+  return true if action.match?(PINNED_CHECKOUT) && (st.keys - %w[name id if uses with]).empty? && st['with'] == CHECKOUT_WITH
   if action.empty? && st.key?('run')
     wanted = PREFIX_RUN_STEP_SHA256[st['name'].to_s]
     return !wanted.nil? && wanted.include?(canonical_hash(st.reject { |k, _| k == 'name' }))
   end
-  name = action.delete_prefix('./.github/actions/')
-  # The egress audit alone is best-effort by design (continue-on-error); no other shared action may be.
-  allowed_keys = %w[name id if uses with] + (name == 'egress-audit' ? %w[continue-on-error] : [])
-  return true if action.start_with?('./.github/actions/') && PREFIX_LOCAL_ACTIONS.include?(name) && (st.keys - allowed_keys).empty?
   pinned_local_action_step?(path, docs, st)
 end
 
@@ -627,6 +666,7 @@ def producer_step_failures(path, doc, docs, failures)
     unless container.nil? || (container.is_a?(String) && Digest::SHA256.hexdigest(container) == REVIEWED_CONTAINER_SHA256)
       failures << "#{path}: job #{job_name}: the container must be absent or exactly the reviewed digest-pinned expression"
     end
+    failures << "#{path}: job #{job_name}: services must be absent beside an untrusted restore (a service container shares the job's network and volumes)" unless job['services'].nil?
     unless job['defaults'].nil? || job['defaults'] == REVIEWED_DEFAULTS
       failures << "#{path}: job #{job_name}: defaults must be absent or exactly the reviewed run.working-directory: src"
     end

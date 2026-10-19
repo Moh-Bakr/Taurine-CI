@@ -1058,3 +1058,5 @@ bash .github/policy/test-repository.sh
 # Rule N's Stage 2 form (the reviewed read-only untrusted restores). Run from here, not as a workflow
 # step of its own, so the reviewed step table of the base-policy pass needs no new entry.
 bash .github/policy/test-untrusted-restore-shape.sh
+# The hashed locate step of the target-cache composite, run with stub tools (checkout-supplied compilers refused).
+bash .github/policy/test-target-cache-locate.sh
