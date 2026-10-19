@@ -47,9 +47,11 @@ runs:
             # `openssl` edge, so it is a parent of tokio-openssl and of nothing else here.
             tokio-openssl) echo 'taurine-db-dbx taurine-mysql-async' ;;
             taurine-tls-openssl) echo 'taurine-db-dbx' ;;
-            # The vendored OpenSSL source is a build-dependency of openssl-sys and nothing else:
-            # any other crate building it would link its own copy of the same 3.5.M.
-            openssl-src) echo 'openssl-sys' ;;
+            # The vendored OpenSSL source is a build-dependency of openssl-sys (its `vendored`
+            # feature) and of the door itself, whose build-dependency pins the 3.5 LTS line and
+            # is read by its build script for the runtime patch check (deny.toml's wrappers
+            # name the same two). Any other crate building it would link its own copy.
+            openssl-src) echo 'openssl-sys taurine-tls-openssl' ;;
             *) return 1 ;;
           esac
         }
@@ -258,7 +260,7 @@ runs:
         allowed = {"openssl-sys": {"openssl", "tokio-openssl", "taurine-tls-openssl"},
                    "openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},
                    "tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async"},
-                   "openssl-src": {"openssl-sys"}}
+                   "openssl-src": {"openssl-sys", "taurine-tls-openssl"}}
         def fail(reason):
             print(label + ": FAILED - " + reason, file=sys.stderr)
             sys.exit(1)

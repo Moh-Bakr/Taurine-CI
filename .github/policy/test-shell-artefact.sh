@@ -107,7 +107,12 @@ case "${crate}" in
     [[ "${crate}" == tokio-openssl && -n "${FAKE_MYSQL_PARENT:-}" ]] && printf '1taurine-mysql-async v0.1.0 (path)\n'
     [[ "${crate}" == tokio-openssl && -n "${FAKE_TOKIO_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'
     true ;;
-  openssl-src) printf '0openssl-src v300.5.5+3.5.5\n'; [[ -n "${FAKE_SRC_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'; true ;;
+  openssl-src)
+    printf '0openssl-src v300.5.5+3.5.5\n'
+    # FAKE_SRC_DOOR gives the real shape: openssl-sys's `vendored` and the door's build-dependency.
+    [[ -n "${FAKE_SRC_DOOR:-}" ]] && printf '1openssl-sys v0.9.117\n1taurine-tls-openssl v0.1.0 (path)\n'
+    [[ -n "${FAKE_SRC_BAD:-}" ]] && printf '1evil-sys v1.0.0\n'
+    true ;;
   *) echo "error: package ID specification \`${crate}\` did not match any packages" >&2; exit 101 ;;
 esac
 STUB
@@ -721,7 +726,10 @@ openssl-src = { path = "../openssl-src" }'
 printf 'fn main() {}\n' >"${toy}/openssl-sys/build.rs"
 crate openssl openssl 'openssl-sys = { path = "../openssl-sys" }'
 crate tls taurine-tls-openssl 'openssl = { path = "../openssl" }
-openssl-sys = { path = "../openssl-sys" }'
+openssl-sys = { path = "../openssl-sys" }' '[build-dependencies]
+openssl-src = { path = "../openssl-src" }'
+# The real door build-depends on openssl-src too (it pins the 3.5 line and reads its version).
+printf 'fn main() {}\n' >"${toy}/tls/build.rs"
 crate dbx taurine-db-dbx 'openssl = { path = "../openssl" }
 taurine-tls-openssl = { path = "../tls" }'
 crate consumer consumer 'openssl = { path = "../openssl" }'
@@ -787,6 +795,8 @@ mutant 'the built-graph allowlist re-widened: the MySQL fork allowed on openssl'
 mutant 'the built-graph allowlist re-widened: any crate allowed on tokio-openssl' artefact '"tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async"},' '"tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async", "evil2"},' fail "$(toy_check "${work}/t-tokiobad")"
 toy_build "${work}/t-evil" --features evilsrc
 expect_fail 'a non-door crate building openssl-src (real cargo)' "$(toy_check "${work}/t-evil")" 'evil depends on openssl-src outside the door'
+mutant 'the built-graph allowlist narrowed: the door build-dependency on openssl-src refused' artefact '"openssl-src": {"openssl-sys", "taurine-tls-openssl"}}' '"openssl-src": {"openssl-sys"}}' pass "$(toy_check "${work}/t-door")"
+mutant 'the built-graph allowlist re-widened: any crate allowed on openssl-src' artefact '"openssl-src": {"openssl-sys", "taurine-tls-openssl"}}' '"openssl-src": {"openssl-sys", "taurine-tls-openssl", "evil"}}' fail "$(toy_check "${work}/t-evil")"
 # The basedir is the real path cargo writes (macOS resolves /var to /private/var).
 mkdir -p "${toy}/.cargo"; printf '[build]\ndep-info-basedir = "%s"\n' "$(cd "${toy}/consumer" && pwd -P)" >"${toy}/.cargo/config.toml"
 toy_build "${work}/t-basedir" --features extra
@@ -806,7 +816,9 @@ expect_fail 'unparseable dep-info (real cargo)' "$(toy_check "${work}/t-door")" 
 grep -qF 'built_graph_check "android-${abi}-built-graph"' .github/workflows/android-validation.yml || fail 'android-native does not judge the built graph'
 grep -qF 'built_graph_check ios-arm64-sim-built-graph' .github/workflows/ios-validation.yml || fail 'ios-native does not judge the built graph'
 grep -qF 'built_graph_check "${os}-desktop-built-graph"' .github/actions/shell-artefact/action.yml || fail 'the desktop check does not judge the built graph'
+expect_pass 'openssl-src built by openssl-sys and the door build-dependency' 'FAKE_SRC_DOOR=1 openssl_door_gate g taurine-mobile -'
 expect_fail 'a non-door crate building openssl-src (S1 gate)' 'FAKE_SRC_BAD=1 openssl_door_gate g taurine-mobile -' 'evil-sys depends on openssl-src outside the OpenSSL door'
+expect_fail 'a non-door crate beside the door building openssl-src (S1 gate)' 'FAKE_SRC_DOOR=1 FAKE_SRC_BAD=1 openssl_door_gate g taurine-mobile -' 'evil-sys depends on openssl-src outside the OpenSSL door'
 
 # ---- G2: a cross build reads the host profile for build-dependencies (real cargo) ------------
 # openssl-src is a registry crate here (a vendored directory source standing in for crates.io),
