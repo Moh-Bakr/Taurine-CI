@@ -395,6 +395,32 @@ no_leak "${out}" 'secret failing|secret flaky|failed · |flaky · '
 out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-bad.md" ""')"
 has "${out}" 'Test inventory withheld: the collector output did not match its reviewed shape.'
 no_leak "${out}" 'customer|ACME|fine|skipped one'
+# The control-plane filter re-checks what the collector already scanned: a passed identity line over 300
+# characters, or a published line with a secret shape, withholds the WHOLE section.
+long_title="$(printf 'a%.0s' $(seq 1 120)) $(printf 'b%.0s' $(seq 1 120)) $(printf 'c%.0s' $(seq 1 80))"
+i=0
+for bad in "${long_title}" 'token=abc' 'password=hunter2' 'uses postgres://u:p@h/db' 'mysql://h/db' 'ghp_0123456789abcdefghijABCDEFGHIJ' \
+  '0123456789abcdef0123456789abcdef0123' 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5' 'QUJDREVGR0hJSktMTU5PUFFSU1RV==' 'mail someone@example.com' 'Bearer abcdefghijklmnop' 'eyJhbGciOiJIUzI1NiJ9'; do
+  i=$((i + 1))
+  { cat "${dir}/inv-good.md" | sed '/^<\/details>$/d'; printf -- '- `c.test.ts` › `%s` — passed · 1 ms\n\n</details>\n' "${bad}"; } > "${dir}/inv-secret-${i}.md"
+  out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-secret-'"${i}"'.md" ""')"
+  has "${out}" 'Test inventory withheld: the collector output did not match its reviewed shape.'
+  no_leak "${out}" 'hunter2|ghp_|postgres://|someone@|eyJ|fine|skipped one'
+done
+# A line at the bound (300 characters) with no secret shape is still published.
+ok_title="$(printf 'x %.0s' $(seq 1 100))"
+{ cat "${dir}/inv-good.md" | sed '/^<\/details>$/d'; printf -- '- `c.test.ts` › `%s` — passed · 1 ms\n\n</details>\n' "${ok_title}"; } > "${dir}/inv-ok-long.md"
+out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-ok-long.md" ""')"
+has "${out}" 'skipped one'
+# The collector error class is letters and underscores, 1 to 40.
+printf '### Tests exercised by this run\n\nTest inventory unavailable: the collector did not complete.\n\ncollector error class: Spawn_failed\n' > "${dir}/inv-class-ok.md"
+out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-class-ok.md" ""')"
+has "${out}" 'collector error class: Spawn_failed'
+for badclass in "$(printf 'a%.0s' $(seq 1 41))" 'with-dash' 'digits12' ''; do
+  printf '### Tests exercised by this run\n\nTest inventory unavailable: the collector did not complete.\n\ncollector error class: %s\n' "${badclass}" > "${dir}/inv-class-bad.md"
+  out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-class-bad.md" ""')"
+  has "${out}" 'Test inventory withheld'
+done
 printf '' > "${dir}/inv-empty.md"
 out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-empty.md" ""')"
 has "${out}" 'withheld'
