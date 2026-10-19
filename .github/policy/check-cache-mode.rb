@@ -568,7 +568,8 @@ PREFIX_RUN_STEP_SHA256 = {
   'Validate protected call input' => %w[624c9205f6916c4655ad74b5696f61106a738aa4a132bcd2b48c2be5f308b90d],
   'Install jq and Ruby in the visual container' => %w[31b233667e9d4321de83ef2d88b058544421b485da66a0b7f121935b6dc25b16],
   'Select the egress mode' => %w[40289952cb6c982cc79cd49ea9fbbe9a8e96833c5918b8f7e71ad8d6b3d7ee8a],
-  'Read the suite contract for this concern' => %w[6ea7f99c7b3ff6f95440e3e1636ecf867b0a9a47338519a328a9905950870995]
+  'Read the suite contract for this concern' => %w[6ea7f99c7b3ff6f95440e3e1636ecf867b0a9a47338519a328a9905950870995],
+  'Refuse test files with no suite owner before any build' => %w[b7fcf77c374702efd68183b00329bb0a09c4277bb63df553b82728fff19137b1]
 }.freeze
 REVIEWED_CONTAINER_SHA256 = '1681a3dd8f4a7b43784aac2160f99c2524bc5af526d87cf8dc0ecb11ee1e4f49'.freeze
 REVIEWED_DEFAULTS = { 'run' => { 'working-directory' => 'src' } }.freeze
