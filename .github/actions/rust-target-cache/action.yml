@@ -409,16 +409,22 @@ runs:
         }
 
         # Counts the entries of the debug profile under $1 that are named for a door crate (file or
-        # directory, with or without the lib prefix), using door.txt of the sets directory $2. Prints
-        # the count only, never a name.
+        # directory, with or without the lib prefix), using door.txt of the sets directory $2, plus, as a
+        # content-level defence in depth, any entry under debug/deps or debug/build named libssl*,
+        # libcrypto* or openssl-build*, whichever crate produced it. Prints the count only, never a name.
         door_entries_remaining() {
-          local profile="$1" sets="$2" names entries d
+          local profile="$1" sets="$2" names entries d by_name=0 by_content=0
           names="$(sed 's/_/[-_]/g' "${sets}/door.txt" | paste -sd'|' -)" || return 1
-          [[ -n "${names}" ]] || { echo 0; return 0; }
           entries="$(for d in ${cached_dirs}; do
             if [[ -d "${profile}/${d}" ]]; then cache_find "${profile}/${d}" -mindepth 1 -maxdepth 1 -print || exit 1; fi
           done)" || return 1
-          printf '%s\n' "${entries}" | sed -E 's#^.*/##' | grep -cE "^(lib)?(${names})-[0-9a-f]+(\.|$)" || true
+          if [[ -n "${names}" ]]; then
+            by_name="$(printf '%s\n' "${entries}" | sed -E 's#^.*/##' | grep -cE "^(lib)?(${names})-[0-9a-f]+(\.|$)" || true)"
+          fi
+          by_content="$(for d in deps build; do
+            if [[ -d "${profile}/${d}" ]]; then cache_find "${profile}/${d}" -mindepth 1 -maxdepth 1 \( -name 'libssl*' -o -name 'libcrypto*' -o -name 'openssl-build*' \) -print || exit 1; fi
+          done | grep -c . || true)" || return 1
+          echo $((by_name + by_content))
         }
 
         size_mib() {

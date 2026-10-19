@@ -511,7 +511,7 @@ CARGO_HOME_PIN = {
   'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
 }.freeze
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
-RUST_TARGET_CACHE_FILE_SHA256 = '8fab08dc51506af2edc4bae191f8fc0ff878cc94541c202a81ce76d80cbe209a'.freeze
+RUST_TARGET_CACHE_FILE_SHA256 = '3acf64ebbe28a924864235b3783894e0a09a1550e3b3c7527b404fbc86e1528d'.freeze
 LOCATE_STEP_SHA256 = 'f0731f6e118740f65994e4a90b3a9c03f4e0f1c2b76c00a34ae1216232253c20'.freeze
 # Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
 # untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing

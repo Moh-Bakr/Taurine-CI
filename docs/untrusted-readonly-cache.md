@@ -360,15 +360,19 @@ step (same OS, image, `rust-app` group, `test-default+check-openvpn` feature lab
 and environment hashes), and `rust-app-2` alone saves it on main, so an untrusted shard restores an exact hit
 whenever the source has not changed `Cargo.lock`, a `Cargo.toml` or a cargo config.
 
-At the time of writing the rust-app build graph holds no OpenSSL (`cargo tree -p taurine-app -p taurine-desktop
--p taurine-mobile -i openssl-sys` finds no package; the door is reachable only behind `taurine-db-dbx`'s
-`legacy-tls` feature, which no rust-app package enables). That is a fact about today's manifests, not a guarantee, and
-`rust-db` already builds `taurine-db-dbx/legacy-tls` in its tests, so its saved entry can hold `openssl-sys` and
-`openssl-src` output. The untrusted restore therefore never relies on the entry being clean: the restore-time strip
+The OpenSSL door is present in the compiled caches today; the strip below is not a future guard. The private
+batch-3 candidate enables `legacy-tls` on `taurine-db-engine` for all targets in `taurine-app/Cargo.toml`, so the
+`rust-app` and `rust-db` compiled entries both contain `taurine-tls-openssl`, `openssl`, `openssl-sys`,
+`openssl-src` and `tokio-openssl` output, plus every crate built on them (`libopenssl_sys-<hash>.rlib` under
+`deps`, `openssl-sys-<hash>/out/libssl.a` and `libcrypto.a` and `openssl-src-<hash>/` under `build`,
+`openssl-*` under `.fingerprint`). The untrusted restore therefore never relies on the entry being clean: the restore-time strip
 that follows every untrusted compiled restore passes `deny-door: 'true'` to the `rust-target-cache` composite, which
 also classifies the OpenSSL door crates (`taurine-tls-openssl`, `openssl`, `openssl-sys`, `openssl-src`,
 `openssl-macros`, `tokio-openssl`, `postgres-openssl`, `native-tls` and the banned `aws-lc-*` crates) as strip roots,
-removes them and every crate built on one, and fails the step if any entry named for one remains. The main-scope
+removes them and every crate built on one, and fails the step if any entry named for one remains, or any entry
+under `debug/deps` or `debug/build` named `libssl*`, `libcrypto*` or `openssl-build*` (a content-level defence in
+depth, whichever crate produced it). Stripping the door costs the `openssl-src` build time (the vendored OpenSSL
+compiles from source) on every untrusted run, by design. The main-scope
 restore is unchanged (it keeps what main saved). `drop-root-order.rb` and `check-cache-mode.rb` refuse an untrusted
 compiled restore whose strip is missing, moved, not directly after the restore, or without `deny-door: 'true'`, and
 the whole composite is pinned by content hash.
