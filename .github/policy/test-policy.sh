@@ -1055,3 +1055,6 @@ conc_fail "$(conc_file 'concurrency:
 echo 'concurrency fixtures: per-run groups pass; shared groups and cancel-in-progress true are refused'
 
 bash .github/policy/test-repository.sh
+# Rule N's Stage 2 form (the reviewed read-only untrusted restores). Run from here, not as a workflow
+# step of its own, so the reviewed step table of the base-policy pass needs no new entry.
+bash .github/policy/test-untrusted-restore-shape.sh

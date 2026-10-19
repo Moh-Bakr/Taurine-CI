@@ -121,11 +121,6 @@ jobs:
         shell: bash
         run: bash .github/policy/test-rule-n-if-shape.sh
 
-      # Rule N's Stage 2 form: the reviewed read-only untrusted restores pass, every widening is refused.
-      - name: Test rule N's reviewed untrusted restore shape
-        shell: bash
-        run: bash .github/policy/test-untrusted-restore-shape.sh
-
       # The environment pre-flight composite, run against stub API answers: only custom branch
       # policies of exactly main and untrusted pass.
       - name: Test the environment pre-flight against stub endpoints
