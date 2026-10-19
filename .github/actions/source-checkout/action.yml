@@ -257,6 +257,7 @@ runs:
         key_source="${CHECKOUT_PATH}/scripts/ci/test-id-key.txt"
         key_dir="${RUNNER_TEMP}/taurine-ci"
         mkdir -p "${key_dir}"
+        chmod 700 "${key_dir}"
         rm -f "${key_dir}/test-id-key"
         if [[ ! -f "${key_source}" || -L "${key_source}" ]]; then
           echo 'keyed test ids: this source has no key file; failing tests will be counted, not identified'
@@ -269,7 +270,9 @@ runs:
           echo 'keyed test ids: the key path leaves the checkout; failing tests will be counted, not identified'
           exit 0
         fi
-        content="$(tr -d '\r' <"${key_source}" | head -c 400)"
+        # head reads the file itself and stops at 400 bytes, so no writer is left to take a SIGPIPE
+        # under pipefail; a longer file is cut and then fails the format check below.
+        content="$(head -c 400 <"${key_source}" | tr -d '\r')"
         pattern=$'^taurine-test-id-key v1\nkey-id: (k[0-9]{1,4})\nkey: ([0-9a-f]{64})$'
         if [[ ! "${content}" =~ ${pattern} ]]; then
           echo 'keyed test ids: the key file does not match its fixed format; failing tests will be counted, not identified'

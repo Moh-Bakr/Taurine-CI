@@ -160,7 +160,13 @@ runs:
             /^error: building [A-Za-z0-9_.+-]+:[A-Za-z0-9_-]+ failed/ { block = "vcpkg"; pending = ""; print; next }
             /^error: / {
               block = "error"; pending = ""
-              if ($0 ~ /^error: (could not compile|test failed, to rerun pass|[0-9]+ targets? failed:|failed to run custom build command for|workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
+              # The crate, target and package names in these cargo lines are private source
+              # identifiers: only the fixed text is published.
+              if ($0 ~ /^error: test failed, to rerun pass/) print "error: test failed, to rerun pass (target withheld)"
+              else if ($0 ~ /^error: [0-9]+ targets? failed:/) { n = $2; print "error: " n " target(s) failed (names withheld)" }
+              else if ($0 ~ /^error: could not compile/) print "error: could not compile (crate and target withheld)"
+              else if ($0 ~ /^error: failed to run custom build command for/) print "error: failed to run custom build command (package withheld)"
+              else if ($0 ~ /^error: (workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
               else pending = $0
               next
             }
@@ -168,7 +174,7 @@ runs:
               if (block == "error") { if (pending != "") print "error: (message withheld)"; pending = ""; print }
               next
             }
-            /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }
+            /^test result: FAILED/ { print }
           ' | head -80 >&2 || true
         }
 
@@ -261,6 +267,19 @@ runs:
           fi
         }
 
+        # The runners' own count lines, and nothing else: stdin lines that are ENTIRELY one of the
+        # fixed shapes below are printed (words and integers only), every other line is dropped, so
+        # a log line that merely starts with a count ("5 failed login attempts for ...") or carries
+        # text after it ("Tests  7 failed because of ...") never reaches the output.
+        #   vitest      Test Files  1 failed | 297 passed | 1 skipped (299)      and   Tests  ...
+        #   Playwright  3 passed (12s)   /   1 failed   /   2 flaky   /   4 skipped   /   1 did not run
+        #   TAP         # pass 5   /   # fail 1   /   # tests 6   (also skipped, cancelled, todo)
+        tci_count_lines() {
+          local word='(failed|passed|skipped|todo|flaky)'
+          grep -E "^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]+ ${word}([[:space:]]+\\|[[:space:]]+[0-9]+ ${word})*([[:space:]]+\\([0-9]+\\))?[[:space:]]*\$|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped|did not run)([[:space:]]+\\([0-9.]+m?s\\))?[[:space:]]*\$|^# (pass|fail|tests|skipped|cancelled|todo) [0-9]+\$" |
+            sed -E 's/^[[:space:]]+//' | cut -c1-120 | awk '!seen[$0]++' | head -20
+        }
+
         # stdin: lines of `kind<TAB>file<TAB>title<TAB>status` (status is one of the fixed words
         # fail, signal, timeout, leak, flaky, produced by this library, never by the log). Prints
         # `test-id-key: <id>`, one `failed-test-id: <hex> status=<word>` per distinct failing test
@@ -274,7 +293,7 @@ runs:
           if [[ "${total}" -eq 0 ]]; then rm -f "${in}"; return 0; fi
           ids="$(cut -f1-3 "${in}" | tci_hmac_ids 2>/dev/null)" || ids=''
           if [[ -z "${ids}" || "$(printf '%s\n' "${ids}" | grep -c '')" -ne "${total}" ]]; then
-            echo "failed-test-ids: unavailable (no keyed key or HMAC tool); failing tests: ${total}"
+            echo "failed-test-ids: unavailable (no usable key or HMAC tool); failing tests: ${total}"
             rm -f "${in}"; return 0
           fi
           echo "test-id-key: $(sed -n 's/^key-id=//p' "${TCI_TEST_ID_KEY}" | head -n 1)"
@@ -283,6 +302,33 @@ runs:
           unidentified="$(printf '%s\n' "${ids}" | grep -c '^-$' || true)"
           if [[ "${unidentified}" -gt 0 ]]; then echo "failed-tests-unidentified: ${unidentified}"; fi
           rm -f "${in}"
+        }
+
+        # The test-inventory section a collector wrote ($1, markdown) as it may be published, with the
+        # keyed ids of the failed or flaky tests ($2, records `kind<TAB>file<TAB>title<TAB>status`,
+        # optional) appended. The collector is project code, so its markdown is not trusted: a line
+        # that names a failed or flaky test is dropped, and every remaining line must match one of the
+        # reviewed shapes (heading, fixed sentence, counts, details wrapper, a passed or skipped
+        # identity line, the fallback lines), else the whole section is replaced by a fixed message.
+        tci_publish_inventory() {
+          local section="$1" records="${2:-}" kept ere rc
+          kept="$(mktemp "${RUNNER_TEMP:-/tmp}/tci-inv.XXXXXX" 2>/dev/null || mktemp)"
+          ere='^(### Tests exercised by this run|Identifies the tests that passed or were skipped, by repo-relative file path and title only; a failed or flaky test is identified only by a keyed id\. Source, fixtures, data values and environment details are not published\.|Test inventory unavailable: (no runner output could be collected|the collector did not complete)\.|- [0-9]+ tests in [0-9]+ files\.|- [0-9]+ (entry|entries) withheld by the secret-shape scan; [0-9]+ withheld as malformed\.|- [0-9]+ runner report\(s\) could not be parsed\.|- Showing the first [0-9]+ \(cap\): [0-9]+ more not listed\.|- [0-9]+ failed or flaky: published only as keyed ids \(`failed-test-id`\), never by title or path\.|<details>|<summary>Test identities</summary>|</details>|- `[^`]+` › `[^`]+` — (passed|skipped) · [0-9]+ ms|collector error class: [A-Za-z_]{0,60}|#### [A-Za-z0-9._-]+ \(fallback, from the runner report\)|- tests: [0-9]+; [a-z0-9 ,]*)$'
+          tr -d '\r' <"${section}" 2>/dev/null | grep -vE ' — (failed|flaky) · ' | grep -v '^$' >"${kept}" || true
+          # grep -v exits 1 only when every line matched a reviewed shape; 0 (a stray line) and 2
+          # (an error) both fail closed.
+          rc=0; grep -vE "${ere}" "${kept}" >/dev/null 2>&1 || rc=$?
+          if [[ -s "${kept}" && "${rc}" -eq 1 ]]; then
+            tr -d '\r' <"${section}" | grep -vE ' — (failed|flaky) · '
+          else
+            printf '### Tests exercised by this run\n\nTest inventory withheld: the collector output did not match its reviewed shape.\n'
+          fi
+          rm -f "${kept}"
+          if [[ -n "${records}" && -s "${records}" ]]; then
+            printf '\n#### Failed or flaky tests (keyed ids; titles and paths are never published)\n\n```\n'
+            head -n 2000 "${records}" | tci_failed_ids || echo 'failed-test-ids: unavailable (the id library failed)'
+            printf '```\n'
+          fi
         }
 
         # One line per panic: the repository-relative file as a keyed `file-id` (never the path),
@@ -304,10 +350,14 @@ runs:
             }
             function emit(loc,    n, a, code) {
               n = split(loc, a, ":");
-              # A fixed error `code=<[a-z_]+>` token (an enum string, never a value) is allowed
-              # through next to the class; nothing else of the message is.
+              # A `code=<[a-z_]+>` token is allowed through next to the class only when it is one of
+              # the fixed app error codes below; nothing else of the message is.
               code = "";
-              if (match(msg, /code=[a-z_]+/)) code = substr(msg, RSTART, RLENGTH);
+              if (match(msg, /code=[a-z_]+/)) {
+                v = substr(msg, RSTART + 5, RLENGTH - 5)
+                # Only the app error-code surface is published; any other value is `code=other`.
+                code = (index(" android auth authorization barrier_refused canceled conflict connect_budget_spent custom engine git_failed git_invalid_input host_key_changed invalid_input ios locked mock network none not_connected not_found not_implemented notes reauth replicate revoked script storage sync unavailable unsupported vault ", " " v " ") > 0) ? "code=" v : "code=other"
+              }
               printf "%s\t%s\t%s\t%s\n", a[1], (a[2] ~ /^[0-9]+$/ ? a[2] : "?"), classify(msg), code;
             }
             /thread \047[^\047]+\047.* panicked at / {

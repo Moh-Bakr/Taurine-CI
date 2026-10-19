@@ -32,7 +32,12 @@ runs:
             /^error\[E[0-9]+\]: / { block = "error"; pending = ""; code = $1; sub(/\]:.*$/, "]", code); print code; next }
             /^error: / {
               block = "error"; pending = ""
-              if ($0 ~ /^error: (could not compile|aborting due to|test failed|[0-9]+ targets? failed|failed to run custom build command for|linking with |failed to (download|select|get|load|parse|fetch)|no matching package)/) print
+              # Crate, target and package names are private source identifiers: fixed text only.
+              if ($0 ~ /^error: test failed/) print "error: test failed, to rerun pass (target withheld)"
+              else if ($0 ~ /^error: [0-9]+ targets? failed/) { n = $2; print "error: " n " target(s) failed (names withheld)" }
+              else if ($0 ~ /^error: could not compile/) print "error: could not compile (crate and target withheld)"
+              else if ($0 ~ /^error: failed to run custom build command for/) print "error: failed to run custom build command (package withheld)"
+              else if ($0 ~ /^error: (aborting due to|linking with |failed to (download|select|get|load|parse|fetch)|no matching package)/) print
               else pending = "yes"
               next
             }
@@ -125,9 +130,7 @@ runs:
         # published; the file path and the test title go into the HMAC only.
         test_failures() {
           js_failure_records "$1" "${2:-}" | tci_failed_ids >&2 || true
-          tr '\\' '/' <"$1" | sanitize_stream | strip_excerpts |
-            grep -E '^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped)' |
-            cut -c1-200 | awk '!seen[$0]++' | head -20 >&2 || true
+          tr -d '\r' <"$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' | tci_count_lines >&2 || true
         }
 
         # The packaging smoke build (an unsigned Tauri build): which phase failed and a fixed
@@ -305,7 +308,7 @@ runs:
           local log="$1" dir exe base dll found line
           echo 'test binary load failure detail (binary: missing imports; names only):'
           # Binaries named in the log, hashes stripped.
-          tr -d '\r' <"${log}" | grep -oE '[A-Za-z0-9_-]+-[0-9a-f]{16}\.exe' | sed -E 's/-[0-9a-f]{16}\.exe$//' | sort -u | head -10 | sed 's/^/  named in log: /' || true
+          echo "  test binaries named in the log: $(tr -d '\r' <"${log}" | grep -oE '[A-Za-z0-9_-]+-[0-9a-f]{16}\.exe' | sort -u | wc -l | tr -d ' ') (names withheld)"
           dir="${CARGO_TARGET_DIR:-}"
           [[ -n "${dir}" ]] || return 0
           local objdump=''
@@ -335,9 +338,9 @@ runs:
             done < <("${objdump}" -p "${exe}" 2>/dev/null | sed -n 's/^[[:space:]]*DLL Name: \([A-Za-z0-9_.-]*\.dll\)$/\1/p' | sort -u)
           done
           if [[ -s "${seen}" ]]; then
-            echo '  imports not found (DLL: binaries needing it, up to 4):'
+            echo '  imports not found (DLL: how many test binaries need it):'
             cut -d'|' -f1 "${seen}" | sort -u | while IFS= read -r dll; do
-              echo "    ${dll}: $(grep -F "${dll}|" "${seen}" | cut -d'|' -f2 | sort -u | head -4 | tr '\n' ' ')"
+              echo "    ${dll}: needed by $(grep -F "${dll}|" "${seen}" | cut -d'|' -f2 | sort -u | wc -l | tr -d ' ') test binary(ies) (names withheld)"
             done | head -20
           fi
           if [[ -s "${RUNNER_TEMP}/loader-path.txt" ]]; then
@@ -468,7 +471,7 @@ runs:
             fi
             if [[ "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
               test_failures "${log}" ""
-              sanitize_stream <"${log}" | strip_excerpts | grep -E '^# (pass|fail|tests)' | head -20 >&2 || true
+              tr -d '\r' <"${log}" | tci_count_lines | grep '^#' >&2 || true
               # TAP names its failing tests in `not ok` lines, which carry no file; only the count is published.
               echo "failing TAP tests: $(grep -cE '^not ok' "${log}" || true)" >&2
             fi
@@ -492,10 +495,7 @@ runs:
               # failing test is never named here: `FAIL` lines, assertion text and received or
               # expected values carry titles and source values, and the keyed ids come from
               # test_failures and playwright_json_failures.
-              sanitize_stream <"${log}" |
-                strip_excerpts |
-                grep -E '^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped)' |
-                cut -c1-120 | tail -20 >&2 || true
+              tr -d '\r' <"${log}" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' | tci_count_lines >&2 || true
             fi
             exit 1
           fi

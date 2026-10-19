@@ -33,7 +33,7 @@ v_e2e=02b2c1599dc6923c        # e2e     e2e/a.spec.ts                 t
 v_file=907b4a6102d0271d       # file    taurine-db/tests/x.rs         (empty title)
 v_utf8=d4069f93924f080f       # js      taurine-desktop/src/é.test.ts ünï > ✓
 
-grammar='^(test-id-key: k[0-9]{1,4}|failed-test-id: [0-9a-f]{16} status=(fail|signal|timeout|leak|flaky)|failed-tests-unidentified: [0-9]+|failed-test-ids: unavailable \(no keyed key or HMAC tool\); failing tests: [0-9]+)$'
+grammar='^(test-id-key: k[0-9]{1,4}|failed-test-id: [0-9a-f]{16} status=(fail|signal|timeout|leak|flaky)|failed-tests-unidentified: [0-9]+|failed-test-ids: unavailable \(no usable key or HMAC tool\); failing tests: [0-9]+)$'
 fail() { echo "keyed test ids: $*" >&2; exit 1; }
 run() { # run <key rt dir> <script...>: a clean shell with both libraries sourced
   local rt="$1"; shift
@@ -167,7 +167,7 @@ AssertionError: expected 'SECRETRECEIVED' to be 'SECRETEXPECTED'
       Tests  3 failed | 40 passed (43)
 LOG
 out="$(run "${dir}/rt" 'test_failures "'"${dir}"'/vitest.log" taurine-desktop/ 2>&1')"
-grep -vE '^( Test Files| *Tests) ' <<<"${out}" > "${dir}/vitest.ids"
+grep -vE '^ *(Test Files|Tests) ' <<<"${out}" > "${dir}/vitest.ids"
 only_grammar "$(cat "${dir}/vitest.ids")"
 has "${out}" "failed-test-id: ${v_js} status=fail"
 has "${out}" "failed-test-id: ${v_utf8} status=fail"
@@ -215,7 +215,7 @@ for mode in absent malformed symlink emptyfile; do
     emptyfile) : > "${rt}/taurine-ci/test-id-key" ;;
   esac
   out="$(run "${rt}" 'nextest_failures "'"${dir}"'/nextest.log"; test_failures "'"${dir}"'/vitest.log" 2>&1')"
-  has "${out}" 'failed-test-ids: unavailable (no keyed key or HMAC tool); failing tests: '
+  has "${out}" 'failed-test-ids: unavailable (no usable key or HMAC tool); failing tests: '
   if grep -q 'failed-test-id: ' <<<"${out}"; then fail "an id was printed without a usable key (${mode})"; fi
   no_leak "${out}" 'queries|it_works|a\.test|Suite|crash_in|taurine-db'
 done
@@ -304,4 +304,130 @@ out="$(cat "${dir}/id-fallback/summary.md")"
 has "${out}" "failed-test-id: ${v_e2e} status=fail"
 has "${out}" 'failed-tests-unidentified: 1'
 no_leak "${out}" 'a\.spec|b\.spec|Locator|Welcome|Loading|SECRET|has.tab|FAIL \['
+# --- 11. Count lines are published only as whole-line shapes, never a line that merely starts like one.
+awk "/cat > .*mobile-report.sh.* <<'TCI_MOBILE_REPORT_LIBRARY'/{on=1; next} /^        TCI_MOBILE_REPORT_LIBRARY/{on=0} on" .github/actions/mobile-report/action.yml | sed -E 's/^        //' > "${dir}/mobile-report.sh"
+cat > "${dir}/counts.log" <<LOG
+ Test Files  2 failed | 297 passed | 1 skipped (299)
+      Tests  7 failed because of customer-ACME
+5 failed login attempts for alice@corp.example
+Tests  1 failed | 5 passed (6) for alice@corp.example
+  3 passed (12s)
+2 flaky
+3 passed with customer-ACME
+# pass 5
+# fail 1 for alice@corp.example
+# tests 6
+LOG
+out="$(run "${dir}/rt" 'tci_count_lines < "'"${dir}"'/counts.log"')"
+has "${out}" 'Test Files  2 failed | 297 passed | 1 skipped (299)'
+has "${out}" '3 passed (12s)'
+has "${out}" '# pass 5'
+has "${out}" '# tests 6'
+[[ "$(wc -l <<<"${out}" | tr -d ' ')" == 5 ]] || fail "an unanchored count line was published: ${out}"
+no_leak "${out}" 'customer|ACME|alice|login|because'
+out="$(run "${dir}/rt" 'test_failures "'"${dir}"'/counts.log" taurine-desktop/ 2>&1')"
+no_leak "${out}" 'customer|ACME|alice|login|because'
+
+# --- 12. cargo detail: crate, target and package names are never published.
+cat > "${dir}/cargo-names.log" <<'LOG'
+error: test failed, to rerun pass `-p secretcrate --test secret_target`
+error: 2 targets failed:
+    `-p secretcrate --lib`
+    `-p secretcrate --test secret_target`
+error: could not compile `secretcrate` (test "secret_target") due to 1 previous error
+error: failed to run custom build command for `secretdep v1.2.3 (/Users/alice/secretdep)`
+LOG
+for fn in cargo_test_detail cargo_detail; do
+  out="$(run "${dir}/rt" "${fn} "'"'"${dir}"'/cargo-names.log" 2>&1')"
+  no_leak "${out}" 'secret|alice|Users'
+  has "${out}" 'target withheld'
+  has "${out}" '2 target(s) failed (names withheld)'
+  has "${out}" 'crate and target withheld'
+done
+printf 'running\nsecret_bin-0123456789abcdef.exe failed 0xc0000139\n' > "${dir}/loader.log"
+out="$(run "${dir}/rt" 'loader_detail "'"${dir}"'/loader.log" 2>&1')"
+has "${out}" 'test binaries named in the log: 1 (names withheld)'
+no_leak "${out}" 'secret_bin'
+cat > "${dir}/mobile-run.sh" <<'RUNNER'
+fake_runner() { printf 'running 1 test\ntest secret_module::secret_test ... FAILED\nfailures:\n    secret_module::secret_test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored\n'; return 101; }
+touch "${RUNNER_TEMP}/secret-crate-0123456789abcdef"
+mobile_test_execute mobile-rust-tests 'the emulator' fake_runner "${RUNNER_TEMP}/secret-crate-0123456789abcdef" || true
+RUNNER
+mkdir -p "${dir}/rt-mobile/taurine-ci"; cp "${dir}/rt/taurine-ci/test-id-key" "${dir}/rt-mobile/taurine-ci/"; : > "${dir}/rt-mobile/summary.md"
+out="$(RUNNER_TEMP="${dir}/rt-mobile" GITHUB_STEP_SUMMARY="${dir}/rt-mobile/summary.md" bash -c 'set -uo pipefail; source "$1/lib.sh"; source "$1/mobile-report.sh"; ( source "$2" ) 2>&1' _ "${dir}" "${dir}/mobile-run.sh"; cat "${dir}/rt-mobile/summary.md")"
+no_leak "${out}" 'secret'
+has "${out}" 'binary 1'
+
+# --- 13. The inventory filter: a failed or flaky identity line is dropped, a line outside the reviewed shapes replaces the section.
+cat > "${dir}/inv-good.md" <<'MD'
+### Tests exercised by this run
+
+Identifies the tests that passed or were skipped, by repo-relative file path and title only; a failed or flaky test is identified only by a keyed id. Source, fixtures, data values and environment details are not published.
+
+- 4 tests in 2 files.
+- 0 entries withheld by the secret-shape scan; 0 withheld as malformed.
+- 2 failed or flaky: published only as keyed ids (`failed-test-id`), never by title or path.
+
+<details>
+<summary>Test identities</summary>
+
+- `a.test.ts` › `fine` — passed · 3 ms
+- `a.test.ts` › `secret failing title` — failed · 9 ms
+- `b.test.ts` › `secret flaky title` — flaky · 9 ms
+- `b.test.ts` › `skipped one` — skipped · 0 ms
+
+</details>
+MD
+printf 'js\ta.test.ts\tsecret failing title\tfail\n' > "${dir}/inv.tsv"
+out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-good.md" "'"${dir}"'/inv.tsv"')"
+has "${out}" '`a.test.ts` › `fine` — passed · 3 ms'
+has "${out}" 'skipped one'
+has "${out}" 'failed-test-id: '
+no_leak "${out}" 'secret failing|secret flaky|failed · |flaky · '
+{ cat "${dir}/inv-good.md"; printf -- '- `a.test.ts` › `x` — failed in customer-ACME\n'; } > "${dir}/inv-bad.md"
+out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-bad.md" ""')"
+has "${out}" 'Test inventory withheld: the collector output did not match its reviewed shape.'
+no_leak "${out}" 'customer|ACME|fine|skipped one'
+printf '' > "${dir}/inv-empty.md"
+out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-empty.md" ""')"
+has "${out}" 'withheld'
+
+# --- 14. The live-proof summary: tallies and keyed ids only, never a check title or an expected-versus-got line.
+ruby -ryaml -e '
+  doc = YAML.safe_load(File.read(".github/actions/live-summary/action.yml"), aliases: false)
+  step = doc["runs"]["steps"].find { |st| st["name"].to_s.start_with?("Publish sanitized live-proof") } or abort("the live summary step is missing")
+  File.write(ARGV[0], step["run"])
+' "${dir}/live-summary.sh"
+ws="${dir}/live"; mkdir -p "${ws}/src" "${ws}/rt/taurine-ci" "${ws}/bin"
+(cd "${ws}/src" && git init -q . && git -c user.email=a@b -c user.name=t commit -q --allow-empty -m x)
+cp "${dir}/rt/taurine-ci/test-id-key" "${ws}/rt/taurine-ci/"; cp "${dir}/lib.sh" "${ws}/rt/taurine-ci/sanitize.sh"
+printf '{"report": true, "blurb": "arm"}' > "${ws}/rt/live-arm.json"
+cat > "${ws}/rt/live-proof.log" <<'LOG'
+pg 4 checks: 2 passed, 1 failed, 1 invalid, 0 skipped for customer-ACME
+  PASS  connect_ok
+  FAIL  cancel_midflight_secret_table
+        expected rows=42 got rows=0 for table customers_acme
+  INVL  setup_secret_step
+        server said: password for alice@corp.example rejected
+  SKIP  optional_check
+LOG
+for tool in nproc free df; do printf '#!/usr/bin/env bash\necho 1\n' > "${ws}/bin/${tool}"; chmod +x "${ws}/bin/${tool}"; done
+: > "${ws}/summary.md"
+(cd "${ws}/src" && PATH="${ws}/bin:${PATH}" GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" ENGINE=pg REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/live-summary.sh") > "${ws}/out.txt" 2>&1 || true
+out="$(cat "${ws}/summary.md" "${ws}/out.txt")"
+has "${out}" 'proof checks: 1 PASS, 1 SKIP, 1 FAIL, 1 INVL'
+[[ "$(grep -c '^failed-test-id: ' <<<"${out}")" -ge 2 ]] || fail "the failing and invalid checks were not keyed: ${out}"
+no_leak "${out}" 'cancel_midflight|secret|expected rows|customers_acme|alice|corp\.example|customer-ACME|connect_ok|optional_check|password'
+
+# --- 15. A panic code outside the allow-list is published as code=other.
+printf "thread 'a' panicked at tests/z.rs:5:1:\nboom code=some_lowercase_secret\nthread 'b' panicked at tests/y.rs:6:1:\nboom code=not_connected\n" > "${dir}/panic-code.log"
+out="$(run "${dir}/rt" 'panic_summary "'"${dir}"'/panic-code.log"')"
+has "${out}" 'code=other'
+has "${out}" 'code=not_connected'
+no_leak "${out}" 'some_lowercase_secret'
+
+# --- 16. The key snapshot: the key directory is private, and an oversize file fails closed without a SIGPIPE.
+mode="$(stat -f '%Lp' "${dir}/ws-good/rt/taurine-ci" 2>/dev/null || stat -c '%a' "${dir}/ws-good/rt/taurine-ci")"
+[[ "${mode}" == 700 ]] || fail "the key directory mode is ${mode}, not 700"
+[[ ! -s "${dir}/ws-big/out.txt" ]] || grep -q 'does not match its fixed format' "${dir}/ws-big/out.txt" || fail 'an oversize key file did not fail closed with the fixed message'
 echo "keyed test ids: ${implementations} HMAC implementation(s) agree with the pinned vectors; extractors, fail-closed paths and the key snapshot step checked"
