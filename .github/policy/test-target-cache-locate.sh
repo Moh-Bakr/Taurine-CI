@@ -72,6 +72,9 @@ expect_refused 'a path toolchain naming a compiler inside the checkout' 'selecte
 mkdir -p "${work}/elsewhere/bin"
 cp "${rustup_home}/toolchains/stable/bin/rustc" "${work}/elsewhere/bin/rustc"
 expect_refused 'a compiler outside rustup toolchains' 'not an installed rustup toolchain' "${stubs}:" FIXTURE_RUSTC="${work}/elsewhere/bin/rustc"
+# A symlinked compiler inside the toolchains directory (pointing outside it).
+ln -s "${work}/elsewhere/bin/rustc" "${rustup_home}/toolchains/stable/bin/rustc-link"
+expect_refused 'a symlinked compiler inside the toolchains directory' 'selected compiler is a symlink' "${stubs}:" FIXTURE_RUSTC="${rustup_home}/toolchains/stable/bin/rustc-link"
 # A compiler under the runner temp directory.
 mkdir -p "${work}/runner-temp/bin"
 cp "${rustup_home}/toolchains/stable/bin/rustc" "${work}/runner-temp/bin/rustc"
@@ -87,4 +90,4 @@ expect_refused 'a rustc planted in the checkout' 'rustc resolves inside the chec
 expect_refused 'a relative PATH entry' 'relative or empty entry' ".:${stubs}:"
 expect_refused 'an unreviewed target directory' 'not one of the reviewed locations' "${stubs}:" CARGO_TARGET_DIR=/tmp/evil
 
-echo 'target-cache locate fixtures: an installed toolchain passes; a checkout-supplied or foreign compiler, a planted rustup or rustc, a relative PATH entry and an unreviewed target directory are refused'
+echo 'target-cache locate fixtures: an installed toolchain passes; a checkout-supplied, foreign or symlinked compiler, a planted rustup or rustc, a relative PATH entry and an unreviewed target directory are refused'

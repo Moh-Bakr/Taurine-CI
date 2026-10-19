@@ -507,18 +507,22 @@ CARGO_HOME_PIN = {
   'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
 }.freeze
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
-RUST_TARGET_CACHE_FILE_SHA256 = 'cc34296f12a3b2738141e4524237b468886e849f28f38fac777fd3a8293982b0'.freeze
-LOCATE_STEP_SHA256 = 'a720fafbcd5d2cab767e59e6b11a7433e7fcbb8e7d2861f6111060b2d6bb167a'.freeze
+RUST_TARGET_CACHE_FILE_SHA256 = '1eedb06f020f90666f1747a08c1339172e4caa1016d0381a37d93e6c6bd3913b'.freeze
+LOCATE_STEP_SHA256 = 'f0731f6e118740f65994e4a90b3a9c03f4e0f1c2b76c00a34ae1216232253c20'.freeze
 # Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
 # untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing
 # in the same reviewed pull request. A name lists TWO OR MORE hashes only where an open pull request changes
 # that file; the FIRST hash in such a pair is this repository's (main's) and must be removed once the pull
 # request(s) named beside it have landed:
-#   rust-toolchain:     #365 (04d9056e...), Wave C ci/speed-wave-c (3e991c0a...). Once both land the merged
-#                       file hashes to a third value that replaces all three.
 #   verify-cargo-cache: #365 (6c38bdfe...).
 #   timings:            Wave C (ff475be9...).
 #   root-setup:         Wave C (81fa9779...).
+# rust-toolchain is deliberately NOT a pair with main's hash: main's file (9ae7bf89...) and Wave C's alone
+# (3e991c0a...) run `rustc --version` and `cargo --version` through the rustup proxy from `src` before
+# anything refuses a `path` toolchain, so a checkout could run a planted compiler with the runner's
+# environment and path files in reach. Only versions that refuse it first are listed: #365's (04d9056e...)
+# and the #365 + Wave C merge (abec7733...), and each must also pass toolchain_guard_first? below. The pin
+# applies only to a job that carries a reviewed untrusted restore, which main does not.
 LOCAL_ACTION_FILE_SHA256 = {
   'timings' => %w[
     9d2a363af0af7877c4a0428c907bbd0445d9c43b0e6db2f033bd339f814fb860
@@ -540,12 +544,32 @@ LOCAL_ACTION_FILE_SHA256 = {
     6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a
   ],
   'rust-toolchain' => %w[
-    9ae7bf89268ef23edc1dbc6831e77a3dd85ed98a049caa1e326b85beebc0091c
     04d9056e51c8ae6fbfd85ca149ca71e38d291809131a00a28a2444161a3cbda0
-    3e991c0add6d3eacb52be1ac122a916fb9a1ae473d664aafda89d901d564a5c2
+    abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec
   ],
   'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256]
 }.freeze
+# The toolchain action's refusal of a `path` toolchain (and of every non-plain key), as the text between
+# `toolchain_refuse() {` and the last call of `toolchain_check`, in the first step's decoded `run`.
+TOOLCHAIN_GUARD_SHA256 = '6eb49f42a7f8ee1177bb05fe0e8f344173f7b751eb4758637fa7e8970eb7be43'.freeze
+TOOLCHAIN_GUARD_LAST_CALL = "  [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy\n".freeze
+
+# True when the action's first step carries the reviewed guard and calls both checks before it runs any
+# rustup, rustc or cargo command (comment lines are not commands).
+def toolchain_guard_first?(doc)
+  step = Array(doc.dig('runs', 'steps')).first
+  run = step.is_a?(Hash) ? step['run'].to_s : ''
+  start = run.index('  toolchain_refuse() {')
+  stop = run.index(TOOLCHAIN_GUARD_LAST_CALL)
+  return false unless start && stop && start < stop
+  return false unless Digest::SHA256.hexdigest(run[start...(stop + TOOLCHAIN_GUARD_LAST_CALL.length)]) == TOOLCHAIN_GUARD_SHA256
+  code = run.lines.reject { |l| l.strip.start_with?('#') }.join
+  tool = code.index(/(^|[\s;(&|`])(rustup|rustc|cargo)\s/)
+  toml = code.index('toolchain_check rust-toolchain.toml toml')
+  legacy = code.index('toolchain_check rust-toolchain legacy')
+  !tool.nil? && !toml.nil? && !legacy.nil? && toml < tool && legacy < tool
+end
+
 # The exact `with` of each shared local action (the canonical JSON of the step's whole `with`, an absent
 # `with` counting as {}), by name. egress-audit appears in two phases; timings only at the start of the job.
 PREFIX_ACTION_WITH_SHA256 = {
@@ -624,7 +648,8 @@ def pinned_local_action_step?(path, docs, st)
   when *PREFIX_ACTION_WITH_SHA256.keys
     PREFIX_ACTION_WITH_SHA256[name].include?(canonical_hash(with))
   when 'rust-toolchain'
-    with == { 'concern' => "${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" }
+    toolchain_guard_first?(local_action_doc(path, docs, name)) &&
+      with == { 'concern' => "${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" }
   when 'verify-cargo-cache'
     with.keys.sort == %w[cache-hit os-label sources-dir] && with['sources-dir'] == '${{ steps.cargo-home.outputs.dir }}' &&
       with['cache-hit'].to_s.match?(CACHE_HIT_REF) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
