@@ -343,7 +343,7 @@ mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    us
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
 
 # 13. The audits reach the verdict, and an untrusted restore waits for macOS (docs/untrusted-readonly-cache.md).
-mutation '13. the Linux result no longer needs the after-audit' "${linux}" '    needs: [plan, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [plan, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select]'
+mutation '13. the Linux result no longer needs the after-audit' "${linux}" '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select]'
 mutation '13. the Linux after-audit no longer waits for the long-pole untrusted half' "${linux}" '    needs: [cache-audit, validate-long-untrusted, validate-untrusted]' '    needs: [cache-audit, validate-untrusted]'
 mutation '13. the Windows result stops passing blocking-failures' "${windows}" "          blocking-failures: " "          selection-note: "
 mutation '13. run-result ignores the blocking count' .github/actions/run-result/action.yml '        if [[ "${blocking}" -gt 0 ]]; then
