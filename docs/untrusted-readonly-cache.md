@@ -564,6 +564,12 @@ protocols (the legacy v1 REST service and the v2 Twirp service). Until the resul
 flag stays `false`, and the policy refuses `true` unless the record is already merged on the base (see the
 gate below).
 
+Amendment from the spike-2 result: v1: service retired, not applicable. The legacy v1 REST cache service is
+no longer served, so the v1 clauses of the protocol list above and of green condition 2 below are not
+applicable; the v2 Twirp service is the only protocol the probes can and must exercise. This amends the
+protocol list only. It is not the record line of the gate below and does not change the flag, which stays
+`false`.
+
 Why the production restores cannot all come first. The two sources restores (and their verifiers) now run
 directly after the shared composites and the suite-contract step, before the toolchain, the Node install
 and the vendored-source fetch. The compiled-dependency restore cannot: its key contains `rustc -vV`, the
