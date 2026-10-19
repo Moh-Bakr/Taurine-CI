@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris | postgres | pg-dbx | mysql | mssql | pgtls | tls-legacy | bastion), a comma-separated list of them, or all
+        description: Engine to prove (doris | starrocks | db2 | informix | rocketmq | iris | postgres | mysql | mssql | pgtls | tls-legacy | bastion), a comma-separated list of them, or all
         required: true
         type: string
       source_sha:
@@ -132,15 +132,21 @@ jobs:
           # `filter` (none for rocketmq: both tests in its file are the proof).
           # `report` says the arm's suite prints the conformance report whose
           # header the verdict reads. `blurb` is the image line the summary shows.
-          # The pg-dbx arm uses the same pinned PostgreSQL 17 server, dialled
-          # through the Dbx route — plan 25 task 2.5, PG2's live evidence for
-          # the Stage-2 pilot. The private Dbx-route suites select the adapter
-          # family over legacy registration; the conformance crate compiles the
-          # engine's `dbx-pg` feature and both routes use `connect_routed`.
-          # No environment switch exists or is needed: the dev-only
+          # The postgres arm also carries the Dbx-route proof (the former pg-dbx
+          # arm, merged into it because both use the same pinned PostgreSQL 17
+          # image and the same conformance crate, so one runner and one cold
+          # build serve both). Its last suite, `dbx_pg_live,dbx_shadow_pg`, keeps
+          # the evidence row the pg-dbx arm printed, with the same name and the
+          # same pass/FAIL rules, and any failing or skipped suite fails the
+          # arm. The private Dbx-route suites select the adapter family over
+          # legacy registration; the conformance crate compiles the engine's
+          # `dbx-pg` feature and both routes use `connect_routed`. No
+          # environment switch exists or is needed: the dev-only
           # `database.engine.override` stays a compiled-in developer setting.
-          # Every compiled route row still defaults to Legacy. This arm proves
-          # Dbx before the flip decision (PG2), but does not flip anything.
+          # Every compiled route row still defaults to Legacy. The Dbx suites
+          # dial the `postgres` role and database, which live-start-pg adds to
+          # the same server. `pg-dbx` is no longer an arm name: a dispatch that
+          # asks for it is refused below with a pointer to `postgres`.
           # The `pgtls` arm also runs the DBX provider's ordinary TLS cases
           # against those same generated certificate fixtures. The dedicated
           # `tls-legacy` arm selects only the three DBX legacy-peer tests and
@@ -164,11 +170,9 @@ jobs:
             {"engine": "postgres", "report": true,
              "suites": ["taurine-db-conformance live_servers postgres_passes_every_check",
                         "taurine-db-postgres live_catalog,live_blob,live_ddl,live_depth,live_explain,live_notices,cancel",
-                        "taurine-db-engine live_postgres"],
-             "blurb": "Image: postgres 17-alpine (pinned by digest); suites: conformance + taurine-db-postgres live + engine live_postgres"},
-            {"engine": "pg-dbx", "report": true,
-             "suites": ["taurine-db-conformance dbx_pg_live,dbx_shadow_pg"],
-             "blurb": "Image: postgres 17-alpine (pinned by digest, the postgres arm's image); suites: the conformance suite and the shadow diff through the Dbx route"},
+                        "taurine-db-engine live_postgres",
+                        "taurine-db-conformance dbx_pg_live,dbx_shadow_pg"],
+             "blurb": "Image: postgres 17-alpine (pinned by digest); suites: conformance + taurine-db-postgres live + engine live_postgres + the Dbx-route conformance suite and shadow diff (dbx_pg_live, dbx_shadow_pg)"},
             {"engine": "mysql", "report": true,
              "suites": ["taurine-db-conformance live_servers mysql_passes_every_check",
                         "taurine-db-mysql live_blob,live_cancel,live_depth,live_explain,live_notices,live_param_types,live_reset",
@@ -199,6 +203,10 @@ jobs:
             wanted="$(jq -c 'map(.engine)' "${RUNNER_TEMP}/roster.json")"
           else
             wanted="$(printf '%s' "${requested}" | jq -Rc 'split(",") | map(select(. != ""))')"
+          fi
+          if printf '%s' "${requested}" | jq -Rce 'split(",") | any(. == "pg-dbx")' | grep -qx true; then
+            echo 'engine pg-dbx was merged into the postgres arm: dispatch postgres (or all); it runs the dbx_pg_live and dbx_shadow_pg suites as separate rows' >&2
+            exit 1
           fi
           if ! jq -en --argjson wanted "${wanted}" --slurpfile roster "${RUNNER_TEMP}/roster.json" \
             '($wanted | length) > 0 and ($wanted | all(. as $w | $roster[0] | any(.engine == $w)))' >/dev/null; then

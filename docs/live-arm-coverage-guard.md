@@ -7,11 +7,17 @@ list. It is defence in depth for a boundary that other checks already pin; it is
 
 ## What is required
 
-The live roster has **13 arms**: `doris`, `starrocks`, `db2`, `informix`, `rocketmq`, `iris`,
-`postgres`, `pg-dbx`, `mysql`, `mssql`, `pgtls`, `tls-legacy` and `bastion`. All 13 are required.
-`all` expands to the whole roster and full admission requires every arm, including `pg-dbx`, the
-Dbx-route live proof, and `tls-legacy`. There is no baseline subset, no waivable arm and no
-applicability profile.
+The live roster has **12 arms**: `doris`, `starrocks`, `db2`, `informix`, `rocketmq`, `iris`,
+`postgres`, `mysql`, `mssql`, `pgtls`, `tls-legacy` and `bastion`. All 12 are required.
+`all` expands to the whole roster and full admission requires every arm, including `tls-legacy`.
+There is no baseline subset, no waivable arm and no applicability profile.
+
+The Dbx-route live proof, formerly the `pg-dbx` arm, is the last suite of the `postgres` arm (same
+pinned PostgreSQL 17 image and same conformance crate, so one runner and one cold build serve both).
+It keeps its own evidence row, `taurine-db-conformance [dbx_pg_live,dbx_shadow_pg]`, with the same
+name and the same pass/FAIL rules, and any failing or skipped suite fails the arm. The guard pins
+that row (see below). `engine=pg-dbx` is no longer accepted: the dispatch contract does not list it
+and the planning step refuses it with a pointer to `postgres`.
 
 ## What the guard checks
 
@@ -21,17 +27,20 @@ It reads two files of this repository as text and JSON, never private source:
    required set: nothing missing, nothing extra, no duplicate arm.
 2. The `engine` options of the `live-proofs.yml` dispatch contract in `.github/ci-matrix.json` equal
    the required set.
-3. Each roster entry carries only the reviewed keys (`engine`, `target`, `filter`, `report`, `blurb`,
+3. The `postgres` entry carries the suite row `taurine-db-conformance dbx_pg_live,dbx_shadow_pg`
+   exactly once. Removing the row, dropping either test target, narrowing it with a test-name
+   filter or repeating it gives `missing_evidence_row`.
+4. Each roster entry carries only the reviewed keys (`engine`, `target`, `filter`, `report`, `blurb`,
    `suites`, `cargo_features`). A key such as `required`, `optional`, `skip`, `if` or `enabled` is
    refused until this check is reviewed to allow it.
 
 The result is one JSON line: a status, the three counts, the public arm IDs that are `missing` or
 `unrequired` (filled only when two arm lists were compared), and a fixed-vocabulary `reason` that
 names the file and the cause, for example `live-proofs.yml: no roster marker`, `ci-matrix.json:
-symlink`, or `live-proofs.yml: key 'optional' in arm 'pg-dbx'`. It exits 0 only for `ok`; every other
+symlink`, or `live-proofs.yml: key 'optional' in arm 'mysql'`. It exits 0 only for `ok`; every other
 status exits 1: `roster_mismatch`, `contract_mismatch`, `duplicate_arm`, `unknown_roster_key`,
-`invalid_input` and `unsafe_input`. An input failure carries empty `missing` and `unrequired` lists,
-so a reformatted or unreadable file is never reported as thirteen missing arms.
+`missing_evidence_row`, `invalid_input` and `unsafe_input`. An input failure carries empty `missing`
+and `unrequired` lists, so a reformatted or unreadable file is never reported as twelve missing arms.
 
 Inputs are read fail-closed: a file must be a regular file, not a symlink, within a size limit and
 valid UTF-8; JSON is bounded in nesting and rejects duplicate keys; the repository root may not be a
@@ -58,7 +67,7 @@ admission requirement itself, which lives in the coordinator's dispatch and veri
 
 `test-live-roster.sh` already runs the real plan step and pins the 13 roster keys and the `all`
 expansion against the contract, `check-dispatch-contracts.rb` already pins the contract options to the
-13 arms, and the protected call input check in `live-proof-arm.yml` already enforces a key allowlist at
+12 arms, and the protected call input check in `live-proof-arm.yml` already enforces a key allowlist at
 run time. Most of this guard is therefore redundant by design. What it adds is:
 
 - a static, policy-time allowlist of roster entry keys, with an explicit duplicate-arm status;
@@ -80,15 +89,17 @@ steps, like the existing contract check (see "Changing the policy" in `how-ci-wo
   set or the current set plus the named new arm, never a subset of it. Do not write "accept either
   set" logic that tolerates a smaller roster.
 - **Removing or renaming an arm is a coverage reduction** and needs its own owner decision first.
+  The `pg-dbx` arm was merged into `postgres` as a timing change (the proof and its evidence row
+  are unchanged and pinned by the guard), not as a coverage reduction.
 
 ## Considered and rejected: a `pg-dbx` exclusion profile
 
 An earlier prototype of this work proposed a separate applicability profile that required only the
 other baseline arms and treated `pg-dbx` as not applicable to a source that lacked Stage 2 proof. The
 owner rejected it permanently: a profile that admits a source with no `pg-dbx` proof is a coverage
-hole, and there is no present case for it. `all` stays the full registered roster with `pg-dbx`
-required. Do not reintroduce a profile, flag or source-supplied mapping that waives an arm. The
+hole, and there is no present case for it. `all` stays the full registered roster, which includes
+the Dbx-route proof (now the pinned `dbx_pg_live,dbx_shadow_pg` row of the `postgres` arm). Do not reintroduce a profile, flag or source-supplied mapping that waives an arm. The
 prototype's source-marker diagnostic was removed with it; it remains in git history.
 
-Registered proof readiness is not an execution PASS, and a missing `pg-dbx` Stage 2 result stays a
+Registered proof readiness is not an execution PASS, and a missing Dbx-route (`dbx_pg_live,dbx_shadow_pg`) Stage 2 result stays a
 failed full run.

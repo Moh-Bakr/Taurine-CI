@@ -173,13 +173,19 @@ ruby -ryaml -e 'path=ARGV.fetch(0); doc=YAML.safe_load(File.read(path),aliases:f
   "${work}/tree/.github/workflows/pg8-measurement.yml"
 expect_policy_rejects 'future PG8 dispatch identity input drift'
 
-# Final Stage 2 accepts only new13. The Stage 1 predecessor policy separately
+# Final Stage 2 accepts only the 12-arm roster (new13 below keeps its historical name). The Stage 1 predecessor policy separately
 # allows complete old12 during rollout; candidate policy must reject that old
 # schema as well as every incomplete subset.
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
   "${work}/tree/.github/ci-matrix.json"
 expect_policy_rejects 'old12 rollback after Stage 2 activation'
+
+# pg-dbx was merged into the postgres arm: the former 13-arm roster is stale and must be refused.
+reset_fixture
+ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion]; File.write(path,JSON.pretty_generate(data))' \
+  "${work}/tree/.github/ci-matrix.json"
+expect_policy_rejects 'stale 13-arm live roster that still lists pg-dbx'
 
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
@@ -188,12 +194,12 @@ expect_policy_rejects 'stale 11-arm live roster'
 
 # The exact complete new13 candidate schema is valid. Every proper subset
 # missing any previously mandatory arm is refused below.
-new13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
+new13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy","bastion"]'
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=JSON.parse(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
   "${work}/tree/.github/ci-matrix.json" "${new13}"
 ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
-for missing in doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion; do
+for missing in doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion; do
   reset_fixture
   ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); options=data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]; options << "tls-legacy"; options.delete(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
     "${work}/tree/.github/ci-matrix.json" "${missing}"
