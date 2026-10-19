@@ -86,11 +86,13 @@ if [[ "$1" == metadata ]]; then
     '{packages: [("openssl-src","openssl-sys","openssl","tokio-openssl") | {name: ., source: $src, manifest_path: ($root + . + "/Cargo.toml")}]}'
   exit 0
 fi
-crate='' target='' edges=''
+crate='' target='' edges='' prefix=''
 while (( $# )); do
-  case "$1" in --invert) crate="$2"; shift ;; --target) target="$2"; shift ;; -e) edges="$2"; shift ;; esac
+  case "$1" in --invert) crate="$2"; shift ;; --target) target="$2"; shift ;; -e) edges="$2"; shift ;; --prefix) prefix="$2"; shift ;; esac
   shift
 done
+# The depth-prefixed output is what the parsers read (`0name`, `1name`): a call without `--prefix depth` fails here.
+if [[ "${prefix}" != depth ]]; then echo 'stub cargo: tree called without --prefix depth' >&2; exit 2; fi
 if [[ "${edges}" == features ]]; then
   # The feature view: taurine-db-dbx with its enabled features. FAKE_NO_LEGACY_TLS drops legacy-tls,
   # FAKE_LEGACY_TLS_OTHER shows the feature on a different package only.
@@ -241,6 +243,8 @@ expect_fail 'another crate depending on tokio-openssl (S1 gate)' 'FAKE_TOKIO_BAD
 mutant 'the shell list re-widened: the MySQL fork allowed on openssl' artefact "openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;" "openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx taurine-mysql-async' ;;" fail 'FAKE_MYSQL_OPENSSL=1 openssl_door_gate g taurine-mobile -'
 expect_fail 'the door in the graph but taurine-db-dbx without legacy-tls' 'FAKE_NO_LEGACY_TLS=1 openssl_door_gate g taurine-mobile -' 'taurine-db-dbx does not resolve with its legacy-tls feature'
 expect_fail 'legacy-tls enabled on another package only' 'FAKE_NO_LEGACY_TLS=1 FAKE_LEGACY_TLS_OTHER=1 openssl_door_gate g taurine-mobile aarch64-linux-android' 'taurine-db-dbx does not resolve with its legacy-tls feature'
+mutant 'the legacy-tls feature query without --prefix depth' artefact 'args=(tree --locked --package "${package}" -e features --invert taurine-db-dbx --depth 2 --prefix depth)' 'args=(tree --locked --package "${package}" -e features --invert taurine-db-dbx --depth 2)' pass 'openssl_door_gate g taurine-mobile -'
+mutant 'the inverted door query without --prefix depth' artefact 'tree --locked --package "${package}" -e "${edges}" --invert "${crate}" --depth "${depth}" --prefix depth)' 'tree --locked --package "${package}" -e "${edges}" --invert "${crate}" --depth "${depth}")' pass 'openssl_door_gate g taurine-mobile -'
 mutant 'the legacy-tls feature assertion removed' artefact 'if ! dbx_legacy_tls_feature "${package}" "${target}" "${log}.features"; then' 'if false; then' fail 'FAKE_NO_LEGACY_TLS=1 openssl_door_gate g taurine-mobile -'
 expect_fail 'unknown package' 'openssl_door_gate g no-such-package -' 'did not resolve'
 
