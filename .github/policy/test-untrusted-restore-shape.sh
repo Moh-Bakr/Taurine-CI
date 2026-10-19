@@ -448,7 +448,7 @@ mutant 'a step env sets RUSTUP_TOOLCHAIN on the toolchain step' 'sets RUSTUP_TOO
 '
 mutant 'the job container changed' 'container must be absent or exactly the reviewed' "${c}" "container: \${{ inputs.concern == 'e2e-visual' &&" "container: \${{ inputs.concern == 'rust-db' &&"
 mutant 'the job container replaced by an image' 'container must be absent or exactly the reviewed' "${c}" "    container: \${{ inputs.concern == 'e2e-visual'" '    container: ubuntu:latest
-    x-unused: \${{ inputs.concern == '"'"'e2e-visual'"'"'' 
+    x-unused: \${{ inputs.concern == '"'"'e2e-visual'"'"''
 mutant 'the job defaults gain a shell' 'defaults must be absent or exactly' "${c}" '    defaults:
       run:
         working-directory: src' '    defaults:
