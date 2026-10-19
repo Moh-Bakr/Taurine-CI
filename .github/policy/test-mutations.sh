@@ -112,7 +112,7 @@ drain() {
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb check-structure.rb check-strict-structure.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb check-structure.rb check-strict-structure.rb check-policy-steps.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
     # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
@@ -544,6 +544,39 @@ mutation '12. the strict structure step made conditional' "${public}" '      - n
         shell: bash' "      - name: Check the control-plane structure, strictly
         if: \${{ false }}
         shell: bash"
+
+# 16. Policy step coverage and the required check's name (check-policy-steps.rb, check-strict-structure.rb).
+mutation '16. the check-repository policy step deleted' "${public}" '      # Repository contents: no private source, credential material or unexpected path.
+      - name: Reject private-source and credential material
+        shell: bash
+        run: bash .github/policy/check-repository.sh
+' ''
+mutation '16. the mutation suite replaced by echo ok' "${public}" '        run: bash .github/policy/test-mutations.sh' '        run: echo ok'
+mutation '16. a policy step weakened with || true' "${public}" '        run: bash .github/policy/test-sanitizers.sh' '        run: bash .github/policy/test-sanitizers.sh || true'
+mutation '16. a policy step given a steering env' "${public}" '      - name: Test the sanitizer expressions against path and token fixtures
+        shell: bash' '      - name: Test the sanitizer expressions against path and token fixtures
+        shell: bash
+        env:
+          RUBYOPT: -e0'
+mutation '16. a policy step made conditional' "${public}" '      - name: Test the weekly openssl-src patch cadence
+        shell: bash' '      - name: Test the weekly openssl-src patch cadence
+        if: ${{ false }}
+        shell: bash'
+mutation '16. a policy step renamed (the table no longer matches)' "${public}" '      - name: Test the weekly openssl-src patch cadence' '      - name: Test the weekly openssl-src patch cadence (renamed)'
+mutation '16. a policy step added outside the table' "${public}" '      - name: Test the weekly openssl-src patch cadence' '      - name: Extra step
+        shell: bash
+        run: "true"
+      - name: Test the weekly openssl-src patch cadence'
+mutation '16. a policy step duplicated' "${public}" '      - name: Test the weekly openssl-src patch cadence' '      - name: Test the weekly openssl-src patch cadence
+        shell: bash
+        run: bash .github/policy/test-weekly-cadence.sh
+      - name: Test the weekly openssl-src patch cadence'
+mutation '16. the policy checkout given a repository override' "${public}" '          fetch-depth: 1
+          persist-credentials: false' '          fetch-depth: 1
+          repository: someone/else
+          persist-credentials: false'
+mutation '16. the base-pass call named like the required check' "${public}" '    name: Base policy' '    name: Validate workflow policy'
+mutation '16. the policy-steps check dropped from the policy job' "${public}" '        run: ruby .github/policy/check-policy-steps.rb' '        run: "true"'
 
 # mutation_by CHECKER LABEL FILE OLD NEW: like mutation, but the named check alone must refuse the tree.
 # test-base-policy-result.sh pins the shape of base-policy.yml, which the reusable-workflow fixtures
