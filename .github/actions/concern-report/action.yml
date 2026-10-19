@@ -200,6 +200,69 @@ runs:
           echo "npm global @tauri-apps packages: $(npm ls -g --depth=0 2>/dev/null | grep -c '@tauri-apps' || true)"
         }
 
+        # Entry-point failures: for each imported DLL that resolves, list the imported function
+        # names the resolved DLL does not export. Everything printed is a Windows DLL name, an
+        # imported function name or a runner tool directory. A test binary is private build
+        # output, but its import table names only public Windows/runtime symbols, not private
+        # source. Names over 64 characters are dropped, output is restricted to
+        # [A-Za-z0-9_.@?$/ ()!-], lines are cut to 120 characters, at most 20 pairs are printed,
+        # and it runs only on the failure path under a 50 second budget. Every printed line
+        # starts with a DLL name, which cannot contain ':', so no line can start a workflow
+        # command. A directory is printed only under a public runner tool root; otherwise only
+        # a class (System32, binary dir, PATH (other)).
+        entrypoint_detail() {
+          local objdump="$1" dir="$2" log="$3"
+          local start="${SECONDS}" exe dll resolved where_out wp n
+          local out="${RUNNER_TEMP}/entry-pairs.txt" imp="${RUNNER_TEMP}/entry-imp.txt" exp="${RUNNER_TEMP}/entry-exp.txt"
+          local cand="${RUNNER_TEMP}/entry-exes.txt" tbl="${RUNNER_TEMP}/entry-table.txt" dlls="${RUNNER_TEMP}/entry-dlls.txt"
+          : >"${out}"; : >"${cand}"
+          # Prefer the binaries named in the log; fall back to the first few test executables.
+          tr -d '\r' <"${log}" | grep -oE '[A-Za-z0-9_-]+-[0-9a-f]{16}\.exe' | sort -u | head -3 | while IFS= read -r n; do
+            [[ -f "${dir}/debug/deps/${n}" ]] && echo "${dir}/debug/deps/${n}" >>"${cand}"
+          done
+          [[ -s "${cand}" ]] || ls "${dir}"/debug/deps/*.exe 2>/dev/null | head -3 >"${cand}"
+          echo '  imported functions missing from the DLL that resolved (dll!function, up to 20; resolved from):'
+          while IFS= read -r exe; do
+            [[ -f "${exe}" ]] || continue
+            # Parse the import table once: "dll name" rows. Any table header resets the state,
+            # and delay-import blocks are ignored.
+            timeout 10 "${objdump}" -p "${exe}" 2>/dev/null | tr -d '\r' | awk '
+              /Tables?:/ { cur = ""; delay = (tolower($0) ~ /delay/); next }
+              !delay && /DLL Name:/ { cur = $NF; if (length(cur) > 64 || cur !~ /^[A-Za-z0-9_.-]+\.[dD][lL][lL]$/) cur = ""; next }
+              cur != "" && NF == 2 && $1 ~ /^[0-9]+$/ && length($2) <= 64 && $2 ~ /^[A-Za-z0-9_.@?$-]+$/ { print cur, $2 }' >"${tbl}"
+            cut -d' ' -f1 "${tbl}" | sort -u >"${dlls}"
+            while IFS= read -r dll; do
+              [[ $((SECONDS - start)) -lt 50 ]] || break 2
+              case "${dll}" in api-ms-win-*|ext-ms-win-*) continue ;; esac
+              resolved=''; where_out='System32'
+              if [[ -f "/c/Windows/System32/${dll}" ]]; then resolved="/c/Windows/System32/${dll}"
+              elif [[ -f "$(dirname "${exe}")/${dll}" ]]; then resolved="$(dirname "${exe}")/${dll}"; where_out='binary dir'
+              else
+                resolved="$(command -v "${dll}" 2>/dev/null || true)"
+                wp="$(timeout 10 cmd //c "where ${dll}" 2>/dev/null | head -1 | tr -d '\r' | sed -E 's#\\[^\\]*$##; s#\\#/#g' | cut -c1-80)"
+                case "${wp}" in
+                  [Cc]:/Program\ Files*|[Cc]:/hostedtoolcache*|[Cc]:/Windows*|[Cc]:/Strawberry*) where_out="PATH ${wp}" ;;
+                  *) where_out='PATH (other)' ;;
+                esac
+              fi
+              [[ -n "${resolved}" ]] || continue
+              awk -v want="${dll}" '$1 == want { print $2 }' "${tbl}" | sort -u >"${imp}"
+              # Exported names: "Ordinal RVA Name" rows of the export table; ordinal-only rows
+              # have no name and are skipped.
+              timeout 10 "${objdump}" -p "${resolved}" 2>/dev/null | tr -d '\r' | awk '
+                /Tables?:/ { e = ($0 ~ /Export Table:/); next }
+                e && NF >= 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^0x[0-9a-fA-F]+$/ && length($3) <= 64 && $3 ~ /^[A-Za-z0-9_.@?$-]+$/ { print $3 }' | sort -u >"${exp}"
+              [[ -s "${exp}" ]] || continue
+              comm -23 "${imp}" "${exp}" | sed "s|^|${dll}!|; s|\$| (${where_out})|" >>"${out}"
+            done <"${dlls}"
+          done <"${cand}"
+          if [[ -s "${out}" ]]; then
+            tr -cd 'A-Za-z0-9_.@?$ ()!/\n-' <"${out}" | sed 's/^/    /' | cut -c1-120 | head -20
+          else
+            echo '    none found by name; the mismatch is not in an imported function of a resolved DLL (check delay-loaded or forwarded exports)'
+          fi
+        }
+
         # A test binary that cannot start: name it (crate name without the hash) and the DLLs
         # it imports that cannot be found. The import list comes from llvm-objdump (Windows) on
         # the built test executables; only file names of public libraries are published, as
@@ -249,6 +312,7 @@ runs:
           fi
           if [[ ! -s "${seen}" ]]; then
             echo '  every imported DLL resolves from the runner; the failure is an entry point (a DLL version mismatch), not a missing file'
+            entrypoint_detail "${objdump}" "$(cygpath -u "${dir}" 2>/dev/null || echo "${dir}")" "${log}" || true
           fi
         }
 
