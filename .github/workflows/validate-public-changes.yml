@@ -95,6 +95,12 @@ jobs:
         shell: bash
         run: ruby .github/policy/check-structure.rb --strict
 
+      # Every policy step is present once, runs its pinned command and sits in its pinned job. --exact: this
+      # tree's own table must match exactly (main's copy, run by the base pass, accepts shape-checked extras).
+      - name: Check that every policy step is present, exact and in its job
+        shell: bash
+        run: ruby .github/policy/check-policy-steps.rb --exact
+
       # Trust tiers: reviewed Actions, token revocation order, cache, secrets, dispatchers.
       - name: Enforce immutable reviewed Actions and safe workflow features
         shell: bash
@@ -183,6 +189,10 @@ jobs:
       - name: Test that the base pass stays on the required status check
         shell: bash
         run: bash .github/policy/test-base-policy-result.sh
+
+      - name: Test that the aggregate policy layout stays fail-closed
+        shell: bash
+        run: bash .github/policy/test-policy-aggregate.sh
 
       - name: Test sanitized build-failure category classification
         shell: bash

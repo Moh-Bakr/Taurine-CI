@@ -3037,7 +3037,7 @@
         "rust_packages": [
           "taurine-cli"
         ],
-        "timeout": 45,
+        "timeout": 30,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3063,14 +3063,14 @@
           "taurine-transport-git",
           "taurine-transport-wifi"
         ],
-        "timeout": 60,
+        "timeout": 30,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
       "rust-db": {
         "rust_package_glob": "taurine-db*",
         "full_only": true,
-        "timeout": 60,
+        "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3081,7 +3081,7 @@
           "taurine-ovpn-sys",
           "taurine-net-conformance"
         ],
-        "timeout": 60,
+        "timeout": 30,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3114,7 +3114,7 @@
           "dbx-mongo-shell"
         ],
         "full_only": true,
-        "timeout": 90,
+        "timeout": 30,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3123,7 +3123,7 @@
           "taurine-desktop/**",
           "packages/**"
         ],
-        "timeout": 60,
+        "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3133,7 +3133,7 @@
           "packages/**"
         ],
         "full_only": true,
-        "timeout": 60,
+        "timeout": 30,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3143,7 +3143,7 @@
           "packages/**"
         ],
         "full_only": true,
-        "timeout": 60,
+        "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3153,7 +3153,7 @@
           "packages/**"
         ],
         "full_only": true,
-        "timeout": 60,
+        "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3163,7 +3163,7 @@
           "packages/**"
         ],
         "full_only": true,
-        "timeout": 60,
+        "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3173,7 +3173,7 @@
           "packages/**"
         ],
         "full_only": true,
-        "timeout": 60,
+        "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3185,7 +3185,7 @@
         "rust_packages": [
           "taurine-desktop"
         ],
-        "timeout": 90,
+        "timeout": 40,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
@@ -3194,14 +3194,14 @@
           "taurine-tls-openssl"
         ],
         "full_only": true,
-        "timeout": 60,
+        "timeout": 30,
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
       "scan-security": {
         "always": true,
         "full_only": true,
-        "timeout": 90,
+        "timeout": 45,
         "paths": [
           "**/*.rs",
           "**/*.ts",
@@ -3223,7 +3223,7 @@
       },
       "e2e-visual": {
         "opt_in": "visual",
-        "timeout": 60,
+        "timeout": 30,
         "paths": [
           "taurine-desktop/**",
           "packages/**"
