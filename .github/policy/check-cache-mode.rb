@@ -529,7 +529,7 @@ LOCAL_ACTION_FILE_SHA256 = {
   'egress-audit' => %w[c6c3ff33427b869f38f3dc83800ae92143233b2137922d67d2a2f75aa32f74b5],
   'root-setup' => %w[1f288c476f7598e3fd583b8116994c429c01e3dc30376ea2df1ae9e2affe1dce],
   'drop-root' => %w[2562fdd5b283364bb839c3a547dce05bbea76438ea47c2be5f7efe26942579dc],
-  'sanitize' => %w[382e6b39a23850e7828ac51191c3e3d642e1e4efcc6233e7ba641f4f33275b27],
+  'sanitize' => %w[4bae990159024f93d9848b12344a7f1d92577dca0ee2aa9916b03c4196a06478],
   'concern-report' => %w[49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
   'shell-artefact' => %w[7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a],
   'scan-concern' => %w[4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
@@ -570,7 +570,7 @@ PREFIX_ACTION_WITH_SHA256 = {
   'scan-concern' => %w[71c7bea029bd1a9231abf6373a5d518bb45d2fa2cb449b10adb0dc01484dda5f],
   'root-setup' => %w[422c143f47d2ac7910b7348b5b4e00f68ccbf86e5f9cfa1d51d350d089bb2b92],
   'drop-root' => %w[7fea94b67beba935a17fd01ddee06f63266769df67633ff6f39a64eddb434652],
-  'sanitize' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a],
+  'sanitize' => %w[4bae990159024f93d9848b12344a7f1d92577dca0ee2aa9916b03c4196a06478],
   'concern-report' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a],
   'shell-artefact' => %w[44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a]
 }.freeze

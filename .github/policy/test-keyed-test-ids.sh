@@ -407,6 +407,24 @@ for bad in "${long_title}" 'token=abc' 'password=hunter2' 'uses postgres://u:p@h
   has "${out}" 'Test inventory withheld: the collector output did not match its reviewed shape.'
   no_leak "${out}" 'hunter2|ghp_|postgres://|someone@|eyJ|fine|skipped one'
 done
+# Base64url-style runs (underscore and hyphen), hex split by a hyphen or a space, and non-ASCII look-alikes
+# (a Cyrillic letter, a zero-width space, a control byte) also withhold the whole section.
+j=0
+for bad in 'abcdefghij_klmnopqrst-uvwxyzABCDEFGHIJ_0123456789' 'x deadbeef-cafebabe-01234567-89abcdef' 'x deadbeef cafebabe 01234567 89abcdef' \
+  "$(printf 'fine \xd0\xb0 title')" "$(printf 'fine\xe2\x80\x8b title')" "$(printf 'fine\x01 title')"; do
+  j=$((j + 1))
+  { cat "${dir}/inv-good.md" | sed '/^<\/details>$/d'; printf -- '- `c.test.ts` › `%s` — passed · 1 ms\n\n</details>\n' "${bad}"; } > "${dir}/inv-ascii-${j}.md"
+  out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-ascii-'"${j}"'.md" ""')"
+  has "${out}" 'Test inventory withheld: the collector output did not match its reviewed shape.'
+  no_leak "${out}" 'fine|skipped one'
+done
+# The fixed separators themselves are ASCII-checked after removal, so the good fixture still passes.
+out="$(run "${dir}/rt" 'tci_publish_inventory "'"${dir}"'/inv-good.md" ""')"
+has "${out}" 'skipped one'
+# A grep that errors (status 2) withholds the section instead of reading as "no secret".
+out="$(run "${dir}/rt" 'grep() { if [[ "$1" == -qiE ]]; then return 2; fi; command grep "$@"; }; tci_publish_inventory "'"${dir}"'/inv-good.md" ""')"
+has "${out}" 'Test inventory withheld'
+no_leak "${out}" 'skipped one'
 # A line at the bound (300 characters) with no secret shape is still published.
 ok_title="$(printf 'x %.0s' $(seq 1 100))"
 { cat "${dir}/inv-good.md" | sed '/^<\/details>$/d'; printf -- '- `c.test.ts` › `%s` — passed · 1 ms\n\n</details>\n' "${ok_title}"; } > "${dir}/inv-ok-long.md"

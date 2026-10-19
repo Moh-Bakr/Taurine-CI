@@ -318,7 +318,7 @@ runs:
         # identity line, the fallback lines), else the whole section is replaced by a fixed message.
         tci_publish_inventory() {
           local section="$1" records="${2:-}" kept ere rc secret_ere
-          secret_ere='(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{12,}|sk-[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{10,}|bearer +[A-Za-z0-9._~+/-]{10,}|(password|passwd|pwd|secret|token|api[_-]?key)[a-z_]*[ ]*[=:]|(postgres(ql)?|mysql|mariadb|mongodb|redis|amqp)(\+[a-z]+)?://|[0-9a-f]{32,}|[A-Za-z0-9+]{40,}|[A-Za-z0-9+/]{20,}={1,2}|[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})'
+          secret_ere='(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{12,}|sk-[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{10,}|bearer +[A-Za-z0-9._~+/-]{10,}|(password|passwd|pwd|secret|token|api[_-]?key)[a-z_]*[ ]*[=:]|(postgres(ql)?|mysql|mariadb|mongodb|redis|amqp)(\+[a-z]+)?://|[0-9a-f]{32,}|([0-9a-f]{4,8}[- ]){3,}[0-9a-f]{4,8}|[A-Za-z0-9+_-]{40,}|[A-Za-z0-9+/_-]{20,}={1,2}|[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})'
           kept="$(mktemp "${RUNNER_TEMP:-/tmp}/tci-inv.XXXXXX" 2>/dev/null || mktemp)"
           ere='^(### Tests exercised by this run|Identifies the tests that passed or were skipped, by repo-relative file path and title only; a failed or flaky test is identified only by a keyed id\. Source, fixtures, data values and environment details are not published\.|Test inventory unavailable: (no runner output could be collected|the collector did not complete|the collector runner is not installed for this concern)\.|- [0-9]+ tests in [0-9]+ files\.|- [0-9]+ (entry|entries) withheld by the secret-shape scan; [0-9]+ withheld as malformed\.|- [0-9]+ runner report\(s\) could not be parsed\.|- Showing the first [0-9]+ \(cap\): [0-9]+ more not listed\.|- [0-9]+ failed or flaky: published only as keyed ids \(`failed-test-id`\), never by title or path\.|<details>|<summary>Test identities</summary>|</details>|- `[^`]+` › `[^`]+` — (passed|skipped) · [0-9]+ ms|collector error class: [A-Za-z_]{1,40}|#### [A-Za-z0-9._-]+ \(fallback, from the runner report\)|- tests: [0-9]+; ((expected|unexpected|flaky|skipped|passed|failed|timedOut|interrupted|\?) [0-9]+(, )?)+)$'
           tr -d '\r' <"${section}" 2>/dev/null | grep -vE ' — (failed|flaky) · ' | grep -v '^$' >"${kept}" || true
@@ -329,10 +329,17 @@ runs:
           # passed or skipped identity line longer than 300 characters, and any published line that has a
           # secret shape (a token prefix, a credential assignment, a database URL, a long hex or base64
           # run, an email address). The control-plane filter does not trust the collector's own scan.
-          local long=0 secret=0
+          # Every check here fails closed: a grep that errors (status 2 or anything but a clean 0 or 1) withholds
+          # the section, and only status 1 (no match) counts as "no secret shape". A published line is also
+          # printable ASCII only once the fixed separators (` › `, ` — `, ` · `) are taken out: any other byte
+          # below 0x20 or above 0x7E (a zero-width or look-alike character) withholds the section.
+          local long=0 secret=0 r=0
           if [[ "${rc}" -eq 1 ]]; then
             awk '/^- `/ && length($0) > 300 { f = 1 } END { exit f ? 1 : 0 }' "${kept}" || long=1
-            grep -qiE "${secret_ere}" "${kept}" 2>/dev/null && secret=1
+            r=0; grep -qiE "${secret_ere}" "${kept}" 2>/dev/null || r=$?
+            [[ "${r}" -eq 1 ]] || secret=1
+            r=0; LC_ALL=C sed 's/ › / /g; s/ — / /g; s/ · / /g' "${kept}" | LC_ALL=C grep -q '[^ -~]' 2>/dev/null || r=$?
+            [[ "${r}" -eq 1 ]] || secret=1
           fi
           if [[ -s "${kept}" && "${rc}" -eq 1 && "${long}" -eq 0 && "${secret}" -eq 0 ]]; then
             tr -d '\r' <"${section}" | grep -vE ' — (failed|flaky) · '
