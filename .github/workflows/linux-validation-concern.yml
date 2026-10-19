@@ -241,7 +241,9 @@ jobs:
         with:
           root: true
           desktop: true
-          mobile: true
+          # The desktop concerns and the browser tiers read taurine-mobile only as source files (the
+          # checkout), never its node_modules; every other concern keeps the mobile install.
+          mobile: ${{ !(startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'desktop-')) }}
           # The browser tiers are frontend-only: they do not need the vendored OpenVPN3 sources.
           vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' && !startsWith(inputs.concern, 'e2e-') }}
 
