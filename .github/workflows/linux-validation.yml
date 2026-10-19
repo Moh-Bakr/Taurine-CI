@@ -438,6 +438,8 @@ jobs:
       SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
+      # The main half never takes the untrusted restores; the key is passed so no caller relies on the callee default.
+      untrusted_readonly_cache: false
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.validate-input.outputs.timeouts)[matrix.concern] }}
       # The shadow review this concern's coverage group would run under a
@@ -461,6 +463,11 @@ jobs:
       SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
     with:
       source_sha: ${{ inputs.source_sha }}
+      # Stage 2 switch, a literal (never an expression, never a dispatch input): false until the
+      # enforcement spike of docs/untrusted-readonly-cache.md is recorded green there, in a change
+      # merged BEFORE the one that flips this. The policy refuses true unless the record is already
+      # on the base and the flipping change neither adds nor alters it.
+      untrusted_readonly_cache: false
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.validate-input.outputs.timeouts)[matrix.concern] }}
       # The shadow review this concern's coverage group would run under a

