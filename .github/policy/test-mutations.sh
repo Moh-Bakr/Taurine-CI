@@ -695,7 +695,7 @@ mutation '17. a restore with no ref gate, reachable on the untrusted ref' "${mac
 mutation '17. rule N dropped from the checker' .github/policy/check-cache-mode.rb "      next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')" "      next"
 
 # 19. Stage 2, the read-only untrusted restore (docs/untrusted-readonly-cache.md): every way to weaken it.
-ug_if="        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' }}"
+ug_if="        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) }}"
 pin='actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 early_restore() { # name: a reviewed-shape untrusted restore of the sources, to be placed at a bad position
   printf '      - name: %s\n        id: early-untrusted\n%s\n        uses: %s\n        with:\n          path: |\n            ${{ steps.cargo-home.outputs.dir }}/registry/cache\n          key: cargo-sources-v3-${{ runner.os }}-${{ hashFiles('"'"'src/Cargo.lock'"'"', '"'"'src/taurine-backend/*/Cargo.lock'"'"', '"'"'src/taurine-backend/vendor/*/Cargo.lock'"'"', '"'"'src/vendor/*/Cargo.lock'"'"') }}\n\n' "$1" "${ug_if}" "${pin}"
@@ -759,7 +759,7 @@ mutation '19. the untrusted restore also gated by a dispatch-controlled term' "$
         uses: ${pin}
         with:
           path: |
-            \${{ steps.cargo-home.outputs.dir }}/registry/cache" "        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' && inputs.source_sha != '' }}
+            \${{ steps.cargo-home.outputs.dir }}/registry/cache" "        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) && inputs.source_sha != '' }}
         uses: ${pin}
         with:
           path: |
@@ -787,7 +787,7 @@ ${ug_if}
           path: |
             src"
 mutation '19. the untrusted source verifier removed' "${linux_concern}" '      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)
-        if: ${{ github.ref == '"'"'refs/heads/untrusted'"'"' && inputs.untrusted_readonly_cache && inputs.concern == '"'"'rust-db'"'"' }}
+        if: ${{ github.ref == '"'"'refs/heads/untrusted'"'"' && inputs.untrusted_readonly_cache && (inputs.concern == '"'"'rust-db'"'"' || startsWith(inputs.concern, '"'"'rust-app-'"'"')) }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
         with:
@@ -796,7 +796,7 @@ mutation '19. the untrusted source verifier removed' "${linux_concern}" '      -
           os-label: Linux
 ' ''
 mutation '19. the untrusted compiled strip removed' "${linux_concern}" '      - name: Strip workspace crates from the restored dependency cache (untrusted, read-only)
-        if: ${{ github.ref == '"'"'refs/heads/untrusted'"'"' && inputs.untrusted_readonly_cache && inputs.concern == '"'"'rust-db'"'"' }}
+        if: ${{ github.ref == '"'"'refs/heads/untrusted'"'"' && inputs.untrusted_readonly_cache && (inputs.concern == '"'"'rust-db'"'"' || startsWith(inputs.concern, '"'"'rust-app-'"'"')) }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
         with:
@@ -804,6 +804,7 @@ mutation '19. the untrusted compiled strip removed' "${linux_concern}" '      - 
           dir: ${{ steps.cargo-target.outputs.dir }}
           cache-hit: ${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}
           os-label: Linux
+          deny-door: '"'"'true'"'"'
 ' ''
 mutation '19. a project step between the untrusted restore and its verifier' "${linux_concern}" '      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)' '      - name: Run project code early
         run: npm ci
@@ -841,7 +842,7 @@ mutation '19. the flag referenced from another step condition' "${linux_concern}
 vname='      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)'
 mutation '19. the untrusted verifier condition ANDed with false' "${linux_concern}" "${vname}
 ${ug_if}" "${vname}
-        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' && false }}"
+        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) && false }}"
 mutation '19. the untrusted verifier cache-hit a literal' "${linux_concern}" "          cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}" "          cache-hit: 'false'"
 mutation '19. the untrusted verifier with continue-on-error' "${linux_concern}" "${vname}
 ${ug_if}" "${vname}
@@ -850,6 +851,7 @@ ${ug_if}"
 mutation '19. the untrusted verifier pointed at another directory' "${linux_concern}" "          sources-dir: \${{ steps.cargo-home.outputs.dir }}
           cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}" "          sources-dir: /nonexistent
           cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}"
+mutation '19. the untrusted strip loses deny-door (compiled OpenSSL output would be restored)' "${linux_concern}" "          deny-door: 'true'" "          deny-door: 'false'"
 mutation '19. the untrusted strip takes its cache-hit from the main restore' "${linux_concern}" "          cache-hit: \${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}" "          cache-hit: \${{ steps.cargo-target-cache.outputs.cache-hit }}"
 # source-controlled code ahead of a token-holding restore
 mutation '19. a project script before the source restores' "${linux_concern}" '      - name: Locate Cargo home for the third-party source cache' '      - name: Fetch pinned vendored sources early

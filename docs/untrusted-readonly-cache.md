@@ -1,7 +1,7 @@
 # Design: read-only cache restore on `untrusted` runs
 
 Status: **design; Stage 1 is merged. Stage 2 (this pull request) adds the four reviewed read-only
-untrusted restores to `linux-validation-concern.yml` (rust-db only), behind a caller flag
+untrusted restores to `linux-validation-concern.yml` (rust-db and the Linux rust-app shards), behind a caller flag
 (`untrusted_readonly_cache`) that stays `false` until the dispatch-path enforcement spike of
 section 7c is recorded green in this file. With the flag false no untrusted restore runs.** Implementation needs (1) an independent adversarial security review and (2) the
 owner's explicit sign-off, because it changes a stated security rule (see
@@ -348,6 +348,30 @@ that the vendored OpenSSL is the locked build. The measured saving (about one to
 critical path) does not justify weakening that. It always builds OpenSSL from source. The crate-sources
 cache is a different cache: it holds only lockfile-verified crate archives (including `openssl-src`), never
 the compiled door.
+
+### 4.6 The rust-app shards, and compiled OpenSSL never restored untrusted
+
+The untrusted restores cover `rust-db` and the three Linux `rust-app-K` shards (the DuckDB-heavy concern),
+through one reviewed concern term, `(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))`,
+pinned as a whole conjunct by `check-cache-mode.rb`, `check-cache-groups.rb` and `drop-root-order.rb`. It never
+names `rust-packaging` (cached on main, not restored untrusted), the door concern or any wider prefix. The key is
+the very key main's protected save wrote: every shard computes the same `rust-app` group key with the `locate`
+step (same OS, image, `rust-app` group, `test-default+check-openvpn` feature label, rustc, week, lock, manifests
+and environment hashes), and `rust-app-2` alone saves it on main, so an untrusted shard restores an exact hit
+whenever the source has not changed `Cargo.lock`, a `Cargo.toml` or a cargo config.
+
+At the time of writing the rust-app build graph holds no OpenSSL (`cargo tree -p taurine-app -p taurine-desktop
+-p taurine-mobile -i openssl-sys` finds no package; the door is reachable only behind `taurine-db-dbx`'s
+`legacy-tls` feature, which no rust-app package enables). That is a fact about today's manifests, not a guarantee, and
+`rust-db` already builds `taurine-db-dbx/legacy-tls` in its tests, so its saved entry can hold `openssl-sys` and
+`openssl-src` output. The untrusted restore therefore never relies on the entry being clean: the restore-time strip
+that follows every untrusted compiled restore passes `deny-door: 'true'` to the `rust-target-cache` composite, which
+also classifies the OpenSSL door crates (`taurine-tls-openssl`, `openssl`, `openssl-sys`, `openssl-src`,
+`openssl-macros`, `tokio-openssl`, `postgres-openssl`, `native-tls` and the banned `aws-lc-*` crates) as strip roots,
+removes them and every crate built on one, and fails the step if any entry named for one remains. The main-scope
+restore is unchanged (it keeps what main saved). `drop-root-order.rb` and `check-cache-mode.rb` refuse an untrusted
+compiled restore whose strip is missing, moved, not directly after the restore, or without `deny-door: 'true'`, and
+the whole composite is pinned by content hash.
 
 ## 5. Policy changes (so a later edit cannot silently add `save` to `untrusted`)
 

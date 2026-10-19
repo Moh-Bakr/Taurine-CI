@@ -35,10 +35,10 @@
 #  I. a job whose steps contain actions/cache/save is `write`;
 #  J. a job whose steps contain actions/cache/restore (and no save) is `read` or `write`.
 #  N. (Stage 2) a cache restore is main-only, or it is exactly one of the four reviewed read-only
-#     untrusted restores (see REVIEWED_UNTRUSTED_RESTORES): Linux concern workflow only, rust-db only,
-#     `actions/cache/restore` directly (never through a composite), its `if` the exact top-level
-#     terms `github.ref == 'refs/heads/untrusted'`, `inputs.untrusted_readonly_cache` and
-#     `inputs.concern == 'rust-db'` and nothing else, `with` exactly `path` and `key`, the path and
+#     untrusted restores (see REVIEWED_UNTRUSTED_RESTORES): Linux concern workflow only, rust-db and the
+#     rust-app shards only, `actions/cache/restore` directly (never through a composite), its `if` the exact
+#     top-level terms `github.ref == 'refs/heads/untrusted'`, `inputs.untrusted_readonly_cache` and
+#     `(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))` and nothing else, `with` exactly `path` and `key`, the path and
 #     the key the reviewed literals (a key never derives from a dispatch input, the head ref or any
 #     other expression), and no other step key (no env, continue-on-error, timeout). Around it:
 #     no `write` permission anywhere in the called workflow or in the untrusted half that calls it,
@@ -64,7 +64,11 @@ BLOCKING_EXPR = %q(${{ (contains(fromJSON('["failure","cancelled"]'), needs.cach
 
 UNTRUSTED_RESTORE_WORKFLOWS = %w[linux-validation-concern.yml].freeze
 UNTRUSTED_FLAG = 'untrusted_readonly_cache'.freeze
-UNTRUSTED_RESTORE_TERMS = [UNTRUSTED, 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
+# The reviewed concern term: rust-db and the rust-app shards (the Linux rust-app-1 to rust-app-3), one
+# parenthesised conjunct. Never rust-packaging (cached on main, not restored untrusted), never the OpenSSL
+# door concern (rust-tls-openssl, section 4.5), never a wider startsWith.
+UNTRUSTED_CONCERN_TERM = "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))".freeze
+UNTRUSTED_RESTORE_TERMS = [UNTRUSTED, 'inputs.untrusted_readonly_cache', UNTRUSTED_CONCERN_TERM].freeze
 PIN = 'actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9'.freeze
 SOURCES_PATH = "${{ steps.cargo-home.outputs.dir }}/registry/cache\n".freeze
 TARGET_PATH = "${{ steps.cargo-target.outputs.dir }}/debug/deps\n${{ steps.cargo-target.outputs.dir }}/debug/build\n${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint\n".freeze
@@ -421,7 +425,7 @@ docs.each do |path, doc|
         (reviewed_restores[path] ||= []) << st
         next
       end
-      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref) and is not the reviewed read-only untrusted restore (Linux concern workflow, rust-db, the exact terms, path and key of docs/untrusted-readonly-cache.md, Stage 2)"
+      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref) and is not the reviewed read-only untrusted restore (Linux concern workflow, rust-db and the rust-app shards, the exact terms, path and key of docs/untrusted-readonly-cache.md, Stage 2)"
     end
   end
 end
@@ -507,7 +511,7 @@ CARGO_HOME_PIN = {
   'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
 }.freeze
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
-RUST_TARGET_CACHE_FILE_SHA256 = '1eedb06f020f90666f1747a08c1339172e4caa1016d0381a37d93e6c6bd3913b'.freeze
+RUST_TARGET_CACHE_FILE_SHA256 = '8fab08dc51506af2edc4bae191f8fc0ff878cc94541c202a81ce76d80cbe209a'.freeze
 LOCATE_STEP_SHA256 = 'f0731f6e118740f65994e4a90b3a9c03f4e0f1c2b76c00a34ae1216232253c20'.freeze
 # Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
 # untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing
@@ -639,7 +643,8 @@ def pinned_local_action_step?(path, docs, st)
     with.keys.sort == %w[cache-hit os-label sources-dir] && with['sources-dir'] == '${{ steps.cargo-home.outputs.dir }}' &&
       with['cache-hit'].to_s.match?(CACHE_HIT_REF) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
   else # rust-target-cache: a mode and the reviewed inputs, nothing else
-    (with.keys - %w[mode group features dir cache-hit os-label]).empty? && %w[locate restored save].include?(with['mode']) &&
+    (with.keys - %w[mode group features dir cache-hit os-label deny-door]).empty? && %w[locate restored save].include?(with['mode']) &&
+      (!with.key?('deny-door') || (with['mode'] == 'restored' && %w[true false].include?(with['deny-door']))) &&
       with.fetch('dir', '${{ steps.cargo-target.outputs.dir }}') == '${{ steps.cargo-target.outputs.dir }}' &&
       (!with.key?('cache-hit') || with['cache-hit'].to_s.match?(CACHE_HIT_REF)) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
   end
@@ -713,6 +718,18 @@ def producer_step_failures(path, doc, docs, failures)
         next if reviewed_prefix_step?(path, docs, st)
         failures << "#{path}: job #{job_name}: step #{st['name'].inspect} sits between #{pid} and the untrusted restore #{rid}: it must be gated to main alone or be a reviewed, hash-pinned step"
       end
+    end
+    # The compiled restore is followed directly by its restore-time strip, which carries deny-door: the
+    # strip removes every OpenSSL door crate output (section 4.5), so a job that restores for the rust-app
+    # shards or rust-db never holds compiled OpenSSL. A missing, moved or weakened strip is refused.
+    if (ti = ids.index('cargo-target-cache-untrusted'))
+      strip = steps[ti + 1]
+      hit = '${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}'
+      strip_ok = strip.is_a?(Hash) && (strip.keys - %w[name id if uses with]).empty? && strip['uses'].to_s == TARGET_CACHE_ACTION &&
+                 top_terms(strip['if'])&.sort == UNTRUSTED_RESTORE_TERMS.sort && strip['with'].is_a?(Hash) &&
+                 strip['with'].reject { |k, _| k == 'os-label' } == { 'mode' => 'restored', 'dir' => '${{ steps.cargo-target.outputs.dir }}', 'cache-hit' => hit, 'deny-door' => 'true' } &&
+                 strip['with']['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
+      failures << "#{path}: job #{job_name}: the untrusted compiled restore must be followed directly by the restore-time strip with deny-door: 'true' on exactly the untrusted-restore terms (compiled OpenSSL door output is never restored into an untrusted job)" unless strip_ok
     end
   end
 

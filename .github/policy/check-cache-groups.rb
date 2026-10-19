@@ -100,7 +100,7 @@ end
 # of the main-only group scheme this file checks: they never save, and a save or any other cache step under
 # the same terms is still counted here and refused.
 UNTRUSTED_RESTORE_WORKFLOWS = %w[linux-validation-concern.yml].freeze
-UNTRUSTED_RESTORE_TERMS = ["github.ref == 'refs/heads/untrusted'", 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
+UNTRUSTED_RESTORE_TERMS = ["github.ref == 'refs/heads/untrusted'", 'inputs.untrusted_readonly_cache', "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))"].freeze
 untrusted_restore = lambda do |step, base|
   return false unless UNTRUSTED_RESTORE_WORKFLOWS.include?(base) && step.is_a?(Hash)
   terms = CacheExpression.top_terms(step['if'].to_s)

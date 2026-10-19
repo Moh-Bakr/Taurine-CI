@@ -42,7 +42,7 @@ SUDO_ALLOWED_COMPOSITES = %w[egress-audit].freeze
 
 CACHE_USES = %r{\Aactions/cache(/restore)?@}
 UNTRUSTED_REF = "github.ref == 'refs/heads/untrusted'"
-UNTRUSTED_TERMS = [UNTRUSTED_REF, 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
+UNTRUSTED_TERMS = [UNTRUSTED_REF, 'inputs.untrusted_readonly_cache', "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))"].freeze
 # Steps that may sit between drop-root and an untrusted restore: they run no source-controlled code.
 PRE_RESTORE_COMPOSITES = %w[sanitize concern-report shell-artefact rust-toolchain rust-target-cache verify-cargo-cache].freeze
 # The two `run` steps that may sit ahead of an untrusted restore. Their whole body is pinned, not only
@@ -101,7 +101,9 @@ def verifier_error(restore, verifier)
     wanted = { 'sources-dir' => '${{ steps.cargo-home.outputs.dir }}', 'cache-hit' => hit, 'os-label' => label }
   elsif path.include?('debug/')
     return 'the verifier is not rust-target-cache in restored mode' unless verifier['uses'].to_s == './.github/actions/rust-target-cache'
-    wanted = { 'mode' => 'restored', 'dir' => '${{ steps.cargo-target.outputs.dir }}', 'cache-hit' => hit, 'os-label' => label }
+    # deny-door: the restore-time strip of every untrusted compiled restore also removes every OpenSSL door
+    # crate output (docs/untrusted-readonly-cache.md, section 4.5); a strip without it is refused here.
+    wanted = { 'mode' => 'restored', 'dir' => '${{ steps.cargo-target.outputs.dir }}', 'cache-hit' => hit, 'os-label' => label, 'deny-door' => 'true' }
   else
     return 'the restore path is not a reviewed cache path'
   end
