@@ -81,6 +81,14 @@ jobs:
     name: Validate protected dispatch input
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # The concern lists the other jobs schedule from. They are computed here, in the first job of the
+    # run, because a separate planning job is one more runner to wait for: with the shared pool full
+    # the 6-second `Plan Windows concerns` job queued 569 s and every Windows concern waited behind it
+    # (survey 8.7). This job holds no source, token or environment; it only emits lists.
+    outputs:
+      ts_matrix: ${{ steps.plan.outputs.ts_matrix }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
+      rust_long_matrix: ${{ steps.plan.outputs.rust_long_matrix }}
     steps:
       - name: Check out public control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -140,44 +148,9 @@ jobs:
         run: ruby .github/policy/refuse-duplicate-dispatch.rb
 
 
-      - name: Report the Rust concern cadence
-        shell: bash
-        env:
-          RUST_REQUESTED: ${{ inputs.rust }}
-        run: |
-          set -euo pipefail
-          {
-            echo '## Windows Rust concerns'
-            echo
-            if [[ "${RUST_REQUESTED}" == true ]]; then
-              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging run in the validate-rust jobs.'
-            else
-              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
-            fi
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-  # Builds the concern matrices from the `rust` and `only` inputs, mirroring the macOS
-  # plan. It holds no source, token or environment: it only emits the lists of concerns
-  # to schedule, so an unrequested or filtered concern never gets a runner at all.
-  plan:
-    permissions:
-      contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/untrusted')
-    needs: validate-input
-    name: Plan Windows concerns
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      ts_matrix: ${{ steps.plan.outputs.ts_matrix }}
-      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
-      rust_long_matrix: ${{ steps.plan.outputs.rust_long_matrix }}
-    steps:
-      - name: Check out public control plane
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
+      # Builds the concern matrices from the `rust` and `only` inputs, mirroring the macOS plan, and
+      # reports the Rust cadence: the lists of concerns to schedule, so an unrequested or filtered
+      # concern never gets a runner at all.
       - name: Select the concerns and report the Rust cadence
         id: plan
         shell: bash
@@ -272,11 +245,11 @@ jobs:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main'
-    needs: [validate-input, plan]
+    needs: validate-input
     strategy:
       fail-fast: false
-      # The TypeScript concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.ts_matrix) }}
+      # The TypeScript concerns, filtered by the validate-input job (the `only` input).
+      matrix: ${{ fromJSON(needs.validate-input.outputs.ts_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: write
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -292,11 +265,11 @@ jobs:
     permissions:
       contents: read
     if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.cache-audit.result == 'success'
-    needs: [validate-input, plan, cache-audit]
+    needs: [validate-input, cache-audit]
     strategy:
       fail-fast: false
-      # The TypeScript concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.ts_matrix) }}
+      # The TypeScript concerns, filtered by the validate-input job (the `only` input).
+      matrix: ${{ fromJSON(needs.validate-input.outputs.ts_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: read
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -328,12 +301,12 @@ jobs:
   validate-rust-long-main:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust && join(fromJSON(needs.plan.outputs.rust_long_matrix).concern, '') != ''
-    needs: [validate-input, plan]
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust && join(fromJSON(needs.validate-input.outputs.rust_long_matrix).concern, '') != ''
+    needs: validate-input
     strategy:
       fail-fast: false
-      # The Rust crate-test concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.rust_long_matrix) }}
+      # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      matrix: ${{ fromJSON(needs.validate-input.outputs.rust_long_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: write
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -348,12 +321,12 @@ jobs:
   validate-rust-long-untrusted:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && inputs.rust && needs.cache-audit.result == 'success' && join(fromJSON(needs.plan.outputs.rust_long_matrix).concern, '') != ''
-    needs: [validate-input, plan, cache-audit]
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && inputs.rust && needs.cache-audit.result == 'success' && join(fromJSON(needs.validate-input.outputs.rust_long_matrix).concern, '') != ''
+    needs: [validate-input, cache-audit]
     strategy:
       fail-fast: false
-      # The Rust crate-test concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.rust_long_matrix) }}
+      # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      matrix: ${{ fromJSON(needs.validate-input.outputs.rust_long_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: read
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -369,12 +342,12 @@ jobs:
   validate-rust-main:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust && join(fromJSON(needs.plan.outputs.rust_matrix).concern, '') != ''
-    needs: [validate-input, plan]
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/main' && inputs.rust && join(fromJSON(needs.validate-input.outputs.rust_matrix).concern, '') != ''
+    needs: validate-input
     strategy:
       fail-fast: false
-      # The Rust crate-test concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.rust_matrix) }}
+      # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      matrix: ${{ fromJSON(needs.validate-input.outputs.rust_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: write
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]
@@ -389,12 +362,12 @@ jobs:
   validate-rust-untrusted:
     permissions:
       contents: read
-    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && inputs.rust && needs.cache-audit.result == 'success' && join(fromJSON(needs.plan.outputs.rust_matrix).concern, '') != ''
-    needs: [validate-input, plan, cache-audit]
+    if: github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && inputs.rust && needs.cache-audit.result == 'success' && join(fromJSON(needs.validate-input.outputs.rust_matrix).concern, '') != ''
+    needs: [validate-input, cache-audit]
     strategy:
       fail-fast: false
-      # The Rust crate-test concerns, filtered by the plan job (the `only` input).
-      matrix: ${{ fromJSON(needs.plan.outputs.rust_matrix) }}
+      # The Rust crate-test concerns, filtered by the validate-input job (the `only` input).
+      matrix: ${{ fromJSON(needs.validate-input.outputs.rust_matrix) }}
     # Kept as ./ : the policy workflow pins and matches this exact form for protected reusable calls.
     cache-mode: read
     uses: ./.github/workflows/windows-validation-concern.yml  # zizmor: ignore[self-repository]

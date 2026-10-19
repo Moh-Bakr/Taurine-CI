@@ -99,7 +99,6 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
      "jobs" =>
       ["cache-audit",
        "cache-audit-after",
-       "plan",
        "result",
        "select",
        "timings",
@@ -170,7 +169,6 @@ CONTROL_PLANE_MANIFEST = {"required_check" =>
      "jobs" =>
       ["cache-audit",
        "cache-audit-after",
-       "plan",
        "result",
        "timings",
        "validate-input",

@@ -399,7 +399,7 @@ finished validation is normal, and the coordinator's ledger reconciles attempts.
 What dispatch does wire today is the shadow review. The Linux dispatcher accepts the
 classifier's request as an identity-bound `suite_selection` input (mutually exclusive with
 `base_sha`: one selection mechanism per dispatch), runs `select-suites.rb` over it in its
-plan job, and carries the per-group result to the bound concern workflows. Two rules keep
+plan step (in `validate-input`), and carries the per-group result to the bound concern workflows. Two rules keep
 that plumbing honest. First, fail-closed: a request the selector rejects - malformed, an
 unknown feature ID, an unreviewed review mode - dispatches the complete set, with the fixed
 rejection code recorded in the run summary; a selection bug must never look like a
@@ -558,6 +558,14 @@ request, and a reviewer sees the addition.
 `full_only` (dropped by the quick profile), `long_pole` (see below) and `opt_in` (the dispatch input
 that enables it). Top-level `rules` list build-wide paths (`full_if_any_changed`) and `docs_only` paths.
 
+**Planning is a step of the first job, not a job.** On Linux and Windows the concern lists are computed by
+the `plan` step of `validate-input`, the job that already checks out the control plane, verifies the dispatch
+identity and refuses a duplicate. A separate planning job is one more runner to wait for: on a full pool the
+6-second `Plan Windows concerns` job queued 569 s and every Windows concern waited behind it (survey 8.7). The
+step holds no source, token or environment and emits the same lists as before; the downstream jobs read
+`needs.validate-input.outputs.*`. macOS already plans in its first job (`plan`, which also holds its dispatch
+identity checks), so it has no extra hop.
+
 **Long poles run in their own jobs.** GitHub starts matrix entries in no promised order, and the
 hosted pool is about 20 runners shared by every workflow of a set (Taurine survey 8.5, 8.7), so a
 long Rust job listed first could still start last. The concerns flagged `long_pole` (`rust-app-*`,
@@ -571,7 +579,7 @@ and `short_matrix`; a half with no concern is skipped by its job's `if`, never a
 `cache-audit-after` and Result need every half, and their job-name pattern accepts the `long` jobs, so no
 concern can leave the verdict.
 
-The Linux dispatcher reads the table; the `plan` job builds the concern list, and the
+The Linux dispatcher reads the table; the `plan` step of `validate-input` builds the concern list, and the
 `select-concerns` composite narrows it when a `base_sha` is supplied. It runs after checkout
 with history and the token already revoked, diffs `base_sha` to `source_sha`, and selects:
 
@@ -614,8 +622,8 @@ print a duplicate-run notice, because their first job holds no `actions: read` p
 | `visual` | Linux | Adds the Playwright `e2e-visual` tier; leave off until baselines for Linux exist |
 | `gitleaks_history` | Linux | Adds the opt-in `scan-history` concern: gitleaks over the full git history of `source_sha` (full clone for that concern only), two passes (the source's own `.gitleaks.toml`, and default rules with no allow-list). Report only, never enforcing; publishes counts, rule ids and commit short SHAs, never values, paths or contents |
 | `base_sha` | Linux | Enables change-aware selection (a partial run) |
-| `only` | Linux, macOS, Windows | Comma-separated concern names for a surgical re-run of exactly those concerns. Every other concern is reported as "not selected", so the verdict is PASS (partial) and the run never admits a merge. On Linux it is mutually exclusive with `base_sha` (refused together); an unknown name, or a Rust concern named while `rust=false` on macOS or Windows, stops the run in the plan job. A Linux opt-in concern named in `only` must also have its own input enabled (`visual`, `gitleaks_history`), or the Result fails because a required concern did not run |
-| `suite_selection` | Linux | The reviewed source-side classifier's suite selection request (single-line JSON, identity-bound). The plan job computes the exact selection with `select-suites.rb` and fails closed to the complete set when the selector rejects the request; the carried selection is a shadow review - the complete set runs and each bound concern reports what a partial selection would have run. Mutually exclusive with `base_sha` and `only` |
+| `only` | Linux, macOS, Windows | Comma-separated concern names for a surgical re-run of exactly those concerns. Every other concern is reported as "not selected", so the verdict is PASS (partial) and the run never admits a merge. On Linux it is mutually exclusive with `base_sha` (refused together); an unknown name, or a Rust concern named while `rust=false` on macOS or Windows, stops the run in the planning step (the `plan` step of `validate-input` on Linux and Windows, the `plan` job on macOS). A Linux opt-in concern named in `only` must also have its own input enabled (`visual`, `gitleaks_history`), or the Result fails because a required concern did not run |
+| `suite_selection` | Linux | The reviewed source-side classifier's suite selection request (single-line JSON, identity-bound). The plan step (in `validate-input`) computes the exact selection with `select-suites.rb` and fails closed to the complete set when the selector rejects the request; the carried selection is a shadow review - the complete set runs and each bound concern reports what a partial selection would have run. Mutually exclusive with `base_sha` and `only` |
 | `selection-mode` | Internal result input | Each dispatcher supplies the reviewed full/partial decision; it is never inferred from the final job list |
 | `rust` | macOS, Windows, Android, iOS | Schedules the slow Rust concerns; without it they are reported as not requested |
 | `engine` | live-proofs | One engine, a comma-separated list of engines, or `all` |

@@ -794,7 +794,7 @@ real_mode_fail() { # label needle perl-expr file
 }
 real_mode_fail 'Linux workflow-level none dropped' 'needs a workflow-level cache-mode: none' 's/\ncache-mode: none\n/\n/' linux-validation.yml
 real_mode_fail 'Linux validate-untrusted not read' 'cache-mode write needs the exact top-level term' 's/cache-mode: read\n/cache-mode: write\n/' linux-validation.yml
-real_mode_fail 'Linux validate-untrusted without the audit need' 'must need the cache-audit job directly' 's/needs: \[validate-input, plan, select, cache-audit\]/needs: [validate-input, plan, select]/' linux-validation.yml
+real_mode_fail 'Linux validate-untrusted without the audit need' 'must need the cache-audit job directly' 's/needs: \[validate-input, select, cache-audit\]/needs: [validate-input, select]/' linux-validation.yml
 real_mode_fail 'Linux validate-main only read' 'needs a sibling job' 's/cache-mode: write\n/cache-mode: read\n/' linux-validation.yml
 real_mode_fail 'Linux select caller without its explicit none' 'must declare its own cache-mode' 's/    cache-mode: none\n    uses: .\/.github\/workflows\/select-concerns.yml/    uses: .\/.github\/workflows\/select-concerns.yml/' linux-validation.yml
 real_mode_fail 'Windows validate-rust-untrusted gated to main' 'needs a sibling job' "s/(  validate-rust-untrusted:\\n(?:.*\\n)*?    if: github\\.repository == 'Moh-Bakr\\/Taurine-CI' && github\\.ref == )'refs\\/heads\\/untrusted'/\$1'refs\\/heads\\/main'/" windows-validation.yml

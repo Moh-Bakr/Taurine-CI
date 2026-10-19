@@ -289,11 +289,11 @@ ruby -e 'path=ARGV.fetch(0); text=File.read(path); old=%q{run: ruby .github/poli
   "${work}/tree/.github/workflows/linux-validation.yml"
 expect_policy_rejects 'a duplicate-dispatch guard that cannot fail'
 
-# Reproduce the deployed Linux Plan step with synthetic inputs. A valid selected opt-in
+# Reproduce the deployed Linux Plan step (a step of the validate-input job: the plan is not a job of its own) with synthetic inputs. A valid selected opt-in
 # concern must survive an empty set-difference, while an opt-in concern with its input off
 # and an unknown name still fail closed.
 reset_fixture
-ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("plan").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
+ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("validate-input").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
   .github/workflows/linux-validation.yml "${work}/plan.sh"
 mkdir -p "${work}/plan-work/.github"
 cp .github/ci-matrix.json "${work}/plan-work/.github/ci-matrix.json"
@@ -340,7 +340,7 @@ grep -Fq "inputs.only == ''" .github/workflows/linux-validation.yml || { echo 'o
 
 # Reproduce the actual Windows Plan step with the valid optional Rust concern.
 # jq -r is required because jq -c represents an empty set-difference as `""`.
-ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("plan").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
+ruby -ryaml -e 'workflow=YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); step=workflow.fetch("jobs").fetch("validate-input").fetch("steps").find { |row| row["id"] == "plan" }; abort unless step; File.write(ARGV.fetch(1), step.fetch("run"))' \
   .github/workflows/windows-validation.yml "${work}/windows-plan.sh"
 run_windows_plan() {
   local label="$1" rust="$2" only="$3" expected_status="$4" status=0

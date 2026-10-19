@@ -12,14 +12,14 @@ require 'yaml'
 table = JSON.parse(File.read('.github/ci-matrix.json'))['concerns']['linux'].keys.sort
 wf = YAML.safe_load(File.read('.github/workflows/linux-validation.yml'), aliases: false)
 step = wf['jobs']['result']['steps'].find { |st| st['uses'].to_s == './.github/actions/run-result' }
-# The Result job expects exactly what the plan job computed from the table (every
+# The Result job expects exactly what the plan step (in the first job, validate-input) computed from the table (every
 # non-opt-in concern, plus an opt-in one when its input is true), never a second,
 # hand-kept list that could drift from the table.
-unless step['with']['expected-concerns'].to_s == '$' + '{{ needs.plan.outputs.expected }}' && wf['jobs']['result']['needs'].include?('plan')
-  warn 'The Linux Result job must take its expected concerns from the plan job output'
+unless step['with']['expected-concerns'].to_s == '$' + '{{ needs.validate-input.outputs.expected }}' && wf['jobs']['result']['needs'].include?('validate-input')
+  warn 'The Linux Result job must take its expected concerns from the validate-input job output (the plan step)'
   exit 1
 end
-unless step['with']['required-concerns'].to_s == '$' + '{{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}' && wf['jobs']['result']['needs'].include?('select')
+unless step['with']['required-concerns'].to_s == '$' + '{{ toJSON(fromJSON(needs.select.outputs.matrix || needs.validate-input.outputs.matrix).concern) }}' && wf['jobs']['result']['needs'].include?('select')
   warn 'The Linux Result job must require every concern in the selected matrix to run'
   exit 1
 end
@@ -59,14 +59,14 @@ mode_by_workflow = {
   '.github/workflows/orchestrate-validation.yml' => ['full']
 }
 required_by_workflow = {
-  '.github/workflows/linux-validation.yml' => "${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.plan.outputs.matrix).concern) }}",
+  '.github/workflows/linux-validation.yml' => "${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.validate-input.outputs.matrix).concern) }}",
   '.github/workflows/macos-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
   '.github/workflows/windows-validation.yml' => "${{ inputs.rust && '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\",\"rust-domain\",\"rust-db\",\"rust-net\",\"rust-ovpn\",\"rust-app-1\",\"rust-app-2\",\"rust-packaging\",\"rust-tls-openssl\"]' || '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\"]' }}",
   '.github/workflows/android-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
   '.github/workflows/ios-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}"
 }
 needs_by_workflow = {
-  '.github/workflows/linux-validation.yml' => %w[plan select],
+  '.github/workflows/linux-validation.yml' => %w[validate-input select],
   '.github/workflows/macos-validation.yml' => %w[plan],
   '.github/workflows/android-validation.yml' => %w[plan],
   '.github/workflows/ios-validation.yml' => %w[plan]
