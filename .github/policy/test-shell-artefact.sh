@@ -86,11 +86,20 @@ if [[ "$1" == metadata ]]; then
     '{packages: [("openssl-src","openssl-sys","openssl","tokio-openssl") | {name: ., source: $src, manifest_path: ($root + . + "/Cargo.toml")}]}'
   exit 0
 fi
-crate='' target=''
+crate='' target='' edges=''
 while (( $# )); do
-  case "$1" in --invert) crate="$2"; shift ;; --target) target="$2"; shift ;; esac
+  case "$1" in --invert) crate="$2"; shift ;; --target) target="$2"; shift ;; -e) edges="$2"; shift ;; esac
   shift
 done
+if [[ "${edges}" == features ]]; then
+  # The feature view: taurine-db-dbx with its enabled features. FAKE_NO_LEGACY_TLS drops legacy-tls,
+  # FAKE_LEGACY_TLS_OTHER shows the feature on a different package only.
+  [[ "${FAKE_TREE:-door}" == absent ]] && { echo "error: package ID specification \`${crate}\` did not match any packages" >&2; exit 101; }
+  printf '0taurine-db-dbx v0.1.0 (path)\n1taurine-db-dbx feature "default"\n'
+  [[ -n "${FAKE_NO_LEGACY_TLS:-}" ]] || printf '1taurine-db-dbx feature "legacy-tls"\n'
+  [[ -n "${FAKE_LEGACY_TLS_OTHER:-}" ]] && printf '1taurine-other feature "legacy-tls"\n'
+  exit 0
+fi
 mode="${FAKE_TREE:-door}"
 if [[ "${mode}" == absent ]]; then
   echo "error: package ID specification \`${crate}\` did not match any packages" >&2; exit 101
@@ -230,6 +239,9 @@ expect_pass 'the MySQL fork wrapping tokio-openssl' 'FAKE_MYSQL_PARENT=1 openssl
 expect_fail 'the MySQL fork with a direct openssl edge (S1 gate)' 'FAKE_MYSQL_OPENSSL=1 openssl_door_gate g taurine-mobile -' 'taurine-mysql-async depends on openssl outside the OpenSSL door'
 expect_fail 'another crate depending on tokio-openssl (S1 gate)' 'FAKE_TOKIO_BAD=1 openssl_door_gate g taurine-mobile -' 'evil-sys depends on tokio-openssl outside the OpenSSL door'
 mutant 'the shell list re-widened: the MySQL fork allowed on openssl' artefact "openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;" "openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx taurine-mysql-async' ;;" fail 'FAKE_MYSQL_OPENSSL=1 openssl_door_gate g taurine-mobile -'
+expect_fail 'the door in the graph but taurine-db-dbx without legacy-tls' 'FAKE_NO_LEGACY_TLS=1 openssl_door_gate g taurine-mobile -' 'taurine-db-dbx does not resolve with its legacy-tls feature'
+expect_fail 'legacy-tls enabled on another package only' 'FAKE_NO_LEGACY_TLS=1 FAKE_LEGACY_TLS_OTHER=1 openssl_door_gate g taurine-mobile aarch64-linux-android' 'taurine-db-dbx does not resolve with its legacy-tls feature'
+mutant 'the legacy-tls feature assertion removed' artefact 'if ! dbx_legacy_tls_feature "${package}" "${target}" "${log}.features"; then' 'if false; then' fail 'FAKE_NO_LEGACY_TLS=1 openssl_door_gate g taurine-mobile -'
 expect_fail 'unknown package' 'openssl_door_gate g no-such-package -' 'did not resolve'
 
 # ---- N3: the gate must see the built feature set -------------------------------------------
