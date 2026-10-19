@@ -58,15 +58,25 @@ PRE_RESTORE_RUN_PINS = {
   },
   'cargo-home' => {
     'id' => 'cargo-home',
-    'if' => "${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}",
+    'if' => "${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') }}",
     'shell' => 'bash',
     'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
   }
 }.freeze
+# The early suite-ownership step has no id (an id would change the step hash pinned in check-cache-mode.rb),
+# so it is selected by its name, and its whole body must still equal the pin: the name only picks the pin.
+PRE_RESTORE_RUN_PINS_BY_NAME = {
+  'Refuse test files with no suite owner before any build' => {
+    'shell' => 'bash',
+    'working-directory' => '${{ github.workspace }}',
+    'run' => "set -euo pipefail\nruby .github/policy/refuse-unowned-tests.rb \"${GITHUB_WORKSPACE}/src\"\n"
+  }
+}.freeze
 
 def pinned_run_step?(step)
-  pin = PRE_RESTORE_RUN_PINS[step['id'].to_s]
-  !pin.nil? && !step.key?('uses') && step.reject { |k, _| k == 'name' } == pin
+  return false if step.key?('uses')
+  pin = step['id'].nil? ? PRE_RESTORE_RUN_PINS_BY_NAME[step['name'].to_s] : PRE_RESTORE_RUN_PINS[step['id'].to_s]
+  !pin.nil? && step.reject { |k, _| k == 'name' } == pin
 end
 
 def terms_equal?(value, wanted)
