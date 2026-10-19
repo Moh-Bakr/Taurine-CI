@@ -476,95 +476,6 @@ runs:
           done < <(mobile_android_buildsrc_pinned)
           return "${rc}"
         }
-        # Reviewed SHA-256 of every Gradle build-logic file outside buildSrc that the private source
-        # tracks under gen/android and `tauri android init` leaves alone (hashes only; no source).
-        # Change them only with a reviewed bump of the private files. gradle/wrapper/* and the
-        # gradlew scripts are pinned by gradle_wrapper_check, and the buildSrc tree by the list above.
-        mobile_android_gradle_pinned() {
-          printf '%s\n' \
-            '780ee423777541b6d7a4f75d7d8da188dc1a92860f70fea09015b03d2e1594c2  app/build.gradle.kts' \
-            'f8d6b8ac33de9acbe318595de7be4500fec1009f8ea0edc508fd998cc15294c5  build.gradle.kts' \
-            '580de86208e48edae2206e167da024f17794269d296ad46a94d001c6809ba2cb  gradle.properties' \
-            '99856053f245337d20d308dbeaf9cd7250ad0c186ebbb6866ab46a6e7005ee19  settings.gradle'
-        }
-        # The Gradle build logic under gen/android (every *.gradle, *.gradle.kts, gradle.properties,
-        # *.versions.toml, anything under a gradle/ directory, any init script or init.d) must be
-        # exactly the pinned list, byte for byte. `before-init`: nothing else. `after-init`: also the
-        # two files the CLI generates from its own template (tauri.settings.gradle,
-        # app/tauri.build.gradle.kts). No link, special file or init.d directory anywhere, and no
-        # includeBuild/includeFlat that leaves gen/android. Fails closed; prints file names and the
-        # reason only, never content.
-        mobile_android_gradle_pin_check() {
-          local mode="$1" root=taurine-mobile/src-tauri/gen/android file rel want got sum rc=0
-          [[ -d "${root}" ]] || { echo 'gradle-pin: FAILED - gen/android is missing' >&2; return 1; }
-          if [[ -n "$(find "${root}" ! -type f ! -type d 2>/dev/null)" ]]; then
-            echo 'gradle-pin: FAILED - gen/android holds a link or special file' >&2; return 1
-          fi
-          if [[ -n "$(find "${root}" -type f -links +1 2>/dev/null)" ]]; then
-            echo 'gradle-pin: FAILED - gen/android holds a hard-linked file' >&2; return 1
-          fi
-          if [[ -n "$(find "${root}" -type d -name init.d 2>/dev/null)" ]]; then
-            echo 'gradle-pin: FAILED - gen/android holds an init.d directory' >&2; return 1
-          fi
-          got=''
-          while IFS= read -r -d '' file; do
-            rel="${file#"${root}"/}"
-            if [[ "${rel}" == *[[:cntrl:]]* ]]; then
-              echo 'gradle-pin: FAILED - a file name holds a control character' >&2; return 1
-            fi
-            case "${rel}" in
-              buildSrc/*|gradle/wrapper/gradle-wrapper.jar|gradle/wrapper/gradle-wrapper.properties|gradlew|gradlew.bat) continue ;;
-              tauri.settings.gradle|app/tauri.build.gradle.kts)
-                [[ "${mode}" == after-init ]] && continue ;;
-            esac
-            case "${rel}" in
-              *.gradle|*.gradle.kts|gradle.properties|*/gradle.properties|*.versions.toml|gradle/*|*/gradle/*|init.gradle*|*/init.gradle*|*/init.d/*)
-                got="$(printf '%s\n%s' "${got}" "${rel}")" ;;
-            esac
-          done < <(find "${root}" -type f -print0 2>/dev/null)
-          got="$(printf '%s\n' "${got}" | sed '/^$/d' | LC_ALL=C sort)"
-          want="$(mobile_android_gradle_pinned | awk '{print $2}' | LC_ALL=C sort)"
-          if [[ "${got}" != "${want}" ]]; then
-            while IFS= read -r file; do
-              [[ -n "${file}" ]] && echo "gradle-pin: FAILED - unexpected file: ${file}" >&2
-            done < <(comm -13 <(printf '%s\n' "${want}") <(printf '%s\n' "${got}"))
-            while IFS= read -r file; do
-              [[ -n "${file}" ]] && echo "gradle-pin: FAILED - missing file: ${file}" >&2
-            done < <(comm -23 <(printf '%s\n' "${want}") <(printf '%s\n' "${got}"))
-            return 1
-          fi
-          while read -r sum file; do
-            [[ -n "${file}" ]] || continue
-            if [[ "$(tci_sha256 "${root}/${file}")" != "${sum}" ]]; then
-              echo "gradle-pin: FAILED - ${file}: hash mismatch" >&2; rc=1
-            elif grep -qE "include(Build|Flat).*(\.\.|['\"]/)" "${root}/${file}" 2>/dev/null; then
-              echo "gradle-pin: FAILED - ${file}: an included build leaves gen/android" >&2; rc=1
-            fi
-          done < <(mobile_android_gradle_pinned)
-          return "${rc}"
-        }
-        # The Tauri build hooks run source-chosen shell inside `tauri <platform> build`, after every
-        # check and before Gradle/Xcode. The effective config is the base tauri.conf.json (the
-        # mobile steps pass no --config, and tauri_cli unsets TAURI_*): refuse any other config file
-        # (the CLI merges tauri.<platform>.conf.json, .json5 and Tauri.toml variants on its own),
-        # require the frontend build hook to be exactly `npm run build` with no pre/post build
-        # script behind it, and refuse any beforeBundleCommand.
-        mobile_tauri_hooks_check() {
-          local src=taurine-mobile/src-tauri conf pkg=taurine-mobile/package.json file rc=0
-          conf="${src}/tauri.conf.json"
-          [[ -f "${conf}" && ! -L "${conf}" ]] || { echo 'tauri-hooks: FAILED - tauri.conf.json is missing' >&2; return 1; }
-          while IFS= read -r -d '' file; do
-            [[ "$(basename "${file}")" == tauri.conf.json ]] && continue
-            echo "tauri-hooks: FAILED - extra Tauri config file: $(basename "${file}")" >&2; rc=1
-          done < <(find "${src}" -maxdepth 1 \( -iname 'tauri.*conf*' -o -iname 'tauri*.toml' \) -print0 2>/dev/null)
-          if ! jq -e '(.build // {}) as $b | ($b.beforeBuildCommand == "npm run build") and (($b.beforeBundleCommand // "") == "")' "${conf}" >/dev/null 2>&1; then
-            echo 'tauri-hooks: FAILED - beforeBuildCommand is not exactly `npm run build`, or beforeBundleCommand is set' >&2; rc=1
-          fi
-          if [[ ! -f "${pkg}" ]] || ! jq -e '((.scripts // {}) | has("prebuild") or has("postbuild") | not)' "${pkg}" >/dev/null 2>&1; then
-            echo 'tauri-hooks: FAILED - the shell package.json has a prebuild/postbuild script (or is missing)' >&2; rc=1
-          fi
-          return "${rc}"
-        }
         mobile_build_phase_reset() {
           local platform="$1" gen=taurine-mobile/src-tauri/gen
           case "${platform}" in
@@ -574,11 +485,17 @@ runs:
               # against a pinned hash list: removing it made the CLI template's newer AGP replace
               # the tracked one, and that AGP refuses the pinned Gradle wrapper.
               rm -f "${gen}/android/tauri.settings.gradle" "${gen}/android/app/tauri.build.gradle.kts"
+              # An untracked local.properties (sdk.dir/ndk.dir) is deleted; a tracked one stays
+              # for mobile_android_gradle_pin_check (mobile-report library) to refuse. The
+              # workflow runs that check right after this reset and after init: it is not called
+              # from here so the reset/check pair keeps the contract main's fixtures assert.
+              if [[ -e "${gen}/android/local.properties" ]] && ! git ls-files --error-unmatch -- "${gen}/android/local.properties" >/dev/null 2>&1; then
+                rm -f "${gen}/android/local.properties"
+              fi
               if [[ -d "${gen}/android/buildSrc" ]]; then
                 find "${gen}/android/buildSrc" -type f -name BuildTask.kt -delete
               fi
-              mobile_android_buildsrc_pin_check without-callback || return 1
-              mobile_android_gradle_pin_check before-init ;;
+              mobile_android_buildsrc_pin_check without-callback ;;
             ios)
               if [[ -n "$(git ls-files -- "${gen}/apple" 2>/dev/null)" ]]; then
                 echo 'build-phase: FAILED - gen/apple is committed in the source; CI generates it' >&2; return 1
@@ -592,7 +509,6 @@ runs:
           case "${platform}" in
             android)
               mobile_android_buildsrc_pin_check with-callback || return 1
-              mobile_android_gradle_pin_check after-init || return 1
               files="$(grep -rl 'android-studio-script' "${gen}/android/buildSrc" 2>/dev/null || true)"
               # shellcheck disable=SC2086
               if [[ -z "${files}" || "$(printf '%s\n' "${files}" | grep -c .)" -ne 1 ]] ||
