@@ -6,15 +6,24 @@ set -euo pipefail
 forbidden_path_re='(^|/)(src|target|node_modules|vendor|taurine-desktop|taurine-mobile)(/|$)|\.(rs|ts|tsx|js|jsx|json|toml|lock|pem|p12|pfx|jks|keystore)$'
 forbidden_name_re='(^|/)(README|SECURITY|CODEOWNERS|LICENSE)(\.|$)'
 
-# Compiled or binary build output is never tracked, wherever it sits: Python bytecode, Java classes, object
-# files and any __pycache__ directory. Checked first, with its own message, so no allowlist branch below can
-# admit one by accident.
+# The tracked-file list is read once into a temporary file and its exit status checked: a failing
+# `git ls-files` (not a repository, an unreadable index) must stop the check, never read as an empty tree.
+tracked_list="$(mktemp)"
+trap 'rm -f "${tracked_list}"' EXIT
+git ls-files -z > "${tracked_list}" || { echo "The tracked file list could not be read (git ls-files failed)" >&2; exit 1; }
+
+# Compiled or binary build output is never tracked, wherever it sits: Python bytecode, Java classes and
+# archives, object files, static and shared libraries, Windows binaries, WebAssembly and any __pycache__
+# directory, whatever the case of the extension. Checked first, with its own message, so no allowlist branch
+# below can admit one by accident.
+shopt -s nocasematch
 while IFS= read -r -d '' path; do
-  if [[ "$path" =~ \.(pyc|pyo|class|o)$ || "$path" =~ (^|/)__pycache__(/|$) ]]; then
+  if [[ "$path" =~ \.(pyc|pyo|class|o|so|dylib|a|dll|exe|jar|wasm)$ || "$path" =~ (^|/)__pycache__(/|$) ]]; then
     echo "Compiled or binary build output is tracked in the public CI repository: $path" >&2
     exit 1
   fi
-done < <(git ls-files -z)
+done < "${tracked_list}"
+shopt -u nocasematch
 
 while IFS= read -r -d '' path; do
   if [[ "$path" == .github/workflows/* ]]; then
@@ -64,7 +73,7 @@ while IFS= read -r -d '' path; do
   fi
   echo "Unexpected tracked path in the public CI repository: $path" >&2
   exit 1
-done < <(git ls-files -z)
+done < "${tracked_list}"
 
 # The files admitted by exact path above are plain data too: a tracked symlink or an executable file at
 # one of those paths would pass the name rules while pointing elsewhere or being runnable. Read the git

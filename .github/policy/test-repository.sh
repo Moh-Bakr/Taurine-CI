@@ -49,13 +49,19 @@ printf '# unreviewed helper\n' > "${unreviewed}/.github/policy/pg8-helper.py"
 git -C "${unreviewed}" add .github/policy/pg8-helper.py
 expect_reject "${unreviewed}" 'an unreviewed third Python policy file' 'Unexpected tracked path in the public CI repository'
 
-for compiled in .github/policy/__pycache__/x.cpython-314.pyc .github/policy/x.pyc .github/actions/y/z.pyo tools/A.class build/x.o __pycache__/note.txt .github/policy/__pycache__/readme.sh; do
+for compiled in lib/x.so lib/x.DYLIB lib/x.a tools/x.dll tools/X.EXE tools/x.jar web/x.wasm web/X.WASM .github/policy/__pycache__/x.cpython-314.pyc .github/policy/x.pyc .github/actions/y/z.pyo tools/A.class build/x.o __pycache__/note.txt .github/policy/__pycache__/readme.sh; do
   bin="$(new_fixture)"
   mkdir -p "${bin}/$(dirname "${compiled}")"
   printf 'x\n' > "${bin}/${compiled}"
   git -C "${bin}" add -f "${compiled}"
   expect_reject "${bin}" "compiled output ${compiled}" 'Compiled or binary build output is tracked'
 done
+
+# A failing git ls-files stops the check instead of reading as an empty list: a directory that is not a repository.
+notrepo="$(mktemp -d "${temp_root}/notrepo.XXXXXX")"
+mkdir -p "${notrepo}/.github/policy"
+cp "${source_root}/.github/policy/check-repository.sh" "${notrepo}/.github/policy/check-repository.sh"
+expect_reject "${notrepo}" 'a directory where git ls-files fails' 'The tracked file list could not be read'
 
 private_source="$(new_fixture)"
 mkdir -p "${private_source}/taurine-desktop/src"
