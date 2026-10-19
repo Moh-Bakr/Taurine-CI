@@ -751,6 +751,32 @@ gradle_tracked; gradle_pins; gradle_init_generated; gradle_build_generated; rm -
 expect_fail 'a missing app/tauri.build.gradle.kts is refused after the build' "${gpins} mobile_android_gradle_pin_check after-build" 'tauri.build.gradle.kts is missing'
 gradle_tracked; gradle_pins; gradle_init_generated; gradle_build_generated; rm -f "${aroot}/app/tauri.properties"
 expect_pass 'a missing app/tauri.properties (no version set) passes after the build' "${gpins} mobile_android_gradle_pin_check after-build"
+# After the build the tree scan is skipped, so links and NUL bytes are refused by the checks themselves.
+gradle_tracked; gradle_pins; gradle_init_generated; gradle_build_generated
+cp "${aroot}/settings.gradle" "${work}/settings.copy"; rm "${aroot}/settings.gradle"; ln -s "${work}/settings.copy" "${aroot}/settings.gradle"
+expect_fail 'a pinned file replaced by a link to identical content is refused after the build' "${gpins} mobile_android_gradle_pin_check after-build" 'missing file: settings.gradle'
+rm -f "${aroot}/settings.gradle" "${work}/settings.copy"
+gradle_tracked; gradle_pins; gradle_init_generated; gradle_build_generated
+printf 'include '"'"':evil'"'"'\0\n' >>"${aroot}/tauri.settings.gradle"
+expect_fail 'a generated Gradle file with a NUL byte is refused' "${gpins} mobile_android_gradle_pin_check after-build" 'a NUL byte'
+gradle_tracked; gradle_pins; gradle_init_generated; gradle_build_generated
+printf 'x\0y\n' >>"${aroot}/app/tauri.build.gradle.kts"
+expect_fail 'a NUL byte in tauri.build.gradle.kts is refused' 'mobile_android_generated_gradle_check' 'a NUL byte'
+# The projectDir is the included project's own crate directory in the registry.
+gradle_generated
+printf "include ':tauri-plugin-shell'\nproject(':tauri-plugin-shell').projectDir = new File(\"%s/tauri-plugin-shell-2.3.1/android\")\n" "${reg_dir}" >>"${aroot}/tauri.settings.gradle"
+expect_pass 'a plugin project in its own registry crate directory is accepted' 'mobile_android_generated_gradle_check'
+gradle_generated
+printf "include ':tauri-plugin-shell'\nproject(':tauri-plugin-shell').projectDir = new File(\"%s/other-crate-1.0.0/android\")\n" "${reg_dir}" >>"${aroot}/tauri.settings.gradle"
+expect_fail 'a plugin project in a foreign registry crate directory is refused' 'mobile_android_generated_gradle_check' "not the included project's own crate directory"
+gradle_generated
+printf "include ':tauri-plugin-shell'\nproject(':tauri-plugin-shell').projectDir = new File(\"%s/tauri-plugin-opener-2.0.0/android\")\n" "${reg_dir}" >>"${aroot}/tauri.settings.gradle"
+expect_fail 'a plugin project in another plugin crate directory is refused' 'mobile_android_generated_gradle_check' "not the included project's own crate directory"
+gradle_generated
+printf "include ':tauri-plugin-shell'\nproject(':tauri-plugin-shell').projectDir = new File(\"%s/tauri-plugin-shell-2.3.1/src\")\n" "${reg_dir}" >>"${aroot}/tauri.settings.gradle"
+expect_fail 'a plugin project outside the crate android directory is refused' 'mobile_android_generated_gradle_check' "not the included project's own crate directory"
+gradle_generated; sed -i.bak 's|tauri-2.0.0/mobile/android|evil-2.0.0/mobile/android|' "${aroot}/tauri.settings.gradle"; rm -f "${aroot}/tauri.settings.gradle.bak"
+expect_fail ':tauri-android in a crate that is not tauri is refused' 'mobile_android_generated_gradle_check' "not the included project's own crate directory"
 gradle_tracked; gradle_pins; gradle_init_generated; printf 'include '"'"':evil'"'"'\n' >"${aroot}/tauri.settings.gradle"
 expect_fail 'a Gradle file planted before the build is judged after init when present' "${gpins} mobile_android_gradle_pin_check after-init" 'a line the pinned CLI template does not emit'
 gradle_tracked; gradle_pins; gradle_init_generated; gradle_build_generated; rm -f "${aroot}/app/tauri.build.gradle.kts"
