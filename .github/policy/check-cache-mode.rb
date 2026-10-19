@@ -501,6 +501,24 @@ CARGO_HOME_PIN = {
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
 LOCATE_STEP_SHA256 = 'b2b5808bd0fae32e972af866f809044edb1be92d21e3c9ac5ee4bbf087f2808a'.freeze
 
+# Local actions that may sit between a producer step and its untrusted restore, by the sha256 of the
+# canonical JSON of their whole action.yml. Changing one is a reviewed change of this table.
+INTERMEDIATE_ACTION_SHA256 = {
+  'verify-cargo-cache' => '6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a'
+}.freeze
+
+def local_action_hash(path, docs, name)
+  rel = ".github/actions/#{name}/action.yml"
+  doc = docs.find { |k, _| k.end_with?(rel) }&.last
+  unless doc.is_a?(Hash)
+    root = File.dirname(File.dirname(File.dirname(path)))
+    file = File.join(root, rel)
+    file = rel unless File.file?(file)
+    doc = File.file?(file) ? (load(file) rescue nil) : nil
+  end
+  doc.is_a?(Hash) ? Digest::SHA256.hexdigest(JSON.generate(canonical_json(doc))) : nil
+end
+
 def canonical_json(value)
   case value
   when Hash then value.map { |k, v| [k.to_s, canonical_json(v)] }.sort_by(&:first).to_h
@@ -547,24 +565,54 @@ def producer_step_failures(path, doc, docs, failures)
                outputs['dir'].is_a?(Hash) && outputs['dir']['value'] == '${{ steps.locate.outputs.dir }}' &&
                outputs['key'].is_a?(Hash) && outputs['key']['value'] == '${{ steps.locate.outputs.key }}'
   failures << "#{action_path}: the dir and key outputs must be exactly the locate step's outputs" unless outputs_ok
-  locate = Array(composite.dig('runs', 'steps')).grep(Hash).select { |st| st['id'] == 'locate' }
-  if locate.length != 1
-    failures << "#{action_path}: expected exactly one locate step (found #{locate.length})"
-  else
+  composite_steps = Array(composite.dig('runs', 'steps')).grep(Hash)
+  # Any id that is `locate` in another case counts as a second locate step, so a look-alike cannot stand in.
+  look_alikes = composite_steps.select { |st| st['id'].to_s.casecmp?('locate') }
+  locate = look_alikes.select { |st| st['id'] == 'locate' }
+  if look_alikes.length != 1 || locate.length != 1
+    failures << "#{action_path}: expected exactly one step with id locate, and no other-case look-alike (found #{look_alikes.length})"
+    return
+  end
+  # STRUCTURAL: `locate` is the first step of the composite. Nothing that could change how it computes dir
+  # and key (a step that writes the environment or path files by any means, plants a shim in a directory on
+  # PATH, or pre-creates the target directory) can then run before it, whatever it names or hides. This is the
+  # control; the name check below is defence in depth only.
+  if composite_steps.first.equal?(locate.first)
     body = locate.first.reject { |k, _| %w[name if id].include?(k) }
     digest = Digest::SHA256.hexdigest(JSON.generate(canonical_json(body)))
     failures << "#{action_path}: the locate step no longer matches the reviewed content hash its untrusted restore depends on" unless digest == LOCATE_STEP_SHA256
+  else
+    failures << "#{action_path}: the locate step must be the first step of the composite (index 0): any step before it could change how it computes dir and key"
   end
-  # The steps that run before `locate` are not hashed, so they may not change how it computes dir and key:
-  # each must be a plain `run` step (no action) whose text never names the runner's environment or path
-  # files, which covers `>>`, `tee` and every other way of writing to them by name. (The locate step's own
-  # CARGO_TARGET_DIR write to GITHUB_ENV is inside the hashed body and comes after its use.)
-  all_steps = Array(composite.dig('runs', 'steps')).grep(Hash)
-  at = all_steps.index { |st| st['id'] == 'locate' }
-  all_steps.first(at || 0).each do |st|
+  composite_steps.each_with_index do |st, index|
+    next unless index > 0 && st['id'].to_s != 'locate' && composite_steps.index { |x| x['id'] == 'locate' } > index
     label = st['name'].to_s.inspect
-    failures << "#{action_path}: step #{label} runs before the locate step and must be a plain run step, not an action" if st.key?('uses')
     failures << "#{action_path}: step #{label} runs before the locate step and may not write GITHUB_ENV or GITHUB_PATH" if JSON.generate(st).match?(/GITHUB_(ENV|PATH)/i)
+  end
+
+  # The steps between a producer and its untrusted restore run before the restore reads the outputs, and
+  # on the untrusted ref they could change the environment, PATH or files the restore step uses. Each must
+  # be gated to main alone (so it never runs on the untrusted ref) or be a local action whose whole file
+  # hash is pinned (INTERMEDIATE_ACTION_SHA256).
+  sources = [['cargo-sources-untrusted', 'cargo-home'], ['cargo-target-cache-untrusted', 'cargo-target']]
+  sources.each do |restore_id, producer_id|
+    ri = steps.index { |st| st['id'] == restore_id }
+    pi = steps.index { |st| st['id'] == producer_id }
+    next if ri.nil? || pi.nil?
+    if pi > ri
+      failures << "#{path}: step #{producer_id} must run before the untrusted restore #{restore_id} that uses its outputs"
+      next
+    end
+    steps[(pi + 1)...ri].each do |st|
+      expr = st['if'].to_s
+      next if requires?(st['if'], MAIN) && !expr.include?('untrusted')
+      action = st['uses'].to_s
+      name = action.start_with?('./.github/actions/') ? action.delete_prefix('./.github/actions/') : nil
+      want = name && INTERMEDIATE_ACTION_SHA256[name]
+      have = want && local_action_hash(path, docs, name)
+      next if want && have == want
+      failures << "#{path}: step #{st['name'].inspect} sits between #{producer_id} and the untrusted restore #{restore_id}: it must be gated to main alone or be a local action with a pinned content hash"
+    end
   end
 end
 

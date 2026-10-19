@@ -306,15 +306,73 @@ mutant 'the composite gains an output' "outputs must be exactly the locate step'
     description: x
     value: y
   dir:'
-mutant 'a pre-locate composite step writes GITHUB_ENV' 'may not write GITHUB_ENV or GITHUB_PATH' "${composite}" '        mkdir -p "${RUNNER_TEMP}/taurine-ci"' '        mkdir -p "${RUNNER_TEMP}/taurine-ci"
-        echo "CARGO_TARGET_DIR=/tmp/planted" >> "$GITHUB_ENV"'
-mutant 'a pre-locate composite step writes GITHUB_PATH' 'may not write GITHUB_ENV or GITHUB_PATH' "${composite}" '        mkdir -p "${RUNNER_TEMP}/taurine-ci"' '        mkdir -p "${RUNNER_TEMP}/taurine-ci"
-        echo "/tmp/planted" | tee -a "${GITHUB_PATH}"'
-mutant 'a pre-locate composite step is an action' 'must be a plain run step, not an action' "${composite}" '    - name: Install the compiled dependency cache helpers
-' '    - name: Planted action
-      uses: actions/checkout@v4
-    - name: Install the compiled dependency cache helpers
+# A step inserted at an anchor line of a copy (the text is a literal block of whole lines).
+insert_mutant() { # label needle file anchor-line text
+  local d="${work}/mutant"
+  rm -rf "${d}"; cp -R "${reviewed}" "${d}"
+  printf '%s\n' "$5" > "${work}/inserted.yml"
+  insert_before "${d}/$3" "$4" "${work}/inserted.yml"
+  expect_fail "$1" "${d}" "$2"
+}
+loc_anchor='    - name: Locate the compiled dependency cache'
+first_msg='the locate step must be the first step of the composite'
+# The locate step is the composite's first step; anything before it is refused whatever it does.
+insert_mutant 'a plain step before locate' "${first_msg}" "${composite}" "${loc_anchor}" '    - name: Early step
+      shell: bash
+      run: echo hi
 '
+insert_mutant 'an obfuscated GITHUB_ENV write before locate' "${first_msg}" "${composite}" "${loc_anchor}" '    - name: Early step
+      shell: bash
+      run: |
+        v="GITHUB_E""NV"; echo "CARGO_TARGET_DIR=/tmp/planted" >> "${!v}"
+'
+insert_mutant 'a shim written into ~/.cargo/bin before locate' "${first_msg}" "${composite}" "${loc_anchor}" '    - name: Early step
+      shell: bash
+      run: |
+        mkdir -p "${HOME}/.cargo/bin"
+        printf "#!/bin/sh\necho planted\n" > "${HOME}/.cargo/bin/rustc"
+        chmod +x "${HOME}/.cargo/bin/rustc"
+'
+insert_mutant 'a GITHUB_PATH write before locate' "${first_msg}" "${composite}" "${loc_anchor}" '    - name: Early step
+      shell: bash
+      run: echo "/tmp/planted" | tee -a "${GITHUB_PATH}"
+'
+insert_mutant 'an action before locate' "${first_msg}" "${composite}" "${loc_anchor}" '    - name: Early action
+      uses: actions/checkout@v4
+'
+# locate present but moved after another step (the original order of the composite).
+reorder="${work}/reorder"; rm -rf "${reorder}"; cp -R "${reviewed}" "${reorder}"
+ruby -e '
+  f = ARGV.fetch(0); lines = File.read(f, encoding: "UTF-8").lines
+  a = lines.index { |l| l.start_with?("    - name: Locate the compiled dependency cache") }
+  b = lines.index { |l| l.start_with?("    - name: Install the compiled dependency cache helpers") }
+  c = lines.index { |l| l.start_with?("    - name: Strip workspace crates from the restored") }
+  abort "reorder fixture: anchors not found" unless a && b && c && a < b && b < c
+  File.write(f, (lines[0...a] + lines[b...c] + lines[a...b] + lines[c..]).join)
+' "${reorder}/${composite}"
+expect_fail 'locate moved after the helper step' "${reorder}" "${first_msg}"
+insert_mutant 'a case-variant look-alike of the locate id' 'no other-case look-alike' "${composite}" '    - name: Install the compiled dependency cache helpers' '    - name: Look-alike
+      id: Locate
+      shell: bash
+      run: echo hi
+'
+# Steps between a producer and its untrusted restore: unguarded ones are refused, main-gated ones pass.
+insert_mutant 'an unguarded step between cargo-home and its untrusted restore' 'sits between cargo-home' "${c}" '      - name: Restore cached third-party crate sources (untrusted, read-only)' '      - name: Between steps
+        shell: bash
+        run: echo hi
+'
+insert_mutant 'an environment write between cargo-target and its untrusted restore' 'sits between cargo-target' "${c}" '      - name: Restore compiled third-party dependencies (untrusted, read-only)' '      - name: Between steps
+        shell: bash
+        run: echo "X=1" >> "${GITHUB_ENV}"
+'
+d_ok="${work}/between-ok"; rm -rf "${d_ok}"; cp -R "${reviewed}" "${d_ok}"
+printf '%s\n' "      - name: Main-only step
+        if: \${{ github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: echo hi
+" > "${work}/inserted.yml"
+insert_before "${d_ok}/${c}" '      - name: Restore compiled third-party dependencies (untrusted, read-only)' "${work}/inserted.yml"
+expect_pass 'a step gated to main between cargo-target and its untrusted restore' "${d_ok}"
 mutant 'the composite locate step changed' 'no longer matches the reviewed content hash' "${composite}" '        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"' '        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
         echo "dir=/tmp/planted" >> "${GITHUB_OUTPUT}"'
 # The workflow policy passes workflows only: the composite is then read from the tree, and still checked.
