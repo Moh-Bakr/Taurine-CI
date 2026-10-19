@@ -898,6 +898,151 @@ mutation '19. the crate re-hash keeps symlinks' .github/actions/verify-cargo-cac
 mutation '19. the crate re-hash keeps nested directories' .github/actions/verify-cargo-cache/action.yml '          find "${cache_dir}" -mindepth 2 -type d -prune -exec rm -rf -- {} +
 ' ''
 
+# 20. The compiled-dependency cache groups on Windows and the uncached OpenSSL door (survey 7.1, decision:
+# the door concern rust-tls-openssl is never cached; check-cache-groups.rb refuses it in any compiled
+# cache step), plus the existing cache's conditions that no test had pinned.
+windows_concern=.github/workflows/windows-validation-concern.yml
+door="inputs.concern == 'rust-tls-openssl'"
+mutation '20. the door concern added to the compiled locate' "${windows_concern}" "        id: cargo-target
+        if: \${{ startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target
+        if: \${{ ${door} || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door concern added to the compiled restore' "${windows_concern}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (${door} || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door concern added to the compiled save' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2'" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (${door} || inputs.concern == 'rust-app-2'"
+mutation '20. the door concern added to the strip-and-prove' "${windows_concern}" "        id: cargo-target-strip
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2'" "        id: cargo-target-strip
+        if: \${{ github.ref == 'refs/heads/main' && (${door} || inputs.concern == 'rust-app-2'"
+mutation '20. the door concern given a group' "${windows_concern}" "(inputs.concern == 'rust-packaging' && 'rust-packaging') || 'rust-app' }}" "(inputs.concern == 'rust-packaging' && 'rust-packaging') || (${door} && 'rust-tls-openssl') || 'rust-app' }}"
+mutation '20. a prefix covering the door concern in the restore' "${windows_concern}" "inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "inputs.concern == 'rust-packaging' || startsWith(inputs.concern, 'rust-tls')) }}
+        uses: actions/cache/restore@"
+mutation '20. the door concern hidden in an unreadable selector (M2)' "${windows_concern}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (contains(fromJSON('[\"rust-tls-openssl\"]'), inputs.concern) || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. an unmapped concern joins the restore and so the fallback group (M8)' "${windows_concern}" "inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "inputs.concern == 'rust-packaging' || inputs.concern == 'rust-net') }}
+        uses: actions/cache/restore@"
+mutation '20. a concern dropped from the restore-time strip (M1)' "${windows_concern}" "'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored" "'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored"
+mutation '20. the compiled save without the miss condition (M5)' "${windows_concern}" " && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        uses: actions/cache/save@" " && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        uses: actions/cache/save@"
+mutation '20. the strip-and-prove without the concern success (M7)' "${windows_concern}" " && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        # Kept as ./" " && steps.cargo-target-cache.outputs.cache-hit != 'true' }}
+        # Kept as ./"
+mutation '20. a saver dropped from the compiled save and its strip-and-prove' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging')" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-packaging')"
+mutation '20. the compiled save step removed (an empty parse)' "${windows_concern}" "        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-target.outputs.dir }}/debug/deps" "        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-target.outputs.dir }}/debug/deps"
+
+# 20b. The door denylist's bypasses (review of the first cache-groups PR): the door is excluded by a
+# positive allowlist per OS now, and every compiled step needs a concern selector.
+restore_if="        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by an upper-case literal in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'RUST-TLS-OPENSSL' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by inputs[concern] in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs['concern'] == 'rust-tls-openssl' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by inputs.CONCERN in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.CONCERN == 'rust-tls-openssl' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by a case-varied prefix in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'RUST-TLS') || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the compiled restore with no concern selector' "${windows_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' }}
+        uses: actions/cache/restore@"
+mutation '20. the compiled locate with no concern selector' "${windows_concern}" "        if: \${{ startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' }}
+        # Kept as ./" "        if: \${{ github.ref == 'refs/heads/main' }}
+        # Kept as ./"
+mutation '20. the compiled save with no concern selector' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') && " "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && "
+mutation '20. every concern but one selected by a negation in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (!(inputs.concern == 'x') || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. a compiled cache step in a workflow outside the allowlist' .github/workflows/android-validation.yml "      - name: Record the runner image" "      - name: Restore compiled
+        if: \${{ inputs.rust }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ runner.temp }}/cargo-target/debug/deps
+          key: x
+
+      - name: Record the runner image"
+
+# 20c. Positive identification of compiled-cache steps (confirmation review): a door-selected
+# actions/cache restore or save step whose path is an alias (a glob, an env var, the temp root) is still a
+# compiled-cache step and is refused; so is a workflow file with a second YAML document.
+sources_anchor="      - name: Restore cached third-party crate sources"
+for alias in '${{ runner.temp }}/cargo-t*/debug/de?ps' '${{ env.CT }}' '${{ runner.temp }}' '${{ runner.temp }}/ct'; do
+  for verb in restore save; do
+    mutation "20c. a door-selected cache ${verb} step with the aliased path ${alias}" "${windows_concern}" "${sources_anchor}" "      - name: Aliased compiled ${verb}
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache/${verb}@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${alias}
+          key: door
+
+${sources_anchor}"
+  done
+done
+mutation '20c. a combined actions/cache step selected for the door with an aliased path' "${windows_concern}" "${sources_anchor}" "      - name: Aliased compiled combined
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ env.CT }}
+          key: door
+
+${sources_anchor}"
+# 20c (case-insensitive keys): GitHub reads step keys case-insensitively, so a `Uses:` door step, a
+# duplicate `With:` beside the pinned crate-sources step, and an `IF:` on a compiled step are all refused.
+mutation '20c. a door-selected cache step written with a capitalised Uses key' "${windows_concern}" "${sources_anchor}" "      - name: Capitalised compiled restore
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        Uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ runner.temp }}/cargo-target
+          key: door
+
+${sources_anchor}"
+mutation '20c. a duplicate With mapping beside the pinned crate-sources step' "${windows_concern}" "          restore-keys: |
+            cargo-sources-v3-\${{ runner.os }}-
+" "          restore-keys: |
+            cargo-sources-v3-\${{ runner.os }}-
+        With:
+          path: \${{ runner.temp }}/cargo-target
+"
+mutation '20c. an upper-case IF on the compiled restore' "${windows_concern}" "        id: cargo-target-cache
+        if: " "        id: cargo-target-cache
+        IF: "
+mutation '20c. the crate-sources restore widened to a second path' "${windows_concern}" "            \${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: cargo-sources-v3" "            \${{ steps.cargo-home.outputs.dir }}/registry/cache
+            \${{ runner.temp }}/cargo-target
+          key: cargo-sources-v3"
+mutation '20c. a second YAML document in a concern workflow' "${windows_concern}" "          phase: report" "          phase: report
+---
+jobs:
+  other:
+    steps:
+      - name: Hidden compiled restore
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ env.CT }}
+          key: door"
+
 # 18. The case-evidence admission in the e2e-visual container (git as root, checkouts owned by the
 # runner's uid): its git calls carry an exact safe.directory for the checkout they read.
 admission=.github/policy/case-evidence-admission.rb

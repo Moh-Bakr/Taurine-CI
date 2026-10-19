@@ -328,6 +328,27 @@ also matters for this design for a second reason: it is the only legitimate way 
 `refs/heads/main`'s scope other than eviction, and the audit in section 3.3 depends on nobody
 else being able to delete or rewrite scopes.
 
+### 4.5 Door concerns are never cached
+
+The OpenSSL door concern (`rust-tls-openssl`) is never in any compiled-dependency cache group, on any
+operating system. `check-cache-groups.rb` enforces this with a positive allowlist, not a denylist: per
+operating system, `CONCERNS` lists the exact concerns that may restore (locate, restore, restore-time
+strip) and save (save, strip-and-prove) the compiled cache, and no compiled-cache step may select anything
+else. Every compiled-cache step must carry exactly one selector made only of lower-case
+`inputs.concern == 'x'` and `startsWith(inputs.concern, 'x')` terms joined by `||`; a step with no
+selector (which would select every concern, the door included), another spelling of the context
+(`inputs['concern']`, `inputs.CONCERN`, `startswith`), a negation or an `||` with anything else is
+refused. Actions string comparison is case-insensitive, so no spelling variant is accepted. A
+compiled-cache step in any workflow without an allowlist entry fails the check, so the guard does not
+depend on a workflow's file name. Caching a new concern is a reviewed edit to `CONCERNS`.
+
+The door's proof (`taurine-tls-openssl/src/policy.rs`) compares version strings, so a restored, tampered
+static library that reports the locked patch would pass it, and the concern is our one independent proof
+that the vendored OpenSSL is the locked build. The measured saving (about one to two minutes, off the
+critical path) does not justify weakening that. It always builds OpenSSL from source. The crate-sources
+cache is a different cache: it holds only lockfile-verified crate archives (including `openssl-src`), never
+the compiled door.
+
 ## 5. Policy changes (so a later edit cannot silently add `save` to `untrusted`)
 
 All in `.github/policy/`. Per "Changing the policy" in `docs/how-ci-works.md` these land in two
