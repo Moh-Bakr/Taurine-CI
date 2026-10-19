@@ -235,15 +235,27 @@ step_mutant() { # label needle step-id from to
 reviewed_msg='is not the reviewed read-only untrusted restore'
 src=cargo-sources-untrusted
 tgt=cargo-target-cache-untrusted
-ug="github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db'"
+# The reviewed concern term and toolchain input differ between the trees this runs on (before and after Batch 2),
+# so every mutant below anchors on whichever form the tree under test carries.
+if grep -qF "startsWith(inputs.concern, 'rust-app-'))" "${c}"; then
+  ct="(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))"
+else
+  ct="inputs.concern == 'rust-db'"
+fi
+if grep -qF "inputs.concern == 'scan-lint') && 'rust-app'" "${c}"; then
+  tc="(inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern"
+else
+  tc="inputs.concern == 'scan-security' && 'rust-app' || inputs.concern"
+fi
+ug="github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && ${ct}"
 
 # Each weakening of the restore itself is refused as "not the reviewed restore".
 step_mutant 'no flag term' "${reviewed_msg}" "${src}" 'inputs.untrusted_readonly_cache && ' ''
-step_mutant 'no concern term' "${reviewed_msg}" "${tgt}" " && inputs.concern == 'rust-db'" ''
-step_mutant 'widened to every Rust concern' "${reviewed_msg}" "${tgt}" "inputs.concern == 'rust-db'" "startsWith(inputs.concern, 'rust-')"
-step_mutant 'widened to a second concern' "${reviewed_msg}" "${src}" "inputs.concern == 'rust-db'" "(inputs.concern == 'rust-db' || inputs.concern == 'rust-app-1')"
-step_mutant 're-opened by ||' "${reviewed_msg}" "${src}" "inputs.concern == 'rust-db' }}" "inputs.concern == 'rust-db' || true }}"
-step_mutant 'a dispatch-controlled extra term' "${reviewed_msg}" "${tgt}" "inputs.concern == 'rust-db' }}" "inputs.concern == 'rust-db' && inputs.source_sha != '' }}"
+step_mutant 'no concern term' "${reviewed_msg}" "${tgt}" " && ${ct}" ''
+step_mutant 'widened to every Rust concern' "${reviewed_msg}" "${tgt}" "${ct}" "startsWith(inputs.concern, 'rust-')"
+step_mutant 'widened to a second concern' "${reviewed_msg}" "${src}" "${ct}" "(${ct} || inputs.concern == 'rust-packaging')"
+step_mutant 're-opened by ||' "${reviewed_msg}" "${src}" "${ct} }}" "${ct} || true }}"
+step_mutant 'a dispatch-controlled extra term' "${reviewed_msg}" "${tgt}" "${ct} }}" "${ct} && inputs.source_sha != '' }}"
 step_mutant 'gated to neither ref' "${reviewed_msg}" "${tgt}" "github.ref == 'refs/heads/untrusted' && " ''
 step_mutant 'gated to main as well as the flag' "${reviewed_msg}" "${tgt}" "github.ref == 'refs/heads/untrusted'" "github.ref == 'refs/heads/main'"
 step_mutant 'compiled key derived from a dispatch input' "${reviewed_msg}" "${tgt}" 'key: ${{ steps.cargo-target.outputs.key }}' 'key: cargo-${{ inputs.source_sha }}'
@@ -536,7 +548,7 @@ defaults:
 
 env:'
 mutant 'the toolchain action file altered' "${allow_msg}" ".github/actions/rust-toolchain/action.yml" 'Per-OS setup for the Rust concerns' 'Per-OS planted setup for the Rust concerns'
-mutant 'the toolchain step gains a with key' "${allow_msg}" "${c}" "          concern: \${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" "          concern: \${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
+mutant 'the toolchain step gains a with key' "${allow_msg}" "${c}" "          concern: \${{ ${tc} }}" "          concern: \${{ ${tc} }}
           extra: x"
 
 # Every shared local action that runs ahead of the producers is pinned as a whole file and by its exact

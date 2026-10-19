@@ -65,6 +65,10 @@ BLOCKING_EXPR = %q(${{ (contains(fromJSON('["failure","cancelled"]'), needs.cach
 UNTRUSTED_RESTORE_WORKFLOWS = %w[linux-validation-concern.yml].freeze
 UNTRUSTED_FLAG = 'untrusted_readonly_cache'.freeze
 UNTRUSTED_RESTORE_TERMS = [UNTRUSTED, 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
+# Batch 2 adds the rust-app shards to the untrusted restores: both reviewed concern terms are accepted here until
+# Batch 2's own checker (which accepts only the second) replaces this file.
+UNTRUSTED_RESTORE_TERMS_RUST_APP = [UNTRUSTED, 'inputs.untrusted_readonly_cache', "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))"].freeze
+UNTRUSTED_RESTORE_TERM_SETS = [UNTRUSTED_RESTORE_TERMS, UNTRUSTED_RESTORE_TERMS_RUST_APP].freeze
 PIN = 'actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9'.freeze
 SOURCES_PATH = "${{ steps.cargo-home.outputs.dir }}/registry/cache\n".freeze
 TARGET_PATH = "${{ steps.cargo-target.outputs.dir }}/debug/deps\n${{ steps.cargo-target.outputs.dir }}/debug/build\n${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint\n".freeze
@@ -398,7 +402,7 @@ def reviewed_untrusted_restore?(st)
   return false unless with.is_a?(Hash) && with.keys.sort == %w[key path]
   return false unless REVIEWED_UNTRUSTED_RESTORES.include?([with['path'].to_s, with['key'].to_s])
   terms = top_terms(st['if'])
-  !terms.nil? && terms.sort == UNTRUSTED_RESTORE_TERMS.sort
+  !terms.nil? && UNTRUSTED_RESTORE_TERM_SETS.any? { |set| terms.sort == set.sort }
 end
 
 reviewed_restores = {}
@@ -528,17 +532,18 @@ LOCAL_ACTION_FILE_SHA256 = {
     9d2a363af0af7877c4a0428c907bbd0445d9c43b0e6db2f033bd339f814fb860
     ff475be9ed8faa47c3a218041c71505a17f0944fc4d32b9f25b08ae61fd59922
   ],
-  'source-checkout' => %w[bcab0702e94fc10fa410a5d8875215dffc03189e557780f86662da4c1796fff0],
+  'source-checkout' => %w[bcab0702e94fc10fa410a5d8875215dffc03189e557780f86662da4c1796fff0 ac95c29654593720210baa620edc335ecf49f33864f9d96deed73f1f296317b3],
   'egress-audit' => %w[c6c3ff33427b869f38f3dc83800ae92143233b2137922d67d2a2f75aa32f74b5],
   'root-setup' => %w[
     92b689e1af931693bb99211a35383fd69879bccf77e1885045fc743675d97d41
     81fa977997b32fbbe67028b272812e88e2164ef2ff9d9a7debe927811b116154
+    1f288c476f7598e3fd583b8116994c429c01e3dc30376ea2df1ae9e2affe1dce
   ],
   'drop-root' => %w[2562fdd5b283364bb839c3a547dce05bbea76438ea47c2be5f7efe26942579dc],
-  'sanitize' => %w[2de2e7da83f5011c724bf34f0096be6c703a0180272fbf7ff2eb2c96df075024],
-  'concern-report' => %w[d993053f802c03335cc09ce4a4b182b02e468d00202835673d50b4ffdb279435],
-  'shell-artefact' => %w[dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184],
-  'scan-concern' => %w[6a70b55ba6b730efcf8f74999261c46119243ce9eada546b46c73bc8d59327cd],
+  'sanitize' => %w[2de2e7da83f5011c724bf34f0096be6c703a0180272fbf7ff2eb2c96df075024 4bae990159024f93d9848b12344a7f1d92577dca0ee2aa9916b03c4196a06478],
+  'concern-report' => %w[d993053f802c03335cc09ce4a4b182b02e468d00202835673d50b4ffdb279435 49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
+  'shell-artefact' => %w[dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184 7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a],
+  'scan-concern' => %w[6a70b55ba6b730efcf8f74999261c46119243ce9eada546b46c73bc8d59327cd 4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
   'verify-cargo-cache' => %w[
     483f07957076d89b401ac26ce30b91c9f940b36a1d9c820680b7e29cffd456b8
     6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a
@@ -547,7 +552,7 @@ LOCAL_ACTION_FILE_SHA256 = {
     04d9056e51c8ae6fbfd85ca149ca71e38d291809131a00a28a2444161a3cbda0
     abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec
   ],
-  'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256]
+  'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256, 'a50a7233883d1fff83fda68d6380937afa14db4256c8f6d725b4d674013df695']
 }.freeze
 # The toolchain action's refusal of a `path` toolchain (and of every non-plain key), as the text between
 # `toolchain_refuse() {` and the last call of `toolchain_check`, in the first step's decoded `run`.
@@ -592,7 +597,8 @@ PREFIX_RUN_STEP_SHA256 = {
   'Validate protected call input' => %w[624c9205f6916c4655ad74b5696f61106a738aa4a132bcd2b48c2be5f308b90d],
   'Install jq and Ruby in the visual container' => %w[31b233667e9d4321de83ef2d88b058544421b485da66a0b7f121935b6dc25b16],
   'Select the egress mode' => %w[40289952cb6c982cc79cd49ea9fbbe9a8e96833c5918b8f7e71ad8d6b3d7ee8a],
-  'Read the suite contract for this concern' => %w[6ea7f99c7b3ff6f95440e3e1636ecf867b0a9a47338519a328a9905950870995]
+  'Read the suite contract for this concern' => %w[6ea7f99c7b3ff6f95440e3e1636ecf867b0a9a47338519a328a9905950870995],
+  'Refuse test files with no suite owner before any build' => %w[b7fcf77c374702efd68183b00329bb0a09c4277bb63df553b82728fff19137b1]
 }.freeze
 REVIEWED_CONTAINER_SHA256 = '1681a3dd8f4a7b43784aac2160f99c2524bc5af526d87cf8dc0ecb11ee1e4f49'.freeze
 REVIEWED_DEFAULTS = { 'run' => { 'working-directory' => 'src' } }.freeze
@@ -649,12 +655,15 @@ def pinned_local_action_step?(path, docs, st)
     PREFIX_ACTION_WITH_SHA256[name].include?(canonical_hash(with))
   when 'rust-toolchain'
     toolchain_guard_first?(local_action_doc(path, docs, name)) &&
-      with == { 'concern' => "${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}" }
+      ["${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}", "${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}"].map { |c| { 'concern' => c } }.include?(with)
   when 'verify-cargo-cache'
     with.keys.sort == %w[cache-hit os-label sources-dir] && with['sources-dir'] == '${{ steps.cargo-home.outputs.dir }}' &&
       with['cache-hit'].to_s.match?(CACHE_HIT_REF) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
   else # rust-target-cache: a mode and the reviewed inputs, nothing else
-    (with.keys - %w[mode group features dir cache-hit os-label]).empty? && %w[locate restored save].include?(with['mode']) &&
+    # deny-door (the restore-time strip's OpenSSL door removal) is accepted as a key here without Batch 2's restriction to
+    # restored mode and the literal true/false, and without its strip-follows-restore rule: closed by Batch 2. Not
+    # exploitable until then: no untrusted restore exists on main and the flag is false.
+    (with.keys - %w[mode group features dir cache-hit os-label deny-door]).empty? && %w[locate restored save].include?(with['mode']) &&
       with.fetch('dir', '${{ steps.cargo-target.outputs.dir }}') == '${{ steps.cargo-target.outputs.dir }}' &&
       (!with.key?('cache-hit') || with['cache-hit'].to_s.match?(CACHE_HIT_REF)) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
   end
@@ -739,7 +748,7 @@ def producer_step_failures(path, doc, docs, failures)
     return
   end
   action_path = '.github/actions/rust-target-cache/action.yml'
-  failures << "#{action_path}: the whole file must match the reviewed content hash its untrusted restore depends on (every step after locate runs before the restore reads the outputs)" unless canonical_hash(composite) == RUST_TARGET_CACHE_FILE_SHA256
+  failures << "#{action_path}: the whole file must match the reviewed content hash its untrusted restore depends on (every step after locate runs before the restore reads the outputs)" unless [RUST_TARGET_CACHE_FILE_SHA256, 'a50a7233883d1fff83fda68d6380937afa14db4256c8f6d725b4d674013df695'].include?(canonical_hash(composite))
   outputs = composite['outputs']
   outputs_ok = outputs.is_a?(Hash) && outputs.keys.sort == %w[dir key] &&
                outputs['dir'].is_a?(Hash) && outputs['dir']['value'] == '${{ steps.locate.outputs.dir }}' &&
@@ -845,7 +854,7 @@ docs.each do |path, doc|
         job.is_a?(Hash) && UNTRUSTED_RESTORE_WORKFLOWS.any? { |w| job['uses'].to_s == "./.github/workflows/#{w}" }
       elsif kind == :value && is_callee && where.length == 5 && where[0] == 'jobs' && where[2] == 'steps' && where[4] == 'if'
         terms = top_terms(doc.dig('jobs', where[1], 'steps', where[3], 'if'))
-        !terms.nil? && terms.sort == UNTRUSTED_RESTORE_TERMS.sort
+        !terms.nil? && UNTRUSTED_RESTORE_TERM_SETS.any? { |set| terms.sort == set.sort }
       else
         false
       end
