@@ -6,6 +6,16 @@ set -euo pipefail
 forbidden_path_re='(^|/)(src|target|node_modules|vendor|taurine-desktop|taurine-mobile)(/|$)|\.(rs|ts|tsx|js|jsx|json|toml|lock|pem|p12|pfx|jks|keystore)$'
 forbidden_name_re='(^|/)(README|SECURITY|CODEOWNERS|LICENSE)(\.|$)'
 
+# Compiled or binary build output is never tracked, wherever it sits: Python bytecode, Java classes, object
+# files and any __pycache__ directory. Checked first, with its own message, so no allowlist branch below can
+# admit one by accident.
+while IFS= read -r -d '' path; do
+  if [[ "$path" =~ \.(pyc|pyo|class|o)$ || "$path" =~ (^|/)__pycache__(/|$) ]]; then
+    echo "Compiled or binary build output is tracked in the public CI repository: $path" >&2
+    exit 1
+  fi
+done < <(git ls-files -z)
+
 while IFS= read -r -d '' path; do
   if [[ "$path" == .github/workflows/* ]]; then
     continue

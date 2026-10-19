@@ -49,6 +49,14 @@ printf '# unreviewed helper\n' > "${unreviewed}/.github/policy/pg8-helper.py"
 git -C "${unreviewed}" add .github/policy/pg8-helper.py
 expect_reject "${unreviewed}" 'an unreviewed third Python policy file' 'Unexpected tracked path in the public CI repository'
 
+for compiled in .github/policy/__pycache__/x.cpython-314.pyc .github/policy/x.pyc .github/actions/y/z.pyo tools/A.class build/x.o __pycache__/note.txt .github/policy/__pycache__/readme.sh; do
+  bin="$(new_fixture)"
+  mkdir -p "${bin}/$(dirname "${compiled}")"
+  printf 'x\n' > "${bin}/${compiled}"
+  git -C "${bin}" add -f "${compiled}"
+  expect_reject "${bin}" "compiled output ${compiled}" 'Compiled or binary build output is tracked'
+done
+
 private_source="$(new_fixture)"
 mkdir -p "${private_source}/taurine-desktop/src"
 printf 'source fixture\n' > "${private_source}/taurine-desktop/src/private.ts"
