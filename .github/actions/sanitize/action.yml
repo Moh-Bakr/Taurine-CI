@@ -148,7 +148,9 @@ runs:
             # cargo-nextest: a failing test is named on its FAIL line (published); its
             # captured output between the STDOUT/STDERR markers is dropped whole, until the
             # next result line, separator or the summary (published: counts only).
-            /^[[:space:]]+(FAIL|SIGABRT|SIGSEGV|TIMEOUT|LEAK) \[/ { in_output = 0; print; next }
+            # The FAIL line carries the test name, so it is never printed here; the keyed
+            # failed-test-id lines of nextest_failures identify the test (see the KEYED note).
+            /^[[:space:]]+(FAIL|SIGABRT|SIGSEGV|TIMEOUT|LEAK) \[/ { in_output = 0; next }
             /^--- (STDOUT|STDERR):/ { in_output = 1; next }
             /^[[:space:]]*Summary \[/ { in_output = 0; print; next }
             /^-{10,}$/ { in_output = 0; next }
@@ -158,7 +160,17 @@ runs:
             /^error: building [A-Za-z0-9_.+-]+:[A-Za-z0-9_-]+ failed/ { block = "vcpkg"; pending = ""; print; next }
             /^error: / {
               block = "error"; pending = ""
-              if ($0 ~ /^error: (could not compile|test failed, to rerun pass|[0-9]+ targets? failed:|failed to run custom build command for|workspace member |the lock file |linking with |failed to (download|select|get|load|parse|fetch)|no matching package|package ID specification)/) print
+              # The crate, target and package names in these cargo lines are private source
+              # identifiers: only the fixed text is published.
+              if ($0 ~ /^error: test failed, to rerun pass/) print "error: test failed, to rerun pass (target withheld)"
+              else if ($0 ~ /^error: [0-9]+ targets? failed:/) { n = $2; print "error: " n " target(s) failed (names withheld)" }
+              else if ($0 ~ /^error: could not compile/) print "error: could not compile (crate and target withheld)"
+              else if ($0 ~ /^error: failed to run custom build command for/) print "error: failed to run custom build command (package withheld)"
+              else if ($0 ~ /^error: workspace member /) { wm++; if (wm == 1) print "error: workspace member (name withheld) is tested by no Rust concern" }
+              else if ($0 ~ /^error: failed to (download|select|get|load|parse|fetch)/) print "error: failed to " $4 " (details withheld)"
+              else if ($0 ~ /^error: no matching package/) print "error: no matching package (name withheld)"
+              else if ($0 ~ /^error: package ID specification/) print "error: package ID specification did not match (spec withheld)"
+              else if ($0 ~ /^error: (the lock file |linking with )/) print
               else pending = $0
               next
             }
@@ -166,7 +178,9 @@ runs:
               if (block == "error") { if (pending != "") print "error: (message withheld)"; pending = ""; print }
               next
             }
-            /^test .* FAILED$/ || /^test result: FAILED/ || /^[[:space:]]+`-p [^`]+`$/ { print }
+            /^test result: FAILED/ { print }
+            # The names stay in the private log file; the gate itself still fails on them.
+            END { if (wm > 0) print "workspace members tested by no concern: " wm }
           ' | head -80 >&2 || true
         }
 
@@ -189,12 +203,147 @@ runs:
           fi
         }
 
-        # One line per panicking test: its name (a function identifier), the repository-relative
-        # file:line of the panic and a FIXED class of the message. The message itself is never
-        # published, because assertion messages quote values and expressions from the source:
-        # `assertion left == right failed` becomes the class, its left/right values are dropped.
+        # KEYED FAILING-TEST IDENTITIES (owner decision 2026-10-18, option A).
+        # The only thing a public log says about WHICH test failed is `failed-test-id: <16 hex>`:
+        # the first 8 bytes of HMAC-SHA256(key, "taurine-test-id/v1" 0x1f kind 0x1f file 0x1f
+        # title), the key being a random value held only in the private source (read by the
+        # source-checkout action into TCI_TEST_ID_KEY before any project code runs, and masked).
+        # Test titles, file paths, binary names, panic messages and assertion text are never
+        # printed by the summaries below; the local helper `ci-failed-tests` in the private
+        # repository maps an id back to a test. The hashing happens HERE, in reviewed control-plane
+        # code, so the key is never handed to project code or a project-side reporter, and the
+        # published grammar is fixed by this file, not by anything the project can print. Fail
+        # closed: with no key, no HMAC tool or a malformed key the summaries print counts only.
+        TCI_TEST_ID_KEY="${RUNNER_TEMP:-/nonexistent}/taurine-ci/test-id-key"
+        # Both interpreters implement the same function; the policy fixtures prove they agree.
+        # The key file is read by path, so the key is never in an argument list.
+        TCI_TEST_ID_RUBY='require "openssl"
+        rows = File.binread(ARGV[0]).split("\n")
+        kid = rows[0].to_s[/\Akey-id=(k[0-9]{1,4})\z/, 1]
+        keyhex = rows[1].to_s[/\Akey=([0-9a-f]{64})\z/, 1]
+        exit 2 unless kid && keyhex && rows.length == 2
+        key = [keyhex].pack("H*")
+        STDIN.binmode
+        lines = STDIN.read.split("\n", -1)
+        lines.pop if lines.last == ""
+        lines.each do |line|
+          line.force_encoding("UTF-8")
+          unless line.valid_encoding?
+            puts "-"
+            next
+          end
+          kind, file, title = line.split("\t", 3)
+          bad = kind.nil? || file.nil? || title.nil? || !kind.match?(/\A[a-z0-9-]{1,12}\z/) || (file + title).match?(/[\x00-\x1f\x7f]/)
+          puts(bad ? "-" : OpenSSL::HMAC.hexdigest("SHA256", key, ["taurine-test-id/v1", kind, file, title].join("\x1f"))[0, 16])
+        end'
+        TCI_TEST_ID_PYTHON='import hashlib, hmac, re, sys
+        rows = open(sys.argv[1], "rb").read().decode("ascii", "replace").splitlines()
+        m1 = re.fullmatch(r"key-id=(k[0-9]{1,4})", rows[0]) if len(rows) == 2 else None
+        m2 = re.fullmatch(r"key=([0-9a-f]{64})", rows[1]) if len(rows) == 2 else None
+        if not (m1 and m2):
+            sys.exit(2)
+        key = bytes.fromhex(m2.group(1))
+        lines = sys.stdin.buffer.read().split(b"\n")
+        if lines and lines[-1] == b"":
+            lines.pop()
+        for raw in lines:
+            try:
+                line = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                print("-")
+                continue
+            parts = line.split("\t", 2)
+            if len(parts) != 3 or not re.fullmatch(r"[a-z0-9-]{1,12}", parts[0]) or re.search(r"[\x00-\x1f\x7f]", parts[1] + parts[2]):
+                print("-")
+                continue
+            msg = "\x1f".join(["taurine-test-id/v1"] + parts)
+            print(hmac.new(key, msg.encode("utf-8"), hashlib.sha256).hexdigest()[:16])'
+
+        # stdin: lines of `kind<TAB>file<TAB>title`; stdout: one line per input line, the 16-hex id
+        # or `-` when the line cannot be identified (a control character, bad UTF-8, a bad kind).
+        # Returns non-zero with no output when the key or an interpreter is unavailable.
+        tci_hmac_ids() {
+          [[ -f "${TCI_TEST_ID_KEY}" && ! -L "${TCI_TEST_ID_KEY}" ]] || return 1
+          if command -v ruby >/dev/null 2>&1; then
+            ruby -e "${TCI_TEST_ID_RUBY}" "${TCI_TEST_ID_KEY}"
+          elif command -v python3 >/dev/null 2>&1; then
+            python3 -I -c "${TCI_TEST_ID_PYTHON}" "${TCI_TEST_ID_KEY}"
+          else
+            return 1
+          fi
+        }
+
+        # The runners' own count lines, and nothing else: stdin lines that are ENTIRELY one of the
+        # fixed shapes below are printed (words and integers only), every other line is dropped, so
+        # a log line that merely starts with a count ("5 failed login attempts for ...") or carries
+        # text after it ("Tests  7 failed because of ...") never reaches the output.
+        #   vitest      Test Files  1 failed | 297 passed | 1 skipped (299)      and   Tests  ...
+        #   Playwright  3 passed (12s)   /   1 failed   /   2 flaky   /   4 skipped   /   1 did not run
+        #   TAP         # pass 5   /   # fail 1   /   # tests 6   (also skipped, cancelled, todo)
+        tci_count_lines() {
+          local word='(failed|passed|skipped|todo|flaky)'
+          grep -E "^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]+ ${word}([[:space:]]+\\|[[:space:]]+[0-9]+ ${word})*([[:space:]]+\\([0-9]+\\))?[[:space:]]*\$|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped|did not run)([[:space:]]+\\([0-9.]+m?s\\))?[[:space:]]*\$|^# (pass|fail|tests|skipped|cancelled|todo) [0-9]+\$" |
+            sed -E 's/^[[:space:]]+//' | cut -c1-120 | awk '!seen[$0]++' | head -20
+        }
+
+        # stdin: lines of `kind<TAB>file<TAB>title<TAB>status` (status is one of the fixed words
+        # fail, signal, timeout, leak, flaky, produced by this library, never by the log). Prints
+        # `test-id-key: <id>`, one `failed-test-id: <hex> status=<word>` per distinct failing test
+        # and, when some could not be identified, a count. Prints a fixed line and a count when the
+        # ids are unavailable. Nothing from the title or the file is ever printed.
+        tci_failed_ids() {
+          local in ids total unidentified
+          in="$(mktemp "${RUNNER_TEMP:-/tmp}/tci-ids.XXXXXX" 2>/dev/null || mktemp)"
+          cat >"${in}"
+          total="$(grep -c '' "${in}" || true)"
+          if [[ "${total}" -eq 0 ]]; then rm -f "${in}"; return 0; fi
+          ids="$(cut -f1-3 "${in}" | tci_hmac_ids 2>/dev/null)" || ids=''
+          if [[ -z "${ids}" || "$(printf '%s\n' "${ids}" | grep -c '')" -ne "${total}" ]]; then
+            echo "failed-test-ids: unavailable (no usable key or HMAC tool); failing tests: ${total}"
+            rm -f "${in}"; return 0
+          fi
+          echo "test-id-key: $(sed -n 's/^key-id=//p' "${TCI_TEST_ID_KEY}" | head -n 1)"
+          paste -d'\t' <(printf '%s\n' "${ids}") <(cut -f4 "${in}") |
+            awk -F'\t' '$1 ~ /^[0-9a-f]{16}$/ && $2 ~ /^(fail|signal|timeout|leak|flaky)$/ && !seen[$0]++ { printf "failed-test-id: %s status=%s\n", $1, $2 }' | sort | head -80
+          unidentified="$(printf '%s\n' "${ids}" | grep -c '^-$' || true)"
+          if [[ "${unidentified}" -gt 0 ]]; then echo "failed-tests-unidentified: ${unidentified}"; fi
+          rm -f "${in}"
+        }
+
+        # The test-inventory section a collector wrote ($1, markdown) as it may be published, with the
+        # keyed ids of the failed or flaky tests ($2, records `kind<TAB>file<TAB>title<TAB>status`,
+        # optional) appended. The collector is project code, so its markdown is not trusted: a line
+        # that names a failed or flaky test is dropped, and every remaining line must match one of the
+        # reviewed shapes (heading, fixed sentence, counts, details wrapper, a passed or skipped
+        # identity line, the fallback lines), else the whole section is replaced by a fixed message.
+        tci_publish_inventory() {
+          local section="$1" records="${2:-}" kept ere rc
+          kept="$(mktemp "${RUNNER_TEMP:-/tmp}/tci-inv.XXXXXX" 2>/dev/null || mktemp)"
+          ere='^(### Tests exercised by this run|Identifies the tests that passed or were skipped, by repo-relative file path and title only; a failed or flaky test is identified only by a keyed id\. Source, fixtures, data values and environment details are not published\.|Test inventory unavailable: (no runner output could be collected|the collector did not complete|the collector runner is not installed for this concern)\.|- [0-9]+ tests in [0-9]+ files\.|- [0-9]+ (entry|entries) withheld by the secret-shape scan; [0-9]+ withheld as malformed\.|- [0-9]+ runner report\(s\) could not be parsed\.|- Showing the first [0-9]+ \(cap\): [0-9]+ more not listed\.|- [0-9]+ failed or flaky: published only as keyed ids \(`failed-test-id`\), never by title or path\.|<details>|<summary>Test identities</summary>|</details>|- `[^`]+` › `[^`]+` — (passed|skipped) · [0-9]+ ms|collector error class: [A-Za-z_]{0,60}|#### [A-Za-z0-9._-]+ \(fallback, from the runner report\)|- tests: [0-9]+; ((expected|unexpected|flaky|skipped|passed|failed|timedOut|interrupted|\?) [0-9]+(, )?)+)$'
+          tr -d '\r' <"${section}" 2>/dev/null | grep -vE ' — (failed|flaky) · ' | grep -v '^$' >"${kept}" || true
+          # grep -v exits 1 only when every line matched a reviewed shape; 0 (a stray line) and 2
+          # (an error) both fail closed.
+          rc=0; grep -vE "${ere}" "${kept}" >/dev/null 2>&1 || rc=$?
+          if [[ -s "${kept}" && "${rc}" -eq 1 ]]; then
+            tr -d '\r' <"${section}" | grep -vE ' — (failed|flaky) · '
+          else
+            printf '### Tests exercised by this run\n\nTest inventory withheld: the collector output did not match its reviewed shape.\n'
+          fi
+          rm -f "${kept}"
+          if [[ -n "${records}" && -s "${records}" ]]; then
+            printf '\n#### Failed or flaky tests (keyed ids; titles and paths are never published)\n\n```\n'
+            head -n 2000 "${records}" | tci_failed_ids || echo 'failed-test-ids: unavailable (the id library failed)'
+            printf '```\n'
+          fi
+        }
+
+        # One line per panic: the repository-relative file as a keyed `file-id` (never the path),
+        # the line number and a FIXED class of the message. Neither the panicking test's name nor
+        # the message is published: `assertion left == right failed` becomes the class, its
+        # left/right values are dropped. `ci-failed-tests` maps a file-id to a tracked file.
         panic_summary() {
-          tr -d '\r' <"$1" | sanitize_stream | awk '
+          local rows files ids
+          rows="$(tr -d '\r' <"$1" | sanitize_stream | awk '
             function classify(m) {
               if (m ~ /^assertion `left (==|!=) right` failed/) return "assertion (left/right comparison) failed";
               if (m ~ /^assertion failed:/) return "assertion failed (expression withheld)";
@@ -205,56 +354,91 @@ runs:
               if (m ~ /^attempt to /) return "arithmetic overflow or invalid operation";
               return "panic (message withheld)";
             }
-            function emit(name, loc,    n, a, where) {
+            function emit(loc,    n, a, code) {
               n = split(loc, a, ":");
-              where = a[1] ":" a[2];
-              # A fixed error `code=<[a-z_]+>` token (an enum string, never a value) is allowed
-              # through next to the class; nothing else of the message is.
+              # A `code=<[a-z_]+>` token is allowed through next to the class only when it is one of
+              # the fixed app error codes below; nothing else of the message is.
               code = "";
-              if (match(msg, /code=[a-z_]+/)) code = "  " substr(msg, RSTART, RLENGTH);
-              printf "  %s  %s  %s%s\n", name, where, classify(msg), code;
+              if (match(msg, /code=[a-z_]+/)) {
+                v = substr(msg, RSTART + 5, RLENGTH - 5)
+                # Only the app error-code surface is published; any other value is `code=other`.
+                code = (index(" android auth authorization barrier_refused canceled conflict connect_budget_spent custom engine git_failed git_invalid_input host_key_changed invalid_input ios locked mock network none not_connected not_found not_implemented notes reauth replicate revoked script storage sync unavailable unsupported vault ", " " v " ") > 0) ? "code=" v : "code=other"
+              }
+              printf "%s\t%s\t%s\t%s\n", a[1], (a[2] ~ /^[0-9]+$/ ? a[2] : "?"), classify(msg), code;
             }
             /thread \047[^\047]+\047.* panicked at / {
-              name = $0; sub(/^.*thread \047/, "", name); sub(/\047.*$/, "", name);
               rest = $0; sub(/^.* panicked at /, "", rest);
               if (rest ~ /^\047/) {
                 msg = rest; sub(/^\047/, "", msg);
                 loc = rest; sub(/^.*\047, /, "", loc);
-                emit(name, loc);
+                emit(loc);
               } else {
-                loc = rest; sub(/:$/, "", loc); pname = name; ploc = loc; pending = 1;
+                loc = rest; sub(/:$/, "", loc); ploc = loc; pending = 1;
               }
               next
             }
-            pending { msg = $0; emit(pname, ploc); pending = 0 }
-          ' | awk '!seen[$0]++' | head -60
+            pending { msg = $0; emit(ploc); pending = 0 }
+          ' | awk '!seen[$0]++' | head -60)"
+          [[ -n "${rows}" ]] || return 0
+          ids="$(cut -f1 <<<"${rows}" | awk '{ print "file\t" $0 "\t" }' | tci_hmac_ids 2>/dev/null)" || ids=''
+          if [[ -z "${ids}" || "$(printf '%s\n' "${ids}" | grep -c '')" -ne "$(grep -c '' <<<"${rows}")" ]]; then
+            ids="$(cut -f1 <<<"${rows}" | sed 's/.*/unavailable/')"
+          fi
+          paste -d'\t' <(printf '%s\n' "${ids}") <(cut -f2- <<<"${rows}") |
+            awk -F'\t' '{ printf "  panic  file-id=%s  line=%s  %s%s\n", ($1 ~ /^([0-9a-f]{16}|unavailable)$/ ? $1 : "-"), $2, $3, ($4 != "" ? "  " $4 : "") }'
         }
 
-        # Names of the tests a cargo test run reports as FAILED (function identifiers).
-        # Three places a failure is named, because `--nocapture` output interleaves with the
-        # result line and defeats an anchored `test x ... FAILED`: the result line itself (even
-        # with output before it), the `---- name stdout ----` header of the failure block and
-        # the `failures:` list at the end of the run. All are function identifiers.
-        failed_test_names() {
+        # Names of the tests a cargo test run reports as FAILED (function identifiers), as
+        # records for tci_failed_ids. Three places a failure is named, because `--nocapture`
+        # output interleaves with the result line and defeats an anchored `test x ... FAILED`: the
+        # result line itself (even with output before it), the `---- name stdout ----` header of
+        # the failure block and the `failures:` list at the end of the run. A libtest run does not
+        # say which binary a test is in, so the record has no file: kind `rust-name`.
+        failed_test_records() {
           tr -d '\r' <"$1" | {
             grep -oE 'test [A-Za-z0-9_:]+ \.\.\. FAILED' | sed -E 's/^test //; s/ \.\.\. FAILED$//'
             grep -oE '^---- [A-Za-z0-9_:]+ (stdout|stderr) ----$' "$1" | sed -E 's/^---- //; s/ (stdout|stderr) ----$//'
             awk '/^failures:$/ { in_list = 1; next } in_list && /^    [A-Za-z0-9_:]+$/ { sub(/^    /, ""); print; next } in_list && /^$/ { in_list = 0 }' "$1"
-          } | sort -u | head -60
+          } | sort -u | head -60 | awk '{ printf "rust-name\t\t%s\tfail\n", $0 }'
         }
 
-        # cargo-nextest failure lines: the failing test (binary id and name), the signal or
-        # timeout, and the flaky retries. Only the status word and the test identity are kept;
-        # captured output never is.
+        # The failing tests of a cargo test run as keyed ids (see the note above).
+        failed_test_names() {
+          failed_test_records "$1" | tci_failed_ids
+        }
+
+        # cargo-nextest failing tests as records `rust<TAB>binary-id<TAB>test name<TAB>status`:
+        # FAIL, the signals, TIMEOUT, LEAK and the flaky retries. Only the status word and the
+        # test identity are read; captured output never is. The `[ 0.012s]` timing and the
+        # `( 3/10)` progress counter are removed first; a `TRY n FAIL` retry line is skipped (the
+        # final status line names the test).
+        nextest_failure_records() {
+          tr -d '\r' <"$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' |
+            sed -E 's/^[[:space:]]+//; s/\[ *[0-9.]+s\] +//; s/\( *[0-9]+\/[0-9]+\) +//' |
+            awk '
+              function status(w) { if (w == "FAIL") return "fail"; if (w == "TIMEOUT") return "timeout"; if (w == "LEAK") return "leak"; return "signal" }
+              $1 ~ /^(FAIL|SIGABRT|SIGSEGV|SIGBUS|SIGKILL|TIMEOUT|LEAK)$/ && NF == 3 {
+                printed[$2 SUBSEP $3] = 1
+                printf "rust\t%s\t%s\t%s\n", $2, $3, status($1); next
+              }
+              $1 == "FLAKY" && NF == 4 { flaky[$3 SUBSEP $4] = 1; printf "rust\t%s\t%s\tflaky\n", $3, $4; next }
+              # With retries a log may carry only `TRY n FAIL ...` lines for the last attempt: a test
+              # with such a line, no final status line and no FLAKY line failed.
+              $1 == "TRY" && $2 ~ /^[0-9]+$/ && $3 ~ /^(FAIL|SIGABRT|SIGSEGV|SIGBUS|SIGKILL|TIMEOUT|LEAK)$/ && NF == 5 { tries[$4 SUBSEP $5] = status($3) }
+              END {
+                for (k in tries) if (!(k in printed) && !(k in flaky)) { split(k, kv, SUBSEP); printf "rust\t%s\t%s\t%s\n", kv[1], kv[2], tries[k] }
+              }
+            ' | awk '!seen[$0]++' | head -80
+        }
+
+        # The failing and flaky nextest tests as keyed ids (see the note above).
         nextest_failures() {
-          tr -d '\r' <"$1" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' |
-            grep -E '^[[:space:]]*(FAIL|SIGABRT|SIGSEGV|SIGBUS|SIGKILL|TIMEOUT|LEAK|FLAKY|TRY [0-9]+ FAIL)[[:space:]]' |
-            sed -E 's/^[[:space:]]+//; s/\[ *[0-9.]+s\] +//' | cut -c1-200 | awk '!seen[$0]++' | head -80
+          nextest_failure_records "$1" | tci_failed_ids
         }
 
         # The cargo-nextest summary line (counts) when there is one.
         nextest_summary() {
-          tr -d '\r' <"$1" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -E '^[[:space:]]*Summary \[' | tail -1 | sed -E 's/^[[:space:]]+//'
+          tr -d '\r' <"$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' | grep -E '^[[:space:]]*Summary \[' | tail -1 | sed -E 's/^[[:space:]]+//'
         }
 
         # Tauri refuses to build when an npm package and its Rust crate are on different
@@ -283,21 +467,19 @@ runs:
           ' | cut -c1-200 | head -30
         }
 
-        # Playwright failures: the list reporter's `N) [project] > spec > title` lines and the
-        # github reporter's annotation titles (spec and test title); messages and diffs never.
+        # Playwright console failures: a COUNT of the failing-spec lines the list and github
+        # reporters printed, never their text. The spec and title are in those lines, so they are
+        # not published; the keyed ids come from the JSON report (playwright_json_failures).
         playwright_failures() {
-          local clean
-          clean="$(tr -d '\r' <"$1" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
-          {
-            printf '%s\n' "${clean}" | grep -E '^[[:space:]]*[0-9]+\) \[' | sed -E 's/^[[:space:]]+//' | cut -c1-200
-            printf '%s\n' "${clean}" | grep -E '^::error .*title=' | sed -E 's/^::error .*title=//; s/(,(file|line|col|endLine|endColumn)=.*|::.*)$//; s/^/FAIL /' | cut -c1-200
-          } | awk '!seen[$0]++' | head -60
+          tr -d '\r' <"$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' |
+            grep -cE '^[[:space:]]*[0-9]+\) \[|^::error .*title=' | awk '{ if ($1 > 0) print "failing spec lines in the console output: " $1 }'
         }
-        # Failing specs from Playwright's JSON report (the console reporter is `github`, which
-        # prints nothing when the run dies before or outside a test). Prints only project, the
-        # repo-relative spec file:line and the test title, plus per-file counts of screenshot
-        # comparison failures (a count, never an image or its path). Reads the report on the
-        # runner; nothing from it is published other than these fields.
+        # Failing tests from Playwright's JSON report (the console reporter is `github`, which
+        # prints nothing when the run dies before or outside a test) as keyed ids: the id covers
+        # the report's spec file and test title (the project is not part of it, so one id names a
+        # test in every project). Also the aggregate screenshot-comparison failure counts (a count
+        # of tests and of differing pixels, never an image, a path or a name). Reads the report on
+        # the runner; no title, path, locator, expected or received value is published.
         playwright_json_failures() {
           local report="$1"
           [[ -s "${report}" ]] || { echo '(no JSON report was written: the run ended before the test phase, for example a dev-server start failure)'; return 0; }
@@ -305,17 +487,25 @@ runs:
             def clean: gsub("\u001b\\[[0-9;]*[A-Za-z]"; "");
             def msg($t): ([ $t.results[]?.error.message? // "" ] | map(clean) | join("\n"));
             def pixels($m): ([ $m | scan("([0-9]+) pixels") | .[0] | tonumber ] | add // 0);
-            def lines($m): [ $m | split("\n")[] | select(test("^[[:space:]]*(Locator|Expected|Received|Error: expect)")) | sub("^[[:space:]]+"; "") ];
+            def safe($v): if ($v | test("[\\x00-\\x1f\\x7f]")) then "\u0001" else $v end;
             [ (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
               | select(($t.status // "") != "expected" and ($t.status // "") != "skipped")
               | (msg($t)) as $m
-              | { file: ($s.file // "?"), line: ($s.line // 0), title: ($s.title // "?"), project: ($t.projectName // "?"), status: ($t.status // "?"),
+              | { file: safe($s.file // "?"), title: safe($s.title // "?"), status: (if ($t.status // "") == "flaky" then "flaky" else "fail" end),
                   visual: (if ($m | test("Screenshot comparison failed|toHaveScreenshot")) then 1 else 0 end),
-                  pixels: pixels($m), detail: lines($m) } ] as $f
-            | ($f[] | "FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))",
-                (.detail[:6][] | "    " + (if test("^(Locator|Error: expect)") then .[0:140] else .[0:70] end))),
-              ( $f | group_by(.file) | map(select(any(.[]; .visual > 0))) | .[]
-                | "visual diffs: \(.[0].file): \(map(.visual) | add) screenshot mismatch(es) in \(length) test(s), \(map(.pixels) | add) pixels differ" )
-          ' "${report}" 2>/dev/null | sed -E 's#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g' | cut -c1-220 | awk '!seen[$0]++' | head -90
+                  pixels: pixels($m) } ] as $f
+            | ($f[] | "e2e\t\(.file)\t\(.title)\t\(.status)"),
+              ( [ $f[] | select(.visual > 0) ] as $v | select(($v | length) > 0)
+                | "visual diffs: \($v | length) screenshot mismatch(es) in \($v | length) test(s), \([$v[].pixels] | add) pixels differ" )
+          ' "${report}" 2>/dev/null | {
+            local records='' line
+            while IFS= read -r line; do
+              case "${line}" in
+                visual\ diffs:*) printf '%s\n' "${line}" ;;
+                e2e$'\t'*) records+="${line}"$'\n' ;;
+              esac
+            done
+            [[ -z "${records}" ]] || printf '%s' "${records}" | tci_failed_ids
+          }
         }
         TCI_SANITIZE_LIBRARY

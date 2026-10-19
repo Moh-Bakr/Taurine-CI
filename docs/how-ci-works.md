@@ -1058,8 +1058,10 @@ Source-bearing output is public, so it is treated as hostile:
   log and only a fixed one-line classification, the exit status and allow-listed detail are printed.
 - The `sanitize` composite installs the shared library: it strips ANSI codes, workspace and
   absolute paths, registry checkouts and token shapes, and drops source excerpts. Detail is
-  limited to shapes that carry no source text: Rust error codes with `file:line`, test names,
-  counts, advisory IDs and package versions, never message text, values or symbols.
+  limited to shapes that carry no source text: Rust error codes with `file:line`, counts,
+  advisory IDs and package versions, never message text, values or symbols. A failing test is
+  never named: it is `failed-test-id: <16 hex>`, an HMAC of its file and title under a key
+  committed in the private source (see "Keyed failing-test ids" below).
 - Failure reasons come from fixed classifiers (`cargo_test_reason`, `js_reason`,
   `mobile_reason`), not from the output itself.
 - The policy workflow runs the sanitizer expressions against path and token fixtures and fails if
@@ -1067,6 +1069,30 @@ Source-bearing output is public, so it is treated as hostile:
 - Workflows declare `permissions: {}` and grant per job; every Action is pinned to a full
   commit SHA on the policy allow-list; protected concurrency groups set `cancel-in-progress:
   false` so a cancel cannot skip token revocation.
+
+## Keyed failing-test ids
+
+Owner decision 2026-10-18 (option A). A public log identifies a failing test only as
+`failed-test-id: <16 hex> status=<word>` beside `test-id-key: <kN>`: the first 8 bytes of
+`HMAC-SHA256(key, "taurine-test-id/v1" 0x1f kind 0x1f file 0x1f title)`. Nextest, libtest,
+vitest and Playwright (JSON report) failures use it; a panic is a keyed `file-id`, a line and a
+fixed class; counts are unchanged. The private repository's `ci-failed-tests <run-id>` maps the
+ids back to tests.
+
+- The hashing runs here, in the `sanitize` library, as part of the reviewed reporters,
+  not by project code. `source-checkout` copies
+  `scripts/ci/test-id-key.txt` from the checked-out source into runner temp (after revocation,
+  before any project command), masks it, and accepts only its fixed three-line grammar
+  (regular file, at most 400 bytes, never sourced or evaluated). Anything else leaves no key and
+  the reporters print counts and `failed-test-ids: unavailable`, never a name.
+- The key is read from the private source, so a source commit chooses it; project code can read
+  it too (it is its own source). It protects public logs from a public reader. It is never an
+  output, an artefact or a log line (the runner masks it).
+- Evidence: `test-keyed-test-ids.sh` (run from `test-extractors.sh`) pins vectors shared with the
+  private tests, proves the ruby and python3 implementations agree, and proves no title, file,
+  binary, thread name, assertion text or secret reaches the output for each runner shape, that
+  every failure mode of the key prints counts only, and that the snapshot step accepts only
+  the fixed format.
 
 ## Control-plane structure manifest
 
