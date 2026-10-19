@@ -29,11 +29,29 @@ module LiveArmCoverage
   end
 
   # The complete required set. There is no waivable subset: `all` requires every registered arm,
-  # including `pg-dbx` (Dbx-route live proof) and `tls-legacy`. Changing this list is a reviewed
-  # policy change, and the base commit's copy of this check runs against the pull request.
-  REQUIRED_ARMS = %w[
+  # including `tls-legacy`. The set has two reviewed shapes while the `pg-dbx` arm is merged into
+  # `postgres`; any other roster is refused. Changing either list is a reviewed policy change, and the
+  # base commit's copy of this check runs against the pull request.
+  #
+  # MERGED_ARMS is the end state: the Dbx-route live proof is the `postgres` arm's own evidence row
+  # (REQUIRED_SUITE_ROWS), so `pg-dbx` is not an arm. LEGACY_ARMS is the shape before the merge, kept
+  # only so the tree that predates it still passes; it goes once nothing registers `pg-dbx`.
+  MERGED_ARMS = %w[
+    doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls tls-legacy bastion
+  ].freeze
+  LEGACY_ARMS = %w[
     doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion
   ].freeze
+  REQUIRED_ARMS = MERGED_ARMS
+
+  # Evidence rows an arm must keep once `pg-dbx` is merged away, each exactly as the roster writes
+  # the suite, so the row the arm's summary prints keeps its name. The Dbx-route proof is two test
+  # targets in one suite row; dropping either target, narrowing it with a test-name filter, repeating
+  # it or removing the row fails here. The legacy shape has its own `pg-dbx` arm instead and is not
+  # held to these rows.
+  REQUIRED_SUITE_ROWS = {
+    'postgres' => ['taurine-db-conformance dbx_pg_live,dbx_shadow_pg']
+  }.freeze
 
   WORKFLOW_PATH = '.github/workflows/live-proofs.yml'.freeze
   MATRIX_PATH = '.github/ci-matrix.json'.freeze
@@ -135,6 +153,17 @@ module LiveArmCoverage
     nil
   end
 
+  # Returns [arm, row] for the first required evidence row an arm no longer carries, else nil.
+  def missing_suite_row(entries)
+    REQUIRED_SUITE_ROWS.each do |arm, rows|
+      entry = entries.find { |e| e['engine'] == arm }
+      suites = entry && entry['suites']
+      suites = [] unless suites.is_a?(Array)
+      rows.each { |row| return [arm, row] unless suites.count(row) == 1 }
+    end
+    nil
+  end
+
   def contract_arms(matrix)
     options = matrix.dig('dispatch_contracts', 'workflows', WORKFLOW_PATH, 'inputs', 'engine', 'options')
     unless options.is_a?(Array) && options.all? { |arm| arm.is_a?(String) }
@@ -146,17 +175,24 @@ module LiveArmCoverage
     raise InvalidInput, "#{MATRIX_LABEL}: no live-proofs engine options"
   end
 
+  # The roster decides which reviewed shape applies, and only the presence of `pg-dbx` selects the
+  # legacy one: a roster that has dropped it is held to the merged shape, so it cannot shed the arm
+  # and its evidence at once. Neither the contract options nor anything else can pick the shape.
+  def required_arms_for(registered)
+    registered.include?('pg-dbx') ? LEGACY_ARMS : MERGED_ARMS
+  end
+
   # `missing` and `unrequired` are filled only for statuses that compare two arm lists. Input
-  # failures carry empty lists and a `reason`, so a malformed file never reads as "13 arms missing".
-  def report(status, registered: [], contract: [], subject: nil, reason: '')
+  # failures carry empty lists and a `reason`, so a malformed file never reads as "12 arms missing".
+  def report(status, registered: [], contract: [], subject: nil, reason: '', required: REQUIRED_ARMS)
     diff = !subject.nil?
     {
       'status' => status,
-      'required_count' => REQUIRED_ARMS.length,
+      'required_count' => required.length,
       'registered_count' => registered.length,
       'contract_count' => contract.length,
-      'missing' => diff ? REQUIRED_ARMS - subject : [],
-      'unrequired' => diff ? subject.uniq - REQUIRED_ARMS : [],
+      'missing' => diff ? required - subject : [],
+      'unrequired' => diff ? subject.uniq - required : [],
       'reason' => reason
     }
   end
@@ -167,7 +203,8 @@ module LiveArmCoverage
     registered = registered_arms(entries)
     matrix = parse_json(read_regular_file(real, MATRIX_PATH, MATRIX_LABEL, MAX_MATRIX_BYTES), MATRIX_LABEL)
     contract = contract_arms(matrix)
-    shared = { registered: registered, contract: contract }
+    required = required_arms_for(registered)
+    shared = { registered: registered, contract: contract, required: required }
 
     if (arm, key = unknown_key(entries))
       return report('unknown_roster_key', **shared, reason: "#{WORKFLOW_LABEL}: key '#{key}' in arm '#{arm}'")
@@ -176,11 +213,15 @@ module LiveArmCoverage
       repeated = registered.group_by(&:itself).select { |_, group| group.length > 1 }.keys.join(', ')
       return report('duplicate_arm', **shared, reason: "#{WORKFLOW_LABEL}: repeated arm #{repeated}")
     end
-    unless registered.sort == REQUIRED_ARMS.sort
+    unless registered.sort == required.sort
       return report('roster_mismatch', **shared, subject: registered, reason: "#{WORKFLOW_LABEL}: roster differs from the required set")
     end
-    unless contract.sort == REQUIRED_ARMS.sort
+    unless contract.sort == required.sort
       return report('contract_mismatch', **shared, subject: contract, reason: "#{MATRIX_LABEL}: engine options differ from the required set")
+    end
+
+    if required.equal?(MERGED_ARMS) && (arm, row = missing_suite_row(entries))
+      return report('missing_evidence_row', **shared, reason: "#{WORKFLOW_LABEL}: arm '#{arm}' lacks the required suite row '#{row}'")
     end
 
     report('ok', **shared, subject: registered)

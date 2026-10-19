@@ -173,32 +173,51 @@ ruby -ryaml -e 'path=ARGV.fetch(0); doc=YAML.safe_load(File.read(path),aliases:f
   "${work}/tree/.github/workflows/pg8-measurement.yml"
 expect_policy_rejects 'future PG8 dispatch identity input drift'
 
-# Final Stage 2 accepts only new13. The Stage 1 predecessor policy separately
-# allows complete old12 during rollout; candidate policy must reject that old
-# schema as well as every incomplete subset.
-reset_fixture
-ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
-  "${work}/tree/.github/ci-matrix.json"
-expect_policy_rejects 'old12 rollback after Stage 2 activation'
+# The live engine roster has exactly two reviewed shapes while pg-dbx is merged into postgres: the
+# merged twelve (end state) and the legacy thirteen that still lists pg-dbx. The Stage 1 predecessor
+# policy separately allowed an older complete old12 during rollout; neither shape may regress to it,
+# and every incomplete subset, reordering or extra arm is refused.
+merged12='["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy","bastion"]'
+legacy13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
+set_roster() {
+  reset_fixture
+  ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=JSON.parse(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
+    "${work}/tree/.github/ci-matrix.json" "$1"
+}
+drop_arm() {
+  ruby -rjson -e 'list=JSON.parse(ARGV.fetch(0)); list.delete(ARGV.fetch(1)); puts JSON.generate(list)' "$1" "$2"
+}
 
-reset_fixture
-ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=%w[doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls bastion]; File.write(path,JSON.pretty_generate(data))' \
-  "${work}/tree/.github/ci-matrix.json"
+# Both reviewed shapes are valid.
+set_roster "${merged12}"
+ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+set_roster "${legacy13}"
+ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
+
+set_roster '["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","bastion"]'
+expect_policy_rejects 'old12 rollback (pg-dbx without tls-legacy)'
+set_roster '["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","bastion"]'
 expect_policy_rejects 'stale 11-arm live roster'
 
-# The exact complete new13 candidate schema is valid. Every proper subset
-# missing any previously mandatory arm is refused below.
-new13='["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
-reset_fixture
-ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]=JSON.parse(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
-  "${work}/tree/.github/ci-matrix.json" "${new13}"
-ruby .github/policy/check-dispatch-contracts.rb "${work}/tree" >/dev/null
-for missing in doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls bastion; do
-  reset_fixture
-  ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); options=data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"]; options << "tls-legacy"; options.delete(ARGV.fetch(1)); File.write(path,JSON.pretty_generate(data))' \
-    "${work}/tree/.github/ci-matrix.json" "${missing}"
-  expect_policy_rejects "new13 missing mandatory old arm ${missing}"
+# Neither shape may lose an arm. postgres in particular is mandatory in both: it carries the Dbx proof.
+for missing in doris starrocks db2 informix rocketmq iris postgres mysql mssql pgtls tls-legacy bastion; do
+  set_roster "$(drop_arm "${merged12}" "${missing}")"
+  expect_policy_rejects "merged12 missing mandatory arm ${missing}"
 done
+for missing in doris starrocks db2 informix rocketmq iris postgres pg-dbx mysql mssql pgtls tls-legacy bastion; do
+  # Legacy minus pg-dbx is the merged shape, which is valid; every other loss is not.
+  [[ "${missing}" != pg-dbx ]] || continue
+  set_roster "$(drop_arm "${legacy13}" "${missing}")"
+  expect_policy_rejects "legacy13 missing mandatory arm ${missing}"
+done
+# pg-dbx swapped in for postgres (same length as a reviewed shape) is refused.
+set_roster '["doris","starrocks","db2","informix","rocketmq","iris","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]'
+expect_policy_rejects 'pg-dbx replacing postgres'
+# Only the exact ordered lists pass: the same thirteen arms in another order, or pg-dbx appended, are refused.
+set_roster '["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy","bastion","pg-dbx"]'
+expect_policy_rejects 'merged12 with pg-dbx appended out of order'
+set_roster '["bastion","doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy"]'
+expect_policy_rejects 'merged12 reordered'
 
 reset_fixture
 ruby -rjson -e 'path=ARGV.fetch(0); data=JSON.parse(File.read(path)); data.fetch("dispatch_contracts").fetch("workflows").fetch(".github/workflows/live-proofs.yml").fetch("inputs").fetch("engine")["options"] << "unreviewed"; File.write(path,JSON.pretty_generate(data))' \
