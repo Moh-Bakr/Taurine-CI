@@ -107,6 +107,9 @@ bash -c '
   source "$1/report.sh"
   rust_build_command cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail --partition count:1/2 --package a --package b
   [[ "${rust_build_cmd[*]}" == "cargo nextest run --no-run --locked --package a --package b" ]]
+  # The three-way rust-app shards: a hash partition and the empty-partition guard are build-irrelevant too.
+  rust_build_command cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail --partition hash:2/3 --no-tests=fail --package a --package b
+  [[ "${rust_build_cmd[*]}" == "cargo nextest run --no-run --locked --package a --package b" ]]
   rust_build_command cargo test --locked --no-fail-fast --package a
   [[ "${rust_build_cmd[*]}" == "cargo test --locked --no-fail-fast --package a --no-run" ]]
   run_deferred rust-a-tests cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail --partition count:1/2 --package a >/dev/null 2>&1 || true

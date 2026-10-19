@@ -3110,6 +3110,18 @@
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
+      "rust-app-3": {
+        "rust_packages": [
+          "taurine-app",
+          "taurine-desktop",
+          "taurine-mobile"
+        ],
+        "full_only": true,
+        "long_pole": true,
+        "timeout": 60,
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
       "rust-dbx": {
         "rust_packages": [
           "dbx-core",

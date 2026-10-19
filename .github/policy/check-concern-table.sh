@@ -67,7 +67,7 @@ mode_by_workflow = {
 required_by_workflow = {
   '.github/workflows/linux-validation.yml' => "${{ toJSON(fromJSON(needs.select.outputs.matrix || needs.validate-input.outputs.matrix).concern) }}",
   '.github/workflows/macos-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
-  '.github/workflows/windows-validation.yml' => "${{ inputs.rust && '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\",\"rust-domain\",\"rust-db\",\"rust-net\",\"rust-ovpn\",\"rust-app-1\",\"rust-app-2\",\"rust-packaging\",\"rust-tls-openssl\"]' || '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\"]' }}",
+  '.github/workflows/windows-validation.yml' => "${{ inputs.rust && '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\",\"rust-domain\",\"rust-db\",\"rust-net\",\"rust-ovpn\",\"rust-app-1\",\"rust-app-2\",\"rust-app-3\",\"rust-packaging\",\"rust-tls-openssl\"]' || '[\"desktop-shard-1\",\"desktop-shard-2\",\"desktop-quality\",\"mobile\",\"contracts\",\"bundle-budget\"]' }}",
   '.github/workflows/android-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}",
   '.github/workflows/ios-validation.yml' => "${{ toJSON(fromJSON(needs.plan.outputs.matrix).concern) }}"
 }

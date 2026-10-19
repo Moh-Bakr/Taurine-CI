@@ -160,7 +160,7 @@ jobs:
         run: |
           set -euo pipefail
           ts='["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]'
-          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
+          rust='["rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-app-3","rust-packaging","rust-tls-openssl"]'
           if [[ "${RUST_REQUESTED}" == true ]]; then
             rust_selected="${rust}"
             known="$(jq -cn --argjson t "${ts}" --argjson r "${rust}" '$t + $r')"
@@ -198,16 +198,16 @@ jobs:
           # The Rust concerns split into the long poles (their own dispatcher jobs, defined first, so
           # they claim runners before the short ones) and the rest: rust_long_matrix and rust_matrix.
           # Together they are exactly the filtered list; the Result job requires the whole list.
-          rust_long='["rust-db","rust-app-1","rust-app-2","rust-packaging"]'
+          rust_long='["rust-db","rust-app-1","rust-app-2","rust-app-3","rust-packaging"]'
           echo "rust_long_matrix=$(jq -cn --argjson c "${rust_selected}" --argjson l "${rust_long}" '{concern: [$c[] | select(. as $x | $l | index($x) != null)]}')" >> "${GITHUB_OUTPUT}"
           echo "rust_matrix=$(jq -cn --argjson c "${rust_selected}" --argjson l "${rust_long}" '{concern: [$c[] | select(. as $x | $l | index($x) == null)]}')" >> "${GITHUB_OUTPUT}"
           {
             echo '## Windows Rust concerns'
             echo
             if [[ "${RUST_REQUESTED}" == true ]]; then
-              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging run in the validate-rust jobs.'
+              echo '- Requested (rust=true): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2, rust-app-3 and rust-packaging run in the validate-rust jobs.'
             else
-              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
+              echo '- **Not requested** (rust=false): rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1, rust-app-2, rust-app-3 and rust-packaging were not scheduled. They are neither passed nor failed on this run; dispatch with -f rust=true to run them.'
             fi
             if [[ "${only_list}" != '[]' ]]; then
               echo "- Only filter active: $(jq -r 'join(", ")' <<<"${only_list}"). Every other concern is not selected; the verdict cannot be PASS (full), which is the only verdict that admits a merge."
@@ -485,8 +485,8 @@ jobs:
         uses: ./.github/actions/run-result  # zizmor: ignore[self-repository]
         with:
           label: Windows
-          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]'
-          required-concerns: ${{ inputs.rust && '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-packaging","rust-tls-openssl"]' || '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]' }}
+          expected-concerns: '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-app-3","rust-packaging","rust-tls-openssl"]'
+          required-concerns: ${{ inputs.rust && '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget","rust-domain","rust-db","rust-net","rust-ovpn","rust-app-1","rust-app-2","rust-app-3","rust-packaging","rust-tls-openssl"]' || '["desktop-shard-1","desktop-shard-2","desktop-quality","mobile","contracts","bundle-budget"]' }}
           name-pattern: '^validate(-rust)?(-long)?-(main|untrusted) \(.+\) / Windows (?<concern>.+)$'
           source-sha: ${{ inputs.source_sha }}
           selection-mode: ${{ inputs.rust && 'full' || 'partial' }}

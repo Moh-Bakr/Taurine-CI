@@ -123,7 +123,7 @@ jobs:
         uses: ./.github/actions/shell-artefact  # zizmor: ignore[self-repository]
 
       # The shells carry the OpenSSL door, so every Rust concern that compiles taurine-app
-      # (rust-app-1/2, rust-packaging) and the door's own concerns build the vendored OpenSSL
+      # (rust-app-1/2/3, rust-packaging) and the door's own concerns build the vendored OpenSSL
       # 3.5 from source. openssl-src runs `perl Configure` with OPENSSL_SRC_PERL first: Git's
       # msys perl (first on the bash PATH) lacks the Win32 modules OpenSSL's MSVC build needs,
       # so the image's Strawberry Perl is named explicitly, job-wide, before any project code.
@@ -306,7 +306,7 @@ jobs:
       # from the untrusted ref, whose scope main never reads), that is protected code only. Every
       # restore, strip and save step carries both top-level terms and the cache policy enforces it. The
       # locate step only computes the key and keeps the target directory outside the private checkout.
-      # One group per measured compile-bound concern family: rust-app (the two shards share one
+      # One group per measured compile-bound concern family: rust-app (the three shards share one
       # build), rust-db (measured 953 s compile against 124 s of tests), rust-domain and
       # rust-packaging. Each single-job group is its own designated saver. rust-ovpn stays outside
       # on purpose (its vcpkg dependency build, not the cargo target directory, dominates it) and

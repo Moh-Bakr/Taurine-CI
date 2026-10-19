@@ -210,6 +210,10 @@ jobs:
         shell: bash
         run: bash .github/policy/test-timings-table.sh
 
+      - name: Prove the three-way rust-app split is complete on every platform
+        shell: bash
+        run: bash .github/policy/test-rust-app-shards.sh
+
       # The reviewed candidate universe and coverage dispositions are immutable public policy.
       - name: Test the feature-suite catalog contract
         shell: bash

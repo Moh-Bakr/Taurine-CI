@@ -507,8 +507,8 @@ feature-branch validation fails (main refuses it, and `untrusted` cannot reach t
 
 | Workflow | Concerns |
 | --- | --- |
-| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and the opt-in e2e-visual and scan-history |
-| `macos-validation.yml` and `macos-validation-concern.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app, rust-packaging, rust-tls-openssl |
+| `linux-validation.yml` (dispatcher) and `linux-validation-concern.yml` | The 23 concerns in `ci-matrix.json`: contracts, frontend-build-budget, desktop-quality, desktop-shard-1/2, mobile-quality, taurine-cli, rust-domain, rust-db, rust-net, rust-app-1/2/3, rust-dbx, rust-packaging, rust-tls-openssl, e2e-critical, e2e-a11y, e2e-regression-1..4, scan-security, and the opt-in e2e-visual and scan-history |
+| `macos-validation.yml` and `macos-validation-concern.yml` | desktop-shard-1/2, desktop-quality, mobile, bundle-budget, orchestrate-skill; with `rust=true` also rust-domain, rust-db, rust-net, rust-ovpn, rust-app-1/2/3, rust-packaging, rust-tls-openssl |
 | `windows-validation.yml` and `windows-validation-concern.yml` | The same app concerns plus contracts; Rust concerns with `rust=true`; `windows_image` selects `windows-2022` (default) or `windows-2025` |
 | `android-validation.yml` | android-native (debug build for aarch64); android-rust with `rust=true` (compile-only mobile test targets, not executed) |
 | `ios-validation.yml` | ios-native (unsigned simulator build); ios-rust with `rust=true` (compile-only) |
@@ -578,6 +578,41 @@ Windows short Rust about 35 over 2 is 18; the live arms about 209 over 6 is 35 p
 queues behind a long pole that was queued at the start. macOS is not capped: it is a separate pool, and its
 long poles already fill its five runners first. A cap is a ceiling, not a reservation; if a measured set shows
 a capped group finishing after the long poles, raise that cap, not the others.
+
+**`rust-app` is three hash shards on every platform.** The crate-test concern for `taurine-app`,
+`taurine-desktop` and `taurine-mobile` runs as `rust-app-1`, `-2` and `-3`, each `cargo nextest run --partition
+hash:K/3` over the same package list and profile (K from the concern name). A hash partition assigns each
+test to exactly one shard from a stable hash of its binary and name, so the three together run every test
+once and none twice, and a test added later lands in one shard without anyone moving it (the earlier
+`count:N/2` split by position). Each shard compiles in full, so compile is paid three times; the saving is the
+test run (about 2 x 270 s of 810 s on Linux, 2 x 290 s of 884 s on Windows) and the better packing of the
+pool, not the compile. Doctests, which nextest does not run, ride with shard 1 only, so they run once.
+`NEXTEST_REQUIRE_TESTS` turns an empty partition into a failure (`--no-tests=fail`) instead of a silent
+pass. The Linux `rust-app-openvpn-check` (about 3 minutes, a separate `cargo check --features openvpn`) moved
+from shard 1 (survey 8.6: it sat on the longer shard) to shard 3: with three shards the fixed work is the only
+known input to the balance, shard 1 already carries the doctests, and shard 2 saves the compiled-dependency
+cache on main, whose contents the check must not enlarge. Move it with one line if a green set shows shard 3
+the longest.
+
+Discovery proof. The partitions are one nextest feature applied to one command, so what can go wrong is the
+shape around it, and `test-rust-app-shards.sh` pins that shape on the real tree and on mutated copies: all
+three platform composites run one arm for `rust-app-1|rust-app-2|rust-app-3` with partition
+`hash:${CONCERN##*-}/3` and no `count:` partition, the doctest branch and the other branch run one package list,
+`ci-matrix.json` holds exactly shards 1 to 3 (each a long pole with the same crates and a 60-minute budget),
+the Windows and macOS planners and the Result lists name exactly the three shards, and the privileged package
+setup knows shard 3. Dropping, renaming, miscounting or repeating a shard fails that script. Per-test proof
+that the three partitions cover the whole list is nextest's own guarantee for `hash:`; this control plane has
+no source to list tests from, and a cross-job count would pass compiled or source-derived data between jobs,
+which the no-source-artifact rule forbids.
+
+Budgets. The three-way jobs are shorter than the two-way ones (compile unchanged, the test run a third), so no
+timeout was raised. Cold untrusted estimates from survey 8.5 to 8.7, against the unchanged limits and the
+80% rule: Linux about 45 s setup + 1,581 s compile (worst measured) + 600 s tests (a third of 1,788 s) + 173 s
+openvpn check on shard 3, about 40 minutes of 60 (67%); Windows about 65 s + 2,487 s compile + 512 s tests (a
+third of 1,536 s), about 51 minutes of 110 (46%, 56 minutes with a 10% compile spread, 51%); macOS about 43 minutes
+compile + 6 minutes tests + setup, about 50 minutes of 100. macOS gains the least: its pool is five runners, and the
+third shard adds about 43 runner-minutes of compile to a set that was already bound by pool work divided by five, so
+measure the macOS set before keeping the third shard there.
 
 **Long poles run in their own jobs.** GitHub starts matrix entries in no promised order, and the
 hosted pool is about 20 runners shared by every workflow of a set (Taurine survey 8.5, 8.7), so a

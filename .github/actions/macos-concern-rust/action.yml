@@ -214,16 +214,18 @@ runs:
             run_deferred rust-ovpn-tests \
               cargo test --locked --no-fail-fast "${rust_ovpn_packages[@]/#/--package=}"
             ;;
-          rust-app-1|rust-app-2)
-            # Two nextest partitions of the same package set, as on Linux and Windows: measured
-            # on macOS, the single concern compiled for 34 minutes and ran tests for 16, so each
-            # leg compiles in full and runs half the tests. `count:N/2` splits deterministically;
-            # no compiled output crosses between the jobs. Doctests ride with partition 1.
-            export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
+          rust-app-1|rust-app-2|rust-app-3)
+            # Three nextest partitions of the same package set, as on Linux and Windows (survey 8.5-4,
+            # 7.7): measured on macOS, the single concern compiled for 34 minutes and ran tests for 16, so
+            # each shard compiles in full and runs a third of the tests. `hash:K/3` assigns every test to
+            # exactly one shard from a stable hash of its binary and name, so none is dropped or run
+            # twice; no compiled output crosses between the jobs. `NEXTEST_REQUIRE_TESTS` makes an empty
+            # partition a failure. Doctests ride with shard 1 only. test-rust-app-shards.sh pins this.
+            export NEXTEST_PARTITION="hash:${CONCERN##*-}/3"
             if [[ "${CONCERN}" == rust-app-1 ]]; then
-              rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              NEXTEST_REQUIRE_TESTS=true rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
             else
-              NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
+              NEXTEST_REQUIRE_TESTS=true NEXTEST_DOCTESTS=skip rust_tests rust-app-tests "${rust_app_packages[@]/#/--package=}"
             fi
             ;;
           rust-packaging)
