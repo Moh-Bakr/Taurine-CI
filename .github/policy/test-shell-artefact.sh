@@ -616,83 +616,60 @@ rm -rf "${src}/taurine-mobile/src-tauri/gen"
 
 # ---- gen/: CI regenerates the mobile Rust build phases ---------------------------------------
 gen="${src}/taurine-mobile/src-tauri/gen"
-# Step A of the buildSrc pin change: the fixtures accept either reviewed behaviour of the action
-# under test and stay strict for each. OLD: reset deletes gen/android/buildSrc. NEW: reset deletes
-# only the regenerated BuildTask.kt and verifies the rest against pinned hashes. Which one applies
-# is read from the extracted shell-config library (the pin-check function exists only in the new one). Step B (after the
-# action changes) deletes the OLD branch.
+bsrc="${gen}/android/buildSrc"
+pkg=src/main/java/co/tangent/taurine/mobile/kotlin
+bt="${bsrc}/${pkg}/BuildTask.kt"
 mkdir -p "${gen}/apple"
-if grep -qF 'mobile_android_buildsrc_pin_check()' "${work}/rt/taurine-ci/shell-config.sh"; then
-  bsrc="${gen}/android/buildSrc"
-  pkg=src/main/java/co/tangent/taurine/mobile/kotlin
-  bt="${bsrc}/${pkg}/BuildTask.kt"
-  build_task() { mkdir -p "${bsrc}/${pkg}"; printf '        val executable = """%s""";\n        val args = listOf(%s);\n%s' "$1" "$2" "${3:-}" >"${bt}"; }
-  # The tracked buildSrc stand-in, and a pinned list standing in for the reviewed one.
-  bsrc_tracked() {
-    rm -rf "${bsrc}"; mkdir -p "${bsrc}/${pkg}"
-    printf 'plugins { id("stand-in") }\n' >"${bsrc}/build.gradle.kts"
-    printf 'class RustPlugin\n' >"${bsrc}/${pkg}/RustPlugin.kt"
-    printf 'old callback\n' >"${bt}"
-  }
-  bsrc_pins() {
-    mobile_pins="mobile_android_buildsrc_pinned() { printf '%s  build.gradle.kts\n%s  ${pkg}/RustPlugin.kt\n' $(shasum -a 256 "${bsrc}/build.gradle.kts" | cut -d' ' -f1) $(shasum -a 256 "${bsrc}/${pkg}/RustPlugin.kt" | cut -d' ' -f1); };"
-  }
-  bsrc_tracked; bsrc_pins
-  expect_pass 'reset removes only the source callback' "${mobile_pins} mobile_build_phase_reset android && [[ ! -e '${bt}' && -f '${bsrc}/build.gradle.kts' && -f '${bsrc}/${pkg}/RustPlugin.kt' ]]"
-  expect_fail 'init did not regenerate the phase' "${mobile_pins} mobile_build_phase_check android" 'missing file'
-  build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
-  expect_pass 'the regenerated npm run -- tauri callback' "${mobile_pins} mobile_build_phase_check android"
-  bsrc_tracked
-  printf 'extra\n' >"${bsrc}/extra.gradle"
-  expect_fail 'an extra file in buildSrc is refused at reset' "${mobile_pins} mobile_build_phase_reset android" 'unexpected file: extra.gradle'
-  bsrc_tracked; bsrc_pins; printf 'class RustPlugin { evil }\n' >"${bsrc}/${pkg}/RustPlugin.kt"
-  expect_fail 'a modified RustPlugin.kt is refused' "${mobile_pins} mobile_build_phase_reset android" 'RustPlugin.kt: hash mismatch'
-  bsrc_tracked; bsrc_pins; printf 'plugins { id("evil") }\n' >"${bsrc}/build.gradle.kts"
-  expect_fail 'a modified build.gradle.kts is refused' "${mobile_pins} mobile_build_phase_reset android" 'build.gradle.kts: hash mismatch'
-  bsrc_tracked; bsrc_pins; rm "${bsrc}/${pkg}/RustPlugin.kt"
-  expect_fail 'a missing pinned file is refused' "${mobile_pins} mobile_build_phase_reset android" 'missing file: src/main/java'
-  bsrc_tracked; bsrc_pins; rm -rf "${bsrc}"
-  expect_fail 'a missing buildSrc is refused' "${mobile_pins} mobile_build_phase_reset android" 'buildSrc is missing'
-  bsrc_tracked; bsrc_pins; printf 'x\n' >"${bsrc}/$(printf 'a\nb.kt')"
-  expect_fail 'a file name with a newline is refused' "${mobile_pins} mobile_build_phase_reset android" 'a path with a newline or control character'
-  bsrc_tracked; bsrc_pins; printf 'x\n' >"${bsrc}/$(printf 'a\001b.kt')"
-  expect_fail 'a file name with a control character is refused' "${mobile_pins} mobile_build_phase_reset android" 'a path with a newline or control character'
-  bsrc_tracked; bsrc_pins; ln -s /etc/hosts "${bsrc}/link"
-  expect_fail 'a symlink in buildSrc is refused' "${mobile_pins} mobile_build_phase_reset android" 'link or special file'
-  bsrc_tracked; bsrc_pins; build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
-  printf 'sneaky\n' >"${bsrc}/src/main/java/Other.kt"
-  expect_fail 'an extra file after init is refused' "${mobile_pins} mobile_build_phase_check android" 'unexpected file: src/main/java/Other.kt'
-  rm "${bsrc}/src/main/java/Other.kt"
-  printf 'class RustPlugin { evil }\n' >"${bsrc}/${pkg}/RustPlugin.kt"
-  expect_fail 'a RustPlugin.kt changed before the check is refused' "${mobile_pins} mobile_build_phase_check android" 'RustPlugin.kt: hash mismatch'
-  bsrc_tracked; bsrc_pins; build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
-  expect_pass 'the pinned set plus the callback passes' "${mobile_pins} mobile_build_phase_check android"
-  build_task node '"tauri", "android", "android-studio-script"'
-  expect_fail 'an unrunnable node tauri callback' "${mobile_pins} mobile_build_phase_check android" 'callback'
-  build_task npm '"run", "--", "tauri", "android", "android-studio-script"' '        val executable = """sh""";\n'
-  expect_fail 'a second executable in the phase' "${mobile_pins} mobile_build_phase_check android" 'callback'
-  build_task npm '"run", "evil", "android", "android-studio-script"'
-  expect_fail 'a callback to another npm script' "${mobile_pins} mobile_build_phase_check android" 'callback'
-  # The library pins the two tracked private files by hash (hashes only, never content).
-  grep -qF '11818be939b3aa44d691228f8666fba5efc796cdc1b4fb8072ab7c91bc056eb0  build.gradle.kts' .github/actions/shell-config/action.yml || fail 'the buildSrc build.gradle.kts hash is not pinned'
-  grep -qF 'd9f87ff5a1aaa6c25b2afe8140f1d02fe4f3065ed451a1fef21875d9f30201d9  src/main/java/co/tangent/taurine/mobile/kotlin/RustPlugin.kt' .github/actions/shell-config/action.yml || fail 'the buildSrc RustPlugin.kt hash is not pinned'
-else
-  bt="${gen}/android/buildSrc/k/BuildTask.kt"
-  mkdir -p "${gen}/android/buildSrc/k"
-  build_task() { printf '        val executable = """%s""";\n        val args = listOf(%s);\n%s' "$1" "$2" "${3:-}" >"${bt}"; }
-  build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
-  expect_pass 'reset removes the source build phase' 'mobile_build_phase_reset android && [[ ! -e taurine-mobile/src-tauri/gen/android/buildSrc ]]'
-  expect_fail 'init did not regenerate the phase' 'mobile_build_phase_check android' 'callback'
-  mkdir -p "${gen}/android/buildSrc/k"
-  build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
-  expect_pass 'the regenerated npm run -- tauri callback' 'mobile_build_phase_check android'
-  build_task node '"tauri", "android", "android-studio-script"'
-  expect_fail 'an unrunnable node tauri callback' 'mobile_build_phase_check android' 'callback'
-  build_task npm '"run", "--", "tauri", "android", "android-studio-script"' '        val executable = """sh""";\n'
-  expect_fail 'a second executable in the phase' 'mobile_build_phase_check android' 'callback'
-  build_task npm '"run", "evil", "android", "android-studio-script"'
-  expect_fail 'a callback to another npm script' 'mobile_build_phase_check android' 'callback'
-fi
+build_task() { mkdir -p "${bsrc}/${pkg}"; printf '        val executable = """%s""";\n        val args = listOf(%s);\n%s' "$1" "$2" "${3:-}" >"${bt}"; }
+# The tracked buildSrc stand-in, and a pinned list standing in for the reviewed one.
+bsrc_tracked() {
+  rm -rf "${bsrc}"; mkdir -p "${bsrc}/${pkg}"
+  printf 'plugins { id("stand-in") }\n' >"${bsrc}/build.gradle.kts"
+  printf 'class RustPlugin\n' >"${bsrc}/${pkg}/RustPlugin.kt"
+  printf 'old callback\n' >"${bt}"
+}
+bsrc_pins() {
+  mobile_pins="mobile_android_buildsrc_pinned() { printf '%s  build.gradle.kts\n%s  ${pkg}/RustPlugin.kt\n' $(shasum -a 256 "${bsrc}/build.gradle.kts" | cut -d' ' -f1) $(shasum -a 256 "${bsrc}/${pkg}/RustPlugin.kt" | cut -d' ' -f1); };"
+}
+bsrc_tracked; bsrc_pins
+expect_pass 'reset removes only the source callback' "${mobile_pins} mobile_build_phase_reset android && [[ ! -e '${bt}' && -f '${bsrc}/build.gradle.kts' && -f '${bsrc}/${pkg}/RustPlugin.kt' ]]"
+expect_fail 'init did not regenerate the phase' "${mobile_pins} mobile_build_phase_check android" 'missing file'
+build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
+expect_pass 'the regenerated npm run -- tauri callback' "${mobile_pins} mobile_build_phase_check android"
+bsrc_tracked
+printf 'extra\n' >"${bsrc}/extra.gradle"
+expect_fail 'an extra file in buildSrc is refused at reset' "${mobile_pins} mobile_build_phase_reset android" 'unexpected file: extra.gradle'
+bsrc_tracked; bsrc_pins; printf 'class RustPlugin { evil }\n' >"${bsrc}/${pkg}/RustPlugin.kt"
+expect_fail 'a modified RustPlugin.kt is refused' "${mobile_pins} mobile_build_phase_reset android" 'RustPlugin.kt: hash mismatch'
+bsrc_tracked; bsrc_pins; printf 'plugins { id("evil") }\n' >"${bsrc}/build.gradle.kts"
+expect_fail 'a modified build.gradle.kts is refused' "${mobile_pins} mobile_build_phase_reset android" 'build.gradle.kts: hash mismatch'
+bsrc_tracked; bsrc_pins; rm "${bsrc}/${pkg}/RustPlugin.kt"
+expect_fail 'a missing pinned file is refused' "${mobile_pins} mobile_build_phase_reset android" 'missing file: src/main/java'
+bsrc_tracked; bsrc_pins; rm -rf "${bsrc}"
+expect_fail 'a missing buildSrc is refused' "${mobile_pins} mobile_build_phase_reset android" 'buildSrc is missing'
+bsrc_tracked; bsrc_pins; printf 'x\n' >"${bsrc}/$(printf 'a\nb.kt')"
+expect_fail 'a file name with a newline is refused' "${mobile_pins} mobile_build_phase_reset android" 'a path with a newline or control character'
+bsrc_tracked; bsrc_pins; printf 'x\n' >"${bsrc}/$(printf 'a\001b.kt')"
+expect_fail 'a file name with a control character is refused' "${mobile_pins} mobile_build_phase_reset android" 'a path with a newline or control character'
+bsrc_tracked; bsrc_pins; ln -s /etc/hosts "${bsrc}/link"
+expect_fail 'a symlink in buildSrc is refused' "${mobile_pins} mobile_build_phase_reset android" 'link or special file'
+bsrc_tracked; bsrc_pins; build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
+printf 'sneaky\n' >"${bsrc}/src/main/java/Other.kt"
+expect_fail 'an extra file after init is refused' "${mobile_pins} mobile_build_phase_check android" 'unexpected file: src/main/java/Other.kt'
+rm "${bsrc}/src/main/java/Other.kt"
+printf 'class RustPlugin { evil }\n' >"${bsrc}/${pkg}/RustPlugin.kt"
+expect_fail 'a RustPlugin.kt changed before the check is refused' "${mobile_pins} mobile_build_phase_check android" 'RustPlugin.kt: hash mismatch'
+bsrc_tracked; bsrc_pins; build_task npm '"run", "--", "tauri", "android", "android-studio-script"'
+expect_pass 'the pinned set plus the callback passes' "${mobile_pins} mobile_build_phase_check android"
+build_task node '"tauri", "android", "android-studio-script"'
+expect_fail 'an unrunnable node tauri callback' "${mobile_pins} mobile_build_phase_check android" 'callback'
+build_task npm '"run", "--", "tauri", "android", "android-studio-script"' '        val executable = """sh""";\n'
+expect_fail 'a second executable in the phase' "${mobile_pins} mobile_build_phase_check android" 'callback'
+build_task npm '"run", "evil", "android", "android-studio-script"'
+expect_fail 'a callback to another npm script' "${mobile_pins} mobile_build_phase_check android" 'callback'
+# The library pins the two tracked private files by hash (hashes only, never content).
+grep -qF '11818be939b3aa44d691228f8666fba5efc796cdc1b4fb8072ab7c91bc056eb0  build.gradle.kts' .github/actions/shell-config/action.yml || fail 'the buildSrc build.gradle.kts hash is not pinned'
+grep -qF 'd9f87ff5a1aaa6c25b2afe8140f1d02fe4f3065ed451a1fef21875d9f30201d9  src/main/java/co/tangent/taurine/mobile/kotlin/RustPlugin.kt' .github/actions/shell-config/action.yml || fail 'the buildSrc RustPlugin.kt hash is not pinned'
 yml="${gen}/apple/project.yml"
 lsp='$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)'
 project_yml() {

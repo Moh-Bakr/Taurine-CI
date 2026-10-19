@@ -421,8 +421,9 @@ runs:
         # Gradle Rust plugin (gen/android/buildSrc) and the Xcode "Build Rust Code" phase
         # (gen/apple). Their callback command is recorded when `init` runs, so a source-committed
         # copy would hand the Rust build to source-chosen arguments. CI regenerates them: before
-        # its own `init`, the Tauri-owned build machinery is removed (gen/android/buildSrc and the
-        # generated tauri.settings.gradle; all of gen/apple, which must not be committed), and after
+        # its own `init`, the Tauri-owned build machinery is removed (the generated Android BuildTask.kt
+        # callback and tauri.settings.gradle, the rest of gen/android/buildSrc being verified against
+        # pinned SHA-256 hashes; all of gen/apple, which must not be committed), and after
         # `init` the regenerated callback must be exactly `npm run -- tauri <platform> ...` (the
         # pinned `tauri` script, see tauri_cli). For iOS the generated project.yml is also checked
         # structurally: its only script phase anywhere is "Build Rust Code" (no other pre-build,
@@ -430,11 +431,64 @@ runs:
         # LD_RUNPATH_SEARCH_PATHS, its LIBRARY_SEARCH_PATHS are the template's, and its only
         # dependencies are the Rust libapp.a and the template's SDK frameworks plus
         # SystemConfiguration (no carthage, package, bundle or target dependency).
+        # Reviewed SHA-256 of every tracked file under gen/android/buildSrc other than the
+        # regenerated callback (hashes only; no source). Change them only with a reviewed bump of
+        # the private buildSrc files.
+        mobile_android_buildsrc_pinned() {
+          printf '%s\n' \
+            '11818be939b3aa44d691228f8666fba5efc796cdc1b4fb8072ab7c91bc056eb0  build.gradle.kts' \
+            'd9f87ff5a1aaa6c25b2afe8140f1d02fe4f3065ed451a1fef21875d9f30201d9  src/main/java/co/tangent/taurine/mobile/kotlin/RustPlugin.kt'
+        }
+        # `without-callback`: the file set is exactly the pinned list. `with-callback`: the pinned
+        # list plus one regenerated BuildTask.kt at the template path. Fails closed; prints file
+        # names and the reason only, never content.
+        mobile_android_buildsrc_pin_check() {
+          local mode="$1" dir=taurine-mobile/src-tauri/gen/android/buildSrc
+          local cb=src/main/java/co/tangent/taurine/mobile/kotlin/BuildTask.kt
+          local want got line sum file rc=0
+          [[ -d "${dir}" ]] || { echo 'buildsrc-pin: FAILED - gen/android/buildSrc is missing' >&2; return 1; }
+          if [[ -n "$(find "${dir}" ! -type f ! -type d 2>/dev/null)" ]]; then
+            echo 'buildsrc-pin: FAILED - buildSrc holds a link or special file' >&2; return 1
+          fi
+          while IFS= read -r -d '' file; do
+            if [[ "${file}" =~ [[:cntrl:]] ]]; then
+              echo 'buildsrc-pin: FAILED - unexpected file: a path with a newline or control character' >&2; return 1
+            fi
+          done < <(find "${dir}" -print0)
+          want="$(mobile_android_buildsrc_pinned | awk '{print $2}')"
+          [[ "${mode}" == with-callback ]] && want="$(printf '%s\n%s\n' "${want}" "${cb}")"
+          want="$(printf '%s\n' "${want}" | LC_ALL=C sort)"
+          got="$(cd "${dir}" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)"
+          if [[ "${got}" != "${want}" ]]; then
+            while IFS= read -r file; do
+              [[ -n "${file}" ]] && echo "buildsrc-pin: FAILED - unexpected file: ${file}" >&2
+            done < <(comm -13 <(printf '%s\n' "${want}") <(printf '%s\n' "${got}"))
+            while IFS= read -r file; do
+              [[ -n "${file}" ]] && echo "buildsrc-pin: FAILED - missing file: ${file}" >&2
+            done < <(comm -23 <(printf '%s\n' "${want}") <(printf '%s\n' "${got}"))
+            return 1
+          fi
+          while read -r sum file; do
+            [[ -n "${file}" ]] || continue
+            if [[ "$(tci_sha256 "${dir}/${file}")" != "${sum}" ]]; then
+              echo "buildsrc-pin: FAILED - ${file}: hash mismatch" >&2; rc=1
+            fi
+          done < <(mobile_android_buildsrc_pinned)
+          return "${rc}"
+        }
         mobile_build_phase_reset() {
           local platform="$1" gen=taurine-mobile/src-tauri/gen
           case "${platform}" in
             android)
-              rm -rf "${gen}/android/buildSrc" "${gen}/android/tauri.settings.gradle" ;;
+              # Only the generated callback is removed (init regenerates it from the pinned CLI).
+              # The rest of buildSrc (Gradle build script, Rust plugin) stays and is verified
+              # against a pinned hash list: removing it made the CLI template's newer AGP replace
+              # the tracked one, and that AGP refuses the pinned Gradle wrapper.
+              rm -f "${gen}/android/tauri.settings.gradle"
+              if [[ -d "${gen}/android/buildSrc" ]]; then
+                find "${gen}/android/buildSrc" -type f -name BuildTask.kt -delete
+              fi
+              mobile_android_buildsrc_pin_check without-callback ;;
             ios)
               if [[ -n "$(git ls-files -- "${gen}/apple" 2>/dev/null)" ]]; then
                 echo 'build-phase: FAILED - gen/apple is committed in the source; CI generates it' >&2; return 1
@@ -447,6 +501,7 @@ runs:
           local platform="$1" gen=taurine-mobile/src-tauri/gen files
           case "${platform}" in
             android)
+              mobile_android_buildsrc_pin_check with-callback || return 1
               files="$(grep -rl 'android-studio-script' "${gen}/android/buildSrc" 2>/dev/null || true)"
               # shellcheck disable=SC2086
               if [[ -z "${files}" || "$(printf '%s\n' "${files}" | grep -c .)" -ne 1 ]] ||
