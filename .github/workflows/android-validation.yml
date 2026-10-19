@@ -135,7 +135,7 @@ jobs:
     name: Android ${{ matrix.concern }} validation
     environment: source-read
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # android-rust is added by the `plan` job when rust=true. The aarch64 test targets
@@ -246,8 +246,10 @@ jobs:
         run: |
           set -euo pipefail
           # The tracked Android project deliberately ignores tauri.settings.gradle,
-          # whose path points into the local Cargo registry. Generate it on the
-          # runner rather than trusting a developer's absolute path.
+          # whose path points into the local Cargo registry. Remove any copy here: the
+          # pinned CLI writes it (and app/tauri.build.gradle.kts) during `tauri android
+          # build`, not during init, and it is judged after that build
+          # (mobile_android_gradle_pin_check after-build).
           cd taurine-mobile
           rm -f src-tauri/gen/android/tauri.settings.gradle
           source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"
@@ -261,10 +263,6 @@ jobs:
           mobile_run android-init tauri_cli . android init --ci --skip-targets-install
           (cd .. && mobile_build_phase_check android)
           (cd .. && mobile_android_gradle_pin_check after-init)
-          if grep -qF '/Users/' src-tauri/gen/android/tauri.settings.gradle; then
-            echo 'Android metadata contains a developer-local path' >&2
-            exit 1
-          fi
 
       - name: Run isolated Android validation concern
         shell: bash
@@ -303,6 +301,10 @@ jobs:
               android_bindgen_env
               mobile_run android-debug-build mobile_tauri_build taurine-mobile android build --apk --debug --target aarch64
               mobile_build_hooks_log_check "${RUNNER_TEMP}/android-debug-build.log" || exit 1
+              # The CLI wrote tauri.settings.gradle and app/tauri.build.gradle.kts and started Gradle in
+              # one process, so their content (and the pinned files) is judged now, not before: a
+              # detective check on a throwaway build (see mobile_android_gradle_pin_check).
+              mobile_android_gradle_pin_check after-build || exit 1
               # Gradle's Rust phase ran in between: the refusals run again on what the build left,
               # and the door crates cargo built from must still equal their verified archives.
               refuse_build_feature_overrides || exit 1

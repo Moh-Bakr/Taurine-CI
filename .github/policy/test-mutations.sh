@@ -112,7 +112,7 @@ drain() {
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb check-structure.rb check-strict-structure.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb check-structure.rb check-strict-structure.rb check-policy-steps.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
     # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
@@ -192,6 +192,11 @@ linux=.github/workflows/linux-validation.yml
 linux_concern=.github/workflows/linux-validation-concern.yml
 preflight=.github/actions/environment-preflight/action.yml
 public=.github/workflows/validate-public-changes.yml
+# The policy job's timeout is a reviewed budget that may change, so the mutations that anchor on the
+# job's shape read the current value from the tree instead of pinning it: the first job shaped
+# like the anchor (the one swap() edits), and the one guarded by always().
+pol_to="$(ruby -e 'm = File.read(ARGV[0]).match(/    runs-on: ubuntu-24\.04\n    timeout-minutes: (\d+)\n    steps:/) or abort("no policy job shape"); puts m[1]' "${src}/${public}")"
+pol_to_guarded="$(ruby -e 'm = File.read(ARGV[0]).match(/    if: \$\{\{ always\(\) \}\}\n    runs-on: ubuntu-24\.04\n    timeout-minutes: (\d+)\n/) or abort("no guarded policy job shape"); puts m[1]' "${src}/${public}")"
 composite_revoke='        if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 weekly_revoke='          if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 
@@ -512,14 +517,14 @@ mutation '13. a service on the policy job' "${public}" '    name: Validate workf
         image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 '
 mutation '13. the policy job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:' '    runs-on: self-hosted
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:'
 mutation '13. the policy job on another hosted label' "${public}" '    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:' '    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:'
 mutation '13. a command chained onto an exempt helper line in test-structure.sh' .github/policy/test-structure.sh 'NOT rejected under --strict: $1" >&2; exit 1; fi' 'NOT rejected under --strict: $1" >&2; exit 1; fi; ruby "${check}" --strict "${dir}/t" >/dev/null'
 mutation '13. --strict run on the real tree by another policy script (the base pass would run it)' .github/policy/test-policy.sh 'set -euo pipefail
@@ -530,15 +535,48 @@ mutation '13. --strict run on the real tree inside test-structure.sh' .github/po
 echo 'accepted  the reviewed tree'"
 mutation '12. the policy job made conditional' "${public}" '    if: ${{ always() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to_guarded}"'
     steps:' '    if: ${{ github.event_name == '"'"'push'"'"' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to_guarded}"'
     steps:'
 mutation '12. the strict structure step made conditional' "${public}" '      - name: Check the control-plane structure, strictly
         shell: bash' "      - name: Check the control-plane structure, strictly
         if: \${{ false }}
         shell: bash"
+
+# 16. Policy step coverage and the required check's name (check-policy-steps.rb, check-strict-structure.rb).
+mutation '16. the check-repository policy step deleted' "${public}" '      # Repository contents: no private source, credential material or unexpected path.
+      - name: Reject private-source and credential material
+        shell: bash
+        run: bash .github/policy/check-repository.sh
+' ''
+mutation '16. the mutation suite replaced by echo ok' "${public}" '        run: bash .github/policy/test-mutations.sh' '        run: echo ok'
+mutation '16. a policy step weakened with || true' "${public}" '        run: bash .github/policy/test-sanitizers.sh' '        run: bash .github/policy/test-sanitizers.sh || true'
+mutation '16. a policy step given a steering env' "${public}" '      - name: Test the sanitizer expressions against path and token fixtures
+        shell: bash' '      - name: Test the sanitizer expressions against path and token fixtures
+        shell: bash
+        env:
+          RUBYOPT: -e0'
+mutation '16. a policy step made conditional' "${public}" '      - name: Test the weekly openssl-src patch cadence
+        shell: bash' '      - name: Test the weekly openssl-src patch cadence
+        if: ${{ false }}
+        shell: bash'
+mutation '16. a policy step renamed (the table no longer matches)' "${public}" '      - name: Test the weekly openssl-src patch cadence' '      - name: Test the weekly openssl-src patch cadence (renamed)'
+mutation '16. a policy step added outside the table' "${public}" '      - name: Test the weekly openssl-src patch cadence' '      - name: Extra step
+        shell: bash
+        run: "true"
+      - name: Test the weekly openssl-src patch cadence'
+mutation '16. a policy step duplicated' "${public}" '      - name: Test the weekly openssl-src patch cadence' '      - name: Test the weekly openssl-src patch cadence
+        shell: bash
+        run: bash .github/policy/test-weekly-cadence.sh
+      - name: Test the weekly openssl-src patch cadence'
+mutation '16. the policy checkout given a repository override' "${public}" '          fetch-depth: 1
+          persist-credentials: false' '          fetch-depth: 1
+          repository: someone/else
+          persist-credentials: false'
+mutation '16. the base-pass call named like the required check' "${public}" '    name: Base policy' '    name: Validate workflow policy'
+mutation '16. the policy-steps check dropped from the policy job' "${public}" '        run: ruby .github/policy/check-policy-steps.rb' '        run: "true"'
 
 # mutation_by CHECKER LABEL FILE OLD NEW: like mutation, but the named check alone must refuse the tree.
 # test-base-policy-result.sh pins the shape of base-policy.yml, which the reusable-workflow fixtures
@@ -584,9 +622,9 @@ mutation_by test-base-policy-result.sh '14. a service on the guard job' "${publi
         image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 '
 mutation_by test-base-policy-result.sh '14. the guard job on a self-hosted runner' "${public}" '    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:' '    runs-on: self-hosted
-    timeout-minutes: 25
+    timeout-minutes: '"${pol_to}"'
     steps:'
 
 mutation_by test-base-policy-result.sh '14. the guard step run as an argument to true (shell: true {0})' "${public}" '        shell: bash
@@ -695,6 +733,10 @@ fi
 # offline_policy: they build real toy workspaces and take minutes).
 mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl edge (shell list)' .github/actions/shell-artefact/action.yml "            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx' ;;" "            openssl) echo 'tokio-openssl taurine-tls-openssl taurine-db-dbx taurine-mysql-async' ;;"
 mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl edge (built-graph map)' .github/actions/shell-artefact/action.yml '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},' '"openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx", "taurine-mysql-async"},'
+
+# 16. The selector's always path: a duplicated concern and a dropped always-concern are refused.
+mutation '16. the selector selects an always concern twice' .github/actions/select-concerns/action.yml "return always, 'partial', 'documentation only'" "return always + [always[0]], 'partial', 'documentation only'"
+mutation '16. the selector drops an always concern' .github/actions/select-concerns/action.yml "always = [c for c, s in concerns.items() if s.get('always')]" "always = [c for c, s in concerns.items() if s.get('always') and c != 'contracts' and not c.startswith('zz')]"
 
 drain
 (( missed == 0 )) || { echo "${missed} mutation(s) passed the policy" >&2; exit 1; }
