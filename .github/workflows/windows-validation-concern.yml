@@ -219,7 +219,7 @@ jobs:
         with:
           patch-diagnostics: 'true'
 
-      # GNU tar for the cache restores and saves (research finding 8). actions/cache runs tar from PATH
+      # GNU tar for the cache restores and saves (research finding 8). The cache action runs tar from PATH
       # and on a Windows runner finds the system BSD tar first, which restores slowly; when the first
       # `tar` on PATH is GNU tar it uses that, and it then compresses with zstd. Git for Windows ships GNU
       # tar on the runner image. Its `usr/bin` directory also holds `link.exe`, `find` and `sort`, which

@@ -173,5 +173,5 @@ ruby -ryaml -e '
     end
   end
   abort "the early check must come after the suite contract snapshot, in the same pre-build window" unless at.call("Read the suite contract for this concern") < check
-' 
+'
 echo 'suite ownership check: owned, added, renamed, exempt, missing-manifest, malformed and glob cases behave as specified; no path is ever printed'
