@@ -419,7 +419,16 @@ expect_fail 'a Tauri config outside src-tauri' 'refuse_build_feature_overrides' 
 rm -r "${src}/elsewhere"
 mkdir -p "${src}/taurine-mobile/src-tauri/sub"; printf '{}\n' >"${src}/taurine-mobile/src-tauri/sub/tauri.conf.json"
 expect_fail 'a nested Tauri config' 'refuse_build_feature_overrides' 'outside the shells'
-rm -r "${src}/taurine-mobile/src-tauri/sub"
+# The mobile CLI writes the merged config into its generated project at build time; those copies
+# are not configs the CLI reads, so they pass. A config elsewhere under src-tauri still fails above.
+mkdir -p "${src}/taurine-mobile/src-tauri/gen/android/app/src/main/assets" "${src}/taurine-mobile/src-tauri/gen/android/app/build/intermediates/assets/debug" "${src}/taurine-mobile/src-tauri/gen/apple/assets"
+for d in android/app/src/main/assets android/app/build/intermediates/assets/debug apple/assets; do printf '{}\n' >"${src}/taurine-mobile/src-tauri/gen/${d}/tauri.conf.json"; done
+rm -rf "${src}/taurine-mobile/src-tauri/sub"
+expect_pass 'the build-time config copies in the generated mobile project' 'refuse_build_feature_overrides'
+mutant 'the generated mobile project no longer skipped' config ' -o -path ./taurine-mobile/src-tauri/gen \) -prune' ' \) -prune' pass 'refuse_build_feature_overrides'
+mkdir -p "${src}/taurine-mobile/src-tauri/generated"; printf '{}\n' >"${src}/taurine-mobile/src-tauri/generated/tauri.conf.json"
+expect_fail 'a nested config in a look-alike directory' 'refuse_build_feature_overrides' 'outside the shells'
+rm -rf "${src}/taurine-mobile/src-tauri/generated" "${src}/taurine-mobile/src-tauri/gen"
 printf '{"bundle":{"externalBin":["bin/sidecar"]}}\n' >"${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
 expect_fail 'a sidecar' 'refuse_build_feature_overrides' 'a sidecar'
 rm "${src}/taurine-desktop/src-tauri/tauri.conf.dev.json"
