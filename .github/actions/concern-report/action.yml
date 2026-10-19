@@ -261,13 +261,15 @@ runs:
             done <"${dlls}"
           done <"${cand}"
           if [[ -s "${out}" ]]; then
+            # The same pair can come from several candidate binaries: count and list it once.
+            sort -u -o "${out}" "${out}"
             # Summary first ("missing by DLL" has no ':' so no line can start a workflow
             # command), then the pairs with DLLs other than KERNEL32, KERNELBASE and NTDLL first.
             {
               printf 'missing by DLL'
               cut -d'!' -f1 "${out}" | sort | uniq -c | sort -rn | awk '{ printf " %s=%s", $2, $1 }'
               printf '\n'
-            } | tr -cd 'A-Za-z0-9_.@?$ ()!/=\n-' | cut -c1-120 | sed 's/^/    /'
+            } | tr -cd 'A-Za-z0-9_.@?$ ()!/=\n-' | sed 's/^/    /' | cut -c1-120
             awk -F'!' '{ d = toupper($1); k = (d ~ /^(KERNEL32|KERNELBASE|NTDLL)\.DLL$/) ? 1 : 0; print k "\t" $0 }' "${out}" | sort -s -t"$(printf '\t')" -k1,1 | cut -f2- \
               | tr -cd 'A-Za-z0-9_.@?$ ()!/\n-' | sed 's/^/    /' | cut -c1-120 | head -19
           else
