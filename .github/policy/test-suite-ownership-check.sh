@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# Fixtures for the fail-fast suite-ownership check (refuse-unowned-tests.rb).
+#
+# The check runs at the start of every Linux concern job, after the token is revoked and root is
+# dropped and before any project command, on data only: the generated ownership manifest and the
+# tracked file names. These fixtures build synthetic repositories and prove it:
+#   - accepts a tree where every in-scope test file matches a suite's include glob;
+#   - refuses an added file and a renamed file the manifest does not cover, by count and reason class,
+#     and prints no path, pattern or file name anywhere (stdout, stderr or the step summary);
+#   - ignores the reviewed exempt trees, node_modules and non-test files, and skips a source with no
+#     manifest (an older revision) without failing;
+#   - fails closed on a malformed manifest and on a tree it cannot list;
+#   - uses the collector's glob semantics exactly (`*` stays in a segment, `**` crosses).
+# Run from the repository root (the policy workflow does).
+set -euo pipefail
+# Wave C step A: this test lands before the tree it judges. It is enforced once the policy workflow
+# runs it (the step arrives with Wave C); in a tree whose workflow does not run it yet there is nothing
+# for it to hold, so it says so and passes. A tree that DOES run it is held to every assertion below.
+if ! grep -qF 'bash .github/policy/test-suite-ownership-check.sh' .github/workflows/validate-public-changes.yml 2>/dev/null; then
+  echo 'suite ownership check: skipped, the policy workflow of this tree does not run this test yet'
+  exit 0
+fi
+script="${PWD}/.github/policy/refuse-unowned-tests.rb"
+collector="${PWD}/.github/policy/collect-suite-evidence.rb"
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+new_repo() { # new_repo NAME: an empty repository at ${work}/NAME
+  local repo="${work}/$1"
+  mkdir -p "${repo}"
+  git -C "${repo}" init -q
+  git -C "${repo}" config user.email ci@example.invalid
+  git -C "${repo}" config user.name ci
+  git -C "${repo}" config commit.gpgsign false
+  printf '%s' "${repo}"
+}
+add_file() { mkdir -p "$(dirname "$1/$2")"; echo "// $2" > "$1/$2"; }
+commit_all() { git -C "$1" add -A; git -C "$1" commit -q -m fixture; }
+write_manifest() { # write_manifest REPO JSON
+  mkdir -p "$1/scripts/ci"
+  printf '%s\n' "$2" > "$1/scripts/ci/suite-ownership.json"
+}
+run_check() { # run_check REPO: sets rc, out, err, summary
+  : > "${work}/summary.md"
+  rc=0
+  GITHUB_STEP_SUMMARY="${work}/summary.md" ruby "${script}" "$1" >"${work}/out.txt" 2>"${work}/err.txt" || rc=$?
+  out="$(cat "${work}/out.txt")"; err="$(cat "${work}/err.txt")"; summary="$(cat "${work}/summary.md")"
+}
+expect_rc() { [[ "${rc}" == "$2" ]] || { echo "ownership case '$1': exit ${rc}, wanted $2: ${out} ${err}" >&2; exit 1; }; }
+expect_text() { # expect_text LABEL TEXT: in stdout or stderr
+  grep -qF -- "$2" <<<"${out}${err}" || { echo "ownership case '$1': output lacks '$2': ${out} ${err}" >&2; exit 1; }
+}
+expect_absent() { # expect_absent LABEL TEXT: nowhere in any output
+  if grep -qF -- "$2" <<<"${out}${err}${summary}"; then echo "ownership case '$1': output leaks '$2'" >&2; exit 1; fi
+}
+
+MANIFEST='{"schema_version":1,"suites":{"a.owner":{"feature":"a","include":["taurine-desktop/tests/e2e/a11y/**","taurine-desktop/src/features/rest/thing.test.ts"]},"b.owner":{"feature":"b","include":["taurine-desktop/src/**/*.test.tsx"]}}}'
+
+# 1. Every in-scope test file is owned.
+repo="$(new_repo owned)"
+add_file "${repo}" taurine-desktop/tests/e2e/a11y/page.spec.ts
+add_file "${repo}" taurine-desktop/tests/e2e/a11y/deep/nested.spec.ts
+add_file "${repo}" taurine-desktop/src/features/rest/thing.test.ts
+add_file "${repo}" taurine-desktop/src/features/rest/ui/view.test.tsx
+write_manifest "${repo}" "${MANIFEST}"
+commit_all "${repo}"
+run_check "${repo}"; expect_rc owned 0
+expect_text owned '4 test file(s) checked, every one has a suite owner'
+
+# 2. An added test file with no owner is refused by count and reason class; no name or path is printed.
+add_file "${repo}" taurine-desktop/tests/e2e/secretarea/brand-new.spec.ts
+commit_all "${repo}"
+run_check "${repo}"; expect_rc added 1
+expect_text added 'ownership_unowned'
+expect_text added '1 of 5 test file(s) have no suite owner'
+for leak in brand-new secretarea taurine-desktop/tests 'a11y/**' suite-ownership.json; do expect_absent added "${leak}"; done
+grep -qF 'Suite ownership' <<<"${summary}" || { echo 'the refusal did not reach the step summary' >&2; exit 1; }
+
+# 3. A renamed test file that leaves its owner's directory is refused (a rename is an add at the new path).
+repo="$(new_repo renamed)"
+add_file "${repo}" taurine-desktop/tests/e2e/a11y/page.spec.ts
+write_manifest "${repo}" "${MANIFEST}"
+commit_all "${repo}"
+git -C "${repo}" mv taurine-desktop/tests/e2e/a11y/page.spec.ts taurine-desktop/tests/e2e/page-moved.spec.ts
+commit_all "${repo}"
+run_check "${repo}"; expect_rc renamed 1
+expect_text renamed '1 of 1 test file(s) have no suite owner'
+expect_absent renamed page-moved
+
+# 4. Exempt trees, node_modules and non-test files are never counted.
+repo="$(new_repo exempt)"
+add_file "${repo}" taurine-desktop/tests/e2e/a11y/page.spec.ts
+add_file "${repo}" skills/orchestrate/scripts/__tests__/a.test.mjs
+add_file "${repo}" vendor/upstream/b.test.ts
+add_file "${repo}" taurine-mobile/tests/e2e/journeys.spec.ts
+add_file "${repo}" taurine-desktop/node_modules/pkg/c.test.js
+add_file "${repo}" taurine-desktop/tests/e2e/helpers/support.ts
+add_file "${repo}" taurine-desktop/src/readme.md
+write_manifest "${repo}" "${MANIFEST}"
+commit_all "${repo}"
+run_check "${repo}"; expect_rc exempt 0
+expect_text exempt '1 test file(s) checked'
+
+# 5. A source with no ownership manifest (an older revision) is skipped, not failed.
+repo="$(new_repo nomanifest)"
+add_file "${repo}" taurine-desktop/tests/e2e/x.spec.ts
+commit_all "${repo}"
+run_check "${repo}"; expect_rc nomanifest 0
+expect_text nomanifest 'skipped'
+
+# 6. A manifest the check cannot read fails closed with a fixed reason class.
+for bad in 'not json' '[]' '{"suites":[]}' '{"suites":{"a":{"include":"x"}}}' '{"suites":{"a":{"include":[1]}}}' \
+           '{"suites":{"a":{"include":["/abs/**"]}}}' '{"suites":{"a":{"include":["../up/**"]}}}' '{"suites":{"a":{"include":[""]}}}'; do
+  repo="$(new_repo bad)"
+  add_file "${repo}" taurine-desktop/tests/e2e/x.spec.ts
+  write_manifest "${repo}" "${bad}"
+  commit_all "${repo}"
+  run_check "${repo}"; expect_rc "malformed ${bad}" 1
+  grep -qE 'reason (manifest_shape|manifest_glob)' <<<"${err}" || { echo "malformed manifest '${bad}': no fixed reason class: ${err}" >&2; exit 1; }
+  rm -rf "${repo}"
+done
+
+# 7. A directory that is not a repository cannot be listed: fail closed.
+mkdir -p "${work}/plain/scripts/ci"
+printf '%s\n' "${MANIFEST}" > "${work}/plain/scripts/ci/suite-ownership.json"
+run_check "${work}/plain"; expect_rc plain 1
+expect_text plain 'reason file_list'
+
+# 8. Glob semantics: `*` stays inside one segment, `**` crosses directories.
+repo="$(new_repo globs)"
+add_file "${repo}" taurine-desktop/src/x.test.tsx
+add_file "${repo}" taurine-desktop/src/deep/er/y.test.tsx
+write_manifest "${repo}" '{"suites":{"s":{"include":["taurine-desktop/src/*.test.tsx"]}}}'
+commit_all "${repo}"
+run_check "${repo}"; expect_rc 'single-star' 1
+expect_text 'single-star' '1 of 2 test file(s) have no suite owner'
+write_manifest "${repo}" '{"suites":{"s":{"include":["taurine-desktop/src/**"]}}}'
+run_check "${repo}"; expect_rc 'double-star' 0
+# The collector's own reading: `a/**/*.ts` needs a separator after the `**`, so it does not own `a/x.ts`.
+write_manifest "${repo}" '{"suites":{"s":{"include":["taurine-desktop/src/**/*.test.tsx"]}}}'
+run_check "${repo}"; expect_rc 'double-star-with-suffix' 1
+expect_text 'double-star-with-suffix' '1 of 2 test file(s) have no suite owner'
+# A literal dot is not a wildcard.
+write_manifest "${repo}" '{"suites":{"s":{"include":["taurine-desktop/src/x.testXtsx","taurine-desktop/src/deep/**"]}}}'
+run_check "${repo}"; expect_rc 'literal-dot' 1
+
+# 9. The check's glob is the collector's glob: the two implementations agree on every shape in use.
+ruby -e '
+  def grab(path)
+    text = File.read(path)
+    src = text[/^def glob_regex\(glob\)\n.*?^end\n/m] or abort "no glob_regex in #{path}"
+    mod = Module.new
+    mod.module_eval(src)
+    mod.instance_method(:glob_regex).bind(Object.new.extend(mod))
+  end
+  a = grab(ARGV.fetch(0)); b = grab(ARGV.fetch(1))
+  globs = %w[a/** a/*.ts a/**/*.ts a/b.spec.ts **/x a/*/b.ts a/b.c*]
+  paths = %w[a/x.ts a/b/x.ts a/b/c/x.ts a/b.spec.ts x a/x/b.ts a/bXspec.ts a/b.cd a/b.c a/b/c.ts]
+  globs.product(paths).each do |glob, path|
+    abort "glob #{glob} disagrees on #{path}" unless a.call(glob).match?(path) == b.call(glob).match?(path)
+  end
+' "${script}" "${collector}"
+
+# 10. The wiring: the check is a step of every Linux concern job (no condition, never tolerated), after the
+# token revocation (the source checkout) and the root drop, and before any dependency install, toolchain
+# setup, scanner or project command, so a refusal arrives in the seconds after the checkout.
+ruby -ryaml -e '
+  steps = YAML.safe_load(File.read(".github/workflows/linux-validation-concern.yml"), aliases: false).fetch("jobs").fetch("validate").fetch("steps")
+  at = ->(name) { steps.index { |s| s["name"] == name } or abort("step missing: #{name}") }
+  check = at.call("Refuse test files with no suite owner before any build")
+  step = steps.fetch(check)
+  abort "the ownership step must run for every concern, unconditionally and never tolerated" if step.key?("if") || step.key?("continue-on-error")
+  abort "the ownership step must run exactly the reviewed command" unless step["run"].to_s.include?("ruby .github/policy/refuse-unowned-tests.rb \"${GITHUB_WORKSPACE}/src\"") && step["shell"] == "bash"
+  checkout = steps.index { |s| s["uses"].to_s == "./.github/actions/source-checkout" } or abort "no source checkout"
+  drop = steps.index { |s| s["uses"].to_s == "./.github/actions/drop-root" } or abort "no drop-root"
+  abort "the ownership check must follow the source checkout and the root drop" unless checkout < drop && drop < check
+  %w[node-setup rust-toolchain vendor-fetch linux-concern-js linux-concern-e2e linux-concern-rust].each do |action|
+    steps.each_with_index do |s, i|
+      abort "#{action} (step #{i}) runs before the ownership check" if s["uses"].to_s == "./.github/actions/#{action}" && i < check
+    end
+  end
+  abort "the early check must come after the suite contract snapshot, in the same pre-build window" unless at.call("Read the suite contract for this concern") < check
+'
+echo 'suite ownership check: owned, added, renamed, exempt, missing-manifest, malformed and glob cases behave as specified; no path is ever printed'
