@@ -260,7 +260,7 @@ runs:
         allowed = {"openssl-sys": {"openssl", "tokio-openssl", "taurine-tls-openssl"},
                    "openssl": {"tokio-openssl", "taurine-tls-openssl", "taurine-db-dbx"},
                    "tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async"},
-                   "openssl-src": {"openssl-sys"}}
+                   "openssl-src": {"openssl-sys", "taurine-tls-openssl"}}
         def fail(reason):
             print(label + ": FAILED - " + reason, file=sys.stderr)
             sys.exit(1)

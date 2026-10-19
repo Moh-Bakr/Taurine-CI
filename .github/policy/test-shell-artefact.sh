@@ -726,7 +726,10 @@ openssl-src = { path = "../openssl-src" }'
 printf 'fn main() {}\n' >"${toy}/openssl-sys/build.rs"
 crate openssl openssl 'openssl-sys = { path = "../openssl-sys" }'
 crate tls taurine-tls-openssl 'openssl = { path = "../openssl" }
-openssl-sys = { path = "../openssl-sys" }'
+openssl-sys = { path = "../openssl-sys" }' '[build-dependencies]
+openssl-src = { path = "../openssl-src" }'
+# The real door build-depends on openssl-src too (it pins the 3.5 line and reads its version).
+printf 'fn main() {}\n' >"${toy}/tls/build.rs"
 crate dbx taurine-db-dbx 'openssl = { path = "../openssl" }
 taurine-tls-openssl = { path = "../tls" }'
 crate consumer consumer 'openssl = { path = "../openssl" }'
@@ -792,6 +795,8 @@ mutant 'the built-graph allowlist re-widened: the MySQL fork allowed on openssl'
 mutant 'the built-graph allowlist re-widened: any crate allowed on tokio-openssl' artefact '"tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async"},' '"tokio-openssl": {"taurine-db-dbx", "taurine-mysql-async", "evil2"},' fail "$(toy_check "${work}/t-tokiobad")"
 toy_build "${work}/t-evil" --features evilsrc
 expect_fail 'a non-door crate building openssl-src (real cargo)' "$(toy_check "${work}/t-evil")" 'evil depends on openssl-src outside the door'
+mutant 'the built-graph allowlist narrowed: the door build-dependency on openssl-src refused' artefact '"openssl-src": {"openssl-sys", "taurine-tls-openssl"}}' '"openssl-src": {"openssl-sys"}}' pass "$(toy_check "${work}/t-door")"
+mutant 'the built-graph allowlist re-widened: any crate allowed on openssl-src' artefact '"openssl-src": {"openssl-sys", "taurine-tls-openssl"}}' '"openssl-src": {"openssl-sys", "taurine-tls-openssl", "evil"}}' fail "$(toy_check "${work}/t-evil")"
 # The basedir is the real path cargo writes (macOS resolves /var to /private/var).
 mkdir -p "${toy}/.cargo"; printf '[build]\ndep-info-basedir = "%s"\n' "$(cd "${toy}/consumer" && pwd -P)" >"${toy}/.cargo/config.toml"
 toy_build "${work}/t-basedir" --features extra
