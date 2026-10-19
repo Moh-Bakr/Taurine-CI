@@ -63,6 +63,31 @@ mkdir -p "${notrepo}/.github/policy"
 cp "${source_root}/.github/policy/check-repository.sh" "${notrepo}/.github/policy/check-repository.sh"
 expect_reject "${notrepo}" 'a directory where git ls-files fails' 'The tracked file list could not be read'
 
+# Every later git ls-files listing is fatal too: a stub git that fails only the index (`-s`) listings, or only
+# the plain name listing, while the first sweep succeeds.
+real_git="$(command -v git)"
+mkdir -p "${temp_root}/stubbin"
+cat > "${temp_root}/stubbin/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == ls-files ]]; then
+  case "\${STUB_GIT_FAIL:-}" in
+    index) [[ " \$* " == *" -s "* ]] && exit 1 ;;
+    names) [[ " \$* " != *" -z "* && " \$* " != *" -s "* ]] && exit 1 ;;
+  esac
+fi
+exec "${real_git}" "\$@"
+STUB
+chmod +x "${temp_root}/stubbin/git"
+for mode in index names; do
+  stubbed="$(new_fixture)"
+  mkdir -p "${stubbed}/.github"
+  printf 'x\n' > "${stubbed}/.github/ci-matrix.json"; git -C "${stubbed}" add -f .github/ci-matrix.json
+  if output="$(cd "${stubbed}" && PATH="${temp_root}/stubbin:${PATH}" STUB_GIT_FAIL="${mode}" bash .github/policy/check-repository.sh 2>&1)"; then
+    echo "repository path fixture failed: a failing ${mode} listing was read as clean" >&2; exit 1
+  fi
+  [[ "${output}" == *'The tracked file list could not be read'* ]] || { echo "repository path fixture failed: wrong rejection for a failing ${mode} listing: ${output}" >&2; exit 1; }
+done
+
 private_source="$(new_fixture)"
 mkdir -p "${private_source}/taurine-desktop/src"
 printf 'source fixture\n' > "${private_source}/taurine-desktop/src/private.ts"
