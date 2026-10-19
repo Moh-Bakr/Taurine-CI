@@ -3074,6 +3074,20 @@
         "egress": "audit",
         "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
       },
+      "scan-lint": {
+        "always": true,
+        "full_only": true,
+        "timeout": 25,
+        "paths": [
+          "**/*.rs",
+          "**/*.ts",
+          "**/*.tsx",
+          "**/Cargo.toml",
+          "**/package.json"
+        ],
+        "egress": "audit",
+        "egress_audit_reason": "staged rollout: block mode is proven on contracts first, then extended to this concern"
+      },
       "rust-packaging": {
         "paths": [
           "taurine-desktop/**",

@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       profile:
-        description: quick runs the fast concerns only (no rust-app, rust-db, rust-dbx, scan-security, a11y or regression e2e tiers) and gives a PASS (partial) verdict; full runs everything
+        description: quick runs the fast concerns only (no rust-app, rust-db, rust-dbx, scan-security, scan-lint, a11y or regression e2e tiers) and gives a PASS (partial) verdict; full runs everything
         required: false
         default: full
         type: choice
@@ -590,7 +590,7 @@ jobs:
         with:
           mode: table
           label: Linux
-          baseline-seconds: '{"rust-app-1":1981,"rust-app-2":2100,"rust-db":839,"rust-dbx":603,"rust-domain":186,"rust-net":124,"rust-packaging":999,"rust-tls-openssl":45,"taurine-cli":206,"scan-security":853,"desktop-shard-1":626,"desktop-shard-2":701,"desktop-quality":161,"mobile-quality":146,"frontend-build-budget":118,"contracts":95,"e2e-critical":744,"e2e-a11y":356,"e2e-regression-1":892,"e2e-regression-2":852,"e2e-regression-3":891,"e2e-regression-4":734,"e2e-visual":192}'
+          baseline-seconds: '{"rust-app-1":1981,"rust-app-2":2100,"rust-db":839,"rust-dbx":603,"rust-domain":186,"rust-net":124,"rust-packaging":999,"rust-tls-openssl":45,"taurine-cli":206,"scan-security":853,"scan-lint":600,"desktop-shard-1":626,"desktop-shard-2":701,"desktop-quality":161,"mobile-quality":146,"frontend-build-budget":118,"contracts":95,"e2e-critical":744,"e2e-a11y":356,"e2e-regression-1":892,"e2e-regression-2":852,"e2e-regression-3":891,"e2e-regression-4":734,"e2e-visual":192}'
           # Runs from the untrusted ref restore no cache, so they compile cold: they are compared with their
           # own baseline, the mean of the two cold untrusted full sets measured in survey 8.5 and 8.6
           # (rust-tls-openssl 125 s is the legacy-tls pass, not the 45 s of the pre-pass main baseline).

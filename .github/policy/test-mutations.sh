@@ -336,8 +336,8 @@ mutation '12. the base-pass job renamed' .github/workflows/validate-public-chang
 # 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
 # must be rejected, because the default grant for a job with no cache-mode is write.
 mutation '11. an untrusted-only cargo-source restore while its caller is not enforced' .github/policy/check-cache-mode.rb '  linux-validation.yml
-' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
             cargo-sources-v3-${{ runner.os }}-
 ' ''
@@ -649,8 +649,8 @@ mutation_by test-base-policy-result.sh '14. an extra key on the guard step (work
 
 # 14. An untrusted restore waits for every untrusted-running workflow to be enforced (rule M).
 mutation '14. an untrusted cargo-source restore while macOS is not enforced' .github/policy/check-cache-mode.rb '  macos-validation.yml
-' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
             cargo-sources-v3-${{ runner.os }}-
 ' ''
@@ -1060,6 +1060,34 @@ mutation '11. an empty value relaxes the fmt gate' .github/actions/rust-lint-enf
           exit 1' '          [[ "${FAIL}" == true ]] || exit 0
           exit 1'
 mutation '12. the all-locks helper runs with the inherited environment' .github/actions/linux-concern-js/action.yml 'env -i PATH="${PATH}" HOME="${HOME}" LANG=C.UTF-8 TMPDIR="${RUNNER_TEMP}" \' 'env PATH="${PATH}" \'
+
+# 11. The security scan gate: each weakening of the full set, of a scanner or of the lint job.
+scan_action=.github/actions/scan-concern/action.yml
+matrix=.github/ci-matrix.json
+mutation '11. scan-lint dropped from the full set (made opt-in)' "${matrix}" '      "scan-lint": {
+        "always": true,' '      "scan-lint": {
+        "opt_in": "visual",
+        "always": true,'
+mutation '11. scan-lint no longer selected in the full set' "${matrix}" '      "scan-lint": {
+        "always": true,
+        "full_only": true,' '      "scan-lint": {
+        "always": true,
+        "full_only": false,'
+mutation '11. the scan-lint job no longer runs the security lints' "${linux_concern}" '          scanner: clippy' '          scanner: semgrep'
+mutation '11. gitleaks dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'gitleaks' || inputs.scanner == 'all' }}" "      if: \${{ inputs.scanner == 'gitleaks' }}"
+mutation '11. npm audit dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'npm-audit' || inputs.scanner == 'all' }}" "      if: \${{ inputs.scanner == 'npm-audit' }}"
+mutation '11. Semgrep dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'semgrep' || inputs.scanner == 'all' || inputs.scanner == 'semgrep-container' }}" "      if: \${{ inputs.scanner == 'semgrep' || inputs.scanner == 'semgrep-container' }}"
+mutation '11. cargo-deny dropped from the scanner run' "${scan_action}" "      id: scan-deny
+      continue-on-error: \${{ inputs.scanner == 'all' }}
+      if: \${{ inputs.scanner == 'deny' || inputs.scanner == 'all' }}" "      id: scan-deny
+      continue-on-error: \${{ inputs.scanner == 'all' }}
+      if: \${{ inputs.scanner == 'deny' }}"
+mutation '11. a scanner no longer fails the report' "${scan_action}" '"cargo-deny|${DENY_OUTCOME}|deny"' '"cargo-deny-skipped|${DENY_OUTCOME}|deny"'
+mutation '11. the scanner report no longer fails the job' "${scan_action}" 'if [[ "${outcome}" != success ]]; then failed=1; fi' 'if [[ "${outcome}" == never ]]; then failed=1; fi'
+mutation '11. rust-lint-enforce made report-only' "${linux_concern}" '        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]' "        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]
+        with:
+          fail: 'false'"
+mutation '11. rust-lint-enforce no longer runs for scan-lint' "${linux_concern}" "inputs.concern == 'scan-lint' && steps.verified-source.outcome == 'success'" "inputs.concern == 'scan-security' && steps.verified-source.outcome == 'success'"
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
