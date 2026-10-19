@@ -235,7 +235,8 @@ ruby -ryaml -e '
   check = at.call("Refuse test files with no suite owner before any build")
   step = steps.fetch(check)
   abort "the ownership step must run for every concern, unconditionally and never tolerated" if step.key?("if") || step.key?("continue-on-error")
-  abort "the ownership step must run exactly the reviewed command" unless step["run"].to_s.include?("ruby .github/policy/refuse-unowned-tests.rb \"${GITHUB_WORKSPACE}/src\"") && step["shell"] == "bash"
+  abort "the ownership step must run exactly the reviewed command" unless step["run"].to_s.sub(/\n\z/, "") == "set -euo pipefail\nruby .github/policy/refuse-unowned-tests.rb \"${GITHUB_WORKSPACE}/src\"" && step["shell"] == "bash"
+  abort "the ownership step may carry only name, shell, working-directory and run" unless (step.keys - %w[name shell working-directory run]).empty?
   checkout = steps.index { |s| s["uses"].to_s == "./.github/actions/source-checkout" } or abort "no source checkout"
   drop = steps.index { |s| s["uses"].to_s == "./.github/actions/drop-root" } or abort "no drop-root"
   abort "the ownership check must follow the source checkout and the root drop" unless checkout < drop && drop < check
