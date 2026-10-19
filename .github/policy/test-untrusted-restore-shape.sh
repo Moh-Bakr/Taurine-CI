@@ -306,6 +306,15 @@ mutant 'the composite gains an output' "outputs must be exactly the locate step'
     description: x
     value: y
   dir:'
+mutant 'a pre-locate composite step writes GITHUB_ENV' 'may not write GITHUB_ENV or GITHUB_PATH' "${composite}" '        mkdir -p "${RUNNER_TEMP}/taurine-ci"' '        mkdir -p "${RUNNER_TEMP}/taurine-ci"
+        echo "CARGO_TARGET_DIR=/tmp/planted" >> "$GITHUB_ENV"'
+mutant 'a pre-locate composite step writes GITHUB_PATH' 'may not write GITHUB_ENV or GITHUB_PATH' "${composite}" '        mkdir -p "${RUNNER_TEMP}/taurine-ci"' '        mkdir -p "${RUNNER_TEMP}/taurine-ci"
+        echo "/tmp/planted" | tee -a "${GITHUB_PATH}"'
+mutant 'a pre-locate composite step is an action' 'must be a plain run step, not an action' "${composite}" '    - name: Install the compiled dependency cache helpers
+' '    - name: Planted action
+      uses: actions/checkout@v4
+    - name: Install the compiled dependency cache helpers
+'
 mutant 'the composite locate step changed' 'no longer matches the reviewed content hash' "${composite}" '        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"' '        echo "dir=${dir}" >> "${GITHUB_OUTPUT}"
         echo "dir=/tmp/planted" >> "${GITHUB_OUTPUT}"'
 # The workflow policy passes workflows only: the composite is then read from the tree, and still checked.

@@ -555,6 +555,17 @@ def producer_step_failures(path, doc, docs, failures)
     digest = Digest::SHA256.hexdigest(JSON.generate(canonical_json(body)))
     failures << "#{action_path}: the locate step no longer matches the reviewed content hash its untrusted restore depends on" unless digest == LOCATE_STEP_SHA256
   end
+  # The steps that run before `locate` are not hashed, so they may not change how it computes dir and key:
+  # each must be a plain `run` step (no action) whose text never names the runner's environment or path
+  # files, which covers `>>`, `tee` and every other way of writing to them by name. (The locate step's own
+  # CARGO_TARGET_DIR write to GITHUB_ENV is inside the hashed body and comes after its use.)
+  all_steps = Array(composite.dig('runs', 'steps')).grep(Hash)
+  at = all_steps.index { |st| st['id'] == 'locate' }
+  all_steps.first(at || 0).each do |st|
+    label = st['name'].to_s.inspect
+    failures << "#{action_path}: step #{label} runs before the locate step and must be a plain run step, not an action" if st.key?('uses')
+    failures << "#{action_path}: step #{label} runs before the locate step and may not write GITHUB_ENV or GITHUB_PATH" if JSON.generate(st).match?(/GITHUB_(ENV|PATH)/i)
+  end
 end
 
 reviewed_restores.each_key do |path|
