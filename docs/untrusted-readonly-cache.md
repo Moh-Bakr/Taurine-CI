@@ -598,6 +598,8 @@ applicable; the v2 Twirp service is the only protocol the probes can and must ex
 protocol list only. It is not the record line of the gate below and does not change the flag, which stays
 `false`.
 
+Stage 2 enforcement spike result: GREEN run 39292781970 reviewed by Moh-Bakr on 2026-10-19
+
 Why the production restores cannot all come first. The two sources restores (and their verifiers) now run
 directly after the shared composites and the suite-contract step, before the toolchain, the Node install
 and the vendored-source fetch. The compiled-dependency restore cannot: its key contains `rustc -vV`, the
