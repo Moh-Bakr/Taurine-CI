@@ -498,7 +498,13 @@ jobs:
           # which identities were published to this run.
           mkdir -p "${RUNNER_TEMP}/test-ids"
           section_file="${RUNNER_TEMP}/test-ids/summary-section.md"
-          if ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
+          if [[ ! -f taurine-desktop/node_modules/.bin/vite-node ]]; then
+            {
+              echo "### Tests exercised by this run"
+              echo
+              echo "Test inventory unavailable: the collector runner is not installed for this concern."
+            } > "${section_file}"
+          elif ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
             TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}/src" \
             taurine-desktop/node_modules/.bin/vite-node scripts/ci/collect-test-ids.ts \
             > "${section_file}"; then

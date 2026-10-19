@@ -281,7 +281,9 @@ identities() { # identities <name> <collector: ok|fail>: run the step against a 
   cp "${dir}/lib.sh" "${ws}/rt/taurine-ci/sanitize.sh"
   cp "${dir}/pw.json" "${ws}/rt/test-ids/e2e-critical.json"
   : > "${ws}/summary.md"
-  if [[ "${mode}" == ok ]]; then
+  if [[ "${mode}" == missing ]]; then
+    rm -f "${ws}/src/taurine-desktop/node_modules/.bin/vite-node"
+  elif [[ "${mode}" == ok ]]; then
     cat > "${ws}/src/taurine-desktop/node_modules/.bin/vite-node" <<'STUB'
 #!/usr/bin/env bash
 printf '### Tests exercised by this run\n\n- 3 tests in 1 files.\n'
@@ -290,7 +292,7 @@ STUB
   else
     printf '#!/usr/bin/env bash\nexit 1\n' > "${ws}/src/taurine-desktop/node_modules/.bin/vite-node"
   fi
-  chmod +x "${ws}/src/taurine-desktop/node_modules/.bin/vite-node"
+  [[ "${mode}" == missing ]] || chmod +x "${ws}/src/taurine-desktop/node_modules/.bin/vite-node"
   (cd "${ws}/src" && GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" CONCERN=desktop-shard-1 \
     REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/identities.sh") > "${ws}/out.txt" 2>&1 || { sed -n 1,20p "${ws}/out.txt" >&2; fail "the identities step failed (${name})"; }
 }
@@ -299,6 +301,11 @@ out="$(cat "${dir}/id-collector/summary.md")"
 has "${out}" "failed-test-id: ${v_js} status=fail"
 grep -qE 'failed-test-id: [0-9a-f]{16} status=flaky' <<<"${out}" || fail 'the collector flaky record was not keyed'
 no_leak "${out}" 'a\.test|b\.test|Suite|does a thing|flaky one'
+identities nocollector missing
+out="$(cat "${dir}/id-nocollector/summary.md")"
+has "${out}" 'Test inventory unavailable: the collector runner is not installed for this concern.'
+no_leak "${out}" 'withheld'
+[[ "$(git grep -c 'collector runner is not installed for this concern' -- .github/actions/linux-test-identities .github/workflows/macos-validation-concern.yml .github/workflows/windows-validation-concern.yml | wc -l | tr -d ' ')" == 3 ]] || fail 'the missing-runner check is not at all three collector sites'
 identities fallback fail
 out="$(cat "${dir}/id-fallback/summary.md")"
 has "${out}" "failed-test-id: ${v_e2e} status=fail"
@@ -434,9 +441,17 @@ mode="$(stat -f '%Lp' "${dir}/ws-good/rt/taurine-ci" 2>/dev/null || stat -c '%a'
 # is published as counts; a hostile first word or trailing text is not.
 printf '%s\n' 'pg_tls — 12 checks: 10 passed, 1 failed, 1 skipped, 0 invalid' '  PASS  connect_ok' > "${ws}/rt/live-proof.log"
 : > "${ws}/summary.md"
-(cd "${ws}/src" && PATH="${ws}/bin:${PATH}" GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" ENGINE=pg REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/live-summary.sh") > "${ws}/out.txt" 2>&1 || true
+(cd "${ws}/src" && PATH="${ws}/bin:${PATH}" GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" ENGINE=pg_tls REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/live-summary.sh") > "${ws}/out.txt" 2>&1 || true
 out="$(cat "${ws}/summary.md")"
 has "${out}" 'pg_tls: 12 checks: 10 passed, 1 failed, 1 skipped, 0 invalid'
+# a first word that is not the arm's engine is replaced by the fixed label
+printf '%s\n' 'customerACME — 12 checks: 10 passed, 1 failed, 1 skipped, 0 invalid' > "${ws}/rt/live-proof.log"
+: > "${ws}/summary.md"
+(cd "${ws}/src" && PATH="${ws}/bin:${PATH}" GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" ENGINE=pg_tls REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/live-summary.sh") > "${ws}/out.txt" 2>&1 || true
+out="$(cat "${ws}/summary.md")"
+has "${out}" 'engine: 12 checks: 10 passed, 1 failed, 1 skipped, 0 invalid'
+no_leak "${out}" 'customerACME'
+printf '%s\n' 'pg_tls — 12 checks: 10 passed, 1 failed, 1 skipped, 0 invalid' > "${ws}/rt/live-proof.log"
 printf '%s\n' 'pg — 3 checks: 1 passed, 1 failed, 1 skipped, 0 invalid for customer-ACME' > "${ws}/rt/live-proof.log"
 : > "${ws}/summary.md"
 (cd "${ws}/src" && PATH="${ws}/bin:${PATH}" GITHUB_WORKSPACE="${ws}" RUNNER_TEMP="${ws}/rt" GITHUB_STEP_SUMMARY="${ws}/summary.md" ENGINE=pg REQUESTED_SOURCE_SHA="$(git rev-parse HEAD)" bash "${dir}/live-summary.sh") > "${ws}/out.txt" 2>&1 || true
@@ -467,7 +482,7 @@ has "${out}" 'withheld'
 no_leak "${out}" 'customer|ACME'
 
 # --- 20. Every vite-node invocation of the collector uses the one path the private repository declares.
-n="$(git grep -hE 'node_modules/\.bin/vite-node' -- .github/actions .github/workflows | grep -vcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' || true)"
+n="$(git grep -hE 'node_modules/\.bin/vite-node' -- .github/actions .github/workflows | grep -v '\[\[ ! -f ' | grep -vcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' || true)"
 [[ "${n}" == 0 ]] || fail "a vite-node invocation does not use taurine-desktop/node_modules/.bin/vite-node (${n})"
 [[ "$(git grep -hcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' -- .github/actions .github/workflows | paste -sd+ - | bc)" -ge 3 ]] || fail 'the collector invocations were not found'
 echo "keyed test ids: ${implementations} HMAC implementation(s) agree with the pinned vectors; extractors, fail-closed paths and the key snapshot step checked"

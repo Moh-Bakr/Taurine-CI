@@ -47,6 +47,8 @@ runs:
         proof_ids="$(grep -E '^  (FAIL|INVL)  ' "${log}" | sed -E 's/^  (FAIL|INVL)  +//; s/[[:space:]]+$//' | awk -v e="${ENGINE}" '{ printf "proof\t%s\t%s\tfail\n", e, $0 }' | tci_failed_ids || true)"
         header_pub="$(printf '%s\n' "${header}" | sed -nE 's/^([a-z0-9_-]+).* ([0-9]+) checks: ([0-9]+) passed, ([0-9]+) failed, ([0-9]+) skipped, ([0-9]+) invalid.*$/\1: \2 checks: \3 passed, \4 failed, \5 skipped, \6 invalid/p' | head -n 1)"
         [[ -n "${header_pub}" || -z "${header}" ]] || header_pub='(report header not in its fixed shape; counts withheld)'
+        # The header's first word is published only when it is the arm's own engine name.
+        if [[ -n "${header_pub}" && "${header_pub%%:*}" != "${ENGINE}" && "${header_pub}" != '('* ]]; then header_pub="engine:${header_pub#*:}"; fi
         result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
         test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 | sed -E 's/^test [a-z_]+ \.\.\. FAILED$/test (name withheld) ... FAILED/' || true)"
         # The panic block carries the assertion that named the failure: the
