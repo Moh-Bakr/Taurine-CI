@@ -121,6 +121,12 @@ runs:
           rustc_path="$(cygpath -u "${rustc_path}")"
           rustup_home="$(cygpath -u "${rustup_home}")"
         fi
+        # The compiler itself must be a regular file: a symlink inside the toolchains directory could point
+        # anywhere (readlink -f is not available on every macOS runner, so symlinks are refused outright).
+        if [[ -L "${rustc_path}" ]]; then
+          echo 'target-cache: the selected compiler is a symlink' >&2
+          exit 1
+        fi
         rustc_dir="$(cd "$(dirname "${rustc_path}")" && pwd -P)"
         rustup_home_real="$(cd "${rustup_home}" && pwd -P)"
         case "${rustc_dir}/" in

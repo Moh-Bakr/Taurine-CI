@@ -39,6 +39,64 @@ cat > "${work}/target-step.yml" <<'YAML'
           key: ${{ steps.cargo-target.outputs.key }}
 
 YAML
+# The toolchain action's refusal of a `path` toolchain, verbatim (the text #365 adds before any rustc runs):
+# a tree whose action lacks it gets it here, so the fixtures run with the reviewed, hash-pinned action.
+cat > "${work}/toolchain-guard.txt" <<'GUARDTEXT'
+          # A `path` toolchain makes rustup resolve rustc to a directory of the private checkout,
+          # so the next `rustc` (the compiled-cache locate step runs `rustc -vV` before the
+          # untrusted restores) would execute source-controlled code. A grep for `path =` is
+          # bypassed by quoted keys, inline tables and dotted keys, so the file is not searched
+          # for the bad spelling: it is accepted only when every line is one of a short list of
+          # plain forms (the [toolchain] header, channel/profile strings, components/targets
+          # string arrays, comments). Anything else, including every spelling of `path`, an
+          # inline table and a dotted key, is refused before any rustc runs.
+          toolchain_refuse() {
+            echo "rust-toolchain: $1 in ${2}; only channel, profile, components and targets as plain strings are accepted" >&2
+            exit 1
+          }
+          toolchain_check() {
+            local file="$1" kind="$2" line count=0 plain='' header=0 in_array=0
+            local str='"[A-Za-z0-9._+-]*"'
+            local items="${str}([[:space:]]*,[[:space:]]*${str})*[[:space:]]*,?[[:space:]]*"
+            local re_header='^\[toolchain\][[:space:]]*(#.*)?$'
+            local re_scalar="^(channel|profile)[[:space:]]*=[[:space:]]*${str}[[:space:]]*(#.*)?\$"
+            local re_array="^(components|targets)[[:space:]]*=[[:space:]]*\\[[[:space:]]*(${items})?\\][[:space:]]*(#.*)?\$"
+            local re_open='^(components|targets)[[:space:]]*=[[:space:]]*\[[[:space:]]*(#.*)?$'
+            local re_item="^[[:space:]]*${items}(#.*)?\$"
+            local re_close='^[[:space:]]*\][[:space:]]*(#.*)?$'
+            local re_plain='^[A-Za-z0-9._+-]+$'
+            # A channel of exactly `.` or `..` would name a directory, not a toolchain.
+            local re_dots_channel='^channel[[:space:]]*=[[:space:]]*"\.{1,2}"'
+            local re_dots_plain='^\.{1,2}$'
+            while IFS= read -r line || [[ -n "${line}" ]]; do
+              line="${line%$'\r'}"
+              [[ "${line}" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+              count=$((count + 1))
+              plain="${line}"
+              if [[ "${line}" =~ ${re_dots_channel} ]] || [[ "${kind}" == legacy && count -eq 1 && "${line}" =~ ${re_dots_plain} ]]; then
+                toolchain_refuse "a channel of . or .." "${file}"
+              fi
+              if (( in_array )); then
+                if [[ "${line}" =~ ${re_close} ]]; then in_array=0
+                elif [[ "${line}" =~ ${re_item} ]]; then :
+                else toolchain_refuse "an unreadable array line" "${file}"; fi
+              elif [[ "${line}" =~ ${re_header} ]]; then
+                (( header == 0 && count == 1 )) || toolchain_refuse "a repeated or misplaced [toolchain] header" "${file}"
+                header=1
+              elif (( header )) && [[ "${line}" =~ ${re_scalar} || "${line}" =~ ${re_array} ]]; then :
+              elif (( header )) && [[ "${line}" =~ ${re_open} ]]; then in_array=1
+              elif [[ "${kind}" == legacy && count -eq 1 && "${line}" =~ ${re_plain} ]]; then :
+              else toolchain_refuse "an unrecognised line" "${file}"; fi
+            done < "${file}"
+            (( in_array == 0 )) || toolchain_refuse "an unterminated array" "${file}"
+            if (( header == 0 )); then
+              # The legacy `rust-toolchain` file may be one plain channel name and nothing else.
+              [[ "${kind}" == legacy && count -eq 1 && "${plain}" =~ ${re_plain} ]] || toolchain_refuse "a toolchain file that is neither a [toolchain] table nor a single channel name" "${file}"
+            fi
+          }
+          [[ ! -f rust-toolchain.toml ]] || toolchain_check rust-toolchain.toml toml
+          [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy
+GUARDTEXT
 cat > "${work}/input.yml" <<'YAML'
       untrusted_readonly_cache:
         description: Restore the two reviewed Rust caches read-only on the untrusted ref, for rust-db only.
@@ -79,6 +137,14 @@ build_reviewed() { # dir
     mkdir -p "${d}/.github/actions/${action}"
     cp ".github/actions/${action}/action.yml" "${d}/.github/actions/${action}/"
   done
+  if ! grep -qF toolchain_check "${d}/.github/actions/rust-toolchain/action.yml"; then
+    insert_before "${d}/.github/actions/rust-toolchain/action.yml" "          echo 'rust-toolchain: installing the toolchain pinned by the source'" "${work}/toolchain-guard.txt"
+    reviewed_toolchain_hash="$(ruby -ryaml -rjson -rdigest -e '
+      canon = lambda { |v| v.is_a?(Hash) ? v.map { |k, x| [k.to_s, canon.call(x)] }.sort_by(&:first).to_h : (v.is_a?(Array) ? v.map { |x| canon.call(x) } : v) }
+      puts Digest::SHA256.hexdigest(JSON.generate(canon.call(YAML.safe_load(File.read(ARGV[0]), aliases: false))))
+    ' "${d}/.github/actions/rust-toolchain/action.yml")"
+    [[ "${reviewed_toolchain_hash}" == 04d9056e51c8ae6fbfd85ca149ca71e38d291809131a00a28a2444161a3cbda0 ]] || { echo "untrusted restore fixture: the guarded toolchain action no longer hashes to the reviewed value (${reviewed_toolchain_hash})" >&2; exit 1; }
+  fi
   local c="${d}/.github/workflows/${concern}" l="${d}/.github/workflows/${caller}"
   # A tree that already carries the reviewed restores (the change that introduces them) is its own
   # reviewed shape: nothing is added, and the same weakenings are applied to its real steps.
@@ -512,6 +578,23 @@ mutant 'a job gains services' 'services must be absent beside an untrusted resto
       db:
         image: postgres
 '
+# main's unguarded toolchain action (the guard text removed) is refused: it runs rustc/cargo from src
+# through the rustup proxy before anything refuses a `path` toolchain.
+unguarded="${work}/unguarded"; rm -rf "${unguarded}"; cp -R "${reviewed}" "${unguarded}"
+ruby -e '
+  f = ARGV.fetch(0); t = File.read(f, encoding: "UTF-8")
+  a = t.index("          # A `path` toolchain makes rustup resolve rustc") or abort "untrusted restore fixture: guard text not found"
+  e = "          [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy\n"
+  b = t.index(e) + e.length
+  File.write(f, t[0...a] + t[b..])
+' "${unguarded}/.github/actions/rust-toolchain/action.yml"
+! grep -qF toolchain_check "${unguarded}/.github/actions/rust-toolchain/action.yml" || { echo 'untrusted restore fixture: the guard was not removed' >&2; exit 1; }
+expect_fail "main's unguarded toolchain action" "${unguarded}" "${allow_msg}"
+# A rustc call ahead of the guard text: the action no longer hashes to a reviewed value.
+late="${work}/late-guard"; rm -rf "${late}"; cp -R "${reviewed}" "${late}"
+swap "${late}/.github/actions/rust-toolchain/action.yml" '          # A `path` toolchain makes rustup resolve rustc' '          rustc --version
+          # A `path` toolchain makes rustup resolve rustc'
+expect_fail 'a rustc call ahead of the guard' "${late}" "${allow_msg}"
 mutant 'the locate step stops using the rustup-selected compiler' 'no longer matches the reviewed content hash' "${composite}" '        rustc_path="$(rustup which rustc)"' '        rustc_path="$(command -v rustc)"'
 
 # Composite steps after locate are covered by the whole-file pin.
@@ -654,6 +737,7 @@ if [[ "${UNTRUSTED_SHAPE_CHILD:-}" != 1 ]]; then
   cp -R .github/workflows .github/actions "${flipped}/.github/"
   cp "${true_tree}/.github/workflows/${concern}" "${true_tree}/.github/workflows/${caller}" "${flipped}/.github/workflows/"
   cp "${true_tree}/${composite}" "${flipped}/${composite}"
+  cp "${true_tree}/.github/actions/rust-toolchain/action.yml" "${flipped}/.github/actions/rust-toolchain/action.yml"
   cp "${true_tree}/docs/untrusted-readonly-cache.md" "${flipped}/docs/"
   cp -R "${policy}" "${flipped}/.github/policy"
   (cd "${flipped}" && UNTRUSTED_SHAPE_CHILD=1 bash .github/policy/test-untrusted-restore-shape.sh >/dev/null) || { echo 'the untrusted restore fixtures failed on a flipped tree (flag true with its record)' >&2; exit 1; }

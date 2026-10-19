@@ -507,14 +507,18 @@ CARGO_HOME_PIN = {
   'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
 }.freeze
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
-RUST_TARGET_CACHE_FILE_SHA256 = 'cc34296f12a3b2738141e4524237b468886e849f28f38fac777fd3a8293982b0'.freeze
-LOCATE_STEP_SHA256 = 'a720fafbcd5d2cab767e59e6b11a7433e7fcbb8e7d2861f6111060b2d6bb167a'.freeze
+RUST_TARGET_CACHE_FILE_SHA256 = '1eedb06f020f90666f1747a08c1339172e4caa1016d0381a37d93e6c6bd3913b'.freeze
+LOCATE_STEP_SHA256 = 'f0731f6e118740f65994e4a90b3a9c03f4e0f1c2b76c00a34ae1216232253c20'.freeze
 # Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
 # untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing
 # in the same reviewed pull request. Each name lists exactly the hash of the file as it is in this tree:
 # batch 2 merged #365 and Wave C into rust-toolchain (verify-cargo-cache is #365's, timings is Wave C's),
 # #360 (scan-lint) and Wave C into root-setup, and the keyed test ids into source-checkout, sanitize and
 # concern-report. A pull request that changes one of these files replaces its hash here, in the same change.
+# rust-toolchain is listed only at a version that refuses a `path` toolchain before it runs any rustc or cargo
+# command (an earlier version let a checkout run a planted compiler with the runner's environment and path
+# files in reach); the hash must also pass toolchain_guard_first? below. It applies only to a job that carries a
+# reviewed untrusted restore.
 LOCAL_ACTION_FILE_SHA256 = {
   'timings' => %w[ff475be9ed8faa47c3a218041c71505a17f0944fc4d32b9f25b08ae61fd59922],
   'source-checkout' => %w[ac95c29654593720210baa620edc335ecf49f33864f9d96deed73f1f296317b3],
@@ -529,6 +533,27 @@ LOCAL_ACTION_FILE_SHA256 = {
   'rust-toolchain' => %w[abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec],
   'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256]
 }.freeze
+# The toolchain action's refusal of a `path` toolchain (and of every non-plain key), as the text between
+# `toolchain_refuse() {` and the last call of `toolchain_check`, in the first step's decoded `run`.
+TOOLCHAIN_GUARD_SHA256 = '6eb49f42a7f8ee1177bb05fe0e8f344173f7b751eb4758637fa7e8970eb7be43'.freeze
+TOOLCHAIN_GUARD_LAST_CALL = "  [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy\n".freeze
+
+# True when the action's first step carries the reviewed guard and calls both checks before it runs any
+# rustup, rustc or cargo command (comment lines are not commands).
+def toolchain_guard_first?(doc)
+  step = Array(doc.dig('runs', 'steps')).first
+  run = step.is_a?(Hash) ? step['run'].to_s : ''
+  start = run.index('  toolchain_refuse() {')
+  stop = run.index(TOOLCHAIN_GUARD_LAST_CALL)
+  return false unless start && stop && start < stop
+  return false unless Digest::SHA256.hexdigest(run[start...(stop + TOOLCHAIN_GUARD_LAST_CALL.length)]) == TOOLCHAIN_GUARD_SHA256
+  code = run.lines.reject { |l| l.strip.start_with?('#') }.join
+  tool = code.index(/(^|[\s;(&|`])(rustup|rustc|cargo)\s/)
+  toml = code.index('toolchain_check rust-toolchain.toml toml')
+  legacy = code.index('toolchain_check rust-toolchain legacy')
+  !tool.nil? && !toml.nil? && !legacy.nil? && toml < tool && legacy < tool
+end
+
 # The exact `with` of each shared local action (the canonical JSON of the step's whole `with`, an absent
 # `with` counting as {}), by name. egress-audit appears in two phases; timings only at the start of the job.
 PREFIX_ACTION_WITH_SHA256 = {
@@ -608,7 +633,8 @@ def pinned_local_action_step?(path, docs, st)
   when *PREFIX_ACTION_WITH_SHA256.keys
     PREFIX_ACTION_WITH_SHA256[name].include?(canonical_hash(with))
   when 'rust-toolchain'
-    with == { 'concern' => "${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}" }
+    toolchain_guard_first?(local_action_doc(path, docs, name)) &&
+      with == { 'concern' => "${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}" }
   when 'verify-cargo-cache'
     with.keys.sort == %w[cache-hit os-label sources-dir] && with['sources-dir'] == '${{ steps.cargo-home.outputs.dir }}' &&
       with['cache-hit'].to_s.match?(CACHE_HIT_REF) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
