@@ -228,8 +228,9 @@ runs:
           rust-app-1|rust-app-2)
             # Two nextest partitions of the same package set (measured: the single concern ran
             # over 1.8x the next slowest). `count:N/2` splits deterministically; no artifact
-            # crosses between the jobs. Doctests ride with partition 1, the openvpn check with
-            # partition 2, so neither runs twice and the two stay balanced.
+            # crosses between the jobs. Doctests and the openvpn check ride with partition 1: partition
+            # 2 measured slower on the same tests (39227442004), so neither runs twice and the extra
+            # work sits on the faster shard.
             export NEXTEST_PARTITION="count:${CONCERN##*-}/2"
             # The command tier both shells call, and the two shells' own unit
             # tests. Tauri's `test` feature drives the commands through its
@@ -249,7 +250,7 @@ runs:
             # OpenSSL only resolve inside dbx-core's own workspace; enabling it from the
             # root workspace is deliberately off, so a change that only breaks that feature
             # is not caught by this CI.
-            if [[ "${CONCERN}" == rust-app-2 ]]; then
+            if [[ "${CONCERN}" == rust-app-1 ]]; then
               run_deferred rust-app-openvpn-check \
                 cargo check --locked --lib --package taurine-app --features openvpn
             fi
