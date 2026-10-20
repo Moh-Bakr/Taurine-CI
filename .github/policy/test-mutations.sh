@@ -28,9 +28,27 @@ mkdir -p "${jobs_dir}"
 export RUNNER_TEMP="${RUNNER_TEMP:-${root}/runner-temp}"
 mkdir -p "${RUNNER_TEMP}"
 policy_source="${MUTATION_POLICY:-${src}/.github/policy}"
-# The unmutated tree is the base for the spike gate: a mutation that flips the flag and adds the record in
-# one diff is judged against a base with no record, as the base-policy pass judges a pull request.
+# The spike gate (check-cache-mode.rb) judges a flag flip against a base document. Every case but the
+# spike ones below keeps the tree's own document as that base, so a tree that already holds the record
+# and the flag (the flip tree) passes unmutated and its other mutations are rejected by their own checks,
+# not by the gate. The spike cases (spike_mutation) are judged against base_doc_copy instead: the tree's
+# record document with every spike-record line removed, as the base-policy pass judges a pull request that
+# flips the flag before the record is merged. Guaranteed here: the gate's SPIKE_RECORD pattern is read from
+# check-cache-mode.rb (no pattern, no run), the copy is built and non-empty, and each spike case must be
+# rejected by check-workflows.sh with the gate's own "needs the spike record already merged on the base"
+# message in the log, so a gate that ignored the variable cannot be counted by some other check.
 export CACHE_MODE_BASE_DOC="${src}/docs/untrusted-readonly-cache.md"
+base_doc_copy="${root}/base-without-record.md"
+spike_record='Stage 2 enforcement spike result: GREEN run 12345678901 reviewed by a-person on 2026-10-20'
+ruby -e '
+  gate = File.read(ARGV.fetch(0), encoding: "UTF-8")
+  m = gate.match(/^SPIKE_RECORD = (\/.+\/)\.freeze$/) or abort("no SPIKE_RECORD pattern in #{ARGV.fetch(0)}")
+  pattern = eval(m[1])
+  doc = File.read(ARGV.fetch(1), encoding: "UTF-8")
+  File.write(ARGV.fetch(2), doc.lines.reject { |l| l.chomp.match?(pattern) }.join)
+' "${policy_source}/check-cache-mode.rb" "${src}/docs/untrusted-readonly-cache.md" "${base_doc_copy}" \
+  || { echo 'cannot build the base document without a spike record' >&2; exit 1; }
+[[ -s "${base_doc_copy}" ]] || { echo 'the base document copy is missing or empty' >&2; exit 1; }
 missed=0
 max_jobs="${MUTATION_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 [[ "${max_jobs}" =~ ^[1-9][0-9]*$ ]] || { echo "MUTATION_JOBS must be a positive integer, got '${max_jobs}'" >&2; exit 1; }
@@ -182,6 +200,27 @@ _mutation() {
   verdict "${label}" "${by}"
 }
 mutation() { spawn "$1" _mutation "$@"; }
+# spike_mutation LABEL FILE OLD NEW [...]: like mutation, judged against the base without the spike
+# record, and rejected specifically by the spike gate (check-workflows.sh, with the gate's message).
+# The tree's record document is first given a record line when it has none (any existing record is
+# kept as it is), so a tree with the one merged record and a tree without it both reach the gate's
+# base comparison; a tree with more than one record is refused by the gate's own count and ends as
+# WRONG CHECKER. The base copy never holds one.
+_spike_mutation() {
+  local label="$1" by=''; shift
+  fresh_tree
+  ruby -e 'pat = eval(ARGV[0][%r{^SPIKE_RECORD = (/.+/)\.freeze$}, 1] || abort("no SPIKE_RECORD pattern")); doc = ARGV[1]; lines = File.read(doc, encoding: "UTF-8").lines; if lines.none? { |l| l.chomp.match?(pat) } then i = lines.index { |l| l.start_with?("### 7b.") } or abort("no 7b heading"); lines.insert(i, ARGV[2] + "\n\n"); File.write(doc, lines.join) end' "$(cat "${dir}/tree/.github/policy/check-cache-mode.rb")" "${dir}/tree/docs/untrusted-readonly-cache.md" "${spike_record}"
+  while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
+  : > "${dir}/log"
+  by="$(cd "${dir}/tree" && CACHE_MODE_BASE_DOC="${base_doc_copy}" offline_policy)" || true
+  if [[ -n "${by}" ]] && ! { [[ "${by}" == check-workflows.sh ]] && grep -q 'needs the spike record already merged on the base' "${dir}/log"; }; then
+    echo "WRONG CHECKER  ${label}  (wanted the spike gate in check-workflows.sh, got '${by}')" >&2
+    miss
+    return
+  fi
+  verdict "${label}" "${by}"
+}
+spike_mutation() { spawn "$1" _spike_mutation "$@"; }
 
 # The unmutated tree must pass, or every rejection below would prove nothing.
 fresh_tree; : > "${dir}/log"
@@ -816,12 +855,9 @@ unt_block="$(sed -n '/^  validate-untrusted:/,/untrusted_readonly_cache: false/p
 unt_true="${unt_block%false}true"
 unt_expr="${unt_block%false}\${{ inputs.source_sha != 'x' }}"
 unt_nokey="${unt_block%untrusted_readonly_cache: false}"
-record='Stage 2 enforcement spike result: GREEN run 12345678901 reviewed by a-person on 2026-10-20'
-mutation '19. the Stage 2 flag switched on without the recorded spike' "${linux}" "${unt_block}" "${unt_true}"
+spike_mutation '19. the Stage 2 flag switched on without the recorded spike' "${linux}" "${unt_block}" "${unt_true}"
 mutation '19. the Stage 2 flag fed from an expression' "${linux}" "${unt_block}" "${unt_expr}"
-mutation '19. the Stage 2 flag flipped and the record added in the same diff' "${linux}" "${unt_block}" "${unt_true}" docs/untrusted-readonly-cache.md '### 7b.' "${record}
-
-### 7b."
+spike_mutation '19. the Stage 2 flag flipped and the record added in the same diff' "${linux}" "${unt_block}" "${unt_true}"
 mutation '19. the untrusted half omits the flag key' "${linux}" "${unt_block}" "${unt_nokey}"
 mutation '19. the callee default set to true' "${linux_concern}" '        default: false
         type: boolean
