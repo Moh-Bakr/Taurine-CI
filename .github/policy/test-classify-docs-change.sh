@@ -69,7 +69,17 @@ new_repo; open_pr; edit 'echo more >> docs/untrusted-readonly-cache.md'; pr_comm
 expect 'the document the policy reads' false
 new_repo; open_pr; edit 'echo more >> docs/a.md; rm docs/untrusted-readonly-cache.md'; pr_commit; merge
 expect 'the excluded document deleted beside another' false
-new_repo; open_pr; edit 'echo q > docs/Untrusted-Readonly-Cache.md'; pr_commit; merge
+# Built with git plumbing, not a working tree: on a case-insensitive file system the second name is the first file.
+new_repo
+( cd "${tmp}/r"
+  blob="$(echo q | git hash-object -w --stdin)"
+  export GIT_INDEX_FILE="${tmp}/case-index"
+  git read-tree main; git update-index --add --cacheinfo "100644,${blob},docs/Untrusted-Readonly-Cache.md"
+  tree="$(git write-tree)"; main_sha="$(git rev-parse main)"
+  pr_sha="$("${G[@]}" commit-tree "${tree}" -p "${main_sha}" -m pr)"
+  merge_sha="$("${G[@]}" commit-tree "${tree}" -p "${main_sha}" -p "${pr_sha}" -m merge)"
+  printf '%s %s %s\n' "${main_sha}" "${pr_sha}" "${merge_sha}" > "${tmp}/case-shas" )
+read -r BASE HEAD_ MERGE < "${tmp}/case-shas"
 expect 'the excluded document under another case' false
 
 new_repo; open_pr; edit 'echo more >> src/code.rs'; pr_commit; merge
