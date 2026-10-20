@@ -42,6 +42,52 @@ bash -c '
   out="$(cargo_test_detail "$1/cargo.log" 2>&1)"
   if grep -qE "secret_thing|private_var" <<<"${out}"; then echo "an error message leaked (test detail)" >&2; exit 1; fi
 ' _ "${dir}"
+# A failed vcpkg port build publishes a bounded tail (30 lines) of that port's buildtree log, so the real compiler or
+# download error is visible, through the same sanitiser: the vcpkg root is shown as <vcpkg>, every other absolute
+# path, token and ANSI sequence is scrubbed, and nothing is read outside vcpkg's buildtrees (a path-like port name,
+# a symlinked directory or log, or no vcpkg root at all publishes nothing).
+vroot="${dir}/vcpkg-root"
+mkdir -p "${vroot}/buildtrees/fmt" "${vroot}/buildtrees/zlib"
+{
+  for i in $(seq 1 40); do echo "line ${i} of the fmt build"; done
+  printf '%s\r\n' "${vroot}/buildtrees/fmt/src/format.cc(12): error C2065: 'undeclared_thing': undeclared identifier"
+  printf '%s\r\n' "$(printf '%s' "${vroot}" | tr / '\\')\\buildtrees\\fmt\\src\\os.cc(7): error C1083: Cannot open include file"
+  printf 'D:\\a\\Taurine\\Taurine\\src\\private\\secret.cc(3): note: PRIVATE_CHECKOUT_MARK\n'
+  printf 'download failed for https://example.invalid/x with Bearer abcdef0123456789 and ghp_ABCDEFGHIJKLMNOP\n'
+  printf '\033[31mred text\033[0m\n'
+} > "${vroot}/buildtrees/fmt/install-x64-windows-static-md-err.log"
+echo 'an older log that must lose to the newer one' > "${vroot}/buildtrees/fmt/config-old.log"; touch -t 202001010000 "${vroot}/buildtrees/fmt/config-old.log"
+printf 'error: building fmt:x64-windows-static-md failed with: BUILD_FAILED\n' > "${dir}/vcpkg.log"
+bash -c '
+  set -euo pipefail
+  source "$1/lib.sh"
+  export VCPKG_INSTALLATION_ROOT="$2"
+  out="$(cargo_test_detail "$1/vcpkg.log" 2>&1)"
+  grep -qF "BUILD_FAILED" <<<"${out}" || grep -qF "error: building fmt:x64-windows-static-md failed" <<<"${out}"
+  grep -qF "vcpkg fmt: last 30 lines of its build log" <<<"${out}"
+  grep -qF "undeclared identifier" <<<"${out}"
+  grep -qF "<vcpkg>/buildtrees/fmt/src/format.cc(12): error C2065" <<<"${out}"
+  grep -qF "Cannot open include file" <<<"${out}"
+  if grep -qF "line 1 of the fmt build" <<<"${out}"; then echo "the tail is longer than 30 lines" >&2; exit 1; fi
+  grep -qF "red text" <<<"${out}"
+  if grep -qE "PRIVATE_CHECKOUT_MARK|secret\.cc|Taurine|abcdef0123456789|ghp_ABCDEFGHIJKLMNOP|older log" <<<"${out}"; then echo "the vcpkg tail leaked a private path, a token or the wrong log" >&2; exit 1; fi
+  if grep -q $(printf "\033") <<<"${out}"; then echo "an ANSI sequence survived" >&2; exit 1; fi
+  if [[ "$(grep -c "" <<<"${out}")" -gt 40 ]]; then echo "the failure detail is not bounded" >&2; exit 1; fi
+  # Nothing is read without a vcpkg root, for a path-like port name, or through a symlink.
+  out="$(env -u VCPKG_INSTALLATION_ROOT bash -c "source \"\$1/lib.sh\"; cargo_test_detail \"\$1/vcpkg.log\"" _ "$1" 2>&1)"
+  if grep -qF "last 30 lines" <<<"${out}"; then echo "a tail was published without a vcpkg root" >&2; exit 1; fi
+  printf "error: building ..:x64-windows failed with: BUILD_FAILED\n" > "$1/dots.log"
+  out="$(cargo_test_detail "$1/dots.log" 2>&1)"
+  if grep -qF "last 30 lines" <<<"${out}"; then echo "a path-like port name was followed" >&2; exit 1; fi
+  ln -s "$1/vcpkg-root/buildtrees/fmt" "$2/buildtrees/linked"
+  printf "error: building linked:x64-windows failed with: BUILD_FAILED\n" > "$1/linked.log"
+  out="$(cargo_test_detail "$1/linked.log" 2>&1)"
+  if grep -qF "last 30 lines" <<<"${out}"; then echo "a symlinked port directory was followed" >&2; exit 1; fi
+  printf "secret\n" > "$1/target-secret.log"; ln -s "$1/target-secret.log" "$2/buildtrees/zlib/build-err.log"
+  printf "error: building zlib:x64-windows failed with: BUILD_FAILED\n" > "$1/zlib.log"
+  out="$(cargo_test_detail "$1/zlib.log" 2>&1)"
+  if grep -qE "secret|last 30 lines" <<<"${out}"; then echo "a symlinked log was followed" >&2; exit 1; fi
+' _ "${dir}" "${vroot}"
 printf 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\nsecretmessage\n' > "${dir}/node.log"
 bash -c '
   set -euo pipefail

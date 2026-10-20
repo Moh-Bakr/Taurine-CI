@@ -182,6 +182,38 @@ runs:
             # The names stay in the private log file; the gate itself still fails on them.
             END { if (wm > 0) print "workspace members tested by no concern: " wm }
           ' | head -80 >&2 || true
+          vcpkg_failure_tail "$1" >&2 || true
+        }
+
+        # When the log shows `error: building <port>:<triplet> failed`, publishes a bounded tail (30 lines) of that
+        # port's newest build log under vcpkg's own buildtrees directory, which holds only the output of building
+        # a public third-party port (its compiler, CMake and download messages) and is where the real error is.
+        # Only the vcpkg tree is read: the port name must be a plain name, the directory and the file must not be
+        # symlinks, and nothing is read when VCPKG_INSTALLATION_ROOT has no buildtrees directory. The vcpkg root is
+        # shown as <vcpkg>; every other absolute path, an ANSI sequence, a token and a long line go through
+        # sanitize_stream and cut like all other published output, so a checkout path outside the vcpkg tree
+        # (a port that built private code is not possible, but a path could still be echoed) never survives.
+        vcpkg_failure_tail() {
+          local root="${VCPKG_INSTALLATION_ROOT:-}" port dir file
+          [[ -n "${root}" && -d "${root}/buildtrees" ]] || return 0
+          port="$(tr -d '\r' <"$1" | sed -nE 's/^error: building ([A-Za-z0-9_.+-]+):[A-Za-z0-9_-]+ failed.*/\1/p' | head -n 1)"
+          [[ -n "${port}" && "${port}" != . && "${port}" != .. ]] || return 0
+          dir="${root}/buildtrees/${port}"
+          [[ -d "${dir}" && ! -L "${dir}" ]] || return 0
+          file="$(ls -t "${dir}"/*-err.log "${dir}"/*.log 2>/dev/null | head -n 1)"
+          [[ -n "${file}" && -f "${file}" && ! -L "${file}" ]] || return 0
+          echo "vcpkg ${port}: last 30 lines of its build log"
+          tail -n 30 "${file}" | tr -d '\r' |
+            awk -v root="${root}" '
+              BEGIN { f = root; b = root; gsub(/\\/, "/", f); gsub(/\//, "\\", b) }
+              {
+                n = split(root "\n" f "\n" b, v, "\n")
+                for (k = 1; k <= n; k++) {
+                  while (v[k] != "" && (i = index($0, v[k])) > 0) $0 = substr($0, 1, i - 1) "<vcpkg>" substr($0, i + length(v[k]))
+                }
+                print
+              }' |
+            sanitize_stream | cut -c1-200
         }
 
         cargo_test_reason() {
