@@ -28,9 +28,25 @@ mkdir -p "${jobs_dir}"
 export RUNNER_TEMP="${RUNNER_TEMP:-${root}/runner-temp}"
 mkdir -p "${RUNNER_TEMP}"
 policy_source="${MUTATION_POLICY:-${src}/.github/policy}"
-# The unmutated tree is the base for the spike gate: a mutation that flips the flag and adds the record in
-# one diff is judged against a base with no record, as the base-policy pass judges a pull request.
-export CACHE_MODE_BASE_DOC="${src}/docs/untrusted-readonly-cache.md"
+# The base for the spike gate is a scratch copy of the tree's record document with every spike-record line
+# removed (the gate's own SPIKE_RECORD pattern, read from check-cache-mode.rb): a mutation that flips the
+# flag, with or without adding the record in the same diff, is judged against a base that has no record, as
+# the base-policy pass judges a pull request. The tree's own document is never the base, because once the
+# real record is merged it would make the flip look already recorded. Fail closed: no copy, or a copy that
+# still holds a record, stops the run, and a gate that ignored the variable would let case 19 pass.
+base_doc_copy="${root}/base-without-record.md"
+ruby -e '
+  gate = File.read(ARGV.fetch(0), encoding: "UTF-8")
+  m = gate.match(/^SPIKE_RECORD = (\/.+\/)\.freeze$/) or abort("no SPIKE_RECORD pattern in #{ARGV.fetch(0)}")
+  pattern = eval(m[1])
+  doc = File.read(ARGV.fetch(1), encoding: "UTF-8")
+  kept = doc.lines.reject { |l| l.chomp.match?(pattern) }
+  abort("the base document copy still holds a spike record") if kept.any? { |l| l.chomp.match?(pattern) }
+  File.write(ARGV.fetch(2), kept.join)
+' "${policy_source}/check-cache-mode.rb" "${src}/docs/untrusted-readonly-cache.md" "${base_doc_copy}" \
+  || { echo 'cannot build the base document without a spike record' >&2; exit 1; }
+[[ -s "${base_doc_copy}" ]] || { echo 'the base document copy is missing or empty' >&2; exit 1; }
+export CACHE_MODE_BASE_DOC="${base_doc_copy}"
 missed=0
 max_jobs="${MUTATION_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 [[ "${max_jobs}" =~ ^[1-9][0-9]*$ ]] || { echo "MUTATION_JOBS must be a positive integer, got '${max_jobs}'" >&2; exit 1; }
