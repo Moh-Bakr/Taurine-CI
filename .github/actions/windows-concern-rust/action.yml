@@ -164,7 +164,7 @@ runs:
           local dir="${1:-}" notes
           notes="${dir}/notes.txt"
           [[ -n "${dir}" && -d "${dir}" && ! -L "${dir}" && -f "${notes}" && ! -L "${notes}" ]] || return 0
-          LC_ALL=C grep -E '^(vcpkg install failed once; retrying|vcpkg-diagnosis: attempt [12]: (download failure|hash mismatch|compiler error C[0-9]{4}|cmake configure failure|unknown))$' "${notes}" |
+          LC_ALL=C grep -aE '^(vcpkg install failed once; retrying|vcpkg-diagnosis: attempt [12]: (download failure|hash mismatch|compiler error C[0-9]{4}|cmake configure failure|unknown))$' "${notes}" |
             head -n 4 | sanitize_stream || true
           rm -rf "${dir}"
         }
