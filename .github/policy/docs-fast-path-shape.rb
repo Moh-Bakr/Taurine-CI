@@ -109,22 +109,22 @@ module DocsFastPathShape
 
   # The two aggregate guards of the classified layout, exact. Each is self-contained: it requires the
   # classification to have succeeded and to be exactly true or false, and then the exact results that
-  # outcome allows.
-  CLASSIFY_GUARD = <<~'SH'
+  # outcome allows. (The guards sit in this file as heredocs; the workflow's `run` blocks must equal them.)
+  CLASSIFY_CHECK = <<~'SH'
     if [[ "${CLASSIFY_RESULT}" != 'success' ]]; then
       echo "::error::the classify job did not pass (result: ${CLASSIFY_RESULT})"
       exit 1
     fi
-    case "${DOCS_ONLY}" in
-      true) expected=skipped; docs_expected=success ;;
-      false) expected=success; docs_expected=skipped ;;
-      *) echo "::error::the classification is neither true nor false (docs_only: '${DOCS_ONLY}')"; exit 1 ;;
-    esac
   SH
 
   GUARD_BASE_RUN = <<~SH
     set -euo pipefail
-    #{CLASSIFY_GUARD.chomp}
+    #{CLASSIFY_CHECK.chomp}
+    case "${DOCS_ONLY}" in
+      true) expected=skipped ;;
+      false) expected=success ;;
+      *) echo "::error::the classification is neither true nor false (docs_only: '${DOCS_ONLY}')"; exit 1 ;;
+    esac
     if [[ "${BASE_PASS_RESULT}" != "${expected}" ]]; then
       echo "::error::the base-policy workflow ended ${BASE_PASS_RESULT}, expected ${expected} (docs_only: ${DOCS_ONLY})"
       exit 1
@@ -134,7 +134,12 @@ module DocsFastPathShape
 
   GUARD_SHARDS_RUN = <<~SH
     set -euo pipefail
-    #{CLASSIFY_GUARD.chomp}
+    #{CLASSIFY_CHECK.chomp}
+    case "${DOCS_ONLY}" in
+      true) expected=skipped; docs_expected=success ;;
+      false) expected=success; docs_expected=skipped ;;
+      *) echo "::error::the classification is neither true nor false (docs_only: '${DOCS_ONLY}')"; exit 1 ;;
+    esac
     failed=0
     for pair in "evidence:${POLICY_EVIDENCE_RESULT}" "fixtures:${POLICY_FIXTURES_RESULT}" "mutations:${POLICY_MUTATIONS_RESULT}" "structure:${POLICY_STRUCTURE_RESULT}"; do
       if [[ "${pair#*:}" != "${expected}" ]]; then

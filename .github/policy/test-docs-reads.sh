@@ -76,7 +76,6 @@ fresh; add_line .github/other.json '      "docs/**",'
 expect_reject 'a glob over the docs directory' 'the docs directory'
 
 # A pinned line is accepted, only that exact line; a stale pin is a warning.
-pin='.github/policy/check-x.sh'
 fresh 's = s.sub("NAMED_NOT_READ = {\n", "NAMED_NOT_READ = {\n    \".github/policy/check-x.sh\" => [\"echo '"'"'see docs/guide.md'"'"'\"],\n")'
 add_line .github/policy/check-x.sh "echo 'see docs/guide.md'"
 expect_accept 'a pinned message line'
