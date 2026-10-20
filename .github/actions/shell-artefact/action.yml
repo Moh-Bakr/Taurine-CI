@@ -161,14 +161,15 @@ runs:
 
         # dbx_legacy_tls_feature <package> <target|-> <out>: succeeds only when `cargo tree -e features`
         # resolves taurine-db-dbx WITH its legacy-tls feature in <package>'s graph for <target>, so the
-        # shipped-door proof does not rest on the manifest default alone. Any resolve error is a failure.
+        # shipped-door proof does not rest on the manifest default alone. cargo marks a repeated subtree with a trailing
+        # ` (*)`, which the line may carry. Any resolve error is a failure.
         dbx_legacy_tls_feature() {
           local package="$1" target="$2" out="$3" args
           args=(tree --locked --package "${package}" -e features --invert taurine-db-dbx --depth 2 --prefix depth)
           if [[ "${target}" != - ]]; then args+=(--target "${target}"); fi
           cargo "${args[@]}" >"${out}" 2>&1 || return 1
           tr -d '\r' <"${out}" >"${out}.lf" && mv "${out}.lf" "${out}"
-          grep -qE '^[0-9]+taurine-db-dbx feature "legacy-tls"$' "${out}"
+          grep -qE '^[0-9]+taurine-db-dbx feature "legacy-tls"( \(\*\))?$' "${out}"
         }
 
         # openssl_door_gate <label> <package> <target|->

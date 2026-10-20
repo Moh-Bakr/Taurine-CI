@@ -1242,6 +1242,23 @@ mutation_by check-docs-reads.rb '21. the spike-record reader switched to another
 mutation_by test-docs-diff.sh '21. the whitespace check never fails' .github/policy/check-docs-diff.sh "if ! git diff --check 'HEAD^1' HEAD; then" 'if false; then'
 mutation_by test-docs-diff.sh '21. the whitespace check run on a checkout that is not a merge commit' .github/policy/check-docs-diff.sh "git rev-parse --verify --quiet 'HEAD^2^{commit}' > /dev/null || fail 'HEAD is not a merge commit of a pull request head'" ':'
 
+# 22. The restore-time door check reads library bytes, not only names (rust-target-cache composite): a door library
+# renamed to anything is refused. Each weakening of that scan is refused by the strip fixtures, which are not part
+# of offline_policy; the composite's pinned hash would refuse these edits as well.
+rtc=.github/actions/rust-target-cache/action.yml
+mutation_by test-rust-target-cache.sh '22. the byte scan no longer looks for the OpenSSL version banner' "${rtc}" "-e 'OpenSSL [0-9]+" "-e 'NeverOpenSSL [0-9]+"
+mutation_by test-rust-target-cache.sh '22. the byte scan no longer looks for libssl and libcrypto source paths' "${rtc}" "-e 'ssl/ssl_lib\.c|crypto/evp/evp_lib\.c|crypto/bio/bio_lib\.c'" "-e 'never/ssl_lib\.c'"
+mutation_by test-rust-target-cache.sh '22. a read error in the byte scan read as a clean file' "${rtc}" "*) echo 'target-cache: content scan failed' >&2; return 1 ;;" '*) ;;'
+mutation_by test-rust-target-cache.sh '22. static libraries left out of the byte scan' "${rtc}" "-o -name '*.a' " ''
+mutation_by test-rust-target-cache.sh '22. the byte scan skipped for the build directory' "${rtc}" '          for d in deps build; do
+            if [[ -d "${profile}/${d}" ]]; then
+              files=' '          for d in deps; do
+            if [[ -d "${profile}/${d}" ]]; then
+              files='
+# 23. The legacy-tls feature line may carry cargo's repeated-subtree mark (shell-artefact composite); the fixture
+# line and its mutation are in test-shell-artefact.sh, which is not part of offline_policy.
+mutation_by test-shell-artefact.sh '23. the repeated-subtree mark no longer allowed on the legacy-tls feature line' .github/actions/shell-artefact/action.yml "feature \"legacy-tls\"( \\(\\*\\))?\$' \"\${out}\"" "feature \"legacy-tls\"\$' \"\${out}\""
+
 drain
 (( missed == 0 )) || { echo "${missed} mutation(s) passed the policy" >&2; exit 1; }
 echo "mutation tests: every reviewed weakening is rejected by the offline policy (${total} cases, ${max_jobs} job(s))"

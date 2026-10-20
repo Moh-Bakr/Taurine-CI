@@ -371,8 +371,10 @@ that follows every untrusted compiled restore passes `deny-door: 'true'` to the 
 also classifies the OpenSSL door crates (`taurine-tls-openssl`, `openssl`, `openssl-sys`, `openssl-src`,
 `openssl-macros`, `tokio-openssl`, `postgres-openssl`, `native-tls` and the banned `aws-lc-*` crates) as strip roots,
 removes them and every crate built on one, and fails the step if any entry named for one remains, or any entry
-under `debug/deps` or `debug/build` named `libssl*`, `libcrypto*` or `openssl-build*` (a content-level defence in
-depth, whichever crate produced it). Stripping the door costs the `openssl-src` build time (the vendored OpenSSL
+under `debug/deps` or `debug/build` named `libssl*`, `libcrypto*` or `openssl-build*`, or any `.rlib`, `.a`, `.so`,
+`.dylib` or `.rmeta` file there whose bytes carry the OpenSSL version banner or a source path only libssl and libcrypto
+embed (two defences in depth, whichever crate produced the entry; the second finds a door library renamed to anything,
+and a traversal or read error fails the step). Stripping the door costs the `openssl-src` build time (the vendored OpenSSL
 compiles from source) on every untrusted run, by design. The main-scope
 restore is unchanged (it keeps what main saved). `drop-root-order.rb` and `check-cache-mode.rb` refuse an untrusted
 compiled restore whose strip is missing, moved, not directly after the restore, or without `deny-door: 'true'`, and

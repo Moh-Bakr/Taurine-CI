@@ -409,11 +409,18 @@ runs:
         }
 
         # Counts the entries of the debug profile under $1 that are named for a door crate (file or
-        # directory, with or without the lib prefix), using door.txt of the sets directory $2, plus, as a
-        # content-level defence in depth, any entry at any depth under debug/deps or debug/build named
-        # libssl*, libcrypto*, openssl-build*, libeay* or ssleay* (any case), whichever crate produced it. Prints the count only, never a name.
+        # directory, with or without the lib prefix), using door.txt of the sets directory $2, plus two
+        # defences in depth, whichever crate produced the entry: any entry at any depth under debug/deps or
+        # debug/build NAMED libssl*, libcrypto*, openssl-build*, libeay* or ssleay* (any case), and any
+        # .rlib, .a, .so, .dylib or .rmeta file at any depth under those two directories whose BYTES carry
+        # a marker of the OpenSSL library itself, so a door library renamed to anything is still found.
+        # The markers are the OpenSSL version banner ("OpenSSL 3.5.0 8 Apr 2025", the full text with its
+        # date) and source paths that only libssl and libcrypto embed (ssl/ssl_lib.c, crypto/evp/evp_lib.c,
+        # crypto/bio/bio_lib.c); the bare words "OpenSSL" and "libssl" are not markers, because crate
+        # documentation in an .rmeta names them. A traversal or read error fails the helper instead of
+        # reading as a clean result. Prints the count only, never a name.
         door_entries_remaining() {
-          local profile="$1" sets="$2" names entries d by_name=0 by_content=0 content found
+          local profile="$1" sets="$2" names entries d by_name=0 by_content=0 by_bytes=0 content found files file grc
           names="$(sed 's/_/[-_]/g' "${sets}/door.txt" | paste -sd'|' -)" || return 1
           entries="$(for d in ${cached_dirs}; do
             if [[ -d "${profile}/${d}" ]]; then cache_find "${profile}/${d}" -mindepth 1 -maxdepth 1 -print || exit 1; fi
@@ -432,7 +439,24 @@ runs:
             fi
           done
           by_content="$(printf '%s' "${content}" | grep -c . || true)"
-          echo $((by_name + by_content))
+          # Byte content: a renamed door library carries the OpenSSL banner and its source paths whatever it is
+          # called. grep status 0 is a hit, 1 is no hit, anything else is a read failure and fails the helper.
+          for d in deps build; do
+            if [[ -d "${profile}/${d}" ]]; then
+              files="$(cache_find "${profile}/${d}" -type f \( -name '*.rlib' -o -name '*.a' -o -name '*.so' -o -name '*.dylib' -o -name '*.rmeta' \) -print)" || return 1
+              while IFS= read -r file; do
+                [[ -n "${file}" ]] || continue
+                grc=0
+                LC_ALL=C grep -aqE -e 'OpenSSL [0-9]+\.[0-9]+\.[0-9]+[^ ]* +[0-9]+ [A-Z][a-z]{2} [0-9]{4}' -e 'ssl/ssl_lib\.c|crypto/evp/evp_lib\.c|crypto/bio/bio_lib\.c' -- "${file}" 2>/dev/null || grc=$?
+                case "${grc}" in
+                  0) by_bytes=$((by_bytes + 1)) ;;
+                  1) ;;
+                  *) echo 'target-cache: content scan failed' >&2; return 1 ;;
+                esac
+              done <<< "${files}"
+            fi
+          done
+          echo $((by_name + by_content + by_bytes))
         }
 
         size_mib() {

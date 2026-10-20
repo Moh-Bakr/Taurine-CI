@@ -277,14 +277,39 @@ LOCK
     fi
   fi
   chmod 755 "${dprofile}/build/unreadable-1/out"; rm -rf "${dprofile:?}/build/unreadable-1"
-  # Content-level defence in depth: whatever crate produced them, libssl*, libcrypto* and openssl-build*
-  # entries under debug/deps and debug/build are refused after the door strip, and nothing else is.
+  # Defences in depth: whatever crate produced them, libssl*, libcrypto* and openssl-build* entries under
+  # debug/deps and debug/build are refused after the door strip, then library files by their bytes, and nothing else is.
   [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the door fixture was not clean before the content cases' >&2; exit 1; }
   for planted in deps/libssl.so.3 deps/libcrypto-0a1b.a build/openssl-build-1234; do
     case "${planted}" in build/*) mkdir -p "${dprofile}/${planted}" ;; *) printf 'planted' > "${dprofile}/${planted}" ;; esac
     [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 1 ]] || { echo "a planted ${planted} was not reported" >&2; exit 1; }
     rm -rf "${dprofile:?}/${planted}"
   done
+  # Byte content: a door library renamed to a name, a directory and an extension that match nothing above is
+  # still found by the OpenSSL banner or by a source path only libssl and libcrypto embed.
+  mkdir -p "${dprofile}/build/tidy-1/out/deep"
+  for hidden in deps/libinnocent-aaaa.rlib build/tidy-1/out/deep/libtidy.a deps/libplain-bbbb.so deps/libplain-cccc.dylib deps/libplain-dddd.rmeta; do
+    for marker in 'xx OpenSSL 3.5.0 8 Apr 2025 yy' 'xx OpenSSL 3.0.13+quic 30 Jan 2024 yy' 'xx/build/ssl/ssl_lib.c:1' 'crypto/evp/evp_lib.c' 'crypto/bio/bio_lib.c'; do
+      printf '%s' "${marker}" > "${dprofile}/${hidden}"
+      [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 1 ]] || { echo "a renamed door library ${hidden} carrying '${marker}' was not refused" >&2; exit 1; }
+    done
+    rm -f "${dprofile:?}/${hidden}"
+  done
+  # Every false-positive guard: crate documentation that names OpenSSL, other libraries, a banner-less file, and
+  # a file of another extension (out of scope, like the rest of the tree) are not reported.
+  printf 'Uses OpenSSL and libssl through the system; see the OpenSSL documentation' > "${dprofile}/deps/libdoc-eeee.rmeta"
+  printf 'ring ssl/ crypto/ring/ OpenSSL 3' > "${dprofile}/deps/libring-ffff.rlib"
+  printf 'OpenSSL 3.5.0 8 Apr 2025' > "${dprofile}/deps/banner-gggg.txt"
+  [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the byte check reported a document, a lookalike or a file of another extension' >&2; exit 1; }
+  rm -f "${dprofile:?}/deps/libdoc-eeee.rmeta" "${dprofile:?}/deps/libring-ffff.rlib" "${dprofile:?}/deps/banner-gggg.txt"
+  # A library file that cannot be read fails the helper: it is not read as clean.
+  printf 'OpenSSL 3.5.0 8 Apr 2025' > "${dprofile}/deps/libhidden-hhhh.rlib"; chmod 000 "${dprofile}/deps/libhidden-hhhh.rlib"
+  if [[ "$(id -u)" != 0 ]]; then
+    if (door_entries_remaining "${dprofile}" "${door_dir}/sets") >/dev/null 2>&1; then
+      chmod 644 "${dprofile}/deps/libhidden-hhhh.rlib"; echo 'an unreadable library was read as clean' >&2; exit 1
+    fi
+  fi
+  chmod 644 "${dprofile}/deps/libhidden-hhhh.rlib"; rm -f "${dprofile:?}/deps/libhidden-hhhh.rlib"
   mkdir -p "${dprofile}/.fingerprint/libssl-1"
   printf 'x' > "${dprofile}/deps/librustls_thing-6666.rlib"
   [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the content check reported an unrelated or out-of-scope entry' >&2; exit 1; }
