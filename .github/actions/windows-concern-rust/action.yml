@@ -95,7 +95,78 @@ runs:
             return 1
           fi
           cd vendor/openvpn3-core
-          "${vcpkg_bin}" install --triplet x64-windows-static-md --disable-metrics
+          local vcpkg_root attempt rc=0
+          # A fresh private directory per run (made by the caller with mktemp -d, because
+          # this function runs in the sub-step's subshell and could not hand the name back):
+          # nothing predictable and nothing pre-existing is read or written.
+          [[ -n "${vcpkg_diag_dir:-}" && -d "${vcpkg_diag_dir}" && ! -L "${vcpkg_diag_dir}" ]] || vcpkg_diag_dir="$(mktemp -d "${RUNNER_TEMP}/vcpkg-diag.XXXXXX")"
+          local vcpkg_out="${vcpkg_diag_dir}/install.out"
+          vcpkg_root="${VCPKG_INSTALLATION_ROOT:-}"
+          if [[ -z "${vcpkg_root}" && "${vcpkg_bin}" == */* ]]; then vcpkg_root="$(dirname "${vcpkg_bin}")"; fi
+          # One retry: a port build failure on an unchanged runner image has been transient
+          # (a source download or the toolchain). The fixed lines go to a notes file that the
+          # concern branch prints after the sub-step; the sub-step's own output is captured.
+          # A successful retry prints only the retry line, so the flake rate is tracked from
+          # that line.
+          for attempt in 1 2; do
+            rc=0
+            "${vcpkg_bin}" install --triplet x64-windows-static-md --disable-metrics >"${vcpkg_out}" 2>&1 || rc=$?
+            cat "${vcpkg_out}"
+            [[ "${rc}" -eq 0 ]] && break
+            vcpkg_diagnose "${vcpkg_out}" "${vcpkg_root}" "${attempt}" "${vcpkg_diag_dir}/notes.txt"
+            if [[ "${attempt}" -eq 1 ]]; then
+              echo 'vcpkg install failed once; retrying' >>"${vcpkg_diag_dir}/notes.txt"
+              echo 'vcpkg install failed once; retrying'
+              sleep 20
+            fi
+          done
+          return "${rc}"
+        }
+
+        # Classifies the failing port's buildtree logs into a fixed, public class. The port
+        # name is used only to find its buildtree and is never written (a dependency name is
+        # never published); no log line is echoed. The class and the four-digit compiler code
+        # are influenced by the checkout (about 13 bits per attempt), which is accepted.
+        vcpkg_diagnose() {
+          local out="$1" root="$2" attempt="$3" notes="$4" port='' dir f logs=() cls code
+          port="$(tr -d '\r' <"${out}" | sed -nE 's/^error: building ([a-z0-9-]+):[A-Za-z0-9_-]+ failed.*/\1/p' | head -n 1 || true)"
+          if [[ ! "${port}" =~ ^[a-z0-9-]+$ ]]; then
+            echo "vcpkg-diagnosis: attempt ${attempt}: unknown" >>"${notes}"
+            return 0
+          fi
+          for dir in "${root}/buildtrees/${port}" "${PWD}/buildtrees/${port}" "${PWD}/vcpkg_installed/vcpkg/buildtrees/${port}"; do
+            [[ -d "${dir}" ]] || continue
+            while IFS= read -r f; do logs+=("${f}"); done < <(find "${dir}" -maxdepth 1 -type f \( -name '*-err.log' -o -name '*-out.log' \) 2>/dev/null)
+          done
+          if [[ "${#logs[@]}" -eq 0 ]]; then
+            echo "vcpkg-diagnosis: attempt ${attempt}: unknown" >>"${notes}"
+            return 0
+          fi
+          code="$(cat "${logs[@]}" 2>/dev/null | tr -d '\r' | grep -oE 'error C[0-9]{4}' | head -n 1 || true)"
+          if grep -qiE 'expected hash|hash mismatch' "${logs[@]}" "${out}" 2>/dev/null; then
+            cls='hash mismatch'
+          elif grep -qiE 'failed to download|download failed|could not resolve host|couldn.t resolve host|connection (timed out|reset)|curl: \([0-9]+\)|ssl connect error' "${logs[@]}" "${out}" 2>/dev/null; then
+            cls='download failure'
+          elif [[ -n "${code}" ]]; then
+            cls="compiler error C${code#error C}"
+          elif cat "${logs[@]}" 2>/dev/null | tr -d '\r' | grep -qE 'CMake Error|CMake configure failed|Configuring incomplete'; then
+            cls='cmake configure failure'
+          else
+            cls='unknown'
+          fi
+          echo "vcpkg-diagnosis: attempt ${attempt}: ${cls}" >>"${notes}"
+        }
+
+        # Prints the fixed notes lines written above. Run in the concern branch, outside
+        # the captured sub-step, so they reach the job log; any line not in a fixed shape
+        # is dropped, the output is capped and passes the shared sanitiser as well.
+        vcpkg_publish_notes() {
+          local dir="${1:-}" notes
+          notes="${dir}/notes.txt"
+          [[ -n "${dir}" && -d "${dir}" && ! -L "${dir}" && -f "${notes}" && ! -L "${notes}" ]] || return 0
+          LC_ALL=C grep -aE '^(vcpkg install failed once; retrying|vcpkg-diagnosis: attempt [12]: (download failure|hash mismatch|compiler error C[0-9]{4}|cmake configure failure|unknown))$' "${notes}" |
+            head -n 4 | sanitize_stream || true
+          rm -rf "${dir}"
         }
 
         # `--locked`: the committed Cargo.lock is what was reviewed and what the Linux
@@ -227,7 +298,9 @@ runs:
             # taurine-ovpn-sys, so this concern compiles that C++ shim too and needs
             # the same vcpkg ports before cargo runs; the install is repeated here
             # rather than shared, because each concern has its own runner.
+            vcpkg_diag_dir="$(mktemp -d "${RUNNER_TEMP}/vcpkg-diag.XXXXXX")"
             run_deferred rust-net-vcpkg windows_ovpn_dependencies
+            vcpkg_publish_notes "${vcpkg_diag_dir:-}"
             if [[ "${deferred_failed}" -eq 0 ]]; then
               run_deferred rust-net-tests \
                 cargo test --locked --no-fail-fast "${rust_net_packages[@]/#/--package=}"
@@ -239,7 +312,9 @@ runs:
             # The vendored openvpn3-core shim, compiled with MSVC against vcpkg's
             # static-md ports. A build and its unit tests only: no tunnel has carried
             # traffic on Windows, and this concern does not claim one has.
+            vcpkg_diag_dir="$(mktemp -d "${RUNNER_TEMP}/vcpkg-diag.XXXXXX")"
             run_deferred rust-ovpn-vcpkg windows_ovpn_dependencies
+            vcpkg_publish_notes "${vcpkg_diag_dir:-}"
             if [[ "${deferred_failed}" -eq 0 ]]; then
               run_deferred rust-ovpn-tests \
                 cargo test --locked --no-fail-fast "${rust_ovpn_packages[@]/#/--package=}"
