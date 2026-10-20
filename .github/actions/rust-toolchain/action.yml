@@ -30,6 +30,60 @@ runs:
         # When it does, install exactly that (rustup reads the file in this directory);
         # otherwise the runner image's default toolchain is used unchanged.
         if [[ -f rust-toolchain.toml || -f rust-toolchain ]]; then
+          # A `path` toolchain makes rustup resolve rustc to a directory of the private checkout,
+          # so the next `rustc` (the compiled-cache locate step runs `rustc -vV` before the
+          # untrusted restores) would execute source-controlled code. A grep for `path =` is
+          # bypassed by quoted keys, inline tables and dotted keys, so the file is not searched
+          # for the bad spelling: it is accepted only when every line is one of a short list of
+          # plain forms (the [toolchain] header, channel/profile strings, components/targets
+          # string arrays, comments). Anything else, including every spelling of `path`, an
+          # inline table and a dotted key, is refused before any rustc runs.
+          toolchain_refuse() {
+            echo "rust-toolchain: $1 in ${2}; only channel, profile, components and targets as plain strings are accepted" >&2
+            exit 1
+          }
+          toolchain_check() {
+            local file="$1" kind="$2" line count=0 plain='' header=0 in_array=0
+            local str='"[A-Za-z0-9._+-]*"'
+            local items="${str}([[:space:]]*,[[:space:]]*${str})*[[:space:]]*,?[[:space:]]*"
+            local re_header='^\[toolchain\][[:space:]]*(#.*)?$'
+            local re_scalar="^(channel|profile)[[:space:]]*=[[:space:]]*${str}[[:space:]]*(#.*)?\$"
+            local re_array="^(components|targets)[[:space:]]*=[[:space:]]*\\[[[:space:]]*(${items})?\\][[:space:]]*(#.*)?\$"
+            local re_open='^(components|targets)[[:space:]]*=[[:space:]]*\[[[:space:]]*(#.*)?$'
+            local re_item="^[[:space:]]*${items}(#.*)?\$"
+            local re_close='^[[:space:]]*\][[:space:]]*(#.*)?$'
+            local re_plain='^[A-Za-z0-9._+-]+$'
+            # A channel of exactly `.` or `..` would name a directory, not a toolchain.
+            local re_dots_channel='^channel[[:space:]]*=[[:space:]]*"\.{1,2}"'
+            local re_dots_plain='^\.{1,2}$'
+            while IFS= read -r line || [[ -n "${line}" ]]; do
+              line="${line%$'\r'}"
+              [[ "${line}" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+              count=$((count + 1))
+              plain="${line}"
+              if [[ "${line}" =~ ${re_dots_channel} ]] || [[ "${kind}" == legacy && count -eq 1 && "${line}" =~ ${re_dots_plain} ]]; then
+                toolchain_refuse "a channel of . or .." "${file}"
+              fi
+              if (( in_array )); then
+                if [[ "${line}" =~ ${re_close} ]]; then in_array=0
+                elif [[ "${line}" =~ ${re_item} ]]; then :
+                else toolchain_refuse "an unreadable array line" "${file}"; fi
+              elif [[ "${line}" =~ ${re_header} ]]; then
+                (( header == 0 && count == 1 )) || toolchain_refuse "a repeated or misplaced [toolchain] header" "${file}"
+                header=1
+              elif (( header )) && [[ "${line}" =~ ${re_scalar} || "${line}" =~ ${re_array} ]]; then :
+              elif (( header )) && [[ "${line}" =~ ${re_open} ]]; then in_array=1
+              elif [[ "${kind}" == legacy && count -eq 1 && "${line}" =~ ${re_plain} ]]; then :
+              else toolchain_refuse "an unrecognised line" "${file}"; fi
+            done < "${file}"
+            (( in_array == 0 )) || toolchain_refuse "an unterminated array" "${file}"
+            if (( header == 0 )); then
+              # The legacy `rust-toolchain` file may be one plain channel name and nothing else.
+              [[ "${kind}" == legacy && count -eq 1 && "${plain}" =~ ${re_plain} ]] || toolchain_refuse "a toolchain file that is neither a [toolchain] table nor a single channel name" "${file}"
+            fi
+          }
+          [[ ! -f rust-toolchain.toml ]] || toolchain_check rust-toolchain.toml toml
+          [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy
           echo 'rust-toolchain: installing the toolchain pinned by the source'
           rustup toolchain install || rustup show >/dev/null
         else
@@ -169,6 +223,9 @@ runs:
             echo 'CARGO_PROFILE_DEV_DEBUG=0'
             echo 'CARGO_PROFILE_TEST_DEBUG=0'
           } >> "${GITHUB_ENV}"
+          # Rust 1.90 and later already use rust-lld by default on x86_64 Linux (gnu), so on a current
+          # toolchain the explicit flag below is redundant and harmless; it keeps an older toolchain on
+          # lld, and the runner's own `ld.lld` is the one it names.
           # Link with lld. RUSTFLAGS replaces, rather than merges with, any
           # `build.rustflags` a cargo config in the checkout sets, so the flag is
           # applied only when no checked-out cargo config sets rustflags of its own;

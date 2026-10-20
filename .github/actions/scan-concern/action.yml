@@ -457,8 +457,7 @@ runs:
 
     - name: Run the security lints with clippy (warning only)
       id: scan-clippy
-      continue-on-error: ${{ inputs.scanner == 'all' }}
-      if: ${{ inputs.scanner == 'clippy' || inputs.scanner == 'all' }}
+      if: ${{ inputs.scanner == 'clippy' }}
       shell: bash
       working-directory: ${{ github.workspace }}/${{ inputs.path }}
       run: |
@@ -542,7 +541,6 @@ runs:
         NPM_OUTCOME: ${{ steps.scan-npm.outcome }}
         SEMGREP_OUTCOME: ${{ steps.scan-semgrep.outcome }}
         DENY_OUTCOME: ${{ steps.scan-deny.outcome }}
-        CLIPPY_OUTCOME: ${{ steps.scan-clippy.outcome }}
       run: |
         set -euo pipefail
         # Each scanner ran as its own step with its own sanitised report; a failure of one
@@ -555,7 +553,7 @@ runs:
           echo '| Scanner | Outcome | Exit |'
           echo '| --- | --- | --- |'
         } >> "${GITHUB_STEP_SUMMARY}"
-        for entry in "gitleaks|${GITLEAKS_OUTCOME}|gitleaks" "npm-audit|${NPM_OUTCOME}|npm" "semgrep|${SEMGREP_OUTCOME}|semgrep" "cargo-deny|${DENY_OUTCOME}|deny" "clippy|${CLIPPY_OUTCOME}|clippy"; do
+        for entry in "gitleaks|${GITLEAKS_OUTCOME}|gitleaks" "npm-audit|${NPM_OUTCOME}|npm" "semgrep|${SEMGREP_OUTCOME}|semgrep" "cargo-deny|${DENY_OUTCOME}|deny"; do
           name="${entry%%|*}"
           rest="${entry#*|}"
           outcome="${rest%%|*}"

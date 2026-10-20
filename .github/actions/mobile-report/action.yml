@@ -176,8 +176,8 @@ runs:
 
         # mobile_test_execute <label> <where> <runner> <binary>...
         # Runs each test binary through <runner> (a function taking the binary path), sums the
-        # libtest `test result:` lines and publishes counts, binary names (hash removed), failing
-        # test names and classified panics. Fail-closed: a failure, a binary that ends without a
+        # libtest `test result:` lines and publishes counts, binaries by position, failing
+        # tests as keyed ids and classified panics. Fail-closed: a failure, a binary that ends without a
         # result line (crash, missing library) or zero executed tests fails the concern. Ignored
         # tests are reported as skipped and never count as executed.
         mobile_test_execute() {
@@ -190,7 +190,8 @@ runs:
           fi
           for bin in "$@"; do
             i=$((i + 1)); binaries=$((binaries + 1))
-            name="$(basename "${bin}")"; name="${name%-*}"
+            # The binary's own name is a private source identifier: it is published by position only.
+            name="binary ${i}"
             log="${RUNNER_TEMP}/${label}-${i}.log"; rc=0
             "${runner}" "${bin}" >"${log}" 2>&1 || rc=$?
             tr -d '\r' <"${log}" >"${log}.lf" && mv "${log}.lf" "${log}"

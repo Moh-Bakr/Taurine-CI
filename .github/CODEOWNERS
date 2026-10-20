@@ -1,0 +1,9 @@
+# Review by the owner is required for the control plane's trust boundary: the workflows, the composite
+# actions, the policy that judges them, and the cache design whose recorded spike gates the Stage 2 switch.
+# Enforcement needs the owner to turn on "Require review from Code Owners" in the main branch protection
+# (a repository setting, not a file in this tree).
+/.github/workflows/ @Moh-Bakr
+/.github/actions/ @Moh-Bakr
+/.github/policy/ @Moh-Bakr
+/.github/CODEOWNERS @Moh-Bakr
+/docs/untrusted-readonly-cache.md @Moh-Bakr

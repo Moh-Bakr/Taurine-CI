@@ -13,14 +13,6 @@
 #   - uses the collector's glob semantics exactly (`*` stays in a segment, `**` crosses).
 # Run from the repository root (the policy workflow does).
 set -euo pipefail
-# Wave C step A: this test lands before the tree it judges. It is enforced once the policy workflow
-# runs it (the step arrives with Wave C); in a tree whose workflow does not run it yet there is nothing
-# for it to hold, so it says so and passes. A tree that DOES run it is held to every assertion below
-# (check-wave-c-wiring.rb fails a Wave C tree that drops the step).
-if ! grep -qF 'bash .github/policy/test-suite-ownership-check.sh' .github/workflows/validate-public-changes.yml 2>/dev/null; then
-  echo 'suite ownership check: skipped, the policy workflow of this tree does not run this test yet'
-  exit 0
-fi
 script="${PWD}/.github/policy/refuse-unowned-tests.rb"
 collector="${PWD}/.github/policy/collect-suite-evidence.rb"
 work="$(mktemp -d)"
@@ -102,12 +94,12 @@ commit_all "${repo}"
 run_check "${repo}"; expect_rc exempt 0
 expect_text exempt '1 test file(s) checked'
 
-# 5. A source with no ownership manifest (an older revision) is skipped, not failed.
+# 5. A source with no ownership manifest fails closed (a source that deletes the manifest must not skip the gate).
 repo="$(new_repo nomanifest)"
 add_file "${repo}" taurine-desktop/tests/e2e/x.spec.ts
 commit_all "${repo}"
-run_check "${repo}"; expect_rc nomanifest 0
-expect_text nomanifest 'skipped'
+run_check "${repo}"; expect_rc nomanifest 1
+expect_text nomanifest 'reason manifest_missing'
 
 # 6. A manifest the check cannot read fails closed with a fixed reason class.
 for bad in 'not json' '[]' '{"suites":[]}' '{"suites":{"a":{"include":"x"}}}' '{"suites":{"a":{"include":[1]}}}' \

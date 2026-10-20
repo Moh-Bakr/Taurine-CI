@@ -28,6 +28,9 @@ mkdir -p "${jobs_dir}"
 export RUNNER_TEMP="${RUNNER_TEMP:-${root}/runner-temp}"
 mkdir -p "${RUNNER_TEMP}"
 policy_source="${MUTATION_POLICY:-${src}/.github/policy}"
+# The unmutated tree is the base for the spike gate: a mutation that flips the flag and adds the record in
+# one diff is judged against a base with no record, as the base-policy pass judges a pull request.
+export CACHE_MODE_BASE_DOC="${src}/docs/untrusted-readonly-cache.md"
 missed=0
 max_jobs="${MUTATION_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 [[ "${max_jobs}" =~ ^[1-9][0-9]*$ ]] || { echo "MUTATION_JOBS must be a positive integer, got '${max_jobs}'" >&2; exit 1; }
@@ -152,18 +155,6 @@ fresh_tree() {
 swap() {
   OLD="$2" NEW="$3" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found in #{ARGV[0]}: #{ENV["OLD"][0, 80]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/tree/$1"
 }
-# present FILE TEXT: succeeds when the tree's FILE contains TEXT.
-present() {
-  OLD="$2" ruby -e 'exit(File.read(ARGV[0]).include?(ENV["OLD"]) ? 0 : 1)' "${dir}/tree/$1"
-}
-# either FILE OLD NEW FILE OLD NEW: a mutation whose anchor has two reviewed shapes (a tree before and
-# after a restructuring). The first pair applies when its text is there, else the second; when neither
-# is there the first pair's swap aborts, so a stale mutation still fails loudly and never tests nothing.
-either() {
-  if present "$1" "$2"; then swap "$1" "$2" "$3"
-  elif present "$4" "$5"; then swap "$4" "$5" "$6"
-  else swap "$1" "$2" "$3"; fi
-}
 # miss LOG-TAIL-MESSAGE: a case the policy did not reject. Status 3 tells the scheduler it is a
 # policy miss, which MUTATION_REPORT may continue past, and not a harness failure.
 miss() {
@@ -185,9 +176,7 @@ verdict() {
 _mutation() {
   local label="$1" by=''; shift
   fresh_tree
-  while (( $# )); do
-    if [[ "$1" == --either ]]; then either "$2" "$3" "$4" "$5" "$6" "$7"; shift 7; else swap "$1" "$2" "$3"; shift 3; fi
-  done
+  while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
   : > "${dir}/log"
   by="$(cd "${dir}/tree" && offline_policy)" || true
   verdict "${label}" "${by}"
@@ -214,7 +203,7 @@ pol_to_guarded="$(ruby -e 'm = File.read(ARGV[0]).match(/    if: \$\{\{ always\(
 composite_revoke='        if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 weekly_revoke='          if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 
-mutation '1. the Linux concern no longer needs the pre-flight job' --either "${linux}" '    needs: [validate-input, plan, select]' '    needs: [plan, select]' "${linux}" '    needs: [validate-input, select]' '    needs: [select]'
+mutation '1. the Linux concern no longer needs the pre-flight job' "${linux}" '    needs: [validate-input, select]' '    needs: [select]'
 mutation '1. source-read no longer needs the pre-flight job' .github/workflows/source-read.yml '    needs: validate-input
 ' ''
 mutation '1. the Linux concern runs past a failed pre-flight' "${linux}" "needs.validate-input.result == 'success' &&" ''
@@ -315,7 +304,8 @@ mutation '12. the Linux untrusted half loses cache-mode read' "${linux}" '    ca
 mutation '12. the Linux untrusted half granted write' "${linux}" '    cache-mode: read
     uses: ./.github/workflows/linux-validation-concern.yml' '    cache-mode: write
     uses: ./.github/workflows/linux-validation-concern.yml'
-mutation '12. the Linux untrusted half runs without the audit' --either "${linux}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' }}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}" "${linux}" "(needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' && join(" "(needs.select.result == 'success' || needs.select.result == 'skipped') && join("
+mutation '12. the Linux long-pole untrusted half runs without the audit' "${linux}" "needs.validate-input.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' && join(fromJSON(needs.select.outputs.long_matrix || needs.validate-input.outputs.long_matrix).concern, '') != '' }}" "needs.validate-input.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && join(fromJSON(needs.select.outputs.long_matrix || needs.validate-input.outputs.long_matrix).concern, '') != '' }}"
+mutation '12. the Linux short untrusted half runs without the audit' "${linux}" "needs.validate-input.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' && join(fromJSON(needs.select.outputs.short_matrix || needs.validate-input.outputs.short_matrix).concern, '') != '' }}" "needs.validate-input.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && join(fromJSON(needs.select.outputs.short_matrix || needs.validate-input.outputs.short_matrix).concern, '') != '' }}"
 mutation '12. the Linux audit no longer limited to untrusted' "${linux}" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
     needs: [validate-input]" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && needs.validate-input.result == 'success' }}
     needs: [validate-input]"
@@ -346,9 +336,7 @@ mutation '12. the base-pass job renamed' .github/workflows/validate-public-chang
 # 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
 # must be rejected, because the default grant for a job with no cache-mode is write.
 mutation '11. an untrusted-only cargo-source restore while its caller is not enforced' .github/policy/check-cache-mode.rb '  linux-validation.yml
-' '' --either "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
+' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
             cargo-sources-v3-${{ runner.os }}-
@@ -358,7 +346,8 @@ mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    us
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
 
 # 13. The audits reach the verdict, and an untrusted restore waits for macOS (docs/untrusted-readonly-cache.md).
-mutation '13. the Linux result no longer needs the after-audit' --either "${linux}" '    needs: [plan, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [plan, validate-main, validate-untrusted, select]' "${linux}" '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select, cache-audit]'
+mutation '13. the Linux result no longer needs the after-audit' "${linux}" '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select]'
+mutation '13. the Linux after-audit no longer waits for the long-pole untrusted half' "${linux}" '    needs: [cache-audit, validate-long-untrusted, validate-untrusted]' '    needs: [cache-audit, validate-untrusted]'
 mutation '13. the Windows result stops passing blocking-failures' "${windows}" "          blocking-failures: " "          selection-note: "
 mutation '13. run-result ignores the blocking count' .github/actions/run-result/action.yml '        if [[ "${blocking}" -gt 0 ]]; then
           # A check outside' '        if [[ "${blocking}" == never ]]; then
@@ -660,9 +649,7 @@ mutation_by test-base-policy-result.sh '14. an extra key on the guard step (work
 
 # 14. An untrusted restore waits for every untrusted-running workflow to be enforced (rule M).
 mutation '14. an untrusted cargo-source restore while macOS is not enforced' .github/policy/check-cache-mode.rb '  macos-validation.yml
-' '' --either "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
+' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
             cargo-sources-v3-${{ runner.os }}-
@@ -670,9 +657,7 @@ mutation '14. an untrusted cargo-source restore while macOS is not enforced' .gi
 mutation '14. the macOS untrusted half granted write' .github/workflows/macos-validation.yml '    cache-mode: read
     # Kept as ./' '    cache-mode: write
     # Kept as ./'
-mutation '14. the macOS concern called without the split' --either .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"'
-    needs: [plan, cache-audit]' '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"'
-    needs: [plan]' .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '"'"''"'"') != '"'"''"'"'
+mutation '14. the macOS concern called without the split' .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '"'"''"'"') != '"'"''"'"'
     needs: [plan, cache-audit]' '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '"'"''"'"') != '"'"''"'"'
     needs: [plan]'
 # 15. The macOS classification and the dispatcher rules read the parsed structure, not indentation.
@@ -709,6 +694,357 @@ mutation '17. a restore with no ref gate, reachable on the untrusted ref' "${mac
 "
 mutation '17. rule N dropped from the checker' .github/policy/check-cache-mode.rb "      next if requires?(st['if'], MAIN) && !st['if'].to_s.include?('untrusted')" "      next"
 
+# 19. Stage 2, the read-only untrusted restore (docs/untrusted-readonly-cache.md): every way to weaken it.
+ug_if="        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) }}"
+pin='actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
+early_restore() { # name: a reviewed-shape untrusted restore of the sources, to be placed at a bad position
+  printf '      - name: %s\n        id: early-untrusted\n%s\n        uses: %s\n        with:\n          path: |\n            ${{ steps.cargo-home.outputs.dir }}/registry/cache\n          key: cargo-sources-v3-${{ runner.os }}-${{ hashFiles('"'"'src/Cargo.lock'"'"', '"'"'src/taurine-backend/*/Cargo.lock'"'"', '"'"'src/taurine-backend/vendor/*/Cargo.lock'"'"', '"'"'src/vendor/*/Cargo.lock'"'"') }}\n\n' "$1" "${ug_if}" "${pin}"
+}
+# a save on untrusted
+mutation '19. the untrusted source restore becomes a save' "${linux_concern}" "        id: cargo-sources-untrusted
+${ug_if}
+        uses: actions/cache/restore@" "        id: cargo-sources-untrusted
+${ug_if}
+        uses: actions/cache/save@"
+mutation '19. a new save step gated to the untrusted ref' "${linux_concern}" '      - name: Install the pinned Playwright browser' "      - name: Save on untrusted
+        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.concern == 'rust-db' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: cargo-sources-v3-x
+
+      - name: Install the pinned Playwright browser"
+mutation '19. the untrusted half granted cache-mode write' "${linux}" '    cache-mode: read
+    uses: ./.github/workflows/linux-validation-concern.yml' '    cache-mode: write
+    uses: ./.github/workflows/linux-validation-concern.yml'
+# a write-capable token
+mutation '19. the untrusted half granted actions: write' "${linux}" '  validate-untrusted:
+    permissions:
+      contents: read' '  validate-untrusted:
+    permissions:
+      contents: read
+      actions: write'
+mutation '19. the untrusted half granted contents: write' "${linux}" '  validate-untrusted:
+    permissions:
+      contents: read' '  validate-untrusted:
+    permissions:
+      contents: write'
+mutation '19. the called concern granted id-token: write' "${linux_concern}" '  validate:
+    permissions:
+      contents: read' '  validate:
+    permissions:
+      contents: read
+      id-token: write'
+mutation '19. the called concern granted packages: write' "${linux_concern}" '  validate:
+    permissions:
+      contents: read' '  validate:
+    permissions:
+      contents: read
+      packages: write'
+# a key derived from untrusted input
+mutation '19. the untrusted compiled key derived from the source SHA input' "${linux_concern}" "          key: \${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored dependency cache (untrusted" "          key: cargo-target-\${{ inputs.source_sha }}
+
+      - name: Strip workspace crates from the restored dependency cache (untrusted"
+mutation '19. restore-keys on the untrusted compiled restore' "${linux_concern}" "          key: \${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored dependency cache (untrusted" "          key: \${{ steps.cargo-target.outputs.key }}
+          restore-keys: |
+            cargo-target-
+
+      - name: Strip workspace crates from the restored dependency cache (untrusted"
+mutation '19. the untrusted restore also gated by a dispatch-controlled term' "${linux_concern}" "${ug_if}
+        uses: ${pin}
+        with:
+          path: |
+            \${{ steps.cargo-home.outputs.dir }}/registry/cache" "        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) && inputs.source_sha != '' }}
+        uses: ${pin}
+        with:
+          path: |
+            \${{ steps.cargo-home.outputs.dir }}/registry/cache"
+mutation '19. the untrusted restore widened beyond rust-db' "${linux_concern}" "        id: cargo-target-cache-untrusted
+${ug_if}" "        id: cargo-target-cache-untrusted
+        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && startsWith(inputs.concern, 'rust-') }}"
+# a restore before the token revocation or the drop to non-root
+mutation '19. a reviewed-shape untrusted restore before the root removal' "${linux_concern}" '      - name: Remove root before project code' "$(early_restore 'Restore cached third-party crate sources (untrusted, read-only)')
+      - name: Remove root before project code"
+mutation '19. a reviewed-shape untrusted restore before the source checkout' "${linux_concern}" '      - name: Start the concern timer' "$(early_restore 'Restore cached third-party crate sources (untrusted, read-only)')
+      - name: Start the concern timer"
+# a restore into a path the project controls, or before verification
+mutation '19. the untrusted restore path moved into the checkout' "${linux_concern}" "      - name: Restore cached third-party crate sources (untrusted, read-only)
+        id: cargo-sources-untrusted
+${ug_if}
+        uses: ${pin}
+        with:
+          path: |
+            \${{ steps.cargo-home.outputs.dir }}/registry/cache" "      - name: Restore cached third-party crate sources (untrusted, read-only)
+        id: cargo-sources-untrusted
+${ug_if}
+        uses: ${pin}
+        with:
+          path: |
+            src"
+mutation '19. the untrusted source verifier removed' "${linux_concern}" '      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)
+        if: ${{ github.ref == '"'"'refs/heads/untrusted'"'"' && inputs.untrusted_readonly_cache && (inputs.concern == '"'"'rust-db'"'"' || startsWith(inputs.concern, '"'"'rust-app-'"'"')) }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
+        with:
+          sources-dir: ${{ steps.cargo-home.outputs.dir }}
+          cache-hit: ${{ steps.cargo-sources-untrusted.outputs.cache-hit }}
+          os-label: Linux
+' ''
+mutation '19. the untrusted compiled strip removed' "${linux_concern}" '      - name: Strip workspace crates from the restored dependency cache (untrusted, read-only)
+        if: ${{ github.ref == '"'"'refs/heads/untrusted'"'"' && inputs.untrusted_readonly_cache && (inputs.concern == '"'"'rust-db'"'"' || startsWith(inputs.concern, '"'"'rust-app-'"'"')) }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored
+          dir: ${{ steps.cargo-target.outputs.dir }}
+          cache-hit: ${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}
+          os-label: Linux
+          deny-door: '"'"'true'"'"'
+' ''
+mutation '19. a project step between the untrusted restore and its verifier' "${linux_concern}" '      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)' '      - name: Run project code early
+        run: npm ci
+        shell: bash
+
+      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)'
+# the switch
+unt_block="$(sed -n '/^  validate-untrusted:/,/untrusted_readonly_cache: false/p' "${linux}")"
+unt_true="${unt_block%false}true"
+unt_expr="${unt_block%false}\${{ inputs.source_sha != 'x' }}"
+unt_nokey="${unt_block%untrusted_readonly_cache: false}"
+record='Stage 2 enforcement spike result: GREEN run 12345678901 reviewed by a-person on 2026-10-20'
+mutation '19. the Stage 2 flag switched on without the recorded spike' "${linux}" "${unt_block}" "${unt_true}"
+mutation '19. the Stage 2 flag fed from an expression' "${linux}" "${unt_block}" "${unt_expr}"
+mutation '19. the Stage 2 flag flipped and the record added in the same diff' "${linux}" "${unt_block}" "${unt_true}" docs/untrusted-readonly-cache.md '### 7b.' "${record}
+
+### 7b."
+mutation '19. the untrusted half omits the flag key' "${linux}" "${unt_block}" "${unt_nokey}"
+mutation '19. the callee default set to true' "${linux_concern}" '        default: false
+        type: boolean
+      suite_selection' '        default: true
+        type: boolean
+      suite_selection'
+mutation '19. the flag referenced from an env value' "${linux_concern}" '      - name: Report concern duration
+        if: ${{ always() }}
+' '      - name: Report concern duration
+        if: ${{ always() }}
+        env:
+          X: ${{ inputs.untrusted_readonly_cache }}
+'
+mutation '19. the flag referenced from another step condition' "${linux_concern}" '      - name: Fetch pinned vendored sources
+        if: ' '      - name: Fetch pinned vendored sources
+        if: inputs.untrusted_readonly_cache || '
+# verifiers that are present but neutered
+vname='      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)'
+mutation '19. the untrusted verifier condition ANDed with false' "${linux_concern}" "${vname}
+${ug_if}" "${vname}
+        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) && false }}"
+mutation '19. the untrusted verifier cache-hit a literal' "${linux_concern}" "          cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}" "          cache-hit: 'false'"
+mutation '19. the untrusted verifier with continue-on-error' "${linux_concern}" "${vname}
+${ug_if}" "${vname}
+        continue-on-error: true
+${ug_if}"
+mutation '19. the untrusted verifier pointed at another directory' "${linux_concern}" "          sources-dir: \${{ steps.cargo-home.outputs.dir }}
+          cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}" "          sources-dir: /nonexistent
+          cache-hit: \${{ steps.cargo-sources-untrusted.outputs.cache-hit }}"
+mutation '19. the untrusted strip loses deny-door (compiled OpenSSL output would be restored)' "${linux_concern}" "          deny-door: 'true'" "          deny-door: 'false'"
+mutation '19. the untrusted strip takes its cache-hit from the main restore' "${linux_concern}" "          cache-hit: \${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}" "          cache-hit: \${{ steps.cargo-target-cache.outputs.cache-hit }}"
+# source-controlled code ahead of a token-holding restore
+mutation '19. a project script before the source restores' "${linux_concern}" '      - name: Locate Cargo home for the third-party source cache' '      - name: Fetch pinned vendored sources early
+        shell: bash
+        run: bash scripts/vendor-openvpn3.sh fetch
+
+      - name: Locate Cargo home for the third-party source cache'
+mutation '19. the Node install ahead of the compiled restores' "${linux_concern}" '      - name: Locate the compiled dependency cache' '      - name: Install JavaScript early
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
+
+      - name: Locate the compiled dependency cache'
+mutation '19. a combined actions/cache step before the root removal' "${linux_concern}" '      - name: Remove root before project code' '      - name: Early combined cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: x
+          key: k
+
+      - name: Remove root before project code'
+mutation '19. the toolchain guard accepts a channel of . or ..' .github/actions/rust-toolchain/action.yml '              if [[ "${line}" =~ ${re_dots_channel} ]] || [[ "${kind}" == legacy && count -eq 1 && "${line}" =~ ${re_dots_plain} ]]; then
+                toolchain_refuse "a channel of . or .." "${file}"
+              fi
+' ''
+mutation '19. the toolchain guard accepts an unrecognised line' .github/actions/rust-toolchain/action.yml '              else toolchain_refuse "an unrecognised line" "${file}"; fi' '              else :; fi'
+mutation '19. the toolchain guard no longer reads the legacy file' .github/actions/rust-toolchain/action.yml '          [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy
+' ''
+mutation '19. the toolchain guard falls back to a grep for path' .github/actions/rust-toolchain/action.yml '          [[ ! -f rust-toolchain.toml ]] || toolchain_check rust-toolchain.toml toml
+          [[ ! -f rust-toolchain ]] || toolchain_check rust-toolchain legacy
+' "          if grep -qE '^[[:space:]]*path[[:space:]]*=' rust-toolchain.toml rust-toolchain 2>/dev/null; then exit 1; fi
+"
+mutation '19. a source script in the pinned suite-contract step' "${linux_concern}" '          ruby .github/policy/suite-contract.rb' '          bash src/evil.sh
+          ruby .github/policy/suite-contract.rb'
+mutation '19. a source script in the pinned Cargo-home step' "${linux_concern}" '          dir="${CARGO_HOME:-${HOME}/.cargo}"
+' '          bash src/evil.sh
+          dir="${CARGO_HOME:-${HOME}/.cargo}"
+'
+mutation '19. a BASH_ENV in the pinned suite-contract step' "${linux_concern}" '          CI_SUITE_SELECTION: ${{ inputs.suite_selection }}
+        run: |
+          set -euo pipefail
+          ruby .github/policy/suite-contract.rb' '          CI_SUITE_SELECTION: ${{ inputs.suite_selection }}
+          BASH_ENV: src/evil.sh
+        run: |
+          set -euo pipefail
+          ruby .github/policy/suite-contract.rb'
+mutation '19. the crate re-hash keeps symlinks' .github/actions/verify-cargo-cache/action.yml '          find "${cache_dir}" -type l -delete
+' ''
+mutation '19. the crate re-hash keeps nested directories' .github/actions/verify-cargo-cache/action.yml '          find "${cache_dir}" -mindepth 2 -type d -prune -exec rm -rf -- {} +
+' ''
+
+# 20. The compiled-dependency cache groups on Windows and the uncached OpenSSL door (survey 7.1, decision:
+# the door concern rust-tls-openssl is never cached; check-cache-groups.rb refuses it in any compiled
+# cache step), plus the existing cache's conditions that no test had pinned.
+windows_concern=.github/workflows/windows-validation-concern.yml
+door="inputs.concern == 'rust-tls-openssl'"
+mutation '20. the door concern added to the compiled locate' "${windows_concern}" "        id: cargo-target
+        if: \${{ startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target
+        if: \${{ ${door} || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door concern added to the compiled restore' "${windows_concern}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (${door} || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door concern added to the compiled save' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2'" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (${door} || inputs.concern == 'rust-app-2'"
+mutation '20. the door concern added to the strip-and-prove' "${windows_concern}" "        id: cargo-target-strip
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2'" "        id: cargo-target-strip
+        if: \${{ github.ref == 'refs/heads/main' && (${door} || inputs.concern == 'rust-app-2'"
+mutation '20. the door concern given a group' "${windows_concern}" "(inputs.concern == 'rust-packaging' && 'rust-packaging') || 'rust-app' }}" "(inputs.concern == 'rust-packaging' && 'rust-packaging') || (${door} && 'rust-tls-openssl') || 'rust-app' }}"
+mutation '20. a prefix covering the door concern in the restore' "${windows_concern}" "inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "inputs.concern == 'rust-packaging' || startsWith(inputs.concern, 'rust-tls')) }}
+        uses: actions/cache/restore@"
+mutation '20. the door concern hidden in an unreadable selector (M2)' "${windows_concern}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (contains(fromJSON('[\"rust-tls-openssl\"]'), inputs.concern) || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. an unmapped concern joins the restore and so the fallback group (M8)' "${windows_concern}" "inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "inputs.concern == 'rust-packaging' || inputs.concern == 'rust-net') }}
+        uses: actions/cache/restore@"
+mutation '20. a concern dropped from the restore-time strip (M1)' "${windows_concern}" "'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored" "'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored"
+mutation '20. the compiled save without the miss condition (M5)' "${windows_concern}" " && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        uses: actions/cache/save@" " && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-target-strip.outcome == 'success' }}
+        uses: actions/cache/save@"
+mutation '20. the strip-and-prove without the concern success (M7)' "${windows_concern}" " && steps.cargo-target-cache.outputs.cache-hit != 'true' && steps.concern-rust.outcome == 'success' }}
+        # Kept as ./" " && steps.cargo-target-cache.outputs.cache-hit != 'true' }}
+        # Kept as ./"
+mutation '20. a saver dropped from the compiled save and its strip-and-prove' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging')" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-packaging')"
+mutation '20. the compiled save step removed (an empty parse)' "${windows_concern}" "        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-target.outputs.dir }}/debug/deps" "        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-target.outputs.dir }}/debug/deps"
+
+# 20b. The door denylist's bypasses (review of the first cache-groups PR): the door is excluded by a
+# positive allowlist per OS now, and every compiled step needs a concern selector.
+restore_if="        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by an upper-case literal in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'RUST-TLS-OPENSSL' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by inputs[concern] in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs['concern'] == 'rust-tls-openssl' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by inputs.CONCERN in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.CONCERN == 'rust-tls-openssl' || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the door by a case-varied prefix in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'RUST-TLS') || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. the compiled restore with no concern selector' "${windows_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') }}
+        uses: actions/cache/restore@" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' }}
+        uses: actions/cache/restore@"
+mutation '20. the compiled locate with no concern selector' "${windows_concern}" "        if: \${{ startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging' }}
+        # Kept as ./" "        if: \${{ github.ref == 'refs/heads/main' }}
+        # Kept as ./"
+mutation '20. the compiled save with no concern selector' "${windows_concern}" "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && (inputs.concern == 'rust-app-2' || inputs.concern == 'rust-db' || inputs.concern == 'rust-domain' || inputs.concern == 'rust-packaging') && " "      - name: Save compiled third-party dependencies
+        if: \${{ github.ref == 'refs/heads/main' && "
+mutation '20. every concern but one selected by a negation in the restore' "${windows_concern}" "${restore_if}" "        id: cargo-target-cache
+        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (!(inputs.concern == 'x') || startsWith(inputs.concern, 'rust-app-')"
+mutation '20. a compiled cache step in a workflow outside the allowlist' .github/workflows/android-validation.yml "      - name: Record the runner image" "      - name: Restore compiled
+        if: \${{ inputs.rust }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ runner.temp }}/cargo-target/debug/deps
+          key: x
+
+      - name: Record the runner image"
+
+# 20c. Positive identification of compiled-cache steps (confirmation review): a door-selected
+# actions/cache restore or save step whose path is an alias (a glob, an env var, the temp root) is still a
+# compiled-cache step and is refused; so is a workflow file with a second YAML document.
+sources_anchor="      - name: Restore cached third-party crate sources"
+for alias in '${{ runner.temp }}/cargo-t*/debug/de?ps' '${{ env.CT }}' '${{ runner.temp }}' '${{ runner.temp }}/ct'; do
+  for verb in restore save; do
+    mutation "20c. a door-selected cache ${verb} step with the aliased path ${alias}" "${windows_concern}" "${sources_anchor}" "      - name: Aliased compiled ${verb}
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache/${verb}@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${alias}
+          key: door
+
+${sources_anchor}"
+  done
+done
+mutation '20c. a combined actions/cache step selected for the door with an aliased path' "${windows_concern}" "${sources_anchor}" "      - name: Aliased compiled combined
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ env.CT }}
+          key: door
+
+${sources_anchor}"
+# 20c (case-insensitive keys): GitHub reads step keys case-insensitively, so a `Uses:` door step, a
+# duplicate `With:` beside the pinned crate-sources step, and an `IF:` on a compiled step are all refused.
+mutation '20c. a door-selected cache step written with a capitalised Uses key' "${windows_concern}" "${sources_anchor}" "      - name: Capitalised compiled restore
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        Uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ runner.temp }}/cargo-target
+          key: door
+
+${sources_anchor}"
+mutation '20c. a duplicate With mapping beside the pinned crate-sources step' "${windows_concern}" "          restore-keys: |
+            cargo-sources-v3-\${{ runner.os }}-
+" "          restore-keys: |
+            cargo-sources-v3-\${{ runner.os }}-
+        With:
+          path: \${{ runner.temp }}/cargo-target
+"
+mutation '20c. an upper-case IF on the compiled restore' "${windows_concern}" "        id: cargo-target-cache
+        if: " "        id: cargo-target-cache
+        IF: "
+mutation '20c. the crate-sources restore widened to a second path' "${windows_concern}" "            \${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: cargo-sources-v3" "            \${{ steps.cargo-home.outputs.dir }}/registry/cache
+            \${{ runner.temp }}/cargo-target
+          key: cargo-sources-v3"
+mutation '20c. a second YAML document in a concern workflow' "${windows_concern}" "          phase: report" "          phase: report
+---
+jobs:
+  other:
+    steps:
+      - name: Hidden compiled restore
+        if: \${{ inputs.concern == 'rust-tls-openssl' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: \${{ env.CT }}
+          key: door"
+
 # 18. The case-evidence admission in the e2e-visual container (git as root, checkouts owned by the
 # runner's uid): its git calls carry an exact safe.directory for the checkout they read.
 admission=.github/policy/case-evidence-admission.rb
@@ -726,6 +1062,34 @@ mutation '11. an empty value relaxes the fmt gate' .github/actions/rust-lint-enf
           exit 1' '          [[ "${FAIL}" == true ]] || exit 0
           exit 1'
 mutation '12. the all-locks helper runs with the inherited environment' .github/actions/linux-concern-js/action.yml 'env -i PATH="${PATH}" HOME="${HOME}" LANG=C.UTF-8 TMPDIR="${RUNNER_TEMP}" \' 'env PATH="${PATH}" \'
+
+# 11. The security scan gate: each weakening of the full set, of a scanner or of the lint job.
+scan_action=.github/actions/scan-concern/action.yml
+matrix=.github/ci-matrix.json
+mutation '11. scan-lint dropped from the full set (made opt-in)' "${matrix}" '      "scan-lint": {
+        "always": true,' '      "scan-lint": {
+        "opt_in": "visual",
+        "always": true,'
+mutation '11. scan-lint no longer selected in the full set' "${matrix}" '      "scan-lint": {
+        "always": true,
+        "full_only": true,' '      "scan-lint": {
+        "always": true,
+        "full_only": false,'
+mutation '11. the scan-lint job no longer runs the security lints' "${linux_concern}" '          scanner: clippy' '          scanner: semgrep'
+mutation '11. gitleaks dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'gitleaks' || inputs.scanner == 'all' }}" "      if: \${{ inputs.scanner == 'gitleaks' }}"
+mutation '11. npm audit dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'npm-audit' || inputs.scanner == 'all' }}" "      if: \${{ inputs.scanner == 'npm-audit' }}"
+mutation '11. Semgrep dropped from the scanner run' "${scan_action}" "      if: \${{ inputs.scanner == 'semgrep' || inputs.scanner == 'all' || inputs.scanner == 'semgrep-container' }}" "      if: \${{ inputs.scanner == 'semgrep' || inputs.scanner == 'semgrep-container' }}"
+mutation '11. cargo-deny dropped from the scanner run' "${scan_action}" "      id: scan-deny
+      continue-on-error: \${{ inputs.scanner == 'all' }}
+      if: \${{ inputs.scanner == 'deny' || inputs.scanner == 'all' }}" "      id: scan-deny
+      continue-on-error: \${{ inputs.scanner == 'all' }}
+      if: \${{ inputs.scanner == 'deny' }}"
+mutation '11. a scanner no longer fails the report' "${scan_action}" '"cargo-deny|${DENY_OUTCOME}|deny"' '"cargo-deny-skipped|${DENY_OUTCOME}|deny"'
+mutation '11. the scanner report no longer fails the job' "${scan_action}" 'if [[ "${outcome}" != success ]]; then failed=1; fi' 'if [[ "${outcome}" == never ]]; then failed=1; fi'
+mutation '11. rust-lint-enforce made report-only' "${linux_concern}" '        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]' "        uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]
+        with:
+          fail: 'false'"
+mutation '11. rust-lint-enforce no longer runs for scan-lint' "${linux_concern}" "inputs.concern == 'scan-lint' && steps.verified-source.outcome == 'success'" "inputs.concern == 'scan-security' && steps.verified-source.outcome == 'success'"
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a

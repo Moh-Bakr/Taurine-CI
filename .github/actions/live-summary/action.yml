@@ -1,9 +1,10 @@
 name: Publish the live proof summary
 description: >
   Publishes the sanitized live-proof summary and returns the arm's verdict. Only a
-  fixed inventory is published: the report's header line, each check's outcome label
-  and title, cargo's result line, the failed test names and one fixed-format line
-  per panic (never assertion text or values). The raw log never leaves the runner.
+  fixed inventory is published: the report header's counts, the PASS/SKIP/FAIL/INVL tallies,
+  a keyed id for each failing check, cargo's result line, the failed tests as keyed ids and one
+  fixed-format line per panic (never a check title, assertion text or values). The raw log
+  never leaves the runner.
   Fails closed: a log without a clean report or a passed suite proves nothing.
 
 inputs:
@@ -36,14 +37,20 @@ runs:
           exit 1
         fi
         header="$(grep -E '^[a-z0-9]+.*[0-9]+ checks: [0-9]+ passed' "${log}" | tail -1 || true)"
-        # A FAIL or INVL carries a detail line under its title — the
-        # expected-versus-got that names the driver defect, or the setup
-        # step that proved nothing. Published beside the label: the content
-        # is the suite's own synthetic constants and server error strings,
-        # never credentials or captured data. Paths are redacted below.
-        outcomes="$(grep -E '^  (PASS|SKIP|FAIL|INVL)  |^        ' "${log}" | sed -E 's/[[:space:]]+$//' | sed -E 's#/home/runner/work/.*#<private-path>#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g; s#Bearer [A-Za-z0-9._~+/=-]+#Bearer <redacted>#g' | cut -c1-200 || true)"
+        # The report's check lines are the suite's own: a title, and under a FAIL or INVL an
+        # expected-versus-got detail that can quote data. None of that text is published. A
+        # reader gets the PASS/SKIP/FAIL/INVL tallies, the header's own counts, and a keyed id
+        # (see the sanitize library) for each failing or invalid check title; the detail lines
+        # are never read at all.
+        proof_count() { grep -cE "^  $1  " "${log}" || true; }
+        outcomes="proof checks: $(proof_count PASS) PASS, $(proof_count SKIP) SKIP, $(proof_count FAIL) FAIL, $(proof_count INVL) INVL"
+        proof_ids="$(grep -E '^  (FAIL|INVL)  ' "${log}" | sed -E 's/^  (FAIL|INVL)  +//; s/[[:space:]]+$//' | awk -v e="${ENGINE}" '{ printf "proof\t%s\t%s\tfail\n", e, $0 }' | tci_failed_ids || true)"
+        header_pub="$(printf '%s\n' "${header}" | sed -nE 's/^([a-z0-9_-]+).* ([0-9]+) checks: ([0-9]+) passed, ([0-9]+) failed, ([0-9]+) skipped, ([0-9]+) invalid.*$/\1: \2 checks: \3 passed, \4 failed, \5 skipped, \6 invalid/p' | head -n 1)"
+        [[ -n "${header_pub}" || -z "${header}" ]] || header_pub='(report header not in its fixed shape; counts withheld)'
+        # The header's first word is published only when it is the arm's own engine name.
+        if [[ -n "${header_pub}" && "${header_pub%%:*}" != "${ENGINE}" && "${header_pub}" != '('* ]]; then header_pub="engine:${header_pub#*:}"; fi
         result="$(grep -E '^test result: ' "${log}" | tail -1 || true)"
-        test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 || true)"
+        test_line="$(grep -E '^test [a-z_]+ \.\.\. (ok|FAILED)' "${log}" | tail -3 | sed -E 's/^test [a-z_]+ \.\.\. FAILED$/test (name withheld) ... FAILED/' || true)"
         # The panic block carries the assertion that named the failure: the
         # connect outcome, the suite's report header, the sign-off's counts.
         # Paths are redacted and lines cut before anything is published; the
@@ -74,11 +81,12 @@ runs:
             echo '**The suite produced no report** — the proof is not evidence either way.'
             echo
           elif [[ -n "${header}" ]]; then
-            echo "Suite report (sanitized — check titles only, never data values):"
+            echo "Suite report (tallies and keyed ids only: check titles and details are never published):"
             echo
             echo '```'
-            echo "${header}"
+            echo "${header_pub}"
             echo "${outcomes}"
+            if [[ -n "${proof_ids}" ]]; then printf '%s\n' "${proof_ids}"; fi
             echo '```'
             echo
           fi
@@ -89,14 +97,14 @@ runs:
             echo '```'
           fi
           if [[ -n "${failed_names}" ]]; then
-            echo 'Failed tests:'
+            echo 'Failed tests (keyed ids; the names are never published):'
             echo
             echo '```'
             printf '%s\n' "${failed_names}"
             echo '```'
           fi
           if [[ -n "${panic_lines}" ]]; then
-            echo 'Panics (test, file:line, class; the message text is never published):'
+            echo 'Panics (keyed file id, line, class; no test name, path or message text is published):'
             echo
             echo '```'
             printf '%s\n' "${panic_lines}"
@@ -106,8 +114,9 @@ runs:
         # The greppable copy, so the published identities are visible in the
         # log alongside the summary.
         {
-          echo "live-proof header: ${header}"
-          echo "${outcomes}"
+          echo "live-proof header: ${header_pub}"
+          echo "live-proof ${outcomes}"
+          if [[ -n "${proof_ids}" ]]; then printf '%s\n' "${proof_ids}" | sed 's/^/live-proof /'; fi
           echo "live-proof ${test_line}"
           echo "live-proof ${result}"
           if [[ -n "${failed_names}" ]]; then

@@ -53,6 +53,9 @@ def references(doc, findings)
       findings << "#{where} is not a mapping"
       return
     end
+    # GitHub reads step and job keys case-insensitively; the checks read them case-sensitively, so a
+    # key that is not all lower-case (`Uses`, `With`, `IF`) is refused, in workflows and composites alike.
+    mapping.each_key { |k| findings << "#{where}: the key #{k.inspect} is not all lower-case (keys are read case-insensitively by GitHub)" if k.is_a?(String) && k != k.downcase }
     return unless mapping.key?('uses')
 
     value = mapping['uses']

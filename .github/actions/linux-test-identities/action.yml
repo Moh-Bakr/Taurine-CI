@@ -1,9 +1,9 @@
 name: Linux test identities
 description: >
-  Complements the sanitised validation proof: names the tests that ran,
-  including failures, so a public run shows which tests a SHA exercised. The inventory is repo-
-  relative file paths and test titles, plus status and duration — never test source, fixtures,
-  data values or environment details. The collector (checked out with the source it reports on)
+  Complements the sanitised validation proof: lists the tests that passed or were skipped, so a
+  public run shows which tests a SHA exercised; a failed or flaky test appears only as a keyed id.
+  The inventory is repo-relative file paths and test titles of passing tests, plus status and
+  duration — never test source, fixtures, data values or environment details. The collector (checked out with the source it reports on)
   re-scans every path and title with the repository's own secret-shape rules and drops rather than
   publishes anything that matches; it builds the whole section in memory and writes it once, so
   nothing reaches the summary unless the sanitized render completed. The runner's raw reporter
@@ -46,7 +46,13 @@ runs:
         # which identities were published to this run.
         mkdir -p "${RUNNER_TEMP}/test-ids"
         section_file="${RUNNER_TEMP}/test-ids/summary-section.md"
-        if ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
+        if [[ ! -f taurine-desktop/node_modules/.bin/vite-node ]]; then
+          {
+            echo "### Tests exercised by this run"
+            echo
+            echo "Test inventory unavailable: the collector runner is not installed for this concern."
+          } > "${section_file}"
+        elif ! TAURINE_TEST_IDS_DIR="${RUNNER_TEMP}/test-ids" \
           TAURINE_TEST_IDS_ROOT="${GITHUB_WORKSPACE}/src" \
           taurine-desktop/node_modules/.bin/vite-node scripts/ci/collect-test-ids.ts \
           > "${section_file}" 2> "${RUNNER_TEMP}/test-ids/collector-private.log"; then
@@ -54,10 +60,10 @@ runs:
             echo "### Tests exercised by this run"
             echo
             echo "Test inventory unavailable: the collector did not complete."
-            # Fallback from the runner's own JSON reports, so a failing run still names its
-            # failing specs: counts per status and, for each non-passing test, its project,
-            # repo-relative spec file:line and title. The collector's own error is reduced to
-            # fixed class names (an Error type or ERR_ code), never its message.
+            # Fallback from the runner's own JSON reports: counts per status, and for each
+            # non-passing test a record the keyed-id step below hashes (never a title or path).
+            # The collector's own error is reduced to fixed class names (an Error type or ERR_
+            # code), never its message.
             echo
             echo "collector error class: $(grep -ohE '\b[A-Z][A-Za-z]*Error\b|\bERR_[A-Z_]+\b' "${RUNNER_TEMP}/test-ids/collector-private.log" 2>/dev/null | head -1 || true)"
             for report in "${RUNNER_TEMP}"/test-ids/*.json; do
@@ -65,13 +71,29 @@ runs:
               echo
               echo "#### $(basename "${report}" .json) (fallback, from the runner report)"
               jq -r '
+                def safe($v): if ($v | test("[\\x00-\\x1f\\x7f]")) then "\u0001" else $v end;
                 [ (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
-                  | { status: ($t.status // "?"), project: ($t.projectName // "?"), file: ($s.file // "?"), line: ($s.line // 0), title: ($s.title // "?") } ] as $all
-                | "- tests: \($all | length); " + ([$all | group_by(.status)[] | "\(.[0].status) \(length)"] | join(", ")),
-                  ($all[] | select(.status != "expected" and .status != "skipped") | "- FAIL [\(.project)] \(.file):\(.line) > \(.title) (\(.status))")
+                  | { status: ($t.status // "?"), file: safe($s.file // "?"), title: safe($s.title // "?") } ] as $all
+                | "- tests: \($all | length); " + ([$all | group_by(.status)[] | "\(.[0].status) \(length)"] | join(", "))
               ' "${report}" 2>/dev/null | sed -E 's#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#<redacted>#g' | cut -c1-220 | head -80 || true
+              # A failing or flaky test is identified by keyed id only (see the sanitize library).
+              jq -r '
+                def safe($v): if ($v | test("[\\x00-\\x1f\\x7f]")) then "\u0001" else $v end;
+                (.suites // [])[] | recurse(.suites[]?) | .specs[]? as $s | $s.tests[]? as $t
+                  | select(($t.status // "") != "expected" and ($t.status // "") != "skipped")
+                  | "e2e\t\(safe($s.file // "?"))\t\(safe($s.title // "?"))\t\(if ($t.status // "") == "flaky" then "flaky" else "fail" end)"
+              ' "${report}" 2>/dev/null >> "${RUNNER_TEMP}/test-ids/failed-records.tsv" || true
             done
           } > "${section_file}"
         fi
-        cat "${section_file}" >> "${GITHUB_STEP_SUMMARY}"
-        cat "${section_file}"
+        # The section is project output, so it is published only through the reviewed filter of the
+        # sanitize library (a failed or flaky test is a keyed id there, never a title or a path).
+        published="${RUNNER_TEMP}/test-ids/published-section.md"
+        if [[ -f "${RUNNER_TEMP}/taurine-ci/sanitize.sh" ]]; then
+          ( source "${RUNNER_TEMP}/taurine-ci/sanitize.sh"; tci_publish_inventory "${section_file}" "${RUNNER_TEMP}/test-ids/failed-records.tsv" ) > "${published}" \
+            || printf '### Tests exercised by this run\n\nTest inventory withheld: the publishing filter failed.\n' > "${published}"
+        else
+          printf '### Tests exercised by this run\n\nTest inventory withheld: the publishing filter is unavailable.\n' > "${published}"
+        fi
+        cat "${published}" >> "${GITHUB_STEP_SUMMARY}"
+        cat "${published}"

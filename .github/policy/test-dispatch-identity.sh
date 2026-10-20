@@ -219,9 +219,9 @@ tls_legacy_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg s
 }
 # The exact proposed 13-arm contract must canonicalize the same way: `all` and
 # its explicit full roster are one identity, while the active old12 identity stays distinct.
-old12_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","bastion"]' .github/ci-matrix.json)"
+old12_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","bastion"]' .github/ci-matrix.json)"
 old12_all_key="$(env "CI_DISPATCH_CONTRACT_JSON=${old12_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"all"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
-new13_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","pg-dbx","mysql","mssql","pgtls","tls-legacy","bastion"]' .github/ci-matrix.json)"
+new13_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy","bastion"]' .github/ci-matrix.json)"
 new13_roster="$(jq -r '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options | join(",")' <<< "${new13_matrix}")"
 new13_all_key="$(env "CI_DISPATCH_CONTRACT_JSON=${new13_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"all"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
 new13_explicit_key="$(env "CI_DISPATCH_CONTRACT_JSON=${new13_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg engines "${new13_roster}" '{source_sha:$sha,engine:$engines}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
@@ -229,16 +229,8 @@ new13_explicit_key="$(env "CI_DISPATCH_CONTRACT_JSON=${new13_matrix}" "CI_WORKFL
   echo 'new13 all/explicit identity did not remain canonical and distinct from exact old12' >&2
   exit 1
 }
-# pg-dbx is merged into postgres, so the tree's own contract decides what a direct dispatch for it
-# means: while the contract still lists it, it is an accepted identity; once it is gone, it is refused
-# (never mapped silently to postgres). postgres itself is accepted in both shapes.
-if jq -e '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options | index("pg-dbx")' .github/ci-matrix.json >/dev/null; then
-  pg_dbx_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"pg-dbx"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
-  [[ "${pg_dbx_key}" =~ ^[0-9a-f]{64}$ ]] || {
-    echo 'direct pg-dbx dispatch was not accepted while the contract lists it' >&2
-    exit 1
-  }
-elif env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"pg-dbx"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb >/dev/null 2>&1; then
+# pg-dbx was merged into the postgres arm: a direct dispatch for it is refused, not mapped silently.
+if env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"pg-dbx"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb >/dev/null 2>&1; then
   echo 'direct pg-dbx dispatch was accepted after the arm was merged into postgres' >&2
   exit 1
 fi
@@ -247,23 +239,6 @@ postgres_key="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha
   echo 'direct postgres dispatch was not accepted' >&2
   exit 1
 }
-# The merged twelve-arm contract canonicalizes like the others: `all` and its explicit roster are one
-# identity, distinct from the legacy thirteen (so a spelling change cannot manufacture a duplicate full run).
-merged12_matrix="$(jq -c '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options=["doris","starrocks","db2","informix","rocketmq","iris","postgres","mysql","mssql","pgtls","tls-legacy","bastion"]' .github/ci-matrix.json)"
-merged12_roster="$(jq -r '.dispatch_contracts.workflows[".github/workflows/live-proofs.yml"].inputs.engine.options | join(",")' <<< "${merged12_matrix}")"
-merged12_all_key="$(env "CI_DISPATCH_CONTRACT_JSON=${merged12_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"all"}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
-merged12_explicit_key="$(env "CI_DISPATCH_CONTRACT_JSON=${merged12_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg engines "${merged12_roster}" '{source_sha:$sha,engine:$engines}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb)"
-[[ "${merged12_all_key}" == "${merged12_explicit_key}" && "${merged12_all_key}" != "${new13_all_key}" ]] || {
-  echo 'merged12 all/explicit identity did not remain canonical and distinct from the legacy thirteen' >&2
-  exit 1
-}
-# Under the merged contract pg-dbx is not a selectable engine, alone or in a list.
-for requested in pg-dbx 'postgres,pg-dbx'; do
-  if env "CI_DISPATCH_CONTRACT_JSON=${merged12_matrix}" "CI_WORKFLOW_PATH=${engine_workflow}" "CI_SOURCE_SHA=${source_sha}" CI_CONTROL_REPOSITORY=Moh-Bakr/Taurine-CI "CI_CONTROL_SHA=${control_sha}" CI_CONTROL_REF=refs/heads/main "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" --arg engines "${requested}" '{source_sha:$sha,engine:$engines}')" CI_GENERATE_ONLY=true ruby .github/policy/dispatch-identity.rb >/dev/null 2>&1; then
-    echo "engine '${requested}' was accepted under the merged twelve-arm contract" >&2
-    exit 1
-  fi
-done
 engine_output="$(env "${engine_base[@]}" "CI_NORMALIZED_INPUTS=$(jq -cn --arg sha "${source_sha}" '{source_sha:$sha,engine:"postgres, doris"}')" "CI_DISPATCH_KEY=${engine_key}" ruby .github/policy/dispatch-identity.rb)"
 [[ "${engine_output}" == *'"engine":"doris,postgres"'* ]] || {
   echo 'engine selection was not canonicalized to the reviewed roster order' >&2

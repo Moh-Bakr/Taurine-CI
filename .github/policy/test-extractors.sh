@@ -20,14 +20,13 @@ bash -c '
   tauri_version_mismatch "$1/tauri.log" | grep -qF "tauri-plugin-dialog (v2.4.1) : @tauri-apps/plugin-dialog (v2.3.0)"
   out="$(panic_summary "$1/panic.log")"
   grep -qF "code=not_connected" <<<"${out}"
-  if grep -q "hunter2" <<<"${out}"; then exit 1; fi
+  if grep -qE "hunter2|a::b|tests/x\.rs" <<<"${out}"; then echo "a panic leaked its test name, path or message" >&2; exit 1; fi
   out="$(playwright_json_failures "$1/pw.json")"
-  # Behaviour, not literals: the report yields its failing tests and the screenshot-mismatch
-  # counts, and never the message body. Whether a failing test is named by spec and title or by a
-  # keyed id is the extractors reviewed choice, so the spec, title and assertion lines are not pinned.
+  # Keyed failing-test ids (see test-keyed-test-ids.sh): the spec file, the title, the locator and
+  # the expected and received values are never published, with or without a key.
   grep -qF "1 screenshot mismatch" <<<"${out}"
   grep -qF "1234 pixels differ" <<<"${out}"
-  if grep -q "SECRETTEXT" <<<"${out}"; then exit 1; fi
+  if grep -qE "a\.spec|Locator|getByRole|Welcome|Received string|Loading|SECRETTEXT" <<<"${out}"; then echo "a Playwright failure leaked its spec, title or assertion" >&2; exit 1; fi
 ' _ "${dir}"
 # Compiler diagnostics: an error[Ennnn] is its code and location, never its message.
 awk "/cat > .*report.sh.* <<'TCI_REPORT_LIBRARY'/{on=1; next} /^        TCI_REPORT_LIBRARY/{on=0} on" .github/actions/concern-report/action.yml | sed -E 's/^        //' > "${dir}/report.sh"
@@ -107,9 +106,14 @@ bash -c '
   source "$1/report.sh"
   rust_build_command cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail --partition count:1/2 --package a --package b
   [[ "${rust_build_cmd[*]}" == "cargo nextest run --no-run --locked --package a --package b" ]]
+  # The three-way rust-app shards: a hash partition and the empty-partition guard are build-irrelevant too.
+  rust_build_command cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail --partition hash:2/3 --no-tests=fail --package a --package b
+  [[ "${rust_build_cmd[*]}" == "cargo nextest run --no-run --locked --package a --package b" ]]
   rust_build_command cargo test --locked --no-fail-fast --package a
   [[ "${rust_build_cmd[*]}" == "cargo test --locked --no-fail-fast --package a --no-run" ]]
   run_deferred rust-a-tests cargo nextest run --locked --profile ci --no-fail-fast --status-level fail --final-status-level fail --partition count:1/2 --package a >/dev/null 2>&1 || true
   [[ "${deferred_results[0]}" == "rust-a-build|passed" ]]
 ' _ "${dir}"
 echo 'failure-detail extractor fixtures: ok'
+# Keyed failing-test identities: the extractors publish an HMAC, never a name, path or message.
+bash .github/policy/test-keyed-test-ids.sh

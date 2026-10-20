@@ -30,23 +30,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The required status check. It waits for the base-policy workflow (below) and fails when that did
-  # not pass, so moving the base pass out of this file does not move it off the required check.
+  # The required status check, and nothing else: an aggregate. It runs no checkout and none of this
+  # pull request's scripts, only the two guards below, so the result it reports cannot be changed by
+  # anything the pull request carries. It needs the base pass (below) and every policy shard, and
+  # fails unless each ended in success; a skipped, cancelled or failed job is not a pass. All of them
+  # run at the same time, so the gate costs the longest of them, not their sum.
   policy:
-    permissions:
-      contents: read
+    permissions: {}
     name: Validate workflow policy
-    needs: [base-pass]
+    needs: [base-pass, policy-evidence, policy-fixtures, policy-mutations, policy-structure]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 5
     steps:
-      # FIRST, before the checkout and before any step that runs this pull request's scripts: those can
-      # append to GITHUB_ENV or GITHUB_PATH (BASH_ENV, PATH, RUBYOPT) and so change how any LATER step's
-      # shell behaves, this guard included. The base-policy pass runs in its own workflow (below), so
-      # the result it reached cannot be influenced by anything the checks here export; this step keeps
-      # the required status check honest: it fails when that workflow did not pass. It needs nothing
-      # from the repository. test-base-policy-result.sh pins its position.
+      # FIRST, before the checkout and before any step that runs this pull request's scripts, and no
+      # such step may follow it in this job: those can append to GITHUB_ENV or GITHUB_PATH (BASH_ENV,
+      # PATH, RUBYOPT) and so change how any LATER step's shell behaves, this guard included. The
+      # base-policy pass runs in its own workflow (below), so the result it reached cannot be influenced
+      # by anything the checks export; this step keeps the required status check honest: it fails when
+      # that workflow did not pass. It needs nothing from the repository. test-base-policy-result.sh
+      # pins its position.
       - name: Require the base-policy workflow to have passed
         if: ${{ always() }}
         shell: bash
@@ -60,6 +63,39 @@ jobs:
           fi
           echo 'base policy: the base-policy workflow passed'
 
+      # The same rule for this pull request's own policy, which runs in the four shards: every one must
+      # have succeeded, so a shard that is skipped, cancelled, failed or dropped from `needs` cannot pass.
+      - name: Require every policy check shard to have passed
+        if: ${{ always() }}
+        shell: bash
+        env:
+          POLICY_EVIDENCE_RESULT: ${{ needs.policy-evidence.result }}
+          POLICY_FIXTURES_RESULT: ${{ needs.policy-fixtures.result }}
+          POLICY_MUTATIONS_RESULT: ${{ needs.policy-mutations.result }}
+          POLICY_STRUCTURE_RESULT: ${{ needs.policy-structure.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for pair in "evidence:${POLICY_EVIDENCE_RESULT}" "fixtures:${POLICY_FIXTURES_RESULT}" "mutations:${POLICY_MUTATIONS_RESULT}" "structure:${POLICY_STRUCTURE_RESULT}"; do
+            if [[ "${pair#*:}" != 'success' ]]; then
+              echo "::error::the policy ${pair%%:*} shard did not pass (result: ${pair#*:})"
+              failed=1
+            fi
+          done
+          [[ "${failed}" -eq 0 ]] || exit 1
+          echo 'policy checks: every policy shard passed'
+
+  # This pull request's own policy, shard 1: repository contents, lint, universal and
+  # structure rules.
+  # Needs no other job: it runs beside the base pass and holds no authority;
+  # only `policy` decides the required check.
+  policy-structure:
+    permissions:
+      contents: read
+    name: Policy structure and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
       - name: Check out public policy repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -121,6 +157,22 @@ jobs:
         shell: bash
         run: bash .github/policy/test-rule-n-if-shape.sh
 
+  # Shard 2: fixture and unit tests of the policy scripts, selectors, dispatch contracts and live-proof pins.
+  # Needs no other job: it runs beside the base pass and holds no authority;
+  # only `policy` decides the required check.
+  policy-fixtures:
+    permissions:
+      contents: read
+    name: Policy fixtures and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
       # The environment pre-flight composite, run against stub API answers: only custom branch
       # policies of exactly main and untrusted pass.
       - name: Test the environment pre-flight against stub endpoints
@@ -142,12 +194,6 @@ jobs:
       - name: Test the weekly openssl-src patch cadence
         shell: bash
         run: bash .github/policy/test-weekly-cadence.sh
-
-      # Every weakening an independent review found is applied to a copy of the tree and must be
-      # rejected, including a pull request that weakens its own policy.
-      - name: Prove each reviewed weakening fails the policy
-        shell: bash
-        run: bash .github/policy/test-mutations.sh
 
       # Sanitizers and failure-detail extractors, run over path, token and message fixtures.
       - name: Test the sanitizer expressions against path and token fixtures
@@ -234,44 +280,6 @@ jobs:
         shell: bash
         run: bash .github/policy/test-suite-dispatch-review.sh
 
-      # The case-evidence contract and its producers. These ran nowhere before:
-      # the scripts were in the tree but no policy step invoked them.
-      - name: Test the case-evidence structural contract
-        shell: bash
-        run: bash .github/policy/test-case-evidence-contract.sh
-
-      - name: Test the case-evidence trust boundary against forged claims
-        shell: bash
-        run: bash .github/policy/test-case-evidence-trust-boundary.sh
-
-      - name: Test the Playwright case-evidence producer against a fake runner
-        shell: bash
-        run: bash .github/policy/test-playwright-case-evidence-producer.sh
-
-      # No committed asset may carry an absolute path: the recorded reports are
-      # real runner output, and a real report is full of them.
-      - name: Check the case-evidence assets for absolute paths
-        shell: bash
-        run: ruby .github/policy/check-case-evidence-assets.rb
-
-      - name: Test the case-evidence asset path guard
-        shell: bash
-        run: bash .github/policy/test-case-evidence-assets.sh
-
-      - name: Test the pinned Playwright parity fixtures
-        shell: bash
-        run: ruby .github/policy/test-playwright-case-parity-fixtures.rb
-
-      - name: Test the pinned Playwright parity producer against a fake runner
-        shell: bash
-        run: bash .github/policy/test-playwright-pinned-parity-producer.sh
-
-      # The admission-path producer: an exact discovery/execution match passes,
-      # and every way the two can disagree blocks.
-      - name: Test the case-evidence admission reconciliation
-        shell: bash
-        run: bash .github/policy/test-case-evidence-admission.sh
-
       - name: Test canonical dispatch identity and input defaults
         shell: bash
         run: bash .github/policy/test-dispatch-identity.sh
@@ -318,7 +326,6 @@ jobs:
         shell: bash
         run: bash .github/policy/test-dispatch-contracts.sh
 
-
       # Release-installed tools are listed with their pins; Dependabot covers the Actions.
       - name: Check the tool pin list and Dependabot coverage
         shell: bash
@@ -329,6 +336,8 @@ jobs:
         shell: bash
         run: bash .github/policy/check-egress-allowlist.sh
 
+      # Last in its shard on purpose: main's step check (superset mode) accepts a step it has no row for only
+      # after the last pinned step of its job, and only when its script exists in main's policy directory.
       - name: Test the rustfmt enforcement default against a stub cargo
         shell: bash
         run: bash .github/policy/test-lint-enforce.sh
@@ -336,6 +345,109 @@ jobs:
       - name: Test the all-locks advisory helper wiring and reporting against a stub
         shell: bash
         run: bash .github/policy/test-all-locks-audit.sh
+
+      # Added after the last reviewed step on purpose: a step the base commit's table does not know yet is
+      # accepted as an extra only after the last pinned step of its job (check-policy-steps.rb).
+      - name: Test the Timings table's queue column and per-ref baselines
+        shell: bash
+        run: bash .github/policy/test-timings-table.sh
+
+      - name: Prove the three-way rust-app split is complete on every platform
+        shell: bash
+        run: bash .github/policy/test-rust-app-shards.sh
+
+      - name: Test the early suite-ownership check on synthetic repositories
+        shell: bash
+        run: bash .github/policy/test-suite-ownership-check.sh
+
+      - name: Require the Wave C policy tests and the early ownership step to stay wired
+        shell: bash
+        run: ruby .github/policy/check-wave-c-wiring.rb
+
+      - name: Test the Wave C wiring check on synthetic trees
+        shell: bash
+        run: bash .github/policy/test-wave-c-wiring.sh
+
+      - name: Test the duplicate-dispatch guard against synthetic runs
+        shell: bash
+        run: bash .github/policy/test-dispatch-dedup.sh
+
+  # Shard 3: the case-evidence contract, producers and Playwright parity tests.
+  # Needs no other job: it runs beside the base pass and holds no authority;
+  # only `policy` decides the required check.
+  policy-evidence:
+    permissions:
+      contents: read
+    name: Policy case-evidence tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # The case-evidence contract and its producers. These ran nowhere before:
+      # the scripts were in the tree but no policy step invoked them.
+      - name: Test the case-evidence structural contract
+        shell: bash
+        run: bash .github/policy/test-case-evidence-contract.sh
+
+      - name: Test the case-evidence trust boundary against forged claims
+        shell: bash
+        run: bash .github/policy/test-case-evidence-trust-boundary.sh
+
+      - name: Test the Playwright case-evidence producer against a fake runner
+        shell: bash
+        run: bash .github/policy/test-playwright-case-evidence-producer.sh
+
+      # No committed asset may carry an absolute path: the recorded reports are
+      # real runner output, and a real report is full of them.
+      - name: Check the case-evidence assets for absolute paths
+        shell: bash
+        run: ruby .github/policy/check-case-evidence-assets.rb
+
+      - name: Test the case-evidence asset path guard
+        shell: bash
+        run: bash .github/policy/test-case-evidence-assets.sh
+
+      - name: Test the pinned Playwright parity fixtures
+        shell: bash
+        run: ruby .github/policy/test-playwright-case-parity-fixtures.rb
+
+      - name: Test the pinned Playwright parity producer against a fake runner
+        shell: bash
+        run: bash .github/policy/test-playwright-pinned-parity-producer.sh
+
+      # The admission-path producer: an exact discovery/execution match passes,
+      # and every way the two can disagree blocks.
+      - name: Test the case-evidence admission reconciliation
+        shell: bash
+        run: bash .github/policy/test-case-evidence-admission.sh
+
+  # Shard 4: every reviewed weakening applied to a copy of the tree and rejected.
+  # Needs no other job: it runs beside the base pass and holds no authority;
+  # only `policy` decides the required check.
+  policy-mutations:
+    permissions:
+      contents: read
+    name: Policy mutations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Every weakening an independent review found is applied to a copy of the tree and must be
+      # rejected, including a pull request that weakens its own policy.
+      - name: Prove each reviewed weakening fails the policy
+        shell: bash
+        run: bash .github/policy/test-mutations.sh
+
 
   # The base commit's policy run against this pull request's tree, and the fixtures that test the
   # step that runs it, in base-policy.yml (see its header). `policy` requires this call's result.

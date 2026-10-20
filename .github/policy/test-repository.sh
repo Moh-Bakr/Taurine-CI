@@ -49,6 +49,45 @@ printf '# unreviewed helper\n' > "${unreviewed}/.github/policy/pg8-helper.py"
 git -C "${unreviewed}" add .github/policy/pg8-helper.py
 expect_reject "${unreviewed}" 'an unreviewed third Python policy file' 'Unexpected tracked path in the public CI repository'
 
+for compiled in lib/x.so lib/x.DYLIB lib/x.a tools/x.dll tools/X.EXE tools/x.jar web/x.wasm web/X.WASM .github/policy/__pycache__/x.cpython-314.pyc .github/policy/x.pyc .github/actions/y/z.pyo tools/A.class build/x.o __pycache__/note.txt .github/policy/__pycache__/readme.sh; do
+  bin="$(new_fixture)"
+  mkdir -p "${bin}/$(dirname "${compiled}")"
+  printf 'x\n' > "${bin}/${compiled}"
+  git -C "${bin}" add -f "${compiled}"
+  expect_reject "${bin}" "compiled output ${compiled}" 'Compiled or binary build output is tracked'
+done
+
+# A failing git ls-files stops the check instead of reading as an empty list: a directory that is not a repository.
+notrepo="$(mktemp -d "${temp_root}/notrepo.XXXXXX")"
+mkdir -p "${notrepo}/.github/policy"
+cp "${source_root}/.github/policy/check-repository.sh" "${notrepo}/.github/policy/check-repository.sh"
+expect_reject "${notrepo}" 'a directory where git ls-files fails' 'The tracked file list could not be read'
+
+# Every later git ls-files listing is fatal too: a stub git that fails only the index (`-s`) listings, or only
+# the plain name listing, while the first sweep succeeds.
+real_git="$(command -v git)"
+mkdir -p "${temp_root}/stubbin"
+cat > "${temp_root}/stubbin/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == ls-files ]]; then
+  case "\${STUB_GIT_FAIL:-}" in
+    index) [[ " \$* " == *" -s "* ]] && exit 1 ;;
+    names) [[ " \$* " != *" -z "* && " \$* " != *" -s "* ]] && exit 1 ;;
+  esac
+fi
+exec "${real_git}" "\$@"
+STUB
+chmod +x "${temp_root}/stubbin/git"
+for mode in index names; do
+  stubbed="$(new_fixture)"
+  mkdir -p "${stubbed}/.github"
+  printf 'x\n' > "${stubbed}/.github/ci-matrix.json"; git -C "${stubbed}" add -f .github/ci-matrix.json
+  if output="$(cd "${stubbed}" && PATH="${temp_root}/stubbin:${PATH}" STUB_GIT_FAIL="${mode}" bash .github/policy/check-repository.sh 2>&1)"; then
+    echo "repository path fixture failed: a failing ${mode} listing was read as clean" >&2; exit 1
+  fi
+  [[ "${output}" == *'The tracked file list could not be read'* ]] || { echo "repository path fixture failed: wrong rejection for a failing ${mode} listing: ${output}" >&2; exit 1; }
+done
+
 private_source="$(new_fixture)"
 mkdir -p "${private_source}/taurine-desktop/src"
 printf 'source fixture\n' > "${private_source}/taurine-desktop/src/private.ts"

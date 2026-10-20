@@ -6,6 +6,32 @@ set -euo pipefail
 forbidden_path_re='(^|/)(src|target|node_modules|vendor|taurine-desktop|taurine-mobile)(/|$)|\.(rs|ts|tsx|js|jsx|json|toml|lock|pem|p12|pfx|jks|keystore)$'
 forbidden_name_re='(^|/)(README|SECURITY|CODEOWNERS|LICENSE)(\.|$)'
 
+# The tracked-file list is read once into a temporary file and its exit status checked: a failing
+# `git ls-files` (not a repository, an unreadable index) must stop the check, never read as an empty tree.
+tracked_list="$(mktemp)"
+git ls-files -z > "${tracked_list}" || { echo "The tracked file list could not be read (git ls-files failed)" >&2; exit 1; }
+# Every later listing of the index goes through the same rule: written to a temporary file, its status
+# checked, then read, so a failing `git ls-files` is fatal wherever it is used.
+index_list() { # dest git-ls-files-args...
+  local dest="$1"; shift
+  git ls-files "$@" > "${dest}" || { echo "The tracked file list could not be read (git ls-files failed)" >&2; exit 1; }
+}
+exact_list="$(mktemp)"; assets_list="$(mktemp)"; names_list="$(mktemp)"; entries_list="$(mktemp)"
+trap 'rm -f "${tracked_list}" "${exact_list}" "${assets_list}" "${names_list}" "${entries_list}"' EXIT
+
+# Compiled or binary build output is never tracked, wherever it sits: Python bytecode, Java classes and
+# archives, object files, static and shared libraries, Windows binaries, WebAssembly and any __pycache__
+# directory, whatever the case of the extension. Checked first, with its own message, so no allowlist branch
+# below can admit one by accident.
+shopt -s nocasematch
+while IFS= read -r -d '' path; do
+  if [[ "$path" =~ \.(pyc|pyo|class|o|so|dylib|a|dll|exe|jar|wasm)$ || "$path" =~ (^|/)__pycache__(/|$) ]]; then
+    echo "Compiled or binary build output is tracked in the public CI repository: $path" >&2
+    exit 1
+  fi
+done < "${tracked_list}"
+shopt -u nocasematch
+
 while IFS= read -r -d '' path; do
   if [[ "$path" == .github/workflows/* ]]; then
     continue
@@ -54,11 +80,12 @@ while IFS= read -r -d '' path; do
   fi
   echo "Unexpected tracked path in the public CI repository: $path" >&2
   exit 1
-done < <(git ls-files -z)
+done < "${tracked_list}"
 
 # The files admitted by exact path above are plain data too: a tracked symlink or an executable file at
 # one of those paths would pass the name rules while pointing elsewhere or being runnable. Read the git
 # mode from the index and accept only a regular, non-executable file (100644).
+index_list "${exact_list}" -s -z -- .github/ci-matrix.json .github/dependabot.yml .github/tool-pins.json .github/egress-allowlist.txt .github/CODEOWNERS
 while IFS= read -r -d '' record; do
   mode="${record%% *}"
   exact="${record#*$'\t'}"
@@ -66,13 +93,14 @@ while IFS= read -r -d '' record; do
     echo "Exact-path files must be plain non-executable regular files: $exact has git mode $mode" >&2
     exit 1
   fi
-done < <(git ls-files -s -z -- .github/ci-matrix.json .github/dependabot.yml .github/tool-pins.json .github/egress-allowlist.txt .github/CODEOWNERS)
+done < "${exact_list}"
 
 # The assets in that directory are not inert data: the reporter is JavaScript
 # the pinned runner loads on the hosted runner. A tracked symlink would pass
 # every name rule above while pointing anywhere -- including into the private
 # source checkout -- so accept only plain regular files, read from the index
 # rather than from the filesystem.
+index_list "${assets_list}" -s -z -- .github/policy/case-evidence-assets
 while IFS= read -r -d '' record; do
   mode="${record%% *}"
   oid="${record#* }"
@@ -104,9 +132,10 @@ while IFS= read -r -d '' record; do
     echo "Case-evidence assets must not contain NUL bytes: $asset" >&2
     exit 1
   fi
-done < <(git ls-files -s -z -- .github/policy/case-evidence-assets)
+done < "${assets_list}"
 
-if git ls-files | grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' -e '.github/CODEOWNERS' \
+index_list "${names_list}"
+if grep -vxF -e '.github/ci-matrix.json' -e '.github/dependabot.yml' -e '.github/tool-pins.json' -e '.github/CODEOWNERS' "${names_list}" \
   | grep -vE '^\.github/policy/case-evidence-assets/[a-z0-9][a-z0-9-]*(\.(config|spec))?\.json$' \
   | grep -E "$forbidden_path_re|$forbidden_name_re"; then
   echo "The public repository contains a forbidden source, credential, or starter-document path." >&2
@@ -135,11 +164,12 @@ fi
 # --cached reports an object it cannot read as an error but exits 1 -- the same
 # status as "no match" -- so the scan below would pass a tree whose blobs it
 # never saw. Fail closed instead, and name the paths.
-unreadable="$(git ls-files -s -z | while IFS= read -r -d '' entry; do
+index_list "${entries_list}" -s -z
+unreadable="$(while IFS= read -r -d '' entry; do
   entry_oid="${entry#* }"
   entry_oid="${entry_oid%% *}"
   printf '%s %s\n' "${entry_oid}" "${entry#*$'\t'}"
-done | while read -r entry_oid entry_path; do
+done < "${entries_list}" | while read -r entry_oid entry_path; do
   # A missing object prints "<oid> missing" whatever --batch-check format is
   # asked for, so test the last word rather than compare the whole line.
   object_state="$(git cat-file --batch-check <<<"${entry_oid}")"

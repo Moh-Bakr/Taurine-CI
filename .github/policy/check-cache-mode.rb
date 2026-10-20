@@ -35,10 +35,10 @@
 #  I. a job whose steps contain actions/cache/save is `write`;
 #  J. a job whose steps contain actions/cache/restore (and no save) is `read` or `write`.
 #  N. (Stage 2) a cache restore is main-only, or it is exactly one of the four reviewed read-only
-#     untrusted restores (see REVIEWED_UNTRUSTED_RESTORES): Linux concern workflow only, rust-db only,
-#     `actions/cache/restore` directly (never through a composite), its `if` the exact top-level
-#     terms `github.ref == 'refs/heads/untrusted'`, `inputs.untrusted_readonly_cache` and
-#     `inputs.concern == 'rust-db'` and nothing else, `with` exactly `path` and `key`, the path and
+#     untrusted restores (see REVIEWED_UNTRUSTED_RESTORES): Linux concern workflow only, rust-db and the
+#     rust-app shards only, `actions/cache/restore` directly (never through a composite), its `if` the exact
+#     top-level terms `github.ref == 'refs/heads/untrusted'`, `inputs.untrusted_readonly_cache` and
+#     `(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))` and nothing else, `with` exactly `path` and `key`, the path and
 #     the key the reviewed literals (a key never derives from a dispatch input, the head ref or any
 #     other expression), and no other step key (no env, continue-on-error, timeout). Around it:
 #     no `write` permission anywhere in the called workflow or in the untrusted half that calls it,
@@ -64,11 +64,11 @@ BLOCKING_EXPR = %q(${{ (contains(fromJSON('["failure","cancelled"]'), needs.cach
 
 UNTRUSTED_RESTORE_WORKFLOWS = %w[linux-validation-concern.yml].freeze
 UNTRUSTED_FLAG = 'untrusted_readonly_cache'.freeze
-UNTRUSTED_RESTORE_TERMS = [UNTRUSTED, 'inputs.untrusted_readonly_cache', "inputs.concern == 'rust-db'"].freeze
-# Batch 2 adds the rust-app shards to the untrusted restores: both reviewed concern terms are accepted here until
-# Batch 2's own checker (which accepts only the second) replaces this file.
-UNTRUSTED_RESTORE_TERMS_RUST_APP = [UNTRUSTED, 'inputs.untrusted_readonly_cache', "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))"].freeze
-UNTRUSTED_RESTORE_TERM_SETS = [UNTRUSTED_RESTORE_TERMS, UNTRUSTED_RESTORE_TERMS_RUST_APP].freeze
+# The reviewed concern term: rust-db and the rust-app shards (the Linux rust-app-1 to rust-app-3), one
+# parenthesised conjunct. Never rust-packaging (cached on main, not restored untrusted), never the OpenSSL
+# door concern (rust-tls-openssl, section 4.5), never a wider startsWith.
+UNTRUSTED_CONCERN_TERM = "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))".freeze
+UNTRUSTED_RESTORE_TERMS = [UNTRUSTED, 'inputs.untrusted_readonly_cache', UNTRUSTED_CONCERN_TERM].freeze
 PIN = 'actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9'.freeze
 SOURCES_PATH = "${{ steps.cargo-home.outputs.dir }}/registry/cache\n".freeze
 TARGET_PATH = "${{ steps.cargo-target.outputs.dir }}/debug/deps\n${{ steps.cargo-target.outputs.dir }}/debug/build\n${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint\n".freeze
@@ -402,7 +402,7 @@ def reviewed_untrusted_restore?(st)
   return false unless with.is_a?(Hash) && with.keys.sort == %w[key path]
   return false unless REVIEWED_UNTRUSTED_RESTORES.include?([with['path'].to_s, with['key'].to_s])
   terms = top_terms(st['if'])
-  !terms.nil? && UNTRUSTED_RESTORE_TERM_SETS.any? { |set| terms.sort == set.sort }
+  !terms.nil? && terms.sort == UNTRUSTED_RESTORE_TERMS.sort
 end
 
 reviewed_restores = {}
@@ -425,7 +425,7 @@ docs.each do |path, doc|
         (reviewed_restores[path] ||= []) << st
         next
       end
-      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref) and is not the reviewed read-only untrusted restore (Linux concern workflow, rust-db, the exact terms, path and key of docs/untrusted-readonly-cache.md, Stage 2)"
+      failures << "#{path}: job #{name}: cache restore step #{st['name'].inspect} is not main-only (it needs the exact top-level term #{MAIN} in its own if and must not mention the untrusted ref) and is not the reviewed read-only untrusted restore (Linux concern workflow, rust-db and the rust-app shards, the exact terms, path and key of docs/untrusted-readonly-cache.md, Stage 2)"
     end
   end
 end
@@ -511,48 +511,44 @@ CARGO_HOME_PIN = {
   'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
 }.freeze
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
-RUST_TARGET_CACHE_FILE_SHA256 = '1eedb06f020f90666f1747a08c1339172e4caa1016d0381a37d93e6c6bd3913b'.freeze
+RUST_TARGET_CACHE_FILE_SHA256 = 'a50a7233883d1fff83fda68d6380937afa14db4256c8f6d725b4d674013df695'.freeze
+# next reviewed version, ships with the flag-flip PR; drop the first hash then
+RUST_TARGET_CACHE_NEXT_FILE_SHA256 = 'bd8a0eae78c40965df39c364588178a972eec0051d0748bf3cc0ca223cb79a6f'.freeze
 LOCATE_STEP_SHA256 = 'f0731f6e118740f65994e4a90b3a9c03f4e0f1c2b76c00a34ae1216232253c20'.freeze
 # Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
 # untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing
-# in the same reviewed pull request. A name lists TWO OR MORE hashes only where an open pull request changes
-# that file; the FIRST hash in such a pair is this repository's (main's) and must be removed once the pull
-# request(s) named beside it have landed:
-#   verify-cargo-cache: #365 (6c38bdfe...).
-#   timings:            Wave C (ff475be9...).
-#   root-setup:         Wave C (81fa9779...).
-# rust-toolchain is deliberately NOT a pair with main's hash: main's file (9ae7bf89...) and Wave C's alone
-# (3e991c0a...) run `rustc --version` and `cargo --version` through the rustup proxy from `src` before
-# anything refuses a `path` toolchain, so a checkout could run a planted compiler with the runner's
-# environment and path files in reach. Only versions that refuse it first are listed: #365's (04d9056e...)
-# and the #365 + Wave C merge (abec7733...), and each must also pass toolchain_guard_first? below. The pin
-# applies only to a job that carries a reviewed untrusted restore, which main does not.
+# in the same reviewed pull request. Each name lists exactly the hash of the file as it is in this tree:
+# batch 2 merged #365 and Wave C into rust-toolchain (verify-cargo-cache is #365's, timings is Wave C's),
+# #360 (scan-lint) and Wave C into root-setup, and the keyed test ids into source-checkout, sanitize and
+# concern-report. A pull request that changes one of these files replaces its hash here, in the same change.
+# rust-toolchain is listed only at a version that refuses a `path` toolchain before it runs any rustc or cargo
+# command (an earlier version let a checkout run a planted compiler with the runner's environment and path
+# files in reach); the hash must also pass toolchain_guard_first? below. It applies only to a job that carries a
+# reviewed untrusted restore.
 LOCAL_ACTION_FILE_SHA256 = {
-  'timings' => %w[
-    9d2a363af0af7877c4a0428c907bbd0445d9c43b0e6db2f033bd339f814fb860
-    ff475be9ed8faa47c3a218041c71505a17f0944fc4d32b9f25b08ae61fd59922
-  ],
-  'source-checkout' => %w[bcab0702e94fc10fa410a5d8875215dffc03189e557780f86662da4c1796fff0 ac95c29654593720210baa620edc335ecf49f33864f9d96deed73f1f296317b3],
+  'timings' => %w[ff475be9ed8faa47c3a218041c71505a17f0944fc4d32b9f25b08ae61fd59922],
+  'source-checkout' => %w[ac95c29654593720210baa620edc335ecf49f33864f9d96deed73f1f296317b3],
   'egress-audit' => %w[c6c3ff33427b869f38f3dc83800ae92143233b2137922d67d2a2f75aa32f74b5],
-  'root-setup' => %w[
-    92b689e1af931693bb99211a35383fd69879bccf77e1885045fc743675d97d41
-    81fa977997b32fbbe67028b272812e88e2164ef2ff9d9a7debe927811b116154
-    1f288c476f7598e3fd583b8116994c429c01e3dc30376ea2df1ae9e2affe1dce
-  ],
+  'root-setup' => %w[1f288c476f7598e3fd583b8116994c429c01e3dc30376ea2df1ae9e2affe1dce],
   'drop-root' => %w[2562fdd5b283364bb839c3a547dce05bbea76438ea47c2be5f7efe26942579dc],
-  'sanitize' => %w[2de2e7da83f5011c724bf34f0096be6c703a0180272fbf7ff2eb2c96df075024 4bae990159024f93d9848b12344a7f1d92577dca0ee2aa9916b03c4196a06478],
-  'concern-report' => %w[d993053f802c03335cc09ce4a4b182b02e468d00202835673d50b4ffdb279435 49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
-  'shell-artefact' => %w[dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184 7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a],
-  'scan-concern' => %w[6a70b55ba6b730efcf8f74999261c46119243ce9eada546b46c73bc8d59327cd 4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
-  'verify-cargo-cache' => %w[
-    483f07957076d89b401ac26ce30b91c9f940b36a1d9c820680b7e29cffd456b8
-    6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a
+  # second hash: next reviewed version, ships with the flag-flip PR; drop the first hash then
+  'sanitize' => %w[
+    4bae990159024f93d9848b12344a7f1d92577dca0ee2aa9916b03c4196a06478
+    5d800b030a24f32029965c91075ac5ddeb720c7f93fa292872bc822027f7eedc
   ],
-  'rust-toolchain' => %w[
-    04d9056e51c8ae6fbfd85ca149ca71e38d291809131a00a28a2444161a3cbda0
-    abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec
+  'concern-report' => %w[49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
+  # second hash: next reviewed version (adds the legacy-tls feature assertion), ships with the cache-flip PR
+  'shell-artefact' => %w[
+    dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184
+    7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a
   ],
-  'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256, 'a50a7233883d1fff83fda68d6380937afa14db4256c8f6d725b4d674013df695']
+  'scan-concern' => %w[4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
+  'verify-cargo-cache' => %w[6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a],
+  'rust-toolchain' => %w[abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec],
+  'rust-target-cache' => [
+    RUST_TARGET_CACHE_FILE_SHA256,
+    RUST_TARGET_CACHE_NEXT_FILE_SHA256
+  ]
 }.freeze
 # The toolchain action's refusal of a `path` toolchain (and of every non-plain key), as the text between
 # `toolchain_refuse() {` and the last call of `toolchain_check`, in the first step's decoded `run`.
@@ -655,15 +651,13 @@ def pinned_local_action_step?(path, docs, st)
     PREFIX_ACTION_WITH_SHA256[name].include?(canonical_hash(with))
   when 'rust-toolchain'
     toolchain_guard_first?(local_action_doc(path, docs, name)) &&
-      ["${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}", "${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}"].map { |c| { 'concern' => c } }.include?(with)
+      with == { 'concern' => "${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}" }
   when 'verify-cargo-cache'
     with.keys.sort == %w[cache-hit os-label sources-dir] && with['sources-dir'] == '${{ steps.cargo-home.outputs.dir }}' &&
       with['cache-hit'].to_s.match?(CACHE_HIT_REF) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
   else # rust-target-cache: a mode and the reviewed inputs, nothing else
-    # deny-door (the restore-time strip's OpenSSL door removal) is accepted as a key here without Batch 2's restriction to
-    # restored mode and the literal true/false, and without its strip-follows-restore rule: closed by Batch 2. Not
-    # exploitable until then: no untrusted restore exists on main and the flag is false.
     (with.keys - %w[mode group features dir cache-hit os-label deny-door]).empty? && %w[locate restored save].include?(with['mode']) &&
+      (!with.key?('deny-door') || (with['mode'] == 'restored' && %w[true false].include?(with['deny-door']))) &&
       with.fetch('dir', '${{ steps.cargo-target.outputs.dir }}') == '${{ steps.cargo-target.outputs.dir }}' &&
       (!with.key?('cache-hit') || with['cache-hit'].to_s.match?(CACHE_HIT_REF)) && with['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
   end
@@ -738,6 +732,18 @@ def producer_step_failures(path, doc, docs, failures)
         failures << "#{path}: job #{job_name}: step #{st['name'].inspect} sits between #{pid} and the untrusted restore #{rid}: it must be gated to main alone or be a reviewed, hash-pinned step"
       end
     end
+    # The compiled restore is followed directly by its restore-time strip, which carries deny-door: the
+    # strip removes every OpenSSL door crate output (section 4.5), so a job that restores for the rust-app
+    # shards or rust-db never holds compiled OpenSSL. A missing, moved or weakened strip is refused.
+    if (ti = ids.index('cargo-target-cache-untrusted'))
+      strip = steps[ti + 1]
+      hit = '${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}'
+      strip_ok = strip.is_a?(Hash) && (strip.keys - %w[name id if uses with]).empty? && strip['uses'].to_s == TARGET_CACHE_ACTION &&
+                 top_terms(strip['if'])&.sort == UNTRUSTED_RESTORE_TERMS.sort && strip['with'].is_a?(Hash) &&
+                 strip['with'].reject { |k, _| k == 'os-label' } == { 'mode' => 'restored', 'dir' => '${{ steps.cargo-target.outputs.dir }}', 'cache-hit' => hit, 'deny-door' => 'true' } &&
+                 strip['with']['os-label'].to_s.match?(/\A[A-Za-z]+\z/)
+      failures << "#{path}: job #{job_name}: the untrusted compiled restore must be followed directly by the restore-time strip with deny-door: 'true' on exactly the untrusted-restore terms (compiled OpenSSL door output is never restored into an untrusted job)" unless strip_ok
+    end
   end
 
   # The composite behind `cargo-target`: read from the files given, or else from the workflow's own tree
@@ -748,7 +754,7 @@ def producer_step_failures(path, doc, docs, failures)
     return
   end
   action_path = '.github/actions/rust-target-cache/action.yml'
-  failures << "#{action_path}: the whole file must match the reviewed content hash its untrusted restore depends on (every step after locate runs before the restore reads the outputs)" unless [RUST_TARGET_CACHE_FILE_SHA256, 'a50a7233883d1fff83fda68d6380937afa14db4256c8f6d725b4d674013df695'].include?(canonical_hash(composite))
+  failures << "#{action_path}: the whole file must match the reviewed content hash its untrusted restore depends on (every step after locate runs before the restore reads the outputs)" unless [RUST_TARGET_CACHE_FILE_SHA256, RUST_TARGET_CACHE_NEXT_FILE_SHA256].include?(canonical_hash(composite))
   outputs = composite['outputs']
   outputs_ok = outputs.is_a?(Hash) && outputs.keys.sort == %w[dir key] &&
                outputs['dir'].is_a?(Hash) && outputs['dir']['value'] == '${{ steps.locate.outputs.dir }}' &&
@@ -854,7 +860,7 @@ docs.each do |path, doc|
         job.is_a?(Hash) && UNTRUSTED_RESTORE_WORKFLOWS.any? { |w| job['uses'].to_s == "./.github/workflows/#{w}" }
       elsif kind == :value && is_callee && where.length == 5 && where[0] == 'jobs' && where[2] == 'steps' && where[4] == 'if'
         terms = top_terms(doc.dig('jobs', where[1], 'steps', where[3], 'if'))
-        !terms.nil? && UNTRUSTED_RESTORE_TERM_SETS.any? { |set| terms.sort == set.sort }
+        !terms.nil? && terms.sort == UNTRUSTED_RESTORE_TERMS.sort
       else
         false
       end

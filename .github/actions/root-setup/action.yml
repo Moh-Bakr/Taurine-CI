@@ -28,7 +28,7 @@ runs:
         packages=()
         rust_concern="${CONCERN}"
         # The clippy scan compiles the workspace, so it takes the rust-app system libraries.
-        [[ "${rust_concern}" == scan-security ]] && rust_concern=rust-app
+        [[ "${rust_concern}" == scan-security || "${rust_concern}" == scan-lint ]] && rust_concern=rust-app
         # The Rust concerns' libraries, one line per concern. Each line's reason is
         # recorded beside the toolchain setup (.github/actions/rust-toolchain), which used
         # to install them itself after the source was checked out.
@@ -36,7 +36,7 @@ runs:
           taurine-cli) packages=(clang libclang-dev) ;;
           rust-domain) packages=(clang libclang-dev libdbus-1-dev pkg-config) ;;
           rust-net) packages=(clang libclang-dev libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev libssl-dev pkg-config) ;;
-          rust-app|rust-app-1|rust-app-2|rust-packaging) packages=(clang libclang-dev libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
+          rust-app|rust-app-1|rust-app-2|rust-app-3|rust-packaging) packages=(clang libclang-dev libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config libasio-dev libfmt-dev libjsoncpp-dev liblz4-dev libxxhash-dev) ;;
           rust-dbx) packages=(clang libclang-dev libfontconfig1-dev libfreetype-dev libssl-dev pkg-config) ;;
           rust-tls-openssl) packages=(clang libclang-dev libssl-dev pkg-config) ;;
           rust-*) packages=(clang libclang-dev) ;;

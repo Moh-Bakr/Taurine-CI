@@ -12,7 +12,12 @@
 #   - the Linux concern workflow runs refuse-unowned-tests.rb as an unconditional, untolerated step, after the
 #     source checkout and the root drop;
 #   - the scripts themselves exist.
-# In a tree that does not have the Wave C shape yet the check says so and passes. Run from the repository root.
+# The Linux concern workflow's reviewed environment is pinned as well, because the early ownership step and every
+# step after it run inside it: the workflow `env` is exactly the three source-repository variables, the validate job
+# has no `env` of its own, its `defaults.run` is exactly the working directory `src`, and the workflow has no
+# `defaults`. A different shell, directory, PATH-shaped variable or injected variable changes what those steps run.
+# A tree without the Wave C shape fails: the shape is no longer transitional, so a dispatcher that loses it is a
+# regression, not a tree that predates it. Run from the repository root.
 require 'yaml'
 
 def load_yaml(path)
@@ -23,10 +28,7 @@ problems = []
 linux = load_yaml('.github/workflows/linux-validation.yml')
 jobs = linux['jobs'] || {}
 wave_c = !jobs.key?('plan') && jobs.key?('validate-long-main') && jobs.key?('validate-long-untrusted')
-unless wave_c
-  puts 'wave C wiring: skipped, this tree does not have the Wave C dispatcher shape yet'
-  exit 0
-end
+problems << 'the Linux dispatcher no longer has the Wave C shape (no plan job; the long-pole jobs validate-long-main and validate-long-untrusted present)' unless wave_c
 
 policy_steps = (load_yaml('.github/workflows/validate-public-changes.yml')['jobs'] || {}).values.flat_map { |job| job.is_a?(Hash) ? (job['steps'] || []) : [] }
 %w[test-timings-table.sh test-rust-app-shards.sh test-suite-ownership-check.sh].each do |script|
@@ -35,7 +37,15 @@ policy_steps = (load_yaml('.github/workflows/validate-public-changes.yml')['jobs
 end
 problems << 'refuse-unowned-tests.rb is missing' unless File.file?('.github/policy/refuse-unowned-tests.rb')
 
-concern = (load_yaml('.github/workflows/linux-validation-concern.yml')['jobs'] || {}).fetch('validate', {})['steps'] || []
+concern_doc = load_yaml('.github/workflows/linux-validation-concern.yml')
+validate_job = (concern_doc['jobs'] || {}).fetch('validate', {})
+REVIEWED_WORKFLOW_ENV = { 'SOURCE_REPOSITORY_ID' => '1330267721', 'SOURCE_REPOSITORY_OWNER' => 'Moh-Bakr', 'SOURCE_REPOSITORY_NAME' => 'Taurine' }.freeze
+REVIEWED_JOB_DEFAULTS = { 'run' => { 'working-directory' => 'src' } }.freeze
+problems << "the Linux concern workflow env must be exactly #{REVIEWED_WORKFLOW_ENV.inspect}" unless concern_doc['env'] == REVIEWED_WORKFLOW_ENV
+problems << 'the Linux concern workflow must have no workflow-level defaults' if concern_doc.key?('defaults')
+problems << 'the Linux concern validate job must have no env of its own' if validate_job.key?('env')
+problems << "the Linux concern validate job defaults must be exactly #{REVIEWED_JOB_DEFAULTS.inspect}" unless validate_job['defaults'] == REVIEWED_JOB_DEFAULTS
+concern = validate_job['steps'] || []
 index = concern.index { |s| s.is_a?(Hash) && s['run'].to_s.include?('ruby .github/policy/refuse-unowned-tests.rb') }
 if index.nil?
   problems << 'the Linux concern workflow no longer runs refuse-unowned-tests.rb'
@@ -55,7 +65,7 @@ else
 end
 
 if problems.empty?
-  puts 'wave C wiring: the three policy tests and the early ownership step are all present'
+  puts 'wave C wiring: the three policy tests, the early ownership step and the reviewed concern env and defaults are all present'
 else
   problems.each { |p| warn p }
   exit 1

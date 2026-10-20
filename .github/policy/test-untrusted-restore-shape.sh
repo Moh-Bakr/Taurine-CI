@@ -18,7 +18,7 @@ composite=.github/actions/rust-target-cache/action.yml
 cat > "${work}/sources-step.yml" <<'YAML'
       - name: Restore cached third-party crate sources (untrusted, read-only)
         id: cargo-sources-untrusted
-        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' }}
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -29,7 +29,7 @@ YAML
 cat > "${work}/target-step.yml" <<'YAML'
       - name: Restore compiled third-party dependencies (untrusted, read-only)
         id: cargo-target-cache-untrusted
-        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && inputs.concern == 'rust-db' }}
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -99,7 +99,7 @@ cat > "${work}/toolchain-guard.txt" <<'GUARDTEXT'
 GUARDTEXT
 cat > "${work}/input.yml" <<'YAML'
       untrusted_readonly_cache:
-        description: Restore the two reviewed Rust caches read-only on the untrusted ref, for rust-db only.
+        description: Restore the two reviewed Rust caches read-only on the untrusted ref, for rust-db and the rust-app shards only.
         required: false
         default: false
         type: boolean
@@ -235,27 +235,33 @@ step_mutant() { # label needle step-id from to
 reviewed_msg='is not the reviewed read-only untrusted restore'
 src=cargo-sources-untrusted
 tgt=cargo-target-cache-untrusted
-# The reviewed concern term and toolchain input differ between the trees this runs on (before and after Batch 2),
-# so every mutant below anchors on whichever form the tree under test carries.
-if grep -qF "startsWith(inputs.concern, 'rust-app-'))" "${c}"; then
-  ct="(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))"
-else
-  ct="inputs.concern == 'rust-db'"
-fi
-if grep -qF "inputs.concern == 'scan-lint') && 'rust-app'" "${c}"; then
-  tc="(inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern"
-else
-  tc="inputs.concern == 'scan-security' && 'rust-app' || inputs.concern"
-fi
+ct="(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-'))"
 ug="github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && ${ct}"
 
 # Each weakening of the restore itself is refused as "not the reviewed restore".
 step_mutant 'no flag term' "${reviewed_msg}" "${src}" 'inputs.untrusted_readonly_cache && ' ''
 step_mutant 'no concern term' "${reviewed_msg}" "${tgt}" " && ${ct}" ''
 step_mutant 'widened to every Rust concern' "${reviewed_msg}" "${tgt}" "${ct}" "startsWith(inputs.concern, 'rust-')"
-step_mutant 'widened to a second concern' "${reviewed_msg}" "${src}" "${ct}" "(${ct} || inputs.concern == 'rust-packaging')"
+step_mutant 'widened to a second concern' "${reviewed_msg}" "${src}" "${ct}" "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-packaging')"
 step_mutant 're-opened by ||' "${reviewed_msg}" "${src}" "${ct} }}" "${ct} || true }}"
 step_mutant 'a dispatch-controlled extra term' "${reviewed_msg}" "${tgt}" "${ct} }}" "${ct} && inputs.source_sha != '' }}"
+# The rust-app extension is exactly rust-db and the rust-app-* shards: dropping rust-db, narrowing the
+# prefix to one shard, a prefix that also matches the packaging concern, the OpenSSL door concern, or
+# the same selector spelled in another case or form is a different step and is refused.
+step_mutant 'the rust-app selector narrowed to one shard' "${reviewed_msg}" "${tgt}" "startsWith(inputs.concern, 'rust-app-')" "inputs.concern == 'rust-app-1'"
+step_mutant 'rust-db dropped from the rust-app extension' "${reviewed_msg}" "${tgt}" "${ct}" "startsWith(inputs.concern, 'rust-app-')"
+step_mutant 'the OpenSSL door concern added to the compiled restore' "${reviewed_msg}" "${tgt}" "${ct}" "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-tls-openssl')"
+step_mutant 'the OpenSSL door concern added to the sources restore' "${reviewed_msg}" "${src}" "${ct}" "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-tls-openssl')"
+step_mutant 'the packaging concern added to the compiled restore' "${reviewed_msg}" "${tgt}" "${ct}" "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-packaging')"
+step_mutant 'the rust-app prefix in another spelling' "${reviewed_msg}" "${tgt}" "startsWith(inputs.concern, 'rust-app-')" "startswith(inputs.concern, 'rust-app-')"
+step_mutant 'the rust-app prefix negated' "${reviewed_msg}" "${tgt}" "${ct}" "!(inputs.concern == 'rust-tls-openssl')"
+# A rust-app compiled restore without the main-scope key: a key that is not exactly the locate output
+# (the key main's protected save wrote), a prefix fallback, or a key from another scope.
+step_mutant 'a rust-app restore keyed apart from the main save' "${reviewed_msg}" "${tgt}" 'key: ${{ steps.cargo-target.outputs.key }}' 'key: cargo-target-v1-untrusted-${{ steps.cargo-target.outputs.key }}'
+step_mutant 'a rust-app restore keyed by the run id' "${reviewed_msg}" "${tgt}" 'key: ${{ steps.cargo-target.outputs.key }}' 'key: cargo-target-v1-${{ github.run_id }}'
+step_mutant 'a rust-app restore falling back to a prefix' "${reviewed_msg}" "${tgt}" '          key: ${{ steps.cargo-target.outputs.key }}' '          key: ${{ steps.cargo-target.outputs.key }}
+          restore-keys: |
+            cargo-target-v1-${{ runner.os }}-'
 step_mutant 'gated to neither ref' "${reviewed_msg}" "${tgt}" "github.ref == 'refs/heads/untrusted' && " ''
 step_mutant 'gated to main as well as the flag' "${reviewed_msg}" "${tgt}" "github.ref == 'refs/heads/untrusted'" "github.ref == 'refs/heads/main'"
 step_mutant 'compiled key derived from a dispatch input' "${reviewed_msg}" "${tgt}" 'key: ${{ steps.cargo-target.outputs.key }}' 'key: cargo-${{ inputs.source_sha }}'
@@ -548,7 +554,7 @@ defaults:
 
 env:'
 mutant 'the toolchain action file altered' "${allow_msg}" ".github/actions/rust-toolchain/action.yml" 'Per-OS setup for the Rust concerns' 'Per-OS planted setup for the Rust concerns'
-mutant 'the toolchain step gains a with key' "${allow_msg}" "${c}" "          concern: \${{ ${tc} }}" "          concern: \${{ ${tc} }}
+mutant 'the toolchain step gains a with key' "${allow_msg}" "${c}" "          concern: \${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}" "          concern: \${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}
           extra: x"
 
 # Every shared local action that runs ahead of the producers is pinned as a whole file and by its exact
@@ -699,6 +705,108 @@ for other in macos-validation-concern.yml windows-validation-concern.yml; do
   out=""; rc=0
   out="$(cd "${d}" && ruby "${OLDPWD}/${policy}/check-cache-mode.rb" ".github/workflows/${other}" 2>&1)" || rc=$?
   [[ ${rc} -ne 0 && "${out}" == *"${reviewed_msg}"* ]] || { echo "the reviewed untrusted restore in ${other} should be refused: ${out}" >&2; exit 1; }
+done
+
+# The rust-app shards' untrusted compiled restore (and the rust-db one) never holds compiled OpenSSL: the
+# restore-time strip that follows it carries deny-door, and nothing may sit between them. The strip has no
+# id (its verifier pin forbids one), so each case is a literal swap or an insertion at its name line.
+strip_name='      - name: Strip workspace crates from the restored dependency cache (untrusted, read-only)'
+door_msg="must be followed directly by the restore-time strip with deny-door: 'true'"
+mutant 'door outputs not stripped: deny-door dropped from the untrusted strip' "${door_msg}" "${c}" "          deny-door: 'true'
+" ''
+mutant 'door outputs not stripped: deny-door false' "${door_msg}" "${c}" "          deny-door: 'true'" "          deny-door: 'false'"
+mutant 'door outputs not stripped: deny-door an expression' "${door_msg}" "${c}" "          deny-door: 'true'" "          deny-door: \${{ inputs.source_sha != '' }}"
+insert_mutant 'a step between the untrusted compiled restore and its door strip' "${door_msg}" "${c}" "${strip_name}" '      - name: Between restore and strip
+        if: ${{ github.ref == '"'"'refs/heads/untrusted'"'"' }}
+        shell: bash
+        run: echo hi
+'
+mutant 'the untrusted strip loses its untrusted terms' "${door_msg}" "${c}" "${strip_name}
+        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && ${ct} }}" "${strip_name}
+        if: \${{ github.ref == 'refs/heads/untrusted' }}"
+mutant 'the door strip of the composite reduced to the plain strip' 'whole file must match the reviewed content hash' "${composite}" 'classify_lock "${sets}" door; else' 'classify_lock "${sets}"; else'
+# A rust-app shard (or rust-db) saving from the untrusted ref: the save is main-only, never under the untrusted terms.
+save_if_rust_app="\${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && ${ct} }}"
+save_step="      - name: Save compiled third-party dependencies (untrusted)
+        if: ${save_if_rust_app}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-target.outputs.dir }}/debug/deps
+          key: \${{ steps.cargo-target.outputs.key }}
+"
+insert_mutant 'a rust-app untrusted restore with a save beside it' 'must not save a cache from the same job without the main-only gate' "${c}" '      - name: Complete the third-party source set before saving' "${save_step}"
+insert_mutant 'rust-app-2 saving from the untrusted ref' 'must not save a cache from the same job without the main-only gate' "${c}" '      - name: Complete the third-party source set before saving' "      - name: Save compiled third-party dependencies (untrusted rust-app-2)
+        if: \${{ github.ref == 'refs/heads/untrusted' && inputs.concern == 'rust-app-2' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            \${{ steps.cargo-target.outputs.dir }}/debug/deps
+          key: \${{ steps.cargo-target.outputs.key }}
+"
+# Ordering: the compiled restore reads the locate step's dir and key, so it runs after locate, and nothing
+# unpinned runs between them. A step moved above locate, and an unpinned step between, are both refused.
+mv_mutant() { # label needle step-name-to-move anchor-step-name (the moved block lands before the anchor)
+  local d="${work}/mutant"
+  rm -rf "${d}"; cp -R "${reviewed}" "${d}"
+  MOVE="$3" BEFORE="$4" ruby -e '
+    path = ARGV.fetch(0); lines = File.read(path, encoding: "UTF-8").lines
+    start = ->(name) { lines.index { |x| x.chomp == "      - name: #{name}" } or abort "untrusted restore fixture: step #{name} not found" }
+    first = start.call(ENV.fetch("MOVE"))
+    last = first + 1
+    last += 1 until last >= lines.length || lines[last].start_with?("      - name:") || lines[last].start_with?("      # ")
+    block = lines.slice!(first...last)
+    lines.insert(start.call(ENV.fetch("BEFORE")), *block)
+    File.write(path, lines.join)
+  ' "${d}/${c}"
+  expect_fail "$1" "${d}" "$2"
+}
+mv_mutant 'a rust-app untrusted restore moved before locate' 'must run before the untrusted restore cargo-target-cache-untrusted' 'Restore compiled third-party dependencies (untrusted, read-only)' 'Locate the compiled dependency cache'
+insert_mutant 'an unpinned step between locate and the compiled restore' 'sits between cargo-target and the untrusted restore cargo-target-cache-untrusted' "${c}" '      - name: Restore compiled third-party dependencies' '      - name: Plant a shim
+        shell: bash
+        run: echo hi
+'
+
+# check-cache-groups.rb (main-only compiled-cache groups) skips exactly the reviewed untrusted restores of the
+# Linux concern workflow: its three steps carry exactly the reviewed `if` terms and are restores or the
+# restore-time strip. A widened term, a save, a strip in another mode, or the same step in another workflow
+# is still a compiled-cache step there and is refused.
+groups_run() { # dir workflow-file
+  (cd "$1" && ruby "${OLDPWD}/${policy}/check-cache-groups.rb" "$2") 2>&1
+}
+out="$(groups_run "${reviewed}" "${c}")" || { echo "check-cache-groups should accept the reviewed untrusted restores: ${out}" >&2; exit 1; }
+groups_mutant() { # label step-id from to
+  local d="${work}/groups-mutant" o rc=0
+  rm -rf "${d}"; cp -R "${reviewed}" "${d}"
+  STEP="$2" FROM="$3" TO="$4" ruby -e '
+    path = ARGV.fetch(0); lines = File.read(path, encoding: "UTF-8").lines
+    at = lines.index { |l| l.chomp == "        id: #{ENV.fetch("STEP")}" } or abort "untrusted restore fixture: step #{ENV.fetch("STEP")} not found"
+    first = at
+    first -= 1 until lines[first].start_with?("      - name:")
+    last = at
+    last += 1 while last + 1 < lines.length && !lines[last + 1].start_with?("      - name:") && !lines[last + 1].start_with?("      # ")
+    block = lines[first..last].join
+    abort "untrusted restore fixture: #{ENV.fetch("FROM").inspect} not in step #{ENV.fetch("STEP")}" unless block.include?(ENV.fetch("FROM"))
+    lines[first..last] = [block.sub(ENV.fetch("FROM")) { ENV.fetch("TO") }]
+    File.write(path, lines.join)
+  ' "${d}/${c}"
+  o="$(groups_run "${d}" "${c}")" || rc=$?
+  [[ ${rc} -ne 0 && "${o}" == *'the cache steps other than the reviewed crate-sources pair must be exactly one each of'* ]] || { echo "check-cache-groups fixture '$1' should be refused as a compiled-cache step, got: ${o}" >&2; exit 1; }
+}
+groups_mutant 'the untrusted compiled restore gains a term' cargo-target-cache-untrusted "${ct} }}" "${ct} && inputs.source_sha != '' }}"
+groups_mutant 'the untrusted compiled restore widened to every Rust concern' cargo-target-cache-untrusted "${ct} }}" "startsWith(inputs.concern, 'rust-') }}"
+groups_mutant 'the untrusted compiled restore gains the OpenSSL door concern' cargo-target-cache-untrusted "${ct} }}" "(inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-') || inputs.concern == 'rust-tls-openssl') }}"
+groups_mutant 'the untrusted compiled restore becomes a save' cargo-target-cache-untrusted 'actions/cache/restore@' 'actions/cache/save@'
+groups_mutant 'the untrusted sources restore becomes a combined cache step' cargo-sources-untrusted 'actions/cache/restore@' 'actions/cache@'
+groups_mutant 'the untrusted sources restore loses the flag term' cargo-sources-untrusted "inputs.untrusted_readonly_cache && " ''
+for other in macos-validation-concern.yml windows-validation-concern.yml; do
+  d="${work}/groups-other-${other%%-*}"
+  rm -rf "${d}"; mkdir -p "${d}/.github/workflows"
+  cp ".github/workflows/${other}" "${d}/.github/workflows/"
+  anchor="$(grep -n '^      - name: Restore cached third-party crate sources' ".github/workflows/${other}" | head -1 | cut -d: -f1)"
+  insert_before "${d}/.github/workflows/${other}" "$(sed -n "${anchor}p" ".github/workflows/${other}")" "${work}/sources-step.yml"
+  rc=0; o="$(groups_run "${d}" ".github/workflows/${other}")" || rc=$?
+  [[ ${rc} -ne 0 ]] || { echo "check-cache-groups should refuse the untrusted restore in ${other}" >&2; exit 1; }
 done
 
 # The whole test again on a flipped tree (flag true on the untrusted half with its record line), which is

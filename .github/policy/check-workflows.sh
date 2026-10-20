@@ -71,9 +71,15 @@ fi
 cache_mode_files=()
 while IFS= read -r -d '' file; do cache_mode_files+=("${file}"); done < <(find .github/workflows -type f -name '*.yml' -print0 | sort -z)
 ruby "${policy}/check-cache-mode.rb" "${cache_mode_files[@]}"
+# Every workflow, not only the concern ones: a compiled-cache step anywhere else fails the check.
+for required in linux macos windows; do
+  [[ -f ".github/workflows/${required}-validation-concern.yml" ]] || { echo "check-cache-groups: missing .github/workflows/${required}-validation-concern.yml" >&2; exit 1; }
+done
+ruby "${policy}/check-cache-groups.rb" "${cache_mode_files[@]}"
 
 ruby "${policy}/check-dispatch-contracts.rb"
 ruby "${policy}/check-suite-catalog.rb"
+ruby "${policy}/check-scan-gate.rb"
 
 if find . -type f -not -path './.git' -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/policy/*' -not -path './.github/ci-matrix.json' -not -path './.github/dependabot.yml' -not -path './.github/tool-pins.json' -not -path './.github/egress-allowlist.txt' -not -path './.github/CODEOWNERS' -not \( -path './docs/*.md' -not -path './docs/*/*' \) -not -name '.gitignore' -print -quit | grep -q .; then
   echo "Only workflow files (and an optional .gitignore) may be tracked at this bootstrap phase." >&2

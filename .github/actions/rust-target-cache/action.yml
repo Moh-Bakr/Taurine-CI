@@ -6,7 +6,9 @@ description: |
   - locate: the cached target directory and the exact key;
   - restored: strips every workspace (path, vendored or Taurine-authored) crate from what was
     restored, so restored state can only ever stand in for third-party crates, and reports
-    hit or miss with the restored size;
+    hit or miss with the restored size. With `deny-door: true` (every untrusted read-only restore)
+    it also strips every OpenSSL door crate output and every crate built on one, and fails if any
+    remains, so compiled OpenSSL is never restored into an untrusted job;
   - save: strips the same set from the finished build, then proves the result (inventory,
     no workspace crate name, no reference into the private checkout, no executable) and
     fails when the proof does not hold, so the save step after it never runs.
@@ -66,6 +68,14 @@ inputs:
   os-label:
     description: Label for the summary lines
     required: true
+  deny-door:
+    description: |
+      restored mode only; the literal true or false (default false). true also strips every OpenSSL
+      door crate, and every crate that depends on one, from what was restored, and fails when any
+      such entry remains. The untrusted read-only restores always pass true (docs/untrusted-readonly-cache.md,
+      section 4.5): compiled OpenSSL output is never restored into an untrusted job.
+    required: false
+    default: 'false'
 
 outputs:
   dir:
@@ -191,14 +201,22 @@ runs:
         # doc or package output) is ever saved.
         cached_dirs='deps build .fingerprint'
 
+        # The crates that carry compiled OpenSSL or an alternative C TLS stack: the door crate and
+        # its OpenSSL dependencies, plus the crates the dependency policy bans outright. A restore
+        # that must never hold their output strips these and everything built on them.
+        door_crates='taurine-tls-openssl openssl openssl-sys openssl-src openssl-macros tokio-openssl postgres-openssl native-tls aws-lc-sys aws-lc-rs aws-lc-fips-sys'
+
         # Writes local.txt (crates built from the private checkout: no `source` in the lock)
         # and strip.txt (local plus every package that depends on one, transitively) and
         # keep.txt (everything else), all as normalised names (dashes to underscores, the
-        # form cargo uses in deps/ file names) under $1.
+        # form cargo uses in deps/ file names) under $1. With a second argument `door`, the
+        # OpenSSL door crates (door_crates below) count as roots too: they and every crate that
+        # depends on one, transitively, join strip.txt, and door.txt lists exactly those.
         classify_lock() {
-          local out="$1"
+          local out="$1" door_list=''
+          [[ "${2:-}" != door ]] || door_list="${door_crates}"
           mkdir -p "${out}"
-          tr -d '\r' < Cargo.lock | awk -v out="${out}" '
+          tr -d '\r' < Cargo.lock | awk -v out="${out}" -v doors="${door_list}" '
             function flush() {
               if (name != "") { count++; pname[count] = name; plocal[count] = !remote; pdeps[count] = deps }
               name = ""; remote = 0; deps = ""; indeps = 0
@@ -214,6 +232,8 @@ runs:
             END {
               flush()
               for (i = 1; i <= count; i++) if (plocal[i]) { strip[norm(pname[i])] = 1; local_[norm(pname[i])] = 1 }
+              nd = split(doors, dl, " ")
+              for (j = 1; j <= nd; j++) { strip[norm(dl[j])] = 1; door_[norm(dl[j])] = 1 }
               changed = 1
               while (changed) {
                 changed = 0
@@ -225,12 +245,14 @@ runs:
                 }
               }
               for (n in local_) print n > (out "/local.txt")
+              for (n in door_) print n > (out "/door.txt")
               for (n in strip) print n > (out "/strip.txt")
               for (i = 1; i <= count; i++) { n = norm(pname[i]); if (!(n in strip)) print n > (out "/keep.txt") }
             }
           '
-          touch "${out}/local.txt" "${out}/strip.txt" "${out}/keep.txt"
+          touch "${out}/local.txt" "${out}/strip.txt" "${out}/keep.txt" "${out}/door.txt"
           sort -u -o "${out}/keep.txt" "${out}/keep.txt"
+          sort -u -o "${out}/door.txt" "${out}/door.txt"
           sort -u -o "${out}/strip.txt" "${out}/strip.txt"
           sort -u -o "${out}/local.txt" "${out}/local.txt"
         }
@@ -386,6 +408,33 @@ runs:
           wc -l < "${sets}/remove.txt" | tr -d ' ' || return 1
         }
 
+        # Counts the entries of the debug profile under $1 that are named for a door crate (file or
+        # directory, with or without the lib prefix), using door.txt of the sets directory $2, plus, as a
+        # content-level defence in depth, any entry at any depth under debug/deps or debug/build named
+        # libssl*, libcrypto*, openssl-build*, libeay* or ssleay* (any case), whichever crate produced it. Prints the count only, never a name.
+        door_entries_remaining() {
+          local profile="$1" sets="$2" names entries d by_name=0 by_content=0
+          names="$(sed 's/_/[-_]/g' "${sets}/door.txt" | paste -sd'|' -)" || return 1
+          entries="$(for d in ${cached_dirs}; do
+            if [[ -d "${profile}/${d}" ]]; then cache_find "${profile}/${d}" -mindepth 1 -maxdepth 1 -print || exit 1; fi
+          done)" || return 1
+          if [[ -n "${names}" ]]; then
+            by_name="$(printf '%s\n' "${entries}" | sed -E 's#^.*/##' | grep -cE "^(lib)?(${names})-[0-9a-f]+(\.|$)" || true)"
+          fi
+          # Recursive, case-insensitive, and it names the old OpenSSL library names too: a door library hidden
+          # under an unrelated crate's output directory (build/renamed-sys-<hash>/out/lib/libssl.a) is found.
+          # A traversal error fails the helper instead of reading as an empty result.
+          content=''
+          for d in deps build; do
+            if [[ -d "${profile}/${d}" ]]; then
+              found="$(cache_find "${profile}/${d}" -mindepth 1 \( -iname 'libssl*' -o -iname 'libcrypto*' -o -iname 'openssl-build*' -o -iname 'libeay*' -o -iname 'ssleay*' \) -print)" || return 1
+              content="${content}${found}"$'\n'
+            fi
+          done
+          by_content="$(printf '%s' "${content}" | grep -c . || true)"
+          echo $((by_name + by_content))
+        }
+
         size_mib() {
           local total=0 d kib
           for d in ${cached_dirs}; do
@@ -417,17 +466,28 @@ runs:
       env:
         TARGET_DIR: ${{ inputs.dir }}
         CACHE_HIT: ${{ inputs.cache-hit }}
+        DENY_DOOR: ${{ inputs.deny-door }}
         OS_LABEL: ${{ inputs.os-label }}
       run: |
         set -euo pipefail
         source "${RUNNER_TEMP}/taurine-ci/target-cache.sh"
         profile="$(to_unix_path "${TARGET_DIR}")/debug"
         sets="$(to_unix_path "${RUNNER_TEMP}")/target-cache-restored"
-        classify_lock "${sets}"
+        [[ "${DENY_DOOR}" == true || "${DENY_DOOR}" == false ]] || { echo 'target-cache: deny-door must be the literal true or false' >&2; exit 1; }
+        if [[ "${DENY_DOOR}" == true ]]; then classify_lock "${sets}" door; else classify_lock "${sets}"; fi
         if [[ "${CACHE_HIT}" == true ]]; then
           # Defence in depth: whatever the entry holds, a workspace crate is never taken from
           # it, so a restored entry can only stand in for third-party crates.
           removed="$(strip_profile "${profile}" "${sets}")"
+          # With deny-door (every untrusted restore) no OpenSSL door crate output may remain either:
+          # the door's own proof compares version strings, so a restored library is never trusted.
+          if [[ "${DENY_DOOR}" == true ]]; then
+            remaining="$(door_entries_remaining "${profile}" "${sets}")"
+            if [[ "${remaining}" != 0 ]]; then
+              echo "target-cache: ${remaining} OpenSSL door entries remain after the restore-time strip" >&2
+              exit 1
+            fi
+          fi
           size="$(size_mib "${profile}")"
           state="exact hit, ${size} MiB restored (${removed} entries removed by the restore-time strip)"
         else

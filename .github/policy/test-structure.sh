@@ -74,7 +74,7 @@ expect_reject 'the required check renamed' 'not "Validate workflow policy"'
 fresh; swap "${public}" '  base-pass:
 ' '  base-pass-moved:
 '
-expect_reject 'another job renamed in the policy workflow' 'reviewed shapes'
+expect_reject 'another job renamed in the policy workflow' 'jobs changed'
 
 fresh; mv "${dir}/t/.github/workflows/base-policy.yml" "${dir}/t/.github/workflows/base-policy-moved.yml"
 expect_reject 'the reusable base-policy workflow renamed' 'in the manifest but missing from the tree'
@@ -227,11 +227,11 @@ fresh; variant "${prune_old}" "[${prune_old}, {\"tier\" => \"public\", \"trigger
 expect_reject 'a forbidden trigger in a transitional alternative' 'lists the forbidden trigger pull_request_target'
 # The required-check pin applies to every alternative.
 pol_old='{"tier" => "policy",
-      "triggers" => ["pull_request", "push", "workflow_dispatch"],
-      "jobs" => ["base-pass", "policy"]}'
-fresh; variant "${pol_old}" "${pol_old}, {\"tier\" => \"policy\", \"triggers\" => [\"pull_request\", \"push\", \"workflow_dispatch\"], \"jobs\" => [\"base-pass\"]}"
+     "triggers" => ["pull_request", "push", "workflow_dispatch"],
+     "jobs" => ["base-pass", "policy", "policy-evidence", "policy-fixtures", "policy-mutations", "policy-structure"]}'
+fresh; variant "${pol_old}" "[${pol_old}, {\"tier\" => \"policy\", \"triggers\" => [\"pull_request\", \"push\", \"workflow_dispatch\"], \"jobs\" => [\"base-pass\"]}]"
 expect_reject 'an alternative without the required check job' 'lacks the required check job policy'
-fresh; variant "${pol_old}" "${pol_old}, \"absent\""
+fresh; variant "${pol_old}" "[${pol_old}, \"absent\"]"
 expect_reject 'an alternative that lets the policy workflow be absent' 'required status check would be dropped'
 
 # A second YAML document is read by one parser and ignored by another: refused.
@@ -249,15 +249,14 @@ expect_reject 'a duplicate jobs key' 'the key "jobs" appears twice'
 fresh; printf '\npermissions: {}\n' >> "${dir}/t/.github/workflows/cache-prune.yml"
 expect_reject 'a duplicate top-level key (permissions)' 'appears twice'
 
-# Wave C step A: the Linux, macOS and Windows dispatchers each have exactly two reviewed shapes (the
-# current jobs and the Wave C jobs: long-pole jobs, and on Linux and Windows the plan folded into
-# validate-input). Anything else, a job added or a job renamed, matches neither and is refused, whichever
-# of the two shapes the tree is in. These cases hold in both.
+# Wave C: the Linux, macOS and Windows dispatchers each have exactly one reviewed shape (the long-pole
+# jobs, and on Linux and Windows the plan folded into validate-input). Anything else, a job added or a job
+# renamed, is refused with the single-shape message that names the changed field.
 for dispatcher in linux macos windows; do
   fresh; printf '\n  validate-extra-pole:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: "true"\n' >> "${dir}/t/.github/workflows/${dispatcher}-validation.yml"
-  expect_reject "a ${dispatcher} dispatcher with a job neither reviewed shape has" 'matches none of the 2 reviewed shapes'
+  expect_reject "a ${dispatcher} dispatcher with a job the reviewed shape lacks" 'jobs changed'
   fresh; swap ".github/workflows/${dispatcher}-validation.yml" $'\n  timings:\n' $'\n  timings-renamed:\n'
-  expect_reject "a ${dispatcher} dispatcher with the Timings job renamed" 'matches none of the 2 reviewed shapes'
+  expect_reject "a ${dispatcher} dispatcher with the Timings job renamed" 'jobs changed'
 done
 
 echo 'structure tests: every unreviewed control-plane change is rejected'

@@ -195,7 +195,7 @@ jobs:
           engine: ${{ inputs.engine }}
 
       - name: Start the PostgreSQL, TLS or bastion servers
-        if: ${{ inputs.engine == 'postgres' || inputs.engine == 'pg-dbx' || inputs.engine == 'pgtls' || inputs.engine == 'tls-legacy' || inputs.engine == 'bastion' }}
+        if: ${{ inputs.engine == 'postgres' || inputs.engine == 'pgtls' || inputs.engine == 'tls-legacy' || inputs.engine == 'bastion' }}
         uses: ./.github/actions/live-start-pg  # zizmor: ignore[self-repository]
         with:
           engine: ${{ inputs.engine }}

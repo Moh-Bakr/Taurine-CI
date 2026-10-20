@@ -168,4 +168,125 @@ if removed="$(strip_profile "${profile}" "${fixture}/sets" 2>"${fixture}/strip-e
 fi
 [[ "$(cat "${fixture}/strip-err")" == 'target-cache: cache content scan failed' ]]
 chmod 600 "${unreadable}"
+# The door strip (deny-door, every untrusted restore): the OpenSSL door crates and every crate built on
+# one are removed from a restored entry, entries of unrelated third-party crates stay, and a leftover door
+# entry is counted. Without the door argument nothing about the classification changes.
+door_dir="${fixture}/door"
+mkdir -p "${door_dir}/src" "${door_dir}/sets" "${door_dir}/plain-sets" "${door_dir}/target/debug"
+cat > "${door_dir}/src/Cargo.lock" <<'LOCK'
+[[package]]
+name = "openssl-src"
+version = "300.5.0"
+source = "registry+https://example.invalid"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.0"
+source = "registry+https://example.invalid"
+dependencies = [
+ "openssl-src",
+]
+
+[[package]]
+name = "openssl"
+version = "0.10.0"
+source = "registry+https://example.invalid"
+dependencies = [
+ "openssl-sys",
+]
+
+[[package]]
+name = "tls-wrapper"
+version = "1.0.0"
+source = "registry+https://example.invalid"
+dependencies = [
+ "openssl",
+]
+
+[[package]]
+name = "rustls-thing"
+version = "1.0.0"
+source = "registry+https://example.invalid"
+LOCK
+(
+  cd "${door_dir}/src"
+  classify_lock "${door_dir}/plain-sets"
+  classify_lock "${door_dir}/sets" door
+  # Plain classification keeps every third-party crate, door ones included; the door pass strips them and
+  # their dependents, and nothing else.
+  for crate in openssl_src openssl_sys openssl tls_wrapper rustls_thing; do
+    grep -qx "${crate}" "${door_dir}/plain-sets/keep.txt" || { echo "plain classification dropped ${crate}" >&2; exit 1; }
+  done
+  [[ ! -s "${door_dir}/plain-sets/door.txt" ]] || { echo 'plain classification reported door crates' >&2; exit 1; }
+  for crate in openssl_src openssl_sys openssl tls_wrapper; do
+    grep -qx "${crate}" "${door_dir}/sets/strip.txt" || { echo "door classification kept ${crate}" >&2; exit 1; }
+  done
+  grep -qx rustls_thing "${door_dir}/sets/keep.txt" || { echo 'door classification dropped an unrelated crate' >&2; exit 1; }
+  grep -qx rustls_thing "${door_dir}/sets/strip.txt" && { echo 'door classification stripped an unrelated crate' >&2; exit 1; }
+  dprofile="${door_dir}/target/debug"
+  mkdir -p "${dprofile}/deps" "${dprofile}/build/openssl-src-1111/out" "${dprofile}/build/openssl-sys-2222/out" \
+    "${dprofile}/.fingerprint/openssl-sys-2222" "${dprofile}/.fingerprint/tls-wrapper-4444" "${dprofile}/.fingerprint/rustls-thing-5555"
+  printf 'safe' > "${dprofile}/deps/libopenssl_sys-2222.rlib"
+  printf 'safe' > "${dprofile}/deps/libopenssl-3333.rlib"
+  printf 'safe' > "${dprofile}/deps/libtls_wrapper-4444.rlib"
+  printf 'safe' > "${dprofile}/deps/librustls_thing-5555.rlib"
+  printf 'safe' > "${dprofile}/build/openssl-src-1111/out/libssl.a"
+  # The realistic layout of the shipped door (taurine-app enables legacy-tls, so rust-app and rust-db caches carry
+  # it): libssl.a and libcrypto.a under both build outputs, openssl-src's source tree and fingerprints.
+  printf 'safe' > "${dprofile}/build/openssl-src-1111/out/libcrypto.a"
+  mkdir -p "${dprofile}/build/openssl-src-1111/out/lib" "${dprofile}/.fingerprint/openssl-src-1111" "${dprofile}/.fingerprint/openssl-1234"
+  printf 'safe' > "${dprofile}/build/openssl-src-1111/out/lib/libssl.a"
+  printf 'safe' > "${dprofile}/build/openssl-sys-2222/out/libssl.a"
+  printf 'safe' > "${dprofile}/build/openssl-sys-2222/out/libcrypto.a"
+  # Before the strip the door entries are counted; the plain strip leaves them; the door strip removes them.
+  [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" -ge 5 ]] || { echo 'door entries were not counted' >&2; exit 1; }
+  strip_profile "${dprofile}" "${door_dir}/plain-sets" >/dev/null
+  [[ -e "${dprofile}/deps/libopenssl_sys-2222.rlib" ]] || { echo 'the plain strip removed a door entry' >&2; exit 1; }
+  strip_profile "${dprofile}" "${door_dir}/sets" >/dev/null
+  [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the door strip left a door entry' >&2; exit 1; }
+  for path in deps/libopenssl_sys-2222.rlib deps/libopenssl-3333.rlib deps/libtls_wrapper-4444.rlib build/openssl-src-1111 \
+    build/openssl-sys-2222 build/openssl-sys-2222/out/libssl.a build/openssl-sys-2222/out/libcrypto.a build/openssl-src-1111/out/libcrypto.a \
+    .fingerprint/openssl-sys-2222 .fingerprint/openssl-src-1111 .fingerprint/openssl-1234 .fingerprint/tls-wrapper-4444; do
+    [[ ! -e "${dprofile}/${path}" ]] || { echo "the door strip retained ${path}" >&2; exit 1; }
+  done
+  [[ -e "${dprofile}/deps/librustls_thing-5555.rlib" && -d "${dprofile}/.fingerprint/rustls-thing-5555" ]] || { echo 'the door strip removed an unrelated crate' >&2; exit 1; }
+  # A door entry that survives (here planted after the strip) is reported, so the restore step fails.
+  printf 'planted' > "${dprofile}/deps/libopenssl_sys-9999.rlib"
+  [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 1 ]] || { echo 'a surviving door entry was not reported' >&2; exit 1; }
+  rm -f "${dprofile}/deps/libopenssl_sys-9999.rlib"
+  # The step fails if any one door entry survives: each realistic shape, planted alone after the strip, is reported.
+  for planted in deps/libopenssl_sys-9999.rlib deps/libopenssl-3333.rlib build/openssl-sys-9999 build/openssl-src-9999 \
+    .fingerprint/openssl-sys-9999 .fingerprint/openssl-src-9999 .fingerprint/openssl-9999; do
+    case "${planted}" in deps/*) printf 'planted' > "${dprofile}/${planted}" ;; *) mkdir -p "${dprofile}/${planted}/out"; printf 'x' > "${dprofile}/${planted}/out/libssl.a" ;; esac
+    # A planted directory also holds a nested libssl.a, which the recursive content check counts too.
+    [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" -ge 1 ]] || { echo "a surviving ${planted} was not reported" >&2; exit 1; }
+    rm -rf "${dprofile:?}/${planted}"
+  done
+  [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the door fixture was not clean after the survivor cases' >&2; exit 1; }
+  # A door library hidden under an unrelated crate name, at any depth and in any case, is reported.
+  for hidden in build/renamed-sys-7777/out/lib/libssl.a build/renamed-sys-7777/out/LIBCRYPTO.a build/other-8888/out/deep/er/libeay32.lib deps/SSLEAY32.dll; do
+    mkdir -p "${dprofile}/$(dirname "${hidden}")"; printf 'planted' > "${dprofile}/${hidden}"
+    [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 1 ]] || { echo "a hidden ${hidden} was not reported" >&2; exit 1; }
+    rm -rf "${dprofile:?}/build/renamed-sys-7777" "${dprofile:?}/build/other-8888" "${dprofile:?}/${hidden}"
+  done
+  # A traversal error fails the helper: an unreadable directory under deps is not read as an empty result.
+  mkdir -p "${dprofile}/build/unreadable-1/out"; chmod 000 "${dprofile}/build/unreadable-1/out"
+  if [[ "$(id -u)" != 0 ]]; then
+    if (door_entries_remaining "${dprofile}" "${door_dir}/sets") >/dev/null 2>&1; then
+      chmod 755 "${dprofile}/build/unreadable-1/out"; echo 'a traversal error was swallowed by the door check' >&2; exit 1
+    fi
+  fi
+  chmod 755 "${dprofile}/build/unreadable-1/out"; rm -rf "${dprofile:?}/build/unreadable-1"
+  # Content-level defence in depth: whatever crate produced them, libssl*, libcrypto* and openssl-build*
+  # entries under debug/deps and debug/build are refused after the door strip, and nothing else is.
+  [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the door fixture was not clean before the content cases' >&2; exit 1; }
+  for planted in deps/libssl.so.3 deps/libcrypto-0a1b.a build/openssl-build-1234; do
+    case "${planted}" in build/*) mkdir -p "${dprofile}/${planted}" ;; *) printf 'planted' > "${dprofile}/${planted}" ;; esac
+    [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 1 ]] || { echo "a planted ${planted} was not reported" >&2; exit 1; }
+    rm -rf "${dprofile:?}/${planted}"
+  done
+  mkdir -p "${dprofile}/.fingerprint/libssl-1"
+  printf 'x' > "${dprofile}/deps/librustls_thing-6666.rlib"
+  [[ "$(door_entries_remaining "${dprofile}" "${door_dir}/sets")" == 0 ]] || { echo 'the content check reported an unrelated or out-of-scope entry' >&2; exit 1; }
+)
 echo 'rust target cache strip fixtures passed'

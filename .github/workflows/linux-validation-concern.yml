@@ -18,6 +18,11 @@ on:
         required: false
         default: 60
         type: number
+      untrusted_readonly_cache:
+        description: Restore the two reviewed Rust caches read-only on the untrusted ref, for rust-db and the rust-app shards only (docs/untrusted-readonly-cache.md, Stage 2). The caller passes a literal; the reviewed default is off until the enforcement spike is recorded green.
+        required: false
+        default: false
+        type: boolean
       suite_selection:
         description: Optional reviewed suite selection JSON ({selection_mode, selected_suite_ids, selection_digest}); empty means the full set
         required: false
@@ -234,41 +239,20 @@ jobs:
           set -euo pipefail
           ruby .github/policy/suite-contract.rb .github/ci-matrix.json "${CONCERN}" "${GITHUB_WORKSPACE}/src" >> "${GITHUB_OUTPUT}"
 
-      - name: Set up Node.js and install the locked JavaScript dependencies
-        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || inputs.concern == 'scan-security' || inputs.concern == 'rust-packaging'
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
-        with:
-          root: true
-          desktop: true
-          # The desktop concerns and the browser tiers read taurine-mobile only as source files (the
-          # checkout), never its node_modules; every other concern keeps the mobile install.
-          mobile: ${{ !(startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'desktop-')) }}
-          # The browser tiers are frontend-only: they do not need the vendored OpenVPN3 sources.
-          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'rust-packaging' && !startsWith(inputs.concern, 'e2e-') }}
-
-      - name: Set up the Rust toolchain
-        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
-        # Kept as ./ : the policy matches this exact form for local actions.
-        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
-        with:
-          # The clippy scan compiles the workspace, so it takes the same system libraries
-          # as the rust-app concern (webkit, dbus, openssl).
-          concern: ${{ inputs.concern == 'scan-security' && 'rust-app' || inputs.concern }}
-
-      - name: Fetch pinned vendored sources
-        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security'
+      # Early suite-ownership check, on data only, in the same window as the contract above: after the
+      # token is revoked and root is dropped, before any dependency install, build or test. The plan step
+      # holds no source (a source-bearing planning job would be one more runner on the critical path),
+      # so the first place a candidate can be refused is the start of each concern job. It reads the
+      # generated ownership manifest and the tracked file NAMES, opens no test file and runs no project
+      # script, and refuses a test file no suite owns in seconds instead of at the end of a 25 to 60
+      # minute job. The trusted collector's own check at the end is unchanged. Only counts and a reason
+      # class are printed; no path is ever logged (docs/how-ci-works.md, "Early suite-ownership check").
+      - name: Refuse test files with no suite owner before any build
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          # `fetch` verifies each download against the sha256 pinned in
-          # vendor.lock and applies the reviewed boringtun zeroize patch, so this
-          # is a supply-chain check as much as a prerequisite.
-          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
-            echo 'vendor-fetch: failed (detailed output withheld)' >&2
-            exit 1
-          fi
-          echo 'vendor-fetch: passed'
+          ruby .github/policy/refuse-unowned-tests.rb "${GITHUB_WORKSPACE}/src"
 
       # Third-party crate sources only: cargo's registry index, the downloaded
       # `.crate` archives and the git dependency databases. Never `target/`, never
@@ -280,7 +264,7 @@ jobs:
       # restored archive is re-verified against the lock checksums below.
       - name: Locate Cargo home for the third-party source cache
         id: cargo-home
-        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -298,7 +282,7 @@ jobs:
       # (github.ref == main, protected-ancestor == true) and the cache policy fails if one does not.
       - name: Restore cached third-party crate sources
         id: cargo-sources
-        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        if: ${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -312,7 +296,7 @@ jobs:
       # private Cargo.lock; anything that does not match, or is not in a lock at
       # all, is deleted before cargo runs. Only counts are printed.
       - name: Verify restored crate archives against Cargo.lock
-        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security' }}
+        if: ${{ inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
         with:
@@ -320,36 +304,37 @@ jobs:
           cache-hit: ${{ steps.cargo-sources.outputs.cache-hit }}
           os-label: Linux
 
-      # Saved before any project code runs, so nothing the private SHA's build scripts, proc
-      # macros or tests do can reach what is saved: only from the protected main branch, only
-      # for a source SHA on a protected private branch (the source-checkout ancestry answer),
-      # only on a miss, and under the key the restore step computed (cache-primary-key), never
-      # a hashFiles evaluated later. Only registry/cache is cached: every `.crate` in it is
-      # re-hashed against Cargo.lock on restore, whereas the registry index and git databases
-      # could not be verified, so cargo rebuilds them. The entry is shared by every Rust concern
-      # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
-      # cargo verifies each download against the lock checksum and runs no build script.
-      - name: Complete the third-party source set before saving
-        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r lock; do
-            manifest="$(dirname "${lock}")/Cargo.toml"
-            [[ -f "${manifest}" ]] || continue
-            if ! cargo fetch --locked --manifest-path "${manifest}" >"${RUNNER_TEMP}/cargo-fetch.log" 2>&1; then
-              echo 'cargo-fetch: one lockfile could not be fetched completely (detail withheld)'
-            fi
-          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*' | sort)
-          echo 'cargo-fetch: done'
-
-      - name: Save verified third-party crate sources
-        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Stage 2 (docs/untrusted-readonly-cache.md): the untrusted ref restores the reviewed crate
+      # sources read-only, for rust-db and the rust-app shards only, behind the caller's literal flag. It runs after the token
+      # revoke and the root removal, under the caller's `cache-mode: read` (the platform refuses any
+      # write), with the exact key (no restore-keys: a branch-scoped prefix match would beat main's
+      # entry) and is verified by the very next step. No save, completion or strip step takes this ref.
+      - name: Restore cached third-party crate sources (untrusted, read-only)
+        id: cargo-sources-untrusted
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ steps.cargo-home.outputs.dir }}/registry/cache
-          key: ${{ steps.cargo-sources.outputs.cache-primary-key }}
+          key: cargo-sources-v3-${{ runner.os }}-${{ hashFiles('src/Cargo.lock', 'src/taurine-backend/*/Cargo.lock', 'src/taurine-backend/vendor/*/Cargo.lock', 'src/vendor/*/Cargo.lock') }}
+
+      - name: Verify restored crate archives against Cargo.lock (untrusted, read-only)
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/verify-cargo-cache  # zizmor: ignore[self-repository]
+        with:
+          sources-dir: ${{ steps.cargo-home.outputs.dir }}
+          cache-hit: ${{ steps.cargo-sources-untrusted.outputs.cache-hit }}
+          os-label: Linux
+
+      - name: Set up the Rust toolchain
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-toolchain  # zizmor: ignore[self-repository]
+        with:
+          # The clippy scan compiles the workspace, so it takes the same system libraries
+          # as the rust-app concern (webkit, dbus, openssl).
+          concern: ${{ (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') && 'rust-app' || inputs.concern }}
 
       # Compiled third-party dependency cache: main only, for a protected source SHA (ref isolation,
       # finding H1). cargo never re-verifies a compiled .rlib, so an entry is only as trustworthy as
@@ -389,6 +374,93 @@ jobs:
           cache-hit: ${{ steps.cargo-target-cache.outputs.cache-hit }}
           os-label: Linux
 
+      # Stage 2: the compiled third-party dependencies, restored read-only on the untrusted ref
+      # (rust-db and the rust-app shards only, exact key, no restore-keys), stripped by the very next
+      # step, which also removes every OpenSSL door crate output (deny-door): compiled OpenSSL is never
+      # restored into an untrusted job. Never saved: only the main half saves, and only rust-app-2 of
+      # the rust-app shards, under the same key every shard restores.
+      - name: Restore compiled third-party dependencies (untrusted, read-only)
+        id: cargo-target-cache-untrusted
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-target.outputs.dir }}/debug/deps
+            ${{ steps.cargo-target.outputs.dir }}/debug/build
+            ${{ steps.cargo-target.outputs.dir }}/debug/.fingerprint
+          key: ${{ steps.cargo-target.outputs.key }}
+
+      - name: Strip workspace crates from the restored dependency cache (untrusted, read-only)
+        if: ${{ github.ref == 'refs/heads/untrusted' && inputs.untrusted_readonly_cache && (inputs.concern == 'rust-db' || startsWith(inputs.concern, 'rust-app-')) }}
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/rust-target-cache  # zizmor: ignore[self-repository]
+        with:
+          mode: restored
+          dir: ${{ steps.cargo-target.outputs.dir }}
+          cache-hit: ${{ steps.cargo-target-cache-untrusted.outputs.cache-hit }}
+          os-label: Linux
+          deny-door: 'true'
+
+      # Saved before any project code runs, so nothing the private SHA's build scripts, proc
+      # macros or tests do can reach what is saved: only from the protected main branch, only
+      # for a source SHA on a protected private branch (the source-checkout ancestry answer),
+      # only on a miss, and under the key the restore step computed (cache-primary-key), never
+      # a hashFiles evaluated later. Only registry/cache is cached: every `.crate` in it is
+      # re-hashed against Cargo.lock on restore, whereas the registry index and git databases
+      # could not be verified, so cargo rebuilds them. The entry is shared by every Rust concern
+      # on this OS, so the saver first fetches every crate each lockfile names (all platforms);
+      # cargo verifies each download against the lock checksum and runs no build script.
+      - name: Complete the third-party source set before saving
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r lock; do
+            manifest="$(dirname "${lock}")/Cargo.toml"
+            [[ -f "${manifest}" ]] || continue
+            if ! cargo fetch --locked --manifest-path "${manifest}" >"${RUNNER_TEMP}/cargo-fetch.log" 2>&1; then
+              echo 'cargo-fetch: one lockfile could not be fetched completely (detail withheld)'
+            fi
+          done < <(find . -name Cargo.lock -not -path '*/node_modules/*' -not -path '*/target/*' | sort)
+          echo 'cargo-fetch: done'
+
+      - name: Save verified third-party crate sources
+        if: ${{ github.ref == 'refs/heads/main' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) && steps.verified-source.outputs.protected-ancestor == 'true' && steps.cargo-sources.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cargo-home.outputs.dir }}/registry/cache
+          key: ${{ steps.cargo-sources.outputs.cache-primary-key }}
+
+      # Project install scripts (npm ci) run here, after every cache restore: a restore holds the cache
+      # token and must not be reachable through an environment that source-controlled code could set.
+      - name: Set up Node.js and install the locked JavaScript dependencies
+        if: (inputs.concern != 'taurine-cli' && !startsWith(inputs.concern, 'rust-') && !startsWith(inputs.concern, 'scan-')) || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint') || inputs.concern == 'rust-packaging'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/node-setup  # zizmor: ignore[self-repository]
+        with:
+          root: true
+          desktop: true
+          # The desktop concerns and the browser tiers read taurine-mobile only as source files (the
+          # checkout), never its node_modules; every other concern keeps the mobile install.
+          mobile: ${{ !(startsWith(inputs.concern, 'e2e-') || startsWith(inputs.concern, 'desktop-')) }}
+          # The browser tiers are frontend-only: they do not need the vendored OpenVPN3 sources.
+          vendor-fetch: ${{ inputs.concern != 'scan-security' && inputs.concern != 'scan-lint' && inputs.concern != 'rust-packaging' && !startsWith(inputs.concern, 'e2e-') }}
+
+      - name: Fetch pinned vendored sources
+        if: inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `fetch` verifies each download against the sha256 pinned in
+          # vendor.lock and applies the reviewed boringtun zeroize patch, so this
+          # is a supply-chain check as much as a prerequisite.
+          if ! bash scripts/vendor-openvpn3.sh fetch >"${RUNNER_TEMP}/vendor-fetch.log" 2>&1; then
+            echo 'vendor-fetch: failed (detailed output withheld)' >&2
+            exit 1
+          fi
+          echo 'vendor-fetch: passed'
+
       - name: Install the pinned Playwright browser
         # e2e-visual runs in the Playwright image, whose browsers are preinstalled.
         if: startsWith(inputs.concern, 'e2e-') && inputs.concern != 'e2e-visual'
@@ -410,18 +482,28 @@ jobs:
 
       - name: Run the scanner
         if: inputs.concern == 'scan-security'
-        # One job, five scanners (gitleaks, npm audit, Semgrep, cargo-deny, clippy): each runs as
-        # its own step with its own report, so one failing scanner does not hide the others.
-        # Clippy, the slow one, runs last.
+        # One job, four scanners (gitleaks, npm audit, Semgrep, cargo-deny): each runs as its own
+        # step with its own report, so one failing scanner does not hide the others. The Rust
+        # lints run in the parallel `scan-lint` concern below.
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
         with:
           scanner: all
 
-      # Enforcing fmt and clippy over the whole owned workspace (the scanner above reports
-      # the security lints only). Runs after the scanner so both reports appear.
+      # The `scan-lint` concern, parallel to `scan-security`: the warning-only security lints
+      # first, then the enforcing fmt and clippy over the whole owned workspace, so both reports
+      # appear. The two clippy runs use different flag sets (the security lints are warnings
+      # without --all-targets; enforcement denies every warning over all targets), so they are
+      # separate passes that share the one compiled dependency tree in this job.
+      - name: Run the security lints
+        if: inputs.concern == 'scan-lint'
+        # Kept as ./ : the policy matches this exact form for local actions.
+        uses: ./.github/actions/scan-concern  # zizmor: ignore[self-repository]
+        with:
+          scanner: clippy
+
       - name: Enforce rustfmt and clippy over the owned workspace
-        if: ${{ always() && !cancelled() && inputs.concern == 'scan-security' && steps.verified-source.outcome == 'success' }}
+        if: ${{ always() && !cancelled() && inputs.concern == 'scan-lint' && steps.verified-source.outcome == 'success' }}
         # Kept as ./ : the policy matches this exact form for local actions.
         uses: ./.github/actions/rust-lint-enforce  # zizmor: ignore[self-repository]
 
@@ -463,7 +545,7 @@ jobs:
 
       # A concern no family above handles must fail loudly, never pass by omission.
       - name: Reject an unsupported concern
-        if: ${{ inputs.concern != 'scan-security' && inputs.concern != 'scan-history' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) || startsWith(inputs.concern, 'e2e-') || inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
+        if: ${{ inputs.concern != 'scan-security' && inputs.concern != 'scan-lint' && inputs.concern != 'scan-history' && !(contains(fromJSON('["contracts","frontend-build-budget","desktop-shard-1","desktop-shard-2","desktop-quality","mobile-quality"]'), inputs.concern) || startsWith(inputs.concern, 'e2e-') || inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-')) }}
         shell: bash
         env:
           CONCERN: ${{ inputs.concern }}

@@ -30,7 +30,7 @@
 # files, run the private ownership audit locally.
 #
 # Usage: ruby refuse-unowned-tests.rb <repo-root>
-# Exit 0: every test file is owned, or the source carries no ownership manifest (an older revision).
+# Exit 0: every test file is owned. A source with no ownership manifest is refused (reason manifest_missing).
 # Exit 1: a test file has no owner, or the manifest is unreadable (fail closed).
 require 'json'
 require 'open3'
@@ -121,10 +121,8 @@ begin
   rescue SystemCallError
     nil
   end
-  if manifest_stat.nil?
-    report(['suite ownership: skipped (this source carries no ownership manifest)'], summary)
-    exit 0
-  end
+  # A missing manifest is refused, never skipped: a source that deletes the manifest must not skip the gate.
+  reject!('manifest_missing') if manifest_stat.nil?
   reject!('manifest_shape') unless manifest_stat.file?
 
   patterns = read_patterns(manifest)

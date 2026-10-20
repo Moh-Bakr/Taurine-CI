@@ -71,24 +71,34 @@ expect() {
     exit 1
   fi
 }
+# The selection is also published split by the table's long_pole flag (the dispatcher runs the long
+# poles in their own jobs): the two halves are disjoint, together exactly `matrix` (which the Result
+# job requires), and the long half is exactly the flagged concerns of the selection, in order.
+check_split() {
+  ruby -rjson -e 'out = File.readlines(ARGV.fetch(0)).to_h { |l| k, v = l.chomp.split("=", 2); [k, v] }
+    whole = JSON.parse(out.fetch("matrix")).fetch("concern"); long = JSON.parse(out.fetch("long_matrix")).fetch("concern"); short = JSON.parse(out.fetch("short_matrix")).fetch("concern")
+    flagged = JSON.parse(File.read(ARGV.fetch(1))).fetch("concerns").fetch("linux").select { |_, s| s["long_pole"] }.keys
+    abort "#{ARGV.fetch(2)}: long and short halves are not the selection" unless (long + short).sort == whole.sort && (long & short).empty? && long.length + short.length == whole.length
+    abort "#{ARGV.fetch(2)}: the long half is not exactly the flagged concerns" unless long == whole.select { |c| flagged.include?(c) } && short.none? { |c| flagged.include?(c) }' "${work}/out.txt" .github/ci-matrix.json "$1"
+}
 all="$(jq -r '[.concerns.linux | to_entries[] | select(.value.opt_in == null) | .key] | join(",")' .github/ci-matrix.json)"
 sha="$(change docs/a.md)"
 expect docs "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,scan-security'
+check_split docs
 sha="$(change taurine-backend/taurine-model/src/lib.rs)"
-# Wave C step A: the selection must name exactly the app shard rows of this tree's own table: the two-shard table
-# selects two, the three-shard table three, never a list written for the other (a table of any other size is refused).
+# The app shards the selection must name are the shard rows of this tree's own table, exactly: a table with
+# three shards must select three, never a list written for another table.
 table_shards="$(jq -r '[.concerns.linux | keys[] | select(test("^rust-app-[0-9]+$"))] | join(",")' .github/ci-matrix.json)"
-case "${table_shards}" in
-  'rust-app-1,rust-app-2' | 'rust-app-1,rust-app-2,rust-app-3') ;;
-  *) echo "selector case 'crate': the table's app shards are '${table_shards}', not the two reviewed sets" >&2; exit 1 ;;
-esac
+[[ "${table_shards}" == 'rust-app-1,rust-app-2,rust-app-3' ]] || { echo "selector case 'crate': the table's app shards are '${table_shards}', not rust-app-1 to rust-app-3" >&2; exit 1; }
 expect crate "$(selected "$(parent_of "${sha}")" "${sha}")" "partial contracts,rust-domain,${table_shards},scan-security"
+check_split crate
 sha="$(change taurine-backend/taurine-db-model/src/lib.rs)"
 expect db "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,rust-db,scan-security'
 sha="$(change taurine-desktop/src/a.ts)"
 expect ui "$(selected "$(parent_of "${sha}")" "${sha}")" 'partial contracts,frontend-build-budget,desktop-quality,desktop-shard-1,desktop-shard-2,e2e-critical,e2e-a11y,e2e-regression-1,e2e-regression-2,e2e-regression-3,e2e-regression-4,rust-packaging,scan-security'
 sha="$(change Cargo.lock)"
 expect lockfile "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
+check_split lockfile
 sha="$(change mystery/a.txt)"
 expect unknown "$(selected "$(parent_of "${sha}")" "${sha}")" "full ${all}"
 expect no-base "$(selected "" "${sha}")" "full ${all}"

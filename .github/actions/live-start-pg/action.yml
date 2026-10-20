@@ -1,7 +1,7 @@
 name: Start the PostgreSQL live servers
 description: >
-  Starts the PostgreSQL 17 servers behind the postgres, pg-dbx (the Dbx route),
-  pgtls (Postgres TLS, DBX TLS, mTLS and plain) and bastion (SSH tunnel) arms, and
+  Starts the PostgreSQL 17 servers behind the postgres (which also carries the
+  Dbx-route proof), pg-dbx (the pg8 measurement's Dbx fixture), pgtls (Postgres TLS, DBX TLS, mTLS and plain) and bastion (SSH tunnel) arms, and
   the legacy-protocol servers (PG 12/13 TLS 1.0/1.1, PG 17 RSA-kex) the
   tls-legacy arm proves.
   Every server image is pinned by digest. Credentials are per-run throwaways for a
@@ -59,6 +59,16 @@ runs:
                 docker logs dbx-postgres 2>&1 | tail -30 >&2 || true
                 exit 1
               fi
+              # The Dbx-route suites (dbx_pg_live, dbx_shadow_pg) dial the `postgres`
+              # role and database, not the lab's `taurine` / `payments`. The image
+              # created only `taurine` (POSTGRES_USER), so add the `postgres` role to
+              # this same server with the same throwaway password. The statement goes
+              # in on stdin, not on a command line, and the proof fails here when the
+              # role cannot log in. The `postgres` database is initdb's own.
+              printf "CREATE ROLE postgres WITH SUPERUSER LOGIN PASSWORD '%s';\n" "${pg_pass}" \
+                | docker exec -i dbx-postgres psql -h 127.0.0.1 -U taurine -d payments -v ON_ERROR_STOP=1 -q >/dev/null
+              docker exec dbx-postgres psql -h 127.0.0.1 -U postgres -d postgres -tAc 'select 1' >/dev/null 2>&1 \
+                || { echo 'postgres: the Dbx suites login (postgres) cannot connect after it was added' >&2; exit 1; }
               version="$(docker exec dbx-postgres psql -h 127.0.0.1 -U taurine -d payments -tAc 'show server_version' 2>/dev/null | head -1)"
               {
                 echo "TAURINE_TEST_PG=127.0.0.1:15432"
