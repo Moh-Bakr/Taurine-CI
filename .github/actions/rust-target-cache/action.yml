@@ -413,7 +413,7 @@ runs:
         # content-level defence in depth, any entry at any depth under debug/deps or debug/build named
         # libssl*, libcrypto*, openssl-build*, libeay* or ssleay* (any case), whichever crate produced it. Prints the count only, never a name.
         door_entries_remaining() {
-          local profile="$1" sets="$2" names entries d by_name=0 by_content=0
+          local profile="$1" sets="$2" names entries d by_name=0 by_content=0 content found
           names="$(sed 's/_/[-_]/g' "${sets}/door.txt" | paste -sd'|' -)" || return 1
           entries="$(for d in ${cached_dirs}; do
             if [[ -d "${profile}/${d}" ]]; then cache_find "${profile}/${d}" -mindepth 1 -maxdepth 1 -print || exit 1; fi

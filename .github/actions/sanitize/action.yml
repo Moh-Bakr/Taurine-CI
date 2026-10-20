@@ -338,8 +338,16 @@ runs:
             awk '/^- `/ && length($0) > 300 { f = 1 } END { exit f ? 1 : 0 }' "${kept}" || long=1
             r=0; grep -qiE "${secret_ere}" "${kept}" 2>/dev/null || r=$?
             [[ "${r}" -eq 1 ]] || secret=1
-            r=0; LC_ALL=C sed 's/ › / /g; s/ — / /g; s/ · / /g' "${kept}" | LC_ALL=C grep -q '[^ -~]' 2>/dev/null || r=$?
-            [[ "${r}" -eq 1 ]] || secret=1
+            # sed writes to a file whose status is checked before grep reads it: a sed that fails reads as a
+            # withheld section, never as a clean one. Only grep's status 1 (no byte outside printable ASCII) passes.
+            ascii_tmp="${kept}.ascii"
+            if LC_ALL=C sed 's/ › / /g; s/ — / /g; s/ · / /g' "${kept}" >"${ascii_tmp}" 2>/dev/null; then
+              r=0; LC_ALL=C grep -q '[^ -~]' "${ascii_tmp}" 2>/dev/null || r=$?
+              [[ "${r}" -eq 1 ]] || secret=1
+            else
+              secret=1
+            fi
+            rm -f "${ascii_tmp}"
           fi
           if [[ -s "${kept}" && "${rc}" -eq 1 && "${long}" -eq 0 && "${secret}" -eq 0 ]]; then
             tr -d '\r' <"${section}" | grep -vE ' — (failed|flaky) · '
