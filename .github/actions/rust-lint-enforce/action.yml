@@ -59,7 +59,7 @@ runs:
         } >> "${GITHUB_STEP_SUMMARY}"
         if [[ "${status}" -ne 0 ]]; then
           echo "fmt: ${files} file(s) differ from rustfmt output (exit ${status}); run cargo fmt --all in the private checkout"
-          [[ "${FAIL}" == true ]] || exit 0
+          [[ "${FAIL}" != false ]] || exit 0
           exit 1
         fi
         echo 'fmt: passed'
@@ -113,7 +113,7 @@ runs:
         fi
         if [[ "${lint_total}" -gt 0 || "${build_ok}" != true ]]; then
           echo "clippy: ${lint_total} lint finding(s), build success=${build_ok}"
-          [[ "${FAIL}" == true ]] || exit 0
+          [[ "${FAIL}" != false ]] || exit 0
           exit 1
         fi
         echo 'clippy: no findings'
