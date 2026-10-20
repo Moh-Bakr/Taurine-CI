@@ -591,11 +591,18 @@ runs:
           [[ "${bad}" -eq 0 ]]
         }
 
-        # elf, macho, pe or none, from the file's magic.
+        # elf, macho, pe or none, from the file's magic. `cafebabe` opens both a fat Mach-O and
+        # a Java class file (kotlinx-coroutines ships one in every APK as DebugProbesKt.bin): the
+        # next word is a fat header's architecture count, which is small, or a class file's
+        # version, whose major is 45 or more, so a word of 45 and up is not a native binary.
         tci_binary_kind() {
-          case "$(LC_ALL=C head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" in
+          local magic word
+          magic="$(LC_ALL=C head -c 8 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+          word="${magic:8:8}"
+          case "${magic:0:8}" in
             7f454c46) echo elf ;;
-            cffaedfe | cefaedfe | feedfacf | feedface | cafebabe | bebafeca) echo macho ;;
+            cafebabe) if [[ "${word}" =~ ^[0-9a-f]{8}$ ]] && (( 16#${word} >= 45 )); then echo none; else echo macho; fi ;;
+            cffaedfe | cefaedfe | feedfacf | feedface | bebafeca) echo macho ;;
             4d5a*) echo pe ;;
             *) echo none ;;
           esac

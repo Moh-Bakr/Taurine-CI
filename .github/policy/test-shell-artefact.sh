@@ -510,6 +510,10 @@ cp "$(artefact e2 1.1.1w)" "${work}/bundle/Frameworks/libbundled"
 expect_fail 'an extra with its own OpenSSL' "artefact_tree_check b '${work}/bundle' '${work}/bundle/app' release present" 'the door is not in the graph'
 mkdir -p "${work}/abi"; cp "$(artefact e3 3.5.5)" "${work}/abi/libssl.so"
 expect_fail 'an ABI with only a prebuilt libssl' "artefact_tree_check b '${work}/abi' - debug present" 'the door is not in the graph'
+mkdir -p "${work}/apk"; printf '\xca\xfe\xba\xbe\x00\x00\x00\x34class' >"${work}/apk/DebugProbesKt.bin"
+expect_pass 'a Java class file in an APK is not judged as a native binary' "artefact_tree_check b '${work}/apk' - debug absent"
+printf '\xca\xfe\xba\xbe\x00\x00\x00\x02OpenSSL 1.1.1w' >"${work}/apk/fat"
+expect_fail 'a fat Mach-O beside it is still judged' "artefact_tree_check b '${work}/apk' - debug absent" 'b-extra-1: FAILED'
 grep -qF 'artefact_tree_check "android-${abi}"' .github/workflows/android-validation.yml || fail 'android-native does not judge every library of each ABI'
 grep -qF 'artefact_tree_check ios-arm64-sim-app' .github/workflows/ios-validation.yml || fail 'ios-native does not judge the whole .app'
 
