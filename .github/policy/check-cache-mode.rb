@@ -532,7 +532,12 @@ LOCAL_ACTION_FILE_SHA256 = {
   'egress-audit' => %w[c6c3ff33427b869f38f3dc83800ae92143233b2137922d67d2a2f75aa32f74b5],
   'root-setup' => %w[1f288c476f7598e3fd583b8116994c429c01e3dc30376ea2df1ae9e2affe1dce],
   'drop-root' => %w[2562fdd5b283364bb839c3a547dce05bbea76438ea47c2be5f7efe26942579dc],
-  'sanitize' => %w[5d800b030a24f32029965c91075ac5ddeb720c7f93fa292872bc822027f7eedc],
+  # second hash: next reviewed version (a failed vcpkg port build publishes a bounded, sanitised tail of its log),
+  # ships with the pull request that changes the action; drop the first hash then
+  'sanitize' => %w[
+    5d800b030a24f32029965c91075ac5ddeb720c7f93fa292872bc822027f7eedc
+    68016ce2a78f0ecd93daa848aaf3b955589602063bc705d89f61a5656652c50e
+  ],
   'concern-report' => %w[49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
   # second hash: next reviewed version (the legacy-tls feature line may carry cargo's ` (*)` mark), ships with the
   # pull request that changes the action; drop the first hash then
