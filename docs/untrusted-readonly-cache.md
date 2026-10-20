@@ -1,11 +1,12 @@
 # Design: read-only cache restore on `untrusted` runs
 
-Status: **design; Stage 1 is merged. Stage 2 (this pull request) adds the four reviewed read-only
-untrusted restores to `linux-validation-concern.yml` (rust-db and the Linux rust-app shards), behind a caller flag
-(`untrusted_readonly_cache`) that stays `false` until the dispatch-path enforcement spike of
-section 7c is recorded green in this file. With the flag false no untrusted restore runs.** Implementation needs (1) an independent adversarial security review and (2) the
+Status: **on for Linux rust-db and rust-app on untrusted.** Stage 1 and Stage 2 are merged; the
+dispatch-path enforcement spike of section 7c is recorded green in this file, and the flag
+(`untrusted_readonly_cache`) is `true` on the Linux `validate-long-untrusted` caller, the only untrusted caller
+whose matrix carries the gated concerns (rust-db and the Linux rust-app shards). It stays `false` on every
+main caller, on `validate-untrusted`, and on macOS, Windows and Android. The design notes below are kept as the record. (Implementation needed (1) an independent adversarial security review and (2) the
 owner's explicit sign-off, because it changes a stated security rule (see
-[section 9](#9-rules-that-change-and-the-owners-approval)).
+[section 9](#9-rules-that-change-and-the-owners-approval)).)
 
 Reviewed against `origin/main` at `fef1b8c`. Output of this document is guidance for review, not an
 approval: every claim about GitHub behaviour below must be re-confirmed by the spike in

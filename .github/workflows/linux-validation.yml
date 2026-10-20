@@ -467,7 +467,7 @@ jobs:
       # enforcement spike of docs/untrusted-readonly-cache.md is recorded green there, in a change
       # merged BEFORE the one that flips this. The policy refuses true unless the record is already
       # on the base and the flipping change neither adds nor alters it.
-      untrusted_readonly_cache: false
+      untrusted_readonly_cache: true
       concern: ${{ matrix.concern }}
       timeout_minutes: ${{ fromJSON(needs.validate-input.outputs.timeouts)[matrix.concern] }}
       # The shadow review this concern's coverage group would run under a
