@@ -134,7 +134,6 @@ expect_strict_accept() { # LABEL
 # --- Changing the shape in two steps (alternatives) ---
 prune_old='{"tier" => "public", "triggers" => ["schedule", "workflow_dispatch"], "jobs" => ["prune"]}'
 prune_new='{"tier" => "public", "triggers" => ["push", "schedule", "workflow_dispatch"], "jobs" => ["prune"]}'
-pub='".github/workflows/validate-public-changes.yml" =>'
 
 # Step A: the new shape is added as the first alternative; the tree still has the old one.
 fresh; variant "${prune_old}" "[${prune_new}, ${prune_old}]"
