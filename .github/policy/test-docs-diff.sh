@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Fixtures for check-docs-diff.sh: a clean documentation change passes, and a whitespace error, a conflict
+# Fixtures for docs-whitespace-diff.sh: a clean documentation change passes, and a whitespace error, a conflict
 # marker and every checkout that is not a pull request merge commit fail. Run from the repository root.
 set -euo pipefail
 
 root="${PWD}"
-script="${root}/.github/policy/check-docs-diff.sh"
+script="${root}/.github/policy/docs-whitespace-diff.sh"
 tmp="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/docs-diff-test.XXXXXX")"
 trap 'rm -rf -- "${tmp}"' EXIT
 fail() { echo "docs diff: $*" >&2; exit 1; }

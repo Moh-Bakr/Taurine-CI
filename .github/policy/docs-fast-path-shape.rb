@@ -102,7 +102,7 @@ module DocsFastPathShape
       {
         'name' => 'Check the documentation change for whitespace errors',
         'shell' => 'bash',
-        'run' => 'bash .github/policy/check-docs-diff.sh'
+        'run' => 'bash .github/policy/docs-whitespace-diff.sh'
       }
     ]
   }.freeze
