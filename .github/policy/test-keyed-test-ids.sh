@@ -314,7 +314,8 @@ identities nocollector missing
 out="$(cat "${dir}/id-nocollector/summary.md")"
 has "${out}" 'Test inventory unavailable: the collector runner is not installed for this concern.'
 no_leak "${out}" 'withheld'
-[[ "$(git grep -c 'collector runner is not installed for this concern' -- .github/actions/linux-test-identities .github/workflows/macos-validation-concern.yml .github/workflows/windows-validation-concern.yml | wc -l | tr -d ' ')" == 3 ]] || fail 'the missing-runner check is not at all three collector sites'
+# Plain grep, not git grep: the mutation harness runs this fixture in a copy that is not a repository.
+[[ "$(grep -rlF 'collector runner is not installed for this concern' .github/actions/linux-test-identities .github/workflows/macos-validation-concern.yml .github/workflows/windows-validation-concern.yml | wc -l | tr -d ' ')" == 3 ]] || fail 'the missing-runner check is not at all three collector sites'
 identities fallback fail
 out="$(cat "${dir}/id-fallback/summary.md")"
 has "${out}" "failed-test-id: ${v_e2e} status=fail"
@@ -539,7 +540,7 @@ has "${out}" 'withheld'
 no_leak "${out}" 'customer|ACME'
 
 # --- 20. Every vite-node invocation of the collector uses the one path the private repository declares.
-n="$(git grep -hE 'node_modules/\.bin/vite-node' -- .github/actions .github/workflows | grep -v '\[\[ ! -f ' | grep -vcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' || true)"
+n="$(grep -rhE 'node_modules/\.bin/vite-node' .github/actions .github/workflows | grep -v '\[\[ ! -f ' | grep -vcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' || true)"
 [[ "${n}" == 0 ]] || fail "a vite-node invocation does not use taurine-desktop/node_modules/.bin/vite-node (${n})"
-[[ "$(git grep -hcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' -- .github/actions .github/workflows | paste -sd+ - | bc)" -ge 3 ]] || fail 'the collector invocations were not found'
+[[ "$(grep -rhcE 'taurine-desktop/node_modules/\.bin/vite-node scripts/ci/collect-test-ids\.ts' .github/actions .github/workflows | paste -sd+ - | bc)" -ge 3 ]] || fail 'the collector invocations were not found'
 echo "keyed test ids: ${implementations} HMAC implementation(s) agree with the pinned vectors; extractors, fail-closed paths and the key snapshot step checked"
