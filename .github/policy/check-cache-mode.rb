@@ -537,7 +537,7 @@ LOCAL_ACTION_FILE_SHA256 = {
     5d800b030a24f32029965c91075ac5ddeb720c7f93fa292872bc822027f7eedc
   ],
   'concern-report' => %w[49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
-  'shell-artefact' => %w[cb86d02a5ea03c9eedc2efc8b7393c21fee45e3a07cf331f7c9efa8482a8c377],
+  'shell-artefact' => %w[2a0010d6c2b181a3b7c9312e283502f2d117aad99d14d3fc3606202e4f8580a5],
   'scan-concern' => %w[4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
   'verify-cargo-cache' => %w[6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a],
   'rust-toolchain' => %w[abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec],
