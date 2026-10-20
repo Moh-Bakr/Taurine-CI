@@ -1220,6 +1220,7 @@ mutation '21. the docs-only result no longer read by the shards guard' "${public
 # The classifier's own fixtures refuse each loosening of it.
 mutation_by test-classify-docs-change.sh '21. a .github change marked docs-only (the allow-list widened)' "${classifier}" '  patterns = [%r{\Adocs/(?:#{SEGMENT}/)*#{SEGMENT}\.md\z}, /\A#{SEGMENT}\.md\z/]' '  patterns = [%r{\Adocs/(?:#{SEGMENT}/)*#{SEGMENT}\.md\z}, /\A#{SEGMENT}\.md\z/, %r{\A\.github/}]'
 mutation_by test-classify-docs-change.sh '21. any path accepted as documentation' "${classifier}" 'patterns.any? { |re| re.match?(path) }' 'true'
+mutation_by test-classify-docs-change.sh '21. a deleted code file accepted (and so a rename out of a code path)' "${classifier}" 'patterns.any? { |re| re.match?(path) }' "(status == 'D' || patterns.any? { |re| re.match?(path) })"
 mutation_by test-classify-docs-change.sh '21. the excluded documents ignored' "${classifier}" 'if excluded.include?(path.downcase)' 'if false'
 mutation_by test-classify-docs-change.sh '21. the excluded documents compared case-sensitively' "${classifier}" 'excluded = DocsFastPathExclusions::EXCLUDED_DOCS.map(&:downcase)' 'excluded = DocsFastPathExclusions::EXCLUDED_DOCS' "${classifier}" 'if excluded.include?(path.downcase)' 'if excluded.include?(path)'
 mutation_by test-classify-docs-change.sh '21. a symlink, a submodule or a mode change accepted' "${classifier}" 'unless modes_ok' 'if false'
