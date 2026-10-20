@@ -22,6 +22,7 @@
 #
 # Run from the repository root.
 require 'yaml'
+require_relative 'docs-fast-path-shape'
 
 # The two helper lines of test-structure.sh that run the strict mode on its synthetic tree, whole-line
 # exact: anything chained onto either line (a second command after `;` or `&&`) is a different line.
@@ -43,6 +44,9 @@ SHARDS = %w[policy-evidence policy-fixtures policy-mutations policy-structure].f
 sharded = SHARDS.any? { |name| jobs.key?(name) }
 missing = sharded ? SHARDS.reject { |name| jobs.key?(name) } : []
 problems << "the sharded policy layout is missing #{missing.join(', ')}: a dropped shard drops its checks" unless missing.empty?
+classified = DocsFastPathShape.classified?(jobs)
+problems << 'the policy workflow must be the classified layout (docs-fast-path-shape.rb): the sharded layout is no longer reviewed' if DocsFastPathShape::REQUIRED && !classified
+problems << 'the classified layout needs the sharded layout beneath it (all four shards)' if classified && !sharded
 holder_name = sharded ? 'policy-structure' : 'policy'
 job = jobs[holder_name] || {}
 strict_line = 'ruby .github/policy/check-structure.rb --strict'
@@ -70,7 +74,7 @@ end
 # Every policy job runs on the plain hosted runner and in no container or service: a digest-pinned
 # container image can still carry ENV BASH_ENV or RUBYOPT, or a ruby of its own, that steers the strict
 # step and the guards; a self-hosted or other runner label changes what runs them at all.
-(%w[policy] + SHARDS).each do |name|
+(%w[policy] + SHARDS + (classified ? %w[classify policy-docs] : [])).each do |name|
   pj = jobs[name]
   next unless pj
 
@@ -102,7 +106,8 @@ SHARD_TITLES.each do |name, title|
   next unless sj
 
   problems << "the #{name} job's name must be exactly #{title.inspect} (got #{sj['name'].inspect})" unless sj['name'] == title
-  problems << "the #{name} job's keys must be exactly permissions, name, runs-on, timeout-minutes and steps (got #{sj.keys.sort.inspect})" unless sj.keys.sort == %w[name permissions runs-on steps timeout-minutes]
+  want_keys = classified ? %w[if name needs permissions runs-on steps timeout-minutes] : %w[name permissions runs-on steps timeout-minutes]
+  problems << "the #{name} job's keys must be exactly #{want_keys.sort.join(', ')} (got #{sj.keys.sort.inspect})" unless sj.keys.sort == want_keys
   problems << "the #{name} job's permissions must be exactly contents: read (got #{sj['permissions'].inspect})" unless sj['permissions'] == { 'contents' => 'read' }
 end
 if sharded
@@ -110,10 +115,23 @@ if sharded
   problems << "the policy aggregate's keys must be exactly permissions, name, needs, if, runs-on, timeout-minutes and steps (got #{agg.keys.sort.inspect})" unless agg.keys.sort == %w[if name needs permissions runs-on steps timeout-minutes]
   problems << "the policy aggregate's permissions must be exactly {} (got #{agg['permissions'].inspect})" unless agg['permissions'] == {}
 end
-(jobs.keys - %w[policy base-pass] - SHARD_TITLES.keys).each { |name| problems << "unexpected job #{name} in the policy workflow" }
-# A shard is never conditional: a skipped shard is a skipped check, and the aggregate (which requires
-# success from each) is not the only line of defence.
-SHARDS.each { |name| problems << "the #{name} job may not carry if" if jobs[name]&.key?('if') }
+(jobs.keys - %w[policy base-pass] - SHARD_TITLES.keys - (classified ? %w[classify policy-docs] : [])).each { |name| problems << "unexpected job #{name} in the policy workflow" }
+if classified
+  # The classified layout: a shard and the base pass are skipped on a documentation-only change and on nothing
+  # else, by exactly this condition; `classify` and `policy-docs` are the reviewed jobs, exact.
+  DocsFastPathShape::GATED.each do |name|
+    j = jobs[name] || {}
+    problems << "the #{name} job must need exactly [classify] (got #{j['needs'].inspect})" unless j['needs'] == ['classify']
+    problems << "the #{name} job's if must be exactly #{DocsFastPathShape::GATE_IF} (got #{j['if'].inspect})" unless j['if'] == DocsFastPathShape::GATE_IF
+  end
+  problems << 'the classify job differs from the reviewed classify job (docs-fast-path-shape.rb)' unless jobs['classify'] == DocsFastPathShape::CLASSIFY_JOB
+  problems << 'the policy-docs job differs from the reviewed policy-docs job (docs-fast-path-shape.rb)' unless jobs['policy-docs'] == DocsFastPathShape::POLICY_DOCS_JOB
+  problems << "the policy aggregate's needs must be exactly #{DocsFastPathShape::AGGREGATE_NEEDS.inspect}" unless (jobs['policy'] || {})['needs'] == DocsFastPathShape::AGGREGATE_NEEDS
+else
+  # A shard is never conditional: a skipped shard is a skipped check, and the aggregate (which requires
+  # success from each) is not the only line of defence.
+  SHARDS.each { |name| problems << "the #{name} job may not carry if" if jobs[name]&.key?('if') }
+end
 
 # Not covered: a pull request can neuter the strict block inside its own check-structure.rb, and an
 # earlier step of the policy job (which runs the pull request's own scripts) could export BASH_ENV

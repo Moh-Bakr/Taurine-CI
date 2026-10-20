@@ -13,8 +13,12 @@ trap 'rm -rf -- "${tmp}"' EXIT
 entry=.github/workflows/validate-public-changes.yml
 fail() { echo "policy aggregate: $*" >&2; exit 1; }
 
-# The fixture: the real entrypoint, which is the sharded layout.
+# The fixture: the real entrypoint, which is the sharded layout, or the classified one (a `classify` job
+# in front of it, docs-fast-path-shape.rb). The text edits below anchor on the sharded layout's exact
+# lines and run only for it; the classified layout's own mutations are in test-docs-fast-path-layout.sh.
+# Everything edited as parsed YAML (from `mutate_yaml` on) holds for both layouts and runs for both.
 grep -q '^  policy-structure:$' "${root}/${entry}" || fail 'the entrypoint is not the sharded layout'
+if grep -q '^  classify:$' "${root}/${entry}"; then classified=true; else classified=false; fi
 cp "${root}/${entry}" "${tmp}/entry.yml"
 
 # check FILE: all three checkers, run on a tree whose entrypoint is FILE; non-zero when any refuses it.
@@ -36,6 +40,9 @@ mutate() {
   if check "${tmp}/mut.yml"; then fail "NOT refused: $1"; fi
   echo "refused   $1"
 }
+if [[ "${classified}" == true ]]; then
+  echo 'skipped   the text edits of the sharded layout: the entrypoint is the classified layout (see test-docs-fast-path-layout.sh)'
+else
 NEEDS='    needs: [base-pass, policy-evidence, policy-fixtures, policy-mutations, policy-structure]'
 mutate 'the aggregate no longer needs the mutations shard' "${NEEDS}" '    needs: [base-pass, policy-evidence, policy-fixtures, policy-structure]'
 mutate 'the aggregate no longer needs the evidence shard' "${NEEDS}" '    needs: [base-pass, policy-fixtures, policy-mutations, policy-structure]'
@@ -134,6 +141,7 @@ mutate 'a shard loses its own checkout' '    name: Policy mutations
     steps:
       - name: Check out public policy repository
         run: echo skipped'
+fi
 
 # mutate_yaml LABEL RUBY: the parsed fixture edited by RUBY (it sees `d`, the workflow hash) must be refused.
 mutate_yaml() {

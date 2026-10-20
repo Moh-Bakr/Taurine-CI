@@ -6,6 +6,12 @@
 # Guards, as a pass or a fail by result: fixtures must have passed on every event, the base-policy
 # job on a pull request, and the entrypoint requires the whole workflow to have passed. A job that
 # was skipped, cancelled or failed is not a job that passed.
+#
+# Three reviewed layouts of the entrypoint: the single `policy` job, the sharded aggregate, and the classified
+# aggregate (docs-fast-path-shape.rb), where each guard also reads the classification and passes only on the
+# exact results that outcome allows. For a documentation-only change (docs_only=true) the base pass and the shards
+# must have been skipped and policy-docs must have passed; otherwise (docs_only=false) all of them must have
+# passed and policy-docs must have been skipped. test-docs-fast-path-layout.sh runs the full truth table.
 set -euo pipefail
 
 entry="${1:-.github/workflows/validate-public-changes.yml}"
@@ -14,9 +20,12 @@ tmp="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/base-policy-result-test.XXXXXX
 trap 'rm -rf -- "${tmp}"' EXIT
 
 fail() { echo "base-policy result: $*" >&2; exit 1; }
+policy_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# yaml FILE RUBY-EXPR: evaluate an expression on the parsed workflow and print it.
-yaml() { ruby -ryaml -e 'doc = YAML.safe_load(File.read(ARGV[0]), aliases: false); print(eval(ARGV[1]))' "$1" "$2"; }
+# yaml FILE RUBY-EXPR: evaluate an expression on the parsed workflow and print it. `shape` is the reviewed
+# classified layout (docs-fast-path-shape.rb).
+yaml() { ruby -ryaml -r"${policy_dir}/docs-fast-path-shape.rb" -e 'doc = YAML.safe_load(File.read(ARGV[0]), aliases: false); shape = DocsFastPathShape; print(eval(ARGV[1]))' "$1" "$2"; }
+classified="$(yaml "${entry}" 'DocsFastPathShape.classified?(doc["jobs"])')"
 
 # step_script FILE JOB STEP: the run script of one named step of one job.
 step_script() {
@@ -28,24 +37,28 @@ step_script() {
   ' "$1" "$2" "$3"
 }
 
-# run_guard SCRIPT VAR RESULT: run the guard's script with the one result it reads.
-run_guard() { env "$2=$3" bash -c "$1" > "${tmp}/out" 2>&1; }
+# run_guard SCRIPT VAR RESULT [NAME=VALUE...]: run the guard's script with the one result it reads (and, in the
+# classified layout, the classification it also reads).
+run_guard() { local script="$1" var="$2" result="$3"; shift 3; env "$@" "${var}=${result}" bash -c "${script}" > "${tmp}/out" 2>&1; }
 
-# expect_guard SCRIPT VAR LABEL: success passes; failure, skipped, cancelled and empty each fail.
+# expect_guard SCRIPT VAR LABEL [NAME=VALUE...]: success passes; failure, skipped, cancelled and empty each fail.
 expect_guard() {
-  local script="$1" var="$2" label="$3" result
-  run_guard "${script}" "${var}" success || { cat "${tmp}/out" >&2; fail "${label}: a success was refused"; }
+  local script="$1" var="$2" label="$3" result; shift 3
+  run_guard "${script}" "${var}" success "$@" || { cat "${tmp}/out" >&2; fail "${label}: a success was refused"; }
   for result in failure skipped cancelled ''; do
-    if run_guard "${script}" "${var}" "${result}"; then fail "${label}: the result '${result}' was accepted"; fi
+    if run_guard "${script}" "${var}" "${result}" "$@"; then fail "${label}: the result '${result}' was accepted"; fi
   done
 }
+# In the classified layout the guards read the classification too: a classified, not-docs-only change.
+classified_env=()
+if [[ "${classified}" == true ]]; then classified_env=(CLASSIFY_RESULT=success DOCS_ONLY=false POLICY_DOCS_RESULT=skipped); fi
 
 fixtures_guard="$(step_script "${reusable}" base-policy-result 'Require the base-policy fixtures job to have passed')"
 base_guard="$(step_script "${reusable}" base-policy-result 'Require the base-policy job to have passed')"
 entry_guard="$(step_script "${entry}" policy 'Require the base-policy workflow to have passed')"
 expect_guard "${fixtures_guard}" FIXTURES_RESULT 'the fixtures guard'
 expect_guard "${base_guard}" BASE_RESULT 'the base-policy guard'
-expect_guard "${entry_guard}" BASE_PASS_RESULT 'the entrypoint guard'
+expect_guard "${entry_guard}" BASE_PASS_RESULT 'the entrypoint guard' ${classified_env[@]+"${classified_env[@]}"}
 
 # Two reviewed layouts of the entrypoint (transitional, see check-strict-structure.rb): the one `policy`
 # job, or the thin aggregate `policy` beside four shard jobs that run this pull request's own checks. In
@@ -56,12 +69,12 @@ sharded="$(yaml "${entry}" 'doc["jobs"].keys.any? { |k| %w[policy-evidence polic
 if [[ "${sharded}" == true ]]; then
   shards_guard="$(step_script "${entry}" policy 'Require every policy check shard to have passed')"
   vars=(POLICY_EVIDENCE_RESULT POLICY_FIXTURES_RESULT POLICY_MUTATIONS_RESULT POLICY_STRUCTURE_RESULT)
-  all_ok() { env "${vars[0]}=success" "${vars[1]}=success" "${vars[2]}=success" "${vars[3]}=success" bash -c "${shards_guard}" > "${tmp}/out" 2>&1; }
+  all_ok() { env ${classified_env[@]+"${classified_env[@]}"} "${vars[0]}=success" "${vars[1]}=success" "${vars[2]}=success" "${vars[3]}=success" bash -c "${shards_guard}" > "${tmp}/out" 2>&1; }
   all_ok || { cat "${tmp}/out" >&2; fail 'the shards guard refused four successes'; }
   for v in "${vars[@]}"; do
     for result in failure skipped cancelled ''; do
       args=(); for w in "${vars[@]}"; do if [[ "${w}" == "${v}" ]]; then args+=("${w}=${result}"); else args+=("${w}=success"); fi; done
-      if env "${args[@]}" bash -c "${shards_guard}" > "${tmp}/out" 2>&1; then fail "the shards guard accepted ${v}='${result}'"; fi
+      if env ${classified_env[@]+"${classified_env[@]}"} "${args[@]}" bash -c "${shards_guard}" > "${tmp}/out" 2>&1; then fail "the shards guard accepted ${v}='${result}'"; fi
     done
   done
 fi
@@ -79,7 +92,10 @@ fi
   || fail 'the entrypoint does not call the reusable base-policy workflow'
 # The aggregate layout needs the base-policy call and all four shards, and nothing else; the single-job
 # layout needs the base-policy call alone.
-if [[ "${sharded}" == true ]]; then
+if [[ "${classified}" == true ]]; then
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["needs"].inspect')" == '["base-pass", "classify", "policy-docs", "policy-evidence", "policy-fixtures", "policy-mutations", "policy-structure"]' ]] \
+    || fail 'the policy aggregate does not need exactly the base-policy call, classify, policy-docs and the four policy shards'
+elif [[ "${sharded}" == true ]]; then
   [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["needs"].inspect')" == '["base-pass", "policy-evidence", "policy-fixtures", "policy-mutations", "policy-structure"]' ]] \
     || fail 'the policy aggregate does not need exactly the base-policy call and the four policy shards'
 else
@@ -100,8 +116,15 @@ fi
   || fail 'the entrypoint guard step has keys other than name, if, shell, env and run'
 [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["shell"]')" == bash ]] \
   || fail 'the entrypoint guard step does not use exactly shell: bash'
-[[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["env"].to_a.inspect')" == '[["BASE_PASS_RESULT", "${{ needs.base-pass.result }}"]]' ]] \
-  || fail 'the entrypoint guard step env is not exactly BASE_PASS_RESULT: needs.base-pass.result'
+if [[ "${classified}" == true ]]; then
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["env"].to_a == shape::GUARD_PINS[0]["env"].to_a')" == true ]] \
+    || fail 'the entrypoint guard step env is not exactly the reviewed BASE_PASS_RESULT, CLASSIFY_RESULT and DOCS_ONLY mapping'
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["env"]["BASE_PASS_RESULT"]')" == '${{ needs.base-pass.result }}' ]] \
+    || fail 'the entrypoint guard step does not read needs.base-pass.result'
+else
+  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"].first["env"].to_a.inspect')" == '[["BASE_PASS_RESULT", "${{ needs.base-pass.result }}"]]' ]] \
+    || fail 'the entrypoint guard step env is not exactly BASE_PASS_RESULT: needs.base-pass.result'
+fi
 # The aggregate layout: `policy` holds exactly the two guards and no other step (no checkout, no script of
 # this pull request, nothing that could export BASH_ENV, PATH or RUBYOPT); the shards guard reads exactly
 # the four shard results; and each shard stands beside the base pass: it needs no job (a dependency on the
@@ -116,12 +139,25 @@ if [[ "${sharded}" == true ]]; then
     || fail 'the shards guard step does not use exactly shell: bash'
   [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"][1]["if"]')" == '${{ always() }}' ]] \
     || fail 'the shards guard step does not always run'
-  [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"][1]["env"].to_a.inspect')" \
-    == '[["POLICY_EVIDENCE_RESULT", "${{ needs.policy-evidence.result }}"], ["POLICY_FIXTURES_RESULT", "${{ needs.policy-fixtures.result }}"], ["POLICY_MUTATIONS_RESULT", "${{ needs.policy-mutations.result }}"], ["POLICY_STRUCTURE_RESULT", "${{ needs.policy-structure.result }}"]]' ]] \
-    || fail 'the shards guard step env is not exactly the four needs.<shard>.result values'
+  if [[ "${classified}" == true ]]; then
+    [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"][1]["env"].to_a == shape::GUARD_PINS[1]["env"].to_a')" == true ]] \
+      || fail 'the shards guard step env is not exactly the reviewed shard, policy-docs and classification mapping'
+  else
+    [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["steps"][1]["env"].to_a.inspect')" \
+      == '[["POLICY_EVIDENCE_RESULT", "${{ needs.policy-evidence.result }}"], ["POLICY_FIXTURES_RESULT", "${{ needs.policy-fixtures.result }}"], ["POLICY_MUTATIONS_RESULT", "${{ needs.policy-mutations.result }}"], ["POLICY_STRUCTURE_RESULT", "${{ needs.policy-structure.result }}"]]' ]] \
+      || fail 'the shards guard step env is not exactly the four needs.<shard>.result values'
+  fi
   for shard in "${shards[@]}"; do
-    [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"].key?(\"needs\")")" == false ]] \
-      || fail "${shard} needs another job, so it no longer runs beside the base pass"
+    if [[ "${classified}" == true ]]; then
+      # Beside the base pass, behind classify only: the one dependency the gate needs.
+      [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"][\"needs\"].inspect")" == '["classify"]' ]] \
+        || fail "${shard} must need exactly classify, no other job"
+      [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"][\"if\"]")" == "needs.classify.outputs.docs_only != 'true'" ]] \
+        || fail "${shard} is not gated by exactly needs.classify.outputs.docs_only != 'true'"
+    else
+      [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"].key?(\"needs\")")" == false ]] \
+        || fail "${shard} needs another job, so it no longer runs beside the base pass"
+    fi
     [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"][\"runs-on\"]")" == ubuntu-24.04 ]] \
       || fail "${shard} does not run on exactly ubuntu-24.04"
     [[ "$(yaml "${entry}" "doc[\"jobs\"][\"${shard}\"][\"steps\"].first[\"uses\"].to_s.start_with?(\"actions/checkout@\")")" == true ]] \
@@ -154,14 +190,27 @@ no_unsafe() {
   got="$(unsafe_keys "$@")"
   [[ -z "${got}" ]] || fail "the base pass could be skipped or its failure ignored (${2}: ${got})"
 }
-no_unsafe "${entry}" base-pass 'if,continue-on-error,environment,secrets' ''
+if [[ "${classified}" == true ]]; then
+  # Gated by classify's output, exactly: no other condition, no tolerated failure.
+  no_unsafe "${entry}" base-pass 'continue-on-error,environment,secrets' ''
+  [[ "$(yaml "${entry}" 'doc["jobs"]["base-pass"]["if"]')" == "needs.classify.outputs.docs_only != 'true'" ]] \
+    || fail "the base pass is not gated by exactly needs.classify.outputs.docs_only != 'true'"
+  [[ "$(yaml "${entry}" 'doc["jobs"]["base-pass"]["needs"].inspect')" == '["classify"]' ]] \
+    || fail 'the base pass must need exactly classify'
+else
+  no_unsafe "${entry}" base-pass 'if,continue-on-error,environment,secrets' ''
+fi
 # The guard's job runs on the plain hosted runner and in no container or service: a digest-pinned image can
 # carry ENV BASH_ENV or RUBYOPT, or a ruby of its own, that changes how the guard behaves, and another
 # runner label changes what runs it.
 no_unsafe "${entry}" policy 'continue-on-error,environment,container,services' 'continue-on-error'
 if [[ "${sharded}" == true ]]; then
   for shard in "${shards[@]}"; do
-    no_unsafe "${entry}" "${shard}" 'if,continue-on-error,environment,container,services,env,defaults' 'if,continue-on-error'
+    if [[ "${classified}" == true ]]; then
+      no_unsafe "${entry}" "${shard}" 'continue-on-error,environment,container,services,env,defaults' 'if,continue-on-error'
+    else
+      no_unsafe "${entry}" "${shard}" 'if,continue-on-error,environment,container,services,env,defaults' 'if,continue-on-error'
+    fi
   done
 fi
 [[ "$(yaml "${entry}" 'doc["jobs"]["policy"]["runs-on"]')" == ubuntu-24.04 ]] \

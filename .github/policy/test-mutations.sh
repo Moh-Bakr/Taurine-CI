@@ -637,9 +637,8 @@ mutation_by test-base-policy-result.sh '14. the guard step run as an argument to
           BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '        shell: true {0}
         env:
           BASE_PASS_RESULT: ${{ needs.base-pass.result }}'
-mutation_by test-base-policy-result.sh '14. the guard step reading a constant (BASE_PASS_RESULT: success)' "${public}" '          BASE_PASS_RESULT: ${{ needs.base-pass.result }}
-        run: |' '          BASE_PASS_RESULT: success
-        run: |'
+# The one line, not the line and its neighbour: the classified layout adds the classification's variables after it.
+mutation_by test-base-policy-result.sh '14. the guard step reading a constant (BASE_PASS_RESULT: success)' "${public}" '          BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '          BASE_PASS_RESULT: success'
 mutation_by test-base-policy-result.sh '14. an extra key on the guard step (working-directory)' "${public}" '        shell: bash
         env:
           BASE_PASS_RESULT: ${{ needs.base-pass.result }}' '        shell: bash

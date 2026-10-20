@@ -28,9 +28,16 @@
 #     refused.
 #   - `--exact` (the policy step of this workflow): the table is this tree's own and must match exactly,
 #     extras refused, so a pull request that adds a step must add its row in the same change.
+# Two reviewed layouts of the workflow (docs-fast-path-shape.rb): the sharded one, and the classified one, where
+# a first job `classify` and a short job `policy-docs` are added, the base pass and the four shards wait for
+# `classify` and are skipped on a documentation-only change, and the two aggregate guards read the
+# classification. The classified layout's jobs, gates and guards are pinned exactly in that file; this check
+# applies them whenever any trace of the fast path is present, so a half-made layout fails, and it requires
+# them when DocsFastPathShape::REQUIRED says the sharded layout is gone.
 # Rows are JSON: [shard, step name, run, env]. Run from the repository root.
 require 'json'
 require 'yaml'
+require_relative 'docs-fast-path-shape'
 require_relative 'yaml-guard'
 
 exact = ARGV.delete('--exact')
@@ -58,6 +65,26 @@ YamlGuard.yaml_duplicates(WORKFLOW).each { |d| problems << "#{WORKFLOW}: #{d}" }
 doc = YAML.safe_load(File.read(WORKFLOW, encoding: 'UTF-8'), aliases: false)
 jobs = doc['jobs'] || {}
 sharded = SHARDS.any? { |name| jobs.key?(name) }
+classified = DocsFastPathShape.classified?(jobs)
+guard_pins = classified ? DocsFastPathShape::GUARD_PINS : GUARD_PINS
+# The classified layout, pinned exactly; a layout that is neither the sharded nor the classified one fails.
+if classified
+  shape = DocsFastPathShape
+  problems << 'the classified layout needs the sharded layout beneath it (all four shards)' unless SHARDS.all? { |name| jobs.key?(name) }
+  problems << 'the classify job differs from the reviewed classify job (docs-fast-path-shape.rb): it must be exact' unless jobs['classify'] == shape::CLASSIFY_JOB
+  problems << 'the policy-docs job differs from the reviewed policy-docs job (docs-fast-path-shape.rb): it must be exact' unless jobs['policy-docs'] == shape::POLICY_DOCS_JOB
+  problems << "the policy aggregate must need exactly #{shape::AGGREGATE_NEEDS.inspect} (got #{(jobs['policy'] || {})['needs'].inspect})" unless (jobs['policy'] || {})['needs'] == shape::AGGREGATE_NEEDS
+  shape::GATED.each do |name|
+    job = jobs[name] || {}
+    problems << "#{name} must need exactly [classify] (got #{job['needs'].inspect})" unless job['needs'] == ['classify']
+    problems << "#{name} must carry if: #{shape::GATE_IF} exactly (got #{job['if'].inspect}), so it is skipped on a documentation-only change and never otherwise" unless job['if'] == shape::GATE_IF
+  end
+  problems << "the classify job must be the first job of the workflow (found #{jobs.keys.first.inspect})" unless jobs.keys.first == 'classify'
+  extra_jobs = jobs.keys - shape::JOB_IDS
+  problems << "unexpected job(s) #{extra_jobs.join(', ')} beside the classified layout" unless extra_jobs.empty?
+elsif DocsFastPathShape::REQUIRED
+  problems << 'the policy workflow must be the classified layout (a classify job, a policy-docs job, gated shards and the classified guards): the sharded layout is no longer reviewed'
+end
 seen = Hash.new(0)
 extras = []
 last_pinned = {}
@@ -89,7 +116,7 @@ last_pinned = {}
 end
 # Guards: each exactly once, in the aggregate at its pinned position with its exact pinned shape; the second
 # only in the sharded layout. (A second step carrying a guard's name anywhere is a duplicate.)
-GUARD_PINS.each_with_index do |pin, pos|
+guard_pins.each_with_index do |pin, pos|
   holders = jobs.flat_map { |jn, j| (j.is_a?(Hash) ? j.fetch('steps', []) : []).each_with_index.select { |st, _| st['name'] == pin['name'] }.map { |st, i| [jn, i, st] } }
   want = pos.zero? || sharded ? 1 : 0
   problems << "guard #{pin['name'].inspect} appears #{holders.size} times, expected #{want}" unless holders.size == want

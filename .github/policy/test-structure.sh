@@ -71,10 +71,14 @@ expect_reject 'the required job id renamed' 'would be dropped'
 fresh; swap "${public}" '    name: Validate workflow policy' '    name: Validate workflow policy (renamed)'
 expect_reject 'the required check renamed' 'not "Validate workflow policy"'
 
+# While the policy workflow's manifest entry lists two reviewed shapes (the docs-only fast path lands in two
+# steps), a changed job set matches neither; with one shape left it is reported as a changed field.
+alt_count="$(ruby "${check}" --json-manifest "${src}" | ruby -rjson -e 'e = JSON.parse(STDIN.read)["workflows"][ARGV[0]]; print(e.is_a?(Array) ? e.size : 1)' "${public}")"
+if [[ "${alt_count}" -gt 1 ]]; then pub_changed='matches none of the'; else pub_changed='jobs changed'; fi
 fresh; swap "${public}" '  base-pass:
 ' '  base-pass-moved:
 '
-expect_reject 'another job renamed in the policy workflow' 'jobs changed'
+expect_reject 'another job renamed in the policy workflow' "${pub_changed}"
 
 fresh; mv "${dir}/t/.github/workflows/base-policy.yml" "${dir}/t/.github/workflows/base-policy-moved.yml"
 expect_reject 'the reusable base-policy workflow renamed' 'in the manifest but missing from the tree'
@@ -226,12 +230,18 @@ expect_reject 'an unsorted name list (a pattern-like loophole)' 'sorted list of 
 fresh; variant "${prune_old}" "[${prune_old}, {\"tier\" => \"public\", \"triggers\" => [\"pull_request_target\"], \"jobs\" => [\"prune\"]}]"
 expect_reject 'a forbidden trigger in a transitional alternative' 'lists the forbidden trigger pull_request_target'
 # The required-check pin applies to every alternative.
-pol_old='{"tier" => "policy",
-     "triggers" => ["pull_request", "push", "workflow_dispatch"],
-     "jobs" => ["base-pass", "policy", "policy-evidence", "policy-fixtures", "policy-mutations", "policy-structure"]}'
-fresh; variant "${pol_old}" "[${pol_old}, {\"tier\" => \"policy\", \"triggers\" => [\"pull_request\", \"push\", \"workflow_dispatch\"], \"jobs\" => [\"base-pass\"]}]"
+# The manifest is rewritten from its own JSON, so these cases hold however many shapes the policy workflow's
+# entry lists. manifest_variant EXPR: a copy of the check whose manifest has been edited by EXPR (it sees `m`).
+manifest_variant() {
+  mkdir -p "${dir}/v"; cp "${check}" "${dir}/v/variant.rb"; cp "${check%/*}/yaml-guard.rb" "${dir}/v/"
+  ruby "${check}" --json-manifest "${src}" > "${dir}/v/manifest.json"
+  EXPR="$1" ruby -rjson -e 's = File.read(ARGV[0]); m = JSON.parse(File.read(ARGV[1])); eval(ENV["EXPR"]); re = /^CONTROL_PLANE_MANIFEST = \{.*?\}\.freeze$/m; abort("manifest not found") unless s.match?(re); File.write(ARGV[0], s.sub(re) { "CONTROL_PLANE_MANIFEST = #{m.inspect}.freeze" })' "${dir}/v/variant.rb" "${dir}/v/manifest.json"
+  runner="${dir}/v/variant.rb"
+}
+shape_of() { printf '%s' "m['workflows']['${public}'] = (e = m['workflows']['${public}']; (e.is_a?(Array) ? e : [e]) + [$1])"; }
+fresh; manifest_variant "$(shape_of '{"tier" => "policy", "triggers" => ["pull_request", "push", "workflow_dispatch"], "jobs" => ["base-pass"]}')"
 expect_reject 'an alternative without the required check job' 'lacks the required check job policy'
-fresh; variant "${pol_old}" "[${pol_old}, \"absent\"]"
+fresh; manifest_variant "$(shape_of '"absent"')"
 expect_reject 'an alternative that lets the policy workflow be absent' 'required status check would be dropped'
 
 # A second YAML document is read by one parser and ignored by another: refused.
