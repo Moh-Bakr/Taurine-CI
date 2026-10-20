@@ -510,6 +510,18 @@ runs:
               "${readelf_bin}" -d "${file}" | sed -nE 's/.*\(NEEDED\).*\[([^]]+)\].*/\1/p'
               ;;
             cffaedfe | cefaedfe | cafebabe)
+              # `cafebabe` also opens a Java class file (kotlinx-coroutines ships one in every APK
+              # as DebugProbesKt.bin): its next word is the class version (major 45 or more) where
+              # a fat header has a small architecture count. Only on a host without otool (Linux,
+              # which judges Android artefacts, where no Mach-O can load) does a class-shaped file
+              # have no dynamic dependencies to read; the OpenSSL string scan still judges it, and
+              # a host with otool reads every cafebabe file as Mach-O, failing on a class file.
+              if [[ "${kind}" == cafebabe ]] && ! type -P otool >/dev/null 2>&1; then
+                local word
+                word="$(LC_ALL=C head -c 8 "${file}" | od -An -tx1 | tr -d ' \n')"; word="${word:8:8}"
+                [[ "${word}" =~ ^[0-9a-f]{8}$ ]] && (( 16#${word} >= 45 )) && return 0
+                return 1
+              fi
               otool -L "${file}" | tail -n +2 | awk '{ print $1 }' | sed 's#.*/##'
               ;;
             4d5a*)
@@ -591,18 +603,11 @@ runs:
           [[ "${bad}" -eq 0 ]]
         }
 
-        # elf, macho, pe or none, from the file's magic. `cafebabe` opens both a fat Mach-O and
-        # a Java class file (kotlinx-coroutines ships one in every APK as DebugProbesKt.bin): the
-        # next word is a fat header's architecture count, which is small, or a class file's
-        # version, whose major is 45 or more, so a word of 45 and up is not a native binary.
+        # elf, macho, pe or none, from the file's magic.
         tci_binary_kind() {
-          local magic word
-          magic="$(LC_ALL=C head -c 8 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-          word="${magic:8:8}"
-          case "${magic:0:8}" in
+          case "$(LC_ALL=C head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" in
             7f454c46) echo elf ;;
-            cafebabe) if [[ "${word}" =~ ^[0-9a-f]{8}$ ]] && (( 16#${word} >= 45 )); then echo none; else echo macho; fi ;;
-            cffaedfe | cefaedfe | feedfacf | feedface | bebafeca) echo macho ;;
+            cffaedfe | cefaedfe | feedfacf | feedface | cafebabe | bebafeca) echo macho ;;
             4d5a*) echo pe ;;
             *) echo none ;;
           esac
