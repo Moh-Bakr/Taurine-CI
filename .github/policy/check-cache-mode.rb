@@ -537,7 +537,11 @@ LOCAL_ACTION_FILE_SHA256 = {
     5d800b030a24f32029965c91075ac5ddeb720c7f93fa292872bc822027f7eedc
   ],
   'concern-report' => %w[49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
-  'shell-artefact' => %w[7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a],
+  # second hash: next reviewed version (adds the legacy-tls feature assertion), ships with the cache-flip PR
+  'shell-artefact' => %w[
+    dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184
+    7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a
+  ],
   'scan-concern' => %w[4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
   'verify-cargo-cache' => %w[6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a],
   'rust-toolchain' => %w[abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec],
