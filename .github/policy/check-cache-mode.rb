@@ -511,9 +511,10 @@ CARGO_HOME_PIN = {
   'run' => "set -euo pipefail\ndir=\"${CARGO_HOME:-${HOME}/.cargo}\"\nif command -v cygpath >/dev/null 2>&1; then\n  dir=\"$(cygpath -m \"${dir}\")\"\nfi\necho \"dir=${dir}\" >> \"${GITHUB_OUTPUT}\"\n"
 }.freeze
 TARGET_CACHE_ACTION = './.github/actions/rust-target-cache'.freeze
-RUST_TARGET_CACHE_FILE_SHA256 = 'a50a7233883d1fff83fda68d6380937afa14db4256c8f6d725b4d674013df695'.freeze
-# next reviewed version, ships with the flag-flip PR; drop the first hash then
-RUST_TARGET_CACHE_NEXT_FILE_SHA256 = 'bd8a0eae78c40965df39c364588178a972eec0051d0748bf3cc0ca223cb79a6f'.freeze
+RUST_TARGET_CACHE_FILE_SHA256 = 'bd8a0eae78c40965df39c364588178a972eec0051d0748bf3cc0ca223cb79a6f'.freeze
+# next reviewed version (door_entries_remaining also scans library bytes for the OpenSSL marker strings), ships
+# with the pull request that changes the composite; drop the first hash then
+RUST_TARGET_CACHE_NEXT_FILE_SHA256 = '6d83e371520b7f5a3cead1faf7ad8b7485540e95fb6d98c12a67962745ddbb34'.freeze
 LOCATE_STEP_SHA256 = 'f0731f6e118740f65994e4a90b3a9c03f4e0f1c2b76c00a34ae1216232253c20'.freeze
 # Whole action.yml hashes (canonical JSON of the parsed file) of every local action that may run before an
 # untrusted restore, so none can be edited (or given a new write to GITHUB_ENV) without this table changing
@@ -531,24 +532,18 @@ LOCAL_ACTION_FILE_SHA256 = {
   'egress-audit' => %w[c6c3ff33427b869f38f3dc83800ae92143233b2137922d67d2a2f75aa32f74b5],
   'root-setup' => %w[1f288c476f7598e3fd583b8116994c429c01e3dc30376ea2df1ae9e2affe1dce],
   'drop-root' => %w[2562fdd5b283364bb839c3a547dce05bbea76438ea47c2be5f7efe26942579dc],
-  # second hash: next reviewed version, ships with the flag-flip PR; drop the first hash then
-  'sanitize' => %w[
-    4bae990159024f93d9848b12344a7f1d92577dca0ee2aa9916b03c4196a06478
-    5d800b030a24f32029965c91075ac5ddeb720c7f93fa292872bc822027f7eedc
-  ],
+  'sanitize' => %w[5d800b030a24f32029965c91075ac5ddeb720c7f93fa292872bc822027f7eedc],
   'concern-report' => %w[49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
-  # second hash: next reviewed version (adds the legacy-tls feature assertion), ships with the cache-flip PR
+  # second hash: next reviewed version (the legacy-tls feature line may carry cargo's ` (*)` mark), ships with the
+  # pull request that changes the action; drop the first hash then
   'shell-artefact' => %w[
-    dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184
     7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a
+    cbb009b03c5fcb489ffb6507aace3ba3ccf886323135ee01c0053b0bed2a2e8e
   ],
   'scan-concern' => %w[4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
   'verify-cargo-cache' => %w[6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a],
   'rust-toolchain' => %w[abec77339a4eba723358e2b8a1a0094a80db7545d92f223b0ddee9c1bea1cfec],
-  'rust-target-cache' => [
-    RUST_TARGET_CACHE_FILE_SHA256,
-    RUST_TARGET_CACHE_NEXT_FILE_SHA256
-  ]
+  'rust-target-cache' => [RUST_TARGET_CACHE_FILE_SHA256, RUST_TARGET_CACHE_NEXT_FILE_SHA256]
 }.freeze
 # The toolchain action's refusal of a `path` toolchain (and of every non-plain key), as the text between
 # `toolchain_refuse() {` and the last call of `toolchain_check`, in the first step's decoded `run`.
