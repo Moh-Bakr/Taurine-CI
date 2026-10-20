@@ -20,9 +20,9 @@
 # comment reads nothing. A pin whose line is gone is only a warning, so a cleanup is never blocked.
 #
 # The files that hold the list and the classifier name documents by design and are not scanned:
-# docs-fast-path-exclusions.rb, classify-docs-change.rb, this file and the two tests of them. None of
-# them opens a document; the fixtures of test-docs-reads.sh and test-classify-docs-change.sh build
-# their own temporary trees.
+# docs-fast-path-exclusions.rb, classify-docs-change.rb, this file and the three tests of them
+# (test-docs-reads.sh, test-classify-docs-change.sh and test-docs-diff.sh). None of them opens a
+# document of this repository; their fixtures build their own temporary trees.
 #
 # The list is read from THIS script's directory, so under the base pass main's list judges a pull
 # request's tree. Run from the repository root; an optional argument names another root (fixtures).
@@ -35,11 +35,12 @@ OWN_FILES = %w[
   check-docs-reads.rb
   test-docs-reads.sh
   test-classify-docs-change.sh
+  test-docs-diff.sh
 ].freeze
-# The docs directory as a path component: docs/ after a quote or slash, a quoted 'docs' or "docs", or /docs ending
-# a word (before a quote, a space, a bracket, a brace or the end of the line). A message that merely begins
-# with the word, like "docs diff: ...", is not a path.
-TOKEN = %r!["'/]docs/|["']docs["']|/docs(?:["'\s)\]}]|$)!
+# The docs directory as a path component: docs/ not glued to a longer name, a quoted 'docs' or "docs", or /docs
+# ending a word (before a quote, a space, a bracket, a brace or the end of the line). A message that merely
+# begins with the word, like "docs diff: ...", is not a path.
+TOKEN = %r~(?<![A-Za-z0-9_.-])docs/|["']docs["']|/docs(?:["'\s)\]}]|$)~
 
 excluded = DocsFastPathExclusions::EXCLUDED_DOCS
 pins = DocsFastPathExclusions::NAMED_NOT_READ

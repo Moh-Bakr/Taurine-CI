@@ -56,6 +56,9 @@ reads=(
   'cp -R "${root}/docs" "${tmp}/"'
   'sed -n 1p "docs/guide.md"'
   'bash -c "cat ./docs/other.md"'
+  'cat docs/*.md'
+  'ls docs/'
+  'cat docs/not-yet-there.md'
 )
 for text in "${reads[@]}"; do
   fresh; add_line .github/policy/check-x.sh "${text}"

@@ -49,13 +49,22 @@ module DocsFastPathExclusions
       "tree_doc = File.join(root, 'docs', 'untrusted-readonly-cache.md')",
       "candidate = File.join(ENV['RUNNER_TEMP'], 'base-policy', 'docs', 'untrusted-readonly-cache.md')",
     ],
+    # the allow-list of tracked paths: a pattern for docs/*.md names, matched against a path and opening nothing
+    ".github/policy/check-repository.sh" => [
+      "if [[ \"$path\" =~ ^docs/[a-z0-9-]+\\.md$ ]]; then",
+    ],
     # a tracked-file allow-list that names docs/*.md by path and opens none of them
     ".github/policy/check-workflows.sh" => [
       "if find . -type f -not -path './.git' -not -path './.git/*' -not -path './.github/workflows/*' -not -path './.github/actions/*/action.yml' -not -path './.github/policy/*' -not -path './.github/ci-matrix.json' -not -path './.github/dependabot.yml' -not -path './.github/tool-pins.json' -not -path './.github/egress-allowlist.txt' -not -path './.github/CODEOWNERS' -not \\( -path './docs/*.md' -not -path './docs/*/*' \\) -not -name '.gitignore' -print -quit | grep -q .; then",
     ],
-    # copies docs/ into each mutated tree; only the excluded document is mutated or read back
+    # copies docs/ into each mutated tree; only the excluded document is mutated or read back. The last two
+    # lines are the fast path's own mutations (section 21), which plant a reader of a document on purpose to
+    # prove check-docs-reads.rb refuses it; the tree that has them is the one that holds the fast path
+    # workflow, and on the tree that does not, they are only a stale pin (a warning)
     ".github/policy/test-mutations.sh" => [
       "cp -R \"${src}/.github\" \"${src}/docs\" \"${dir}/tree/\"",
+      "cat docs/how-ci-works.md > /dev/null'",
+      "mutation_by check-docs-reads.rb '21. the spike-record reader switched to another document' .github/policy/check-cache-mode.rb \"tree_doc = File.join(root, 'docs', 'untrusted-readonly-cache.md')\" \"tree_doc = File.join(root, 'docs', 'how-ci-works.md')\"",
     ],
     # synthetic changed-file names fed to a stub, not files read
     ".github/policy/test-policy.sh" => [
@@ -73,11 +82,17 @@ module DocsFastPathExclusions
       "mkdir -p \"${nul_docs}/docs\"",
       "printf -- '\\000-----BEGIN RSA PRIVATE KEY-----\\nTEST_FIXTURE_NOT_A_REAL_KEY\\n' > \"${nul_docs}/docs/nul-fixture.md\"",
       "mkdir -p \"${unreadable}/docs\"",
+      "git -C \"${credential}\" add docs/repository-fixture.md",
+      "git -C \"${nul_docs}\" add docs/nul-fixture.md",
+      "git -C \"${unreadable}\" update-index --add --cacheinfo 100644,1234567890abcdef1234567890abcdef12345678,docs/unreadable.md",
     ],
     # a synthetic docs/ directory in a temporary repository
     ".github/policy/test-selector.sh" => [
       "mkdir -p \"${repo}/taurine-desktop/src\" \"${repo}/docs\" \"${repo}/mystery\"",
       "echo a > \"${repo}/docs/a.md\"",
+      "sha=\"$(change docs/a.md)\"",
+      "docs_sha=\"$(change docs/b.md)\"",
+      "for synthetic_change in docs/c.md taurine-desktop/src/a.ts; do",
     ],
     # copies the excluded document into temporary trees and builds synthetic docs/ directories
     ".github/policy/test-untrusted-restore-shape.sh" => [
