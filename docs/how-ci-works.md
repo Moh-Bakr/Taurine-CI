@@ -1487,7 +1487,7 @@ glob the line does not name) is not found by a grep: review is the control for t
 `test-docs-reads.sh` pins the shapes the grep does find.
 
 **policy-docs.** Runs only when `docs_only` is `true`: `check-repository.sh` (allowed paths, the
-compiled-file sweep, credential patterns) and `check-docs-diff.sh`, which runs `git diff --check`
+compiled-file sweep, credential patterns) and `docs-whitespace-diff.sh`, which runs `git diff --check`
 between the first parent of the merge commit and the merge commit itself and fails on any checkout
 that is not a pull request merge commit. There is no markdown size or line check in this repository
 to add. It needs only `classify`, has a 5 minute timeout and holds no authority.

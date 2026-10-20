@@ -1202,7 +1202,7 @@ mutation '21. the docs-only repository check turned into true' "${public}" '    
         run: bash .github/policy/check-repository.sh' '      - name: Reject private-source and credential material in a documentation change
         shell: bash
         run: "true"'
-mutation '21. the docs-only whitespace check turned into true' "${public}" 'run: bash .github/policy/check-docs-diff.sh' 'run: "true"'
+mutation '21. the docs-only whitespace check turned into true' "${public}" 'run: bash .github/policy/docs-whitespace-diff.sh' 'run: "true"'
 mutation '21. the aggregate no longer needs the classification' "${public}" '    needs: [base-pass, classify, policy-docs, policy-evidence, policy-fixtures, policy-mutations, policy-structure]' '    needs: [base-pass, policy-docs, policy-evidence, policy-fixtures, policy-mutations, policy-structure]'
 mutation '21. the aggregate no longer needs the docs-only job' "${public}" '    needs: [base-pass, classify, policy-docs, policy-evidence, policy-fixtures, policy-mutations, policy-structure]' '    needs: [base-pass, classify, policy-evidence, policy-fixtures, policy-mutations, policy-structure]'
 mutation '21. the shards guard passes a skipped shard when docs_only is false' "${public}" "            false) expected=success; docs_expected=skipped ;;
@@ -1239,8 +1239,8 @@ mutation_by check-docs-reads.rb '21. the document the policy reads removed from 
 mutation_by check-docs-reads.rb '21. a new reader of an unlisted document' .github/policy/check-sizes.sh 'set -euo pipefail' 'set -euo pipefail
 cat docs/how-ci-works.md > /dev/null'
 mutation_by check-docs-reads.rb '21. the spike-record reader switched to another document' .github/policy/check-cache-mode.rb "tree_doc = File.join(root, 'docs', 'untrusted-readonly-cache.md')" "tree_doc = File.join(root, 'docs', 'how-ci-works.md')"
-mutation_by test-docs-diff.sh '21. the whitespace check never fails' .github/policy/check-docs-diff.sh "if ! git diff --check 'HEAD^1' HEAD; then" 'if false; then'
-mutation_by test-docs-diff.sh '21. the whitespace check run on a checkout that is not a merge commit' .github/policy/check-docs-diff.sh "git rev-parse --verify --quiet 'HEAD^2^{commit}' > /dev/null || fail 'HEAD is not a merge commit of a pull request head'" ':'
+mutation_by test-docs-diff.sh '21. the whitespace check never fails' .github/policy/docs-whitespace-diff.sh "if ! git diff --check 'HEAD^1' HEAD; then" 'if false; then'
+mutation_by test-docs-diff.sh '21. the whitespace check run on a checkout that is not a merge commit' .github/policy/docs-whitespace-diff.sh "git rev-parse --verify --quiet 'HEAD^2^{commit}' > /dev/null || fail 'HEAD is not a merge commit of a pull request head'" ':'
 
 # 22. The restore-time door check reads library bytes, not only names (rust-target-cache composite): a door library
 # renamed to anything is refused. Each weakening of that scan is refused by the strip fixtures, which are not part
