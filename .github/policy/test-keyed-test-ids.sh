@@ -35,6 +35,15 @@ v_utf8=d4069f93924f080f       # js      taurine-desktop/src/é.test.ts ünï > �
 
 grammar='^(test-id-key: k[0-9]{1,4}|failed-test-id: [0-9a-f]{16} status=(fail|signal|timeout|leak|flaky)|failed-tests-unidentified: [0-9]+|failed-test-ids: unavailable \(no usable key or HMAC tool\); failing tests: [0-9]+)$'
 fail() { echo "keyed test ids: $*" >&2; exit 1; }
+# The permission bits of a path, read portably. GNU stat first: on GNU/Linux `stat -f` is the FILESYSTEM
+# status (it succeeds and prints filesystem text), so BSD `stat -f %Lp` must only run when `-c` is refused.
+# Anything but exactly 3-4 octal digits fails closed.
+mode_of() {
+  local m
+  m="$(stat -c '%a' "$1" 2>/dev/null)" || m="$(stat -f '%Lp' "$1" 2>/dev/null)" || fail "cannot read the mode of $1"
+  [[ "${m}" =~ ^[0-7]{3,4}$ ]] || fail "the mode of $1 is not octal digits"
+  printf '%s' "${m}"
+}
 run() { # run <key rt dir> <script...>: a clean shell with both libraries sourced
   local rt="$1"; shift
   RUNNER_TEMP="${rt}" bash -c 'set -euo pipefail; source "$1/lib.sh"; source "$1/report.sh"; shift; eval "$1"' _ "${dir}" "$*"
@@ -243,7 +252,7 @@ snapshot good "${good}"
 grep -qxF "::add-mask::${key_hex}" "${dir}/ws-good/out.txt" || fail 'the key was not masked'
 snapshot crlf "taurine-test-id-key v1\r\nkey-id: k7\r\nkey: ${key_hex}\r\n"
 [[ -f "${dir}/ws-crlf/rt/taurine-ci/test-id-key" ]] || fail 'a CRLF key file was refused'
-mode="$(stat -f '%Lp' "${dir}/ws-good/rt/taurine-ci/test-id-key" 2>/dev/null || stat -c '%a' "${dir}/ws-good/rt/taurine-ci/test-id-key")"
+mode="$(mode_of "${dir}/ws-good/rt/taurine-ci/test-id-key")"
 [[ "${mode}" == 600 ]] || fail "the snapshot mode is ${mode}, not 600"
 snapshot none '@none'
 snapshot symlink '@symlink'
@@ -482,7 +491,7 @@ has "${out}" 'code=not_connected'
 no_leak "${out}" 'some_lowercase_secret'
 
 # --- 16. The key snapshot: the key directory is private, and an oversize file fails closed without a SIGPIPE.
-mode="$(stat -f '%Lp' "${dir}/ws-good/rt/taurine-ci" 2>/dev/null || stat -c '%a' "${dir}/ws-good/rt/taurine-ci")"
+mode="$(mode_of "${dir}/ws-good/rt/taurine-ci")"
 [[ "${mode}" == 700 ]] || fail "the key directory mode is ${mode}, not 700"
 [[ ! -s "${dir}/ws-big/out.txt" ]] || grep -q 'does not match its fixed format' "${dir}/ws-big/out.txt" || fail 'an oversize key file did not fail closed with the fixed message'
 # --- 17. The real live-proof header (conformance report.rs: `<id> — N checks: P passed, F failed, S skipped, I invalid`)

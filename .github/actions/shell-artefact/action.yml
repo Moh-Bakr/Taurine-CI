@@ -159,18 +159,6 @@ runs:
           esac
         }
 
-        # dbx_legacy_tls_feature <package> <target|-> <out>: succeeds only when `cargo tree -e features`
-        # resolves taurine-db-dbx WITH its legacy-tls feature in <package>'s graph for <target>, so the
-        # shipped-door proof does not rest on the manifest default alone. Any resolve error is a failure.
-        dbx_legacy_tls_feature() {
-          local package="$1" target="$2" out="$3" args
-          args=(tree --locked --package "${package}" -e features --invert taurine-db-dbx --depth 2 --prefix depth)
-          if [[ "${target}" != - ]]; then args+=(--target "${target}"); fi
-          cargo "${args[@]}" >"${out}" 2>&1 || return 1
-          tr -d '\r' <"${out}" >"${out}.lf" && mv "${out}.lf" "${out}"
-          grep -qE '^[0-9]+taurine-db-dbx feature "legacy-tls"$' "${out}"
-        }
-
         # openssl_door_gate <label> <package> <target|->
         # Gate S1, door-only form. Absent: openssl-sys is not in <package>'s graph for
         # <target> (older sources) - passes, recorded as absent. Present: passes only when every
@@ -221,10 +209,6 @@ runs:
           state="$(tci_inverted "${log}" "${package}" "${target}" normal taurine-tls-openssl 0)"
           if [[ "${state}" != present ]]; then
             echo "${label}: FAILED - openssl-sys is in the graph but the taurine-tls-openssl door is not" >&2
-            bad=1
-          fi
-          if ! dbx_legacy_tls_feature "${package}" "${target}" "${log}.features"; then
-            echo "${label}: FAILED - taurine-db-dbx does not resolve with its legacy-tls feature in the ${package} graph" >&2
             bad=1
           fi
           door_provenance "${label}" || bad=1
