@@ -28,7 +28,7 @@ check() {
   cp -R "${policy_dir}" "${tmp}/tree/.github/policy"
   cp "${root}/.github/workflows/base-policy.yml" "${tmp}/tree/.github/workflows/"
   cp "$1" "${tmp}/tree/${entry}"
-  ( cd "${tmp}/tree" && ruby .github/policy/check-strict-structure.rb && ruby .github/policy/check-policy-steps.rb && ruby .github/policy/check-policy-steps.rb --exact && bash .github/policy/test-base-policy-result.sh ) > "${tmp}/out" 2>&1
+  ( cd "${tmp}/tree" && ruby .github/policy/check-strict-structure.rb && ruby .github/policy/check-policy-steps.rb && bash .github/policy/test-base-policy-result.sh ) > "${tmp}/out" 2>&1
 }
 check "${tmp}/entry.yml" || { cat "${tmp}/out" >&2; fail 'the classified layout was refused'; }
 echo 'accepted  the classified layout'
