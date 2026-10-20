@@ -34,12 +34,6 @@ check() {
 check "${tmp}/entry.yml" || { cat "${tmp}/out" >&2; fail 'the aggregate layout was refused'; }
 echo 'accepted  the aggregate layout'
 
-# mutate LABEL OLD NEW: the fixture with the first OLD replaced by NEW must be refused.
-mutate() {
-  OLD="$2" NEW="$3" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found: #{ENV["OLD"][0, 70]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[1], s)' "${tmp}/entry.yml" "${tmp}/mut.yml"
-  if check "${tmp}/mut.yml"; then fail "NOT refused: $1"; fi
-  echo "refused   $1"
-}
 # mutate_yaml LABEL RUBY: the parsed fixture edited by RUBY (it sees `d`, the workflow hash) must be refused.
 mutate_yaml() {
   EXPR="$2" ruby -ryaml -e 'd = YAML.safe_load(File.read(ARGV[0]), aliases: false); eval(ENV["EXPR"]); File.write(ARGV[1], YAML.dump(d))' "${tmp}/entry.yml" "${tmp}/mut.yml"
@@ -57,6 +51,13 @@ for shard in policy-structure policy-fixtures policy-evidence policy-mutations; 
   mutate_yaml "${shard} given write permission" "d['jobs']['${shard}']['permissions'] = { 'contents' => 'write' }"
   mutate_yaml "${shard} checks out another repository" "d['jobs']['${shard}']['steps'][0]['with']['repository'] = 'someone/else'"
   mutate_yaml "${shard} checks out with a token" "d['jobs']['${shard}']['steps'][0]['with']['token'] = 'x'"
+  mutate_yaml "${shard} tolerates failure" "d['jobs']['${shard}']['continue-on-error'] = true"
+  mutate_yaml "${shard} in a container" "d['jobs']['${shard}']['container'] = 'mcr.example/runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'"
+  mutate_yaml "${shard} on a self-hosted runner" "d['jobs']['${shard}']['runs-on'] = 'self-hosted'"
+  mutate_yaml "${shard} given a service" "d['jobs']['${shard}']['services'] = { 'db' => { 'image' => 'postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } }"
+  mutate_yaml "${shard} given an env that steers its steps" "d['jobs']['${shard}']['env'] = { 'RUBYOPT' => '-e0' }"
+  mutate_yaml "a ${shard} step tolerates failure" "d['jobs']['${shard}']['steps'][1]['continue-on-error'] = true"
+  mutate_yaml "${shard} loses its own checkout" "d['jobs']['${shard}']['steps'][0] = { 'name' => 'Check out public policy repository', 'run' => 'echo skipped' }"
 done
 mutate_yaml 'an extra job named like the required check' "d['jobs']['extra'] = { 'name' => '${REQ}', 'runs-on' => 'ubuntu-24.04', 'steps' => [{ 'run' => 'true', 'shell' => 'bash' }] }"
 mutate_yaml 'the base-pass call named like the required check' "d['jobs']['base-pass']['name'] = '${REQ}'"
