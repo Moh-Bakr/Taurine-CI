@@ -329,6 +329,14 @@ jobs:
         shell: bash
         run: bash .github/policy/check-egress-allowlist.sh
 
+      - name: Test the rustfmt enforcement default against a stub cargo
+        shell: bash
+        run: bash .github/policy/test-lint-enforce.sh
+
+      - name: Test the all-locks advisory helper wiring and reporting against a stub
+        shell: bash
+        run: bash .github/policy/test-all-locks-audit.sh
+
   # The base commit's policy run against this pull request's tree, and the fixtures that test the
   # step that runs it, in base-policy.yml (see its header). `policy` requires this call's result.
   base-pass:

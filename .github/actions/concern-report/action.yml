@@ -32,7 +32,12 @@ runs:
             /^error\[E[0-9]+\]: / { block = "error"; pending = ""; code = $1; sub(/\]:.*$/, "]", code); print code; next }
             /^error: / {
               block = "error"; pending = ""
-              if ($0 ~ /^error: (could not compile|aborting due to|test failed|[0-9]+ targets? failed|failed to run custom build command for|linking with |failed to (download|select|get|load|parse|fetch)|no matching package)/) print
+              # Crate, target and package names are private source identifiers: fixed text only.
+              if ($0 ~ /^error: test failed/) print "error: test failed, to rerun pass (target withheld)"
+              else if ($0 ~ /^error: [0-9]+ targets? failed/) { n = $2; print "error: " n " target(s) failed (names withheld)" }
+              else if ($0 ~ /^error: could not compile/) print "error: could not compile (crate and target withheld)"
+              else if ($0 ~ /^error: failed to run custom build command for/) print "error: failed to run custom build command (package withheld)"
+              else if ($0 ~ /^error: (aborting due to|linking with |failed to (download|select|get|load|parse|fetch)|no matching package)/) print
               else pending = "yes"
               next
             }
@@ -41,7 +46,7 @@ runs:
               next
             }
             /^[[:space:]]*= note: .*(lint level|-D |-W |deny\(|warn\()/ { print; next }
-            /^Diff in / || /^test .* FAILED$/ || /^test result: / || /^failures:$/ || /^smoke: / { print }
+            /^Diff in / || /^test result: / || /^failures:$/ || /^smoke: / { print }
           ' | head -40 >&2 || true
         }
 
@@ -71,7 +76,7 @@ runs:
         # picks up the same `.cargo/audit.toml`.
         cargo_audit_detail() {
           sanitize_stream <"$1" |
-            grep -E '^ID: |^Severity: |^error: [0-9]+ vulnerabilit|^warning: [0-9]+ (allowed )?warning|^Warning: (unmaintained|unsound|yanked|notice)' |
+            grep -E '^ID: |^Severity: |^[0-9]{1,4} lockfile\(s\) audited, [0-9]{1,4} failed\.$|^error: [0-9]+ vulnerabilit|^warning: [0-9]+ (allowed )?warning|^Warning: (unmaintained|unsound|yanked|notice)' |
             head -40 >&2 || true
           echo 'names withheld: run `cargo audit` in the private checkout to see the affected crates' >&2
         }
@@ -101,13 +106,31 @@ runs:
             head -40 >&2 || true
         }
 
-        # Failing tests of a JavaScript runner: the `FAIL file > suite > test` lines (file path
-        # and test titles, the same identities the test inventory already publishes) plus the
-        # runner's own count lines. Assertion messages and received/expected values stay private.
+        # The failing tests of a JavaScript runner (vitest) as records `js<TAB>file<TAB>title<TAB>fail`
+        # for tci_failed_ids: from the `FAIL [|project|] file > suite > test` lines, the file being
+        # the runner's repository-relative path (a workspace prefix is removed, backslashes become
+        # slashes) and the title the part after the first ` > `. A `FAIL file [ file ]` line (a
+        # suite that did not load) has an empty title. Nothing here is printed: only the keyed ids.
+        js_failure_records() {
+          tr -d '\r' <"$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' |
+            awk -v ws="${GITHUB_WORKSPACE:+${GITHUB_WORKSPACE}/src/}" -v prefix="${2:-}" '
+              /^[[:space:]]*FAIL[[:space:]]/ {
+                l = $0; sub(/^[[:space:]]*FAIL[[:space:]]+/, "", l); sub(/^\|[^|]*\|[[:space:]]*/, "", l)
+                n = index(l, " > ")
+                if (n > 0) { file = substr(l, 1, n - 1); title = substr(l, n + 3) } else { file = l; sub(/ \[.*$/, "", file); title = "" }
+                gsub(/\\/, "/", file); if (ws != "" && index(file, ws) == 1) file = substr(file, length(ws) + 1); else if (file !~ /^\//) { while (substr(file, 1, 3) == "../" && prefix != "") { file = substr(file, 4); sub(/[^\/]*\/$/, "", prefix) } file = prefix file }
+                sub(/[[:space:]]+$/, "", title)
+                printf "js\t%s\t%s\tfail\n", file, title
+              }' | awk '!seen[$0]++' | head -80
+        }
+
+        # Failing tests of a JavaScript runner as keyed ids (see the KEYED FAILING-TEST IDENTITIES
+        # note in the sanitize library) plus the runner's own count lines. Neither the `FAIL file >
+        # suite > test` lines nor the assertion messages and received/expected values are
+        # published; the file path and the test title go into the HMAC only.
         test_failures() {
-          tr '\\' '/' <"$1" | sanitize_stream | strip_excerpts |
-            grep -E '^[[:space:]]*FAIL[[:space:]]|^[[:space:]]*(Test Files|Tests)[[:space:]]+[0-9]|^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped)' |
-            cut -c1-200 | awk '!seen[$0]++' | head -60 >&2 || true
+          js_failure_records "$1" "${2:-}" | tci_failed_ids >&2 || true
+          tr -d '\r' <"$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' | tci_count_lines >&2 || true
         }
 
         # The packaging smoke build (an unsigned Tauri build): which phase failed and a fixed
@@ -285,7 +308,7 @@ runs:
           local log="$1" dir exe base dll found line
           echo 'test binary load failure detail (binary: missing imports; names only):'
           # Binaries named in the log, hashes stripped.
-          tr -d '\r' <"${log}" | grep -oE '[A-Za-z0-9_-]+-[0-9a-f]{16}\.exe' | sed -E 's/-[0-9a-f]{16}\.exe$//' | sort -u | head -10 | sed 's/^/  named in log: /' || true
+          echo "  test binaries named in the log: $(tr -d '\r' <"${log}" | grep -oE '[A-Za-z0-9_-]+-[0-9a-f]{16}\.exe' | sort -u | wc -l | tr -d ' ') (names withheld)"
           dir="${CARGO_TARGET_DIR:-}"
           [[ -n "${dir}" ]] || return 0
           local objdump=''
@@ -315,9 +338,9 @@ runs:
             done < <("${objdump}" -p "${exe}" 2>/dev/null | sed -n 's/^[[:space:]]*DLL Name: \([A-Za-z0-9_.-]*\.dll\)$/\1/p' | sort -u)
           done
           if [[ -s "${seen}" ]]; then
-            echo '  imports not found (DLL: binaries needing it, up to 4):'
+            echo '  imports not found (DLL: how many test binaries need it):'
             cut -d'|' -f1 "${seen}" | sort -u | while IFS= read -r dll; do
-              echo "    ${dll}: $(grep -F "${dll}|" "${seen}" | cut -d'|' -f2 | sort -u | head -4 | tr '\n' ' ')"
+              echo "    ${dll}: needed by $(grep -F "${dll}|" "${seen}" | cut -d'|' -f2 | sort -u | wc -l | tr -d ' ') test binary(ies) (names withheld)"
             done | head -20
           fi
           if [[ -s "${RUNNER_TEMP}/loader-path.txt" ]]; then
@@ -347,8 +370,8 @@ runs:
               flaky="$(tr -d '\r' <"${log}" | grep -c ' FLAKY ' || true)"
               if [[ "${flaky}" -gt 0 ]]; then
                 echo "::warning title=flaky tests::${label}: ${flaky} test(s) passed only on retry"
-                echo 'flaky tests (retries, test binary and name):'
-                nextest_failures "${log}" | grep -E '^FLAKY' | head -40 || true
+                echo 'flaky tests (keyed ids; the key is private):'
+                nextest_failures "${log}" | grep -E '^(test-id-key: |failed-test-id: .* status=flaky$|failed-test-ids: unavailable)' | head -40 || true
               fi
               if [[ "${executed}" -lt 1 ]]; then
                 echo "${label}: failed (no tests were executed; a test run that runs nothing proves nothing)" >&2
@@ -408,10 +431,11 @@ runs:
               if [[ "${label}" == rust-packaging-smoke ]]; then
                 packaging_detail "${log}"
               fi
-              # cargo-nextest: the failing tests, signals, timeouts and flaky retries by name.
+              # cargo-nextest: the failing tests, signals, timeouts and flaky retries as keyed ids
+              # (an HMAC of test binary and name; the local `ci-failed-tests` maps them back).
               nextest_lines="$(nextest_failures "${log}" || true)"
               if [[ -n "${nextest_lines}" ]]; then
-                echo 'nextest failures (status, test binary and name):' >&2
+                echo 'nextest failures (keyed ids and status; names, binaries and messages are never published):' >&2
                 printf '%s\n' "${nextest_lines}" >&2
                 nextest_summary "${log}" >&2 || true
               fi
@@ -421,10 +445,10 @@ runs:
               # The panicking tests with a fixed class of each panic and its file:line.
               panics="$(panic_summary "${log}" || true)"
               if [[ -n "${panics}" ]]; then
-                echo 'panics (test, file:line, class; messages withheld):' >&2
+                echo 'panics (keyed file id, line, class; test names, paths and messages withheld):' >&2
                 printf '%s\n' "${panics}" >&2
               fi
-            elif [[ "${label}" == cargo-audit ]]; then
+            elif [[ "${label}" == cargo-audit || "${label}" == cargo-audit-all-locks ]]; then
               echo "${label}: failed (advisory findings below; exit ${rc}; remaining output withheld)" >&2
               cargo_audit_detail "${log}"
             else
@@ -434,7 +458,10 @@ runs:
               ts_diagnostics "${log}"
             fi
             if [[ "${label}" == desktop-tests-* || "${label}" == mobile-tests ]]; then
-              test_failures "${log}"
+              # vitest prints a path relative to its own root: the id uses the repository-relative path.
+              js_root='taurine-desktop/'
+              if [[ "${label}" == mobile-tests ]]; then js_root='taurine-mobile/'; fi
+              test_failures "${log}" "${js_root}"
             fi
             if [[ "${label}" == desktop-vite-build ]]; then
               # Vite's top-level error lines are safe once paths are scrubbed.
@@ -443,19 +470,20 @@ runs:
                 head -20 >&2 || true
             fi
             if [[ "${label}" == dashboard-contracts || "${label}" == orchestrate-verification ]]; then
-              test_failures "${log}"
-              sanitize_stream <"${log}" | strip_excerpts | grep -E '^(not ok|# (pass|fail|tests))' | head -20 >&2 || true
+              test_failures "${log}" ""
+              tr -d '\r' <"${log}" | tci_count_lines | grep '^#' >&2 || true
+              # TAP names its failing tests in `not ok` lines, which carry no file; only the count is published.
+              echo "failing TAP tests: $(grep -cE '^not ok' "${log}" || true)" >&2
             fi
             if [[ "${label}" == e2e-* ]]; then
-              # The failing specs by name (list reporter lines and annotation titles).
+              # The console reporter's failing specs are counted, never named.
               pw="$(playwright_failures "${log}" || true)"
               if [[ -n "${pw}" ]]; then
-                echo 'failing specs (spec > title):' >&2
                 printf '%s\n' "${pw}" >&2
               fi
               pwj="$(playwright_json_failures "${RUNNER_TEMP}/test-ids/${label}.json" || true)"
               if [[ -n "${pwj}" ]]; then
-                echo 'failing specs from the JSON report:' >&2
+                echo 'failing specs from the JSON report (keyed ids; spec files and titles are never published):' >&2
                 printf '%s\n' "${pwj}" >&2
               fi
             fi
@@ -463,12 +491,11 @@ runs:
               budget_report "${log}" >&2
             fi
             if [[ "${label}" == mobile-tests || "${label}" == e2e-* ]]; then
-              # Keep hosted-only diagnostics useful without publishing
-              # private source paths or compiler/test output.
-              sanitize_stream <"${log}" |
-                strip_excerpts |
-                grep -Ei '(failed tests|test files|tests[[:space:]]+|assertionerror|expected|received|timed out|(^|[[:space:]])[0-9]+ (passed|failed|flaky|skipped)|(^|[[:space:]])(FAIL|PASS)[[:space:]])' |
-                tail -80 >&2 || true
+              # Runner count lines only (the file and test counts and the pass/fail tallies). A
+              # failing test is never named here: `FAIL` lines, assertion text and received or
+              # expected values carry titles and source values, and the keyed ids come from
+              # test_failures and playwright_json_failures.
+              tr -d '\r' <"${log}" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' | tci_count_lines >&2 || true
             fi
             exit 1
           fi

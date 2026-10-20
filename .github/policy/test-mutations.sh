@@ -112,7 +112,7 @@ drain() {
 # rejects the tree and returns non-zero; returns zero when every check passes.
 offline_policy() {
   local check
-  for check in check-universal.rb check-structure.rb check-strict-structure.rb check-policy-steps.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
+  for check in check-universal.rb check-structure.rb check-strict-structure.rb check-policy-steps.rb test-preflight.sh test-cache-scope-audit.sh test-run-result.sh test-revoke.sh check-workflows.sh check-sizes.sh test-lint-enforce.sh test-all-locks-audit.sh test-policy.sh test-sanitizers.sh test-extractors.sh check-concern-table.sh test-selector.sh check-tools.sh check-egress-allowlist.sh; do
     [[ -f ".github/policy/${check}" ]] || continue
     # The structure manifest pins the tree's shape, so a case that rewrites a workflow to test another
     # rule (reject_file below) sets SKIP_STRUCTURE; the manifest has its own fixtures in test-structure.sh.
@@ -152,6 +152,18 @@ fresh_tree() {
 swap() {
   OLD="$2" NEW="$3" ruby -e 's = File.read(ARGV[0]); i = s.index(ENV["OLD"]) or abort("mutation text not found in #{ARGV[0]}: #{ENV["OLD"][0, 80]}"); s[i, ENV["OLD"].length] = ENV["NEW"]; File.write(ARGV[0], s)' "${dir}/tree/$1"
 }
+# present FILE TEXT: succeeds when the tree's FILE contains TEXT.
+present() {
+  OLD="$2" ruby -e 'exit(File.read(ARGV[0]).include?(ENV["OLD"]) ? 0 : 1)' "${dir}/tree/$1"
+}
+# either FILE OLD NEW FILE OLD NEW: a mutation whose anchor has two reviewed shapes (a tree before and
+# after a restructuring). The first pair applies when its text is there, else the second; when neither
+# is there the first pair's swap aborts, so a stale mutation still fails loudly and never tests nothing.
+either() {
+  if present "$1" "$2"; then swap "$1" "$2" "$3"
+  elif present "$4" "$5"; then swap "$4" "$5" "$6"
+  else swap "$1" "$2" "$3"; fi
+}
 # miss LOG-TAIL-MESSAGE: a case the policy did not reject. Status 3 tells the scheduler it is a
 # policy miss, which MUTATION_REPORT may continue past, and not a harness failure.
 miss() {
@@ -173,7 +185,9 @@ verdict() {
 _mutation() {
   local label="$1" by=''; shift
   fresh_tree
-  while (( $# )); do swap "$1" "$2" "$3"; shift 3; done
+  while (( $# )); do
+    if [[ "$1" == --either ]]; then either "$2" "$3" "$4" "$5" "$6" "$7"; shift 7; else swap "$1" "$2" "$3"; shift 3; fi
+  done
   : > "${dir}/log"
   by="$(cd "${dir}/tree" && offline_policy)" || true
   verdict "${label}" "${by}"
@@ -200,7 +214,7 @@ pol_to_guarded="$(ruby -e 'm = File.read(ARGV[0]).match(/    if: \$\{\{ always\(
 composite_revoke='        if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 weekly_revoke='          if ! api -X DELETE "${GITHUB_API_URL}/installation/token"; then'
 
-mutation '1. the Linux concern no longer needs the pre-flight job' "${linux}" '    needs: [validate-input, plan, select]' '    needs: [plan, select]'
+mutation '1. the Linux concern no longer needs the pre-flight job' --either "${linux}" '    needs: [validate-input, plan, select]' '    needs: [plan, select]' "${linux}" '    needs: [validate-input, select]' '    needs: [select]'
 mutation '1. source-read no longer needs the pre-flight job' .github/workflows/source-read.yml '    needs: validate-input
 ' ''
 mutation '1. the Linux concern runs past a failed pre-flight' "${linux}" "needs.validate-input.result == 'success' &&" ''
@@ -301,7 +315,7 @@ mutation '12. the Linux untrusted half loses cache-mode read' "${linux}" '    ca
 mutation '12. the Linux untrusted half granted write' "${linux}" '    cache-mode: read
     uses: ./.github/workflows/linux-validation-concern.yml' '    cache-mode: write
     uses: ./.github/workflows/linux-validation-concern.yml'
-mutation '12. the Linux untrusted half runs without the audit' "${linux}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' }}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}"
+mutation '12. the Linux untrusted half runs without the audit' --either "${linux}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' }}" "needs.validate-input.result == 'success' && needs.plan.result == 'success' && (needs.select.result == 'success' || needs.select.result == 'skipped') }}" "${linux}" "(needs.select.result == 'success' || needs.select.result == 'skipped') && needs.cache-audit.result == 'success' && join(" "(needs.select.result == 'success' || needs.select.result == 'skipped') && join("
 mutation '12. the Linux audit no longer limited to untrusted' "${linux}" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && github.ref == 'refs/heads/untrusted' && needs.validate-input.result == 'success' }}
     needs: [validate-input]" "    if: \${{ github.repository == 'Moh-Bakr/Taurine-CI' && needs.validate-input.result == 'success' }}
     needs: [validate-input]"
@@ -332,8 +346,10 @@ mutation '12. the base-pass job renamed' .github/workflows/validate-public-chang
 # 11b. The reviewer's case for the policy half: an untrusted-only restore with no cache-mode anywhere
 # must be rejected, because the default grant for a job with no cache-mode is write.
 mutation '11. an untrusted-only cargo-source restore while its caller is not enforced' .github/policy/check-cache-mode.rb '  linux-validation.yml
-' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+' '' --either "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
             cargo-sources-v3-${{ runner.os }}-
 ' ''
@@ -342,7 +358,7 @@ mutation '11. a duplicate cache-mode key on the Linux caller' "${linux}" '    us
     uses: ./.github/workflows/linux-validation-concern.yml  # zizmor: ignore[self-repository]'
 
 # 13. The audits reach the verdict, and an untrusted restore waits for macOS (docs/untrusted-readonly-cache.md).
-mutation '13. the Linux result no longer needs the after-audit' "${linux}" '    needs: [plan, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [plan, validate-main, validate-untrusted, select]'
+mutation '13. the Linux result no longer needs the after-audit' --either "${linux}" '    needs: [plan, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [plan, validate-main, validate-untrusted, select]' "${linux}" '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select, cache-audit, cache-audit-after]' '    needs: [validate-input, validate-long-main, validate-long-untrusted, validate-main, validate-untrusted, select, cache-audit]'
 mutation '13. the Windows result stops passing blocking-failures' "${windows}" "          blocking-failures: " "          selection-note: "
 mutation '13. run-result ignores the blocking count' .github/actions/run-result/action.yml '        if [[ "${blocking}" -gt 0 ]]; then
           # A check outside' '        if [[ "${blocking}" == never ]]; then
@@ -644,16 +660,20 @@ mutation_by test-base-policy-result.sh '14. an extra key on the guard step (work
 
 # 14. An untrusted restore waits for every untrusted-running workflow to be enforced (rule M).
 mutation '14. an untrusted cargo-source restore while macOS is not enforced' .github/policy/check-cache-mode.rb '  macos-validation.yml
-' '' "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+' '' --either "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || inputs.concern == 'scan-security') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" "        if: \${{ github.ref == 'refs/heads/main' && steps.verified-source.outputs.protected-ancestor == 'true' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "        if: \${{ github.ref == 'refs/heads/untrusted' && (inputs.concern == 'taurine-cli' || startsWith(inputs.concern, 'rust-') || (inputs.concern == 'scan-security' || inputs.concern == 'scan-lint')) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0" "${linux_concern}" '          restore-keys: |
             cargo-sources-v3-${{ runner.os }}-
 ' ''
 mutation '14. the macOS untrusted half granted write' .github/workflows/macos-validation.yml '    cache-mode: read
     # Kept as ./' '    cache-mode: write
     # Kept as ./'
-mutation '14. the macOS concern called without the split' .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"'
+mutation '14. the macOS concern called without the split' --either .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"'
     needs: [plan, cache-audit]' '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"'
+    needs: [plan]' .github/workflows/macos-validation.yml '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && needs.cache-audit.result == '"'"'success'"'"' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '"'"''"'"') != '"'"''"'"'
+    needs: [plan, cache-audit]' '    if: github.repository == '"'"'Moh-Bakr/Taurine-CI'"'"' && github.ref == '"'"'refs/heads/untrusted'"'"' && join(fromJSON(needs.plan.outputs.long_matrix).concern, '"'"''"'"') != '"'"''"'"'
     needs: [plan]'
 # 15. The macOS classification and the dispatcher rules read the parsed structure, not indentation.
 mutation '15. classification falls back to an indentation grep' .github/policy/workflow-lists.sh '[[ "$(ruby "${workflow_lists_dir}/classify-workflow.rb" "${file}")" == dispatcher ]]' '! grep -qE '"'"'^    environment:'"'"' "${file}"'
@@ -694,6 +714,18 @@ mutation '17. rule N dropped from the checker' .github/policy/check-cache-mode.r
 admission=.github/policy/case-evidence-admission.rb
 mutation_by test-case-evidence-admission.sh '18. the admission git calls without safe.directory' "${admission}" "tool, '-c', safe_directory!(root, code), '-C', root," "tool, '-C', root,"
 mutation_by test-case-evidence-admission.sh '18. the admission safe.directory widened to every repository' "${admission}" '"safe.directory=#{real}"' '"safe.directory=*"'
+
+mutation '11. rustfmt back to report-only by default' .github/actions/rust-lint-enforce/action.yml "    default: 'true'" "    default: 'false'"
+mutation '11. the fmt step reads the clippy input' .github/actions/rust-lint-enforce/action.yml 'FAIL: ${{ inputs.fmt-fail }}' 'FAIL: ${{ inputs.fail }}'
+mutation '12. a protected SHA may omit the all-locks advisory helper' .github/actions/linux-concern-js/action.yml 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" != false ]]; then' 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" == never ]]; then'
+mutation '12. the workflow stops requiring the helper on protected SHAs' "${linux_concern}" "          require-all-locks-audit: \${{ steps.verified-source.outputs.protected-ancestor == 'true' }}
+" ''
+mutation '12. the required-helper gate fails open on an empty value' .github/actions/linux-concern-js/action.yml 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" != false ]]; then' 'elif [[ "${REQUIRE_ALL_LOCKS_AUDIT}" == true ]]; then'
+mutation '12. the all-locks helper runs without a timeout' .github/actions/linux-concern-js/action.yml 'timeout --kill-after=15s 6m bash' 'bash'
+mutation '11. an empty value relaxes the fmt gate' .github/actions/rust-lint-enforce/action.yml '          [[ "${FAIL}" != false ]] || exit 0
+          exit 1' '          [[ "${FAIL}" == true ]] || exit 0
+          exit 1'
+mutation '12. the all-locks helper runs with the inherited environment' .github/actions/linux-concern-js/action.yml 'env -i PATH="${PATH}" HOME="${HOME}" LANG=C.UTF-8 TMPDIR="${RUNNER_TEMP}" \' 'env PATH="${PATH}" \'
 
 # 10. Self-editing policy. A pull request quietly exempts the Linux concern from rule 7 in its own
 # copy of the policy (the rule's fixtures, which use other files, still pass) and adds a
