@@ -510,6 +510,18 @@ runs:
               "${readelf_bin}" -d "${file}" | sed -nE 's/.*\(NEEDED\).*\[([^]]+)\].*/\1/p'
               ;;
             cffaedfe | cefaedfe | cafebabe)
+              # `cafebabe` also opens a Java class file (kotlinx-coroutines ships one in every APK
+              # as DebugProbesKt.bin): its next word is the class version (minor 0, major 45 to
+              # 255) where a fat header has a small architecture count. Only on a host without
+              # otool (Linux, which judges Android artefacts, where no Mach-O can load) does a
+              # class-shaped file have no dynamic dependencies to read; the OpenSSL string scan
+              # still judges it, and a host with otool reads every cafebabe file as Mach-O.
+              if [[ "${kind}" == cafebabe ]] && ! type -P otool >/dev/null 2>&1; then
+                local word
+                word="$(LC_ALL=C head -c 8 "${file}" | od -An -tx1 | tr -d ' \n')"; word="${word:8:8}"
+                [[ "${word}" =~ ^000000[0-9a-f]{2}$ ]] && (( 16#${word} >= 45 )) && return 0
+                return 1
+              fi
               otool -L "${file}" | tail -n +2 | awk '{ print $1 }' | sed 's#.*/##'
               ;;
             4d5a*)

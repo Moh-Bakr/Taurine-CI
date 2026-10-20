@@ -510,6 +510,18 @@ cp "$(artefact e2 1.1.1w)" "${work}/bundle/Frameworks/libbundled"
 expect_fail 'an extra with its own OpenSSL' "artefact_tree_check b '${work}/bundle' '${work}/bundle/app' release present" 'the door is not in the graph'
 mkdir -p "${work}/abi"; cp "$(artefact e3 3.5.5)" "${work}/abi/libssl.so"
 expect_fail 'an ABI with only a prebuilt libssl' "artefact_tree_check b '${work}/abi' - debug present" 'the door is not in the graph'
+# A Java class file (cafebabe, then its version) has no dynamic dependencies on a host without
+# otool, which is where Android artefacts are judged; its strings are still scanned, and a fat
+# Mach-O (cafebabe, then a small architecture count) is still refused there.
+if ! type -P otool >/dev/null 2>&1; then
+  mkdir -p "${work}/apk"; printf '\xca\xfe\xba\xbe\x00\x00\x00\x34class' >"${work}/apk/DebugProbesKt.bin"
+  expect_pass 'a Java class file in an APK has no dynamic dependencies to read' "artefact_tree_check b '${work}/apk' - debug absent"
+  printf '\xca\xfe\xba\xbe\x00\x00\x00\x34OpenSSL 1.1.1w' >"${work}/apk/DebugProbesKt.bin"
+  expect_fail 'a class-shaped file carrying OpenSSL is still refused' "artefact_tree_check b '${work}/apk' - debug absent" 'FAILED'
+  printf '\xca\xfe\xba\xbe\x00\x00\x00\x34class' >"${work}/apk/DebugProbesKt.bin"
+  printf '\xca\xfe\xba\xbe\x00\x00\x00\x02fat' >"${work}/apk/fat"
+  expect_fail 'a fat Mach-O beside it is still judged' "artefact_tree_check b '${work}/apk' - debug absent" 'the dynamic dependency list could not be read'
+fi
 grep -qF 'artefact_tree_check "android-${abi}"' .github/workflows/android-validation.yml || fail 'android-native does not judge every library of each ABI'
 grep -qF 'artefact_tree_check ios-arm64-sim-app' .github/workflows/ios-validation.yml || fail 'ios-native does not judge the whole .app'
 
