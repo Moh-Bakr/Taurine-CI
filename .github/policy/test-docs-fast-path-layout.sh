@@ -103,7 +103,7 @@ done
 mutate 'the aggregate loses its checkout-free steps (a third step added)' "${J}['policy']['steps'] << { 'name' => 'Extra', 'shell' => 'bash', 'run' => 'true' }"
 mutate 'the aggregate guards swapped' "${J}['policy']['steps'].reverse!"
 mutate 'a guard that passes a skipped shard when docs_only is false' "g = ${J}['policy']['steps'][1]; g['run'] = g['run'].sub('false) expected=success; docs_expected=skipped ;;', 'false) expected=\${POLICY_FIXTURES_RESULT}; docs_expected=skipped ;;')"
-mutate 'a guard that passes a skipped base pass when docs_only is false' "g = ${J}['policy']['steps'][0]; g['run'] = g['run'].sub('false) expected=success;', 'false) expected=\${BASE_PASS_RESULT};')"
+mutate 'a guard that passes a skipped base pass when docs_only is false' "g = ${J}['policy']['steps'][0]; g['run'] = g['run'].sub('false) expected=success ;;', 'false) expected=\${BASE_PASS_RESULT} ;;')"
 mutate 'a guard that accepts a failed shard beside a skipped one' "g = ${J}['policy']['steps'][1]; g['run'] = g['run'].sub('!= \"\${expected}\"', '== \"failure\"')"
 mutate 'a guard that ignores a failed classification' "g = ${J}['policy']['steps'][0]; g['run'] = g['run'].sub(\"!= 'success'\", \"== 'never'\")"
 mutate 'a guard that ignores the classification altogether' "g = ${J}['policy']['steps'][1]; g['env'].delete('CLASSIFY_RESULT'); g['run'] = \"set -euo pipefail\\nexpected=success; docs_expected=skipped\\n\" + g['run'].split(\"esac\\n\", 2).last"
