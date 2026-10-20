@@ -1416,10 +1416,12 @@ the required check: the guards pass only on success, and `policy` needs the call
 ### The policy gate is an aggregate over four shards
 
 `policy` (the required check "Validate workflow policy") runs no checkout and none of the pull
-request's scripts: two guards only. It needs the base pass and four shard jobs that need nothing
-else, so all of them run at once and the gate costs the longest of them, not their sum. Each shard
-starts with its own checkout; every step of the former single job runs in exactly one shard, and
-`check-policy-steps.rb` pins which one.
+request's scripts: two guards only. It needs the classification, the base pass, the short docs-only
+job and four shard jobs that wait for the classification and for nothing else, so all of them run
+at once and the gate costs the longest of them, not their sum. Each shard starts with its own
+checkout; every step of the former single job runs in exactly one shard, and
+`check-policy-steps.rb` pins which one. A documentation-only change skips the base pass and the
+four shards (see "Docs-only fast path", below).
 
 | Job | Steps | Timeout | Basis (recent green run 39271687193, summed step times) |
 | --- | --- | --- | --- |
@@ -1427,12 +1429,97 @@ starts with its own checkout; every step of the former single job runs in exactl
 | `policy-fixtures` | the remaining fixture and unit tests, the aggregate-layout test | 25 min | about 100 s, plus the aggregate-layout test (about 140 cases; roughly 12 minutes measured on a busy 10-core Mac; not in that run); about 14 min in all, 1.8x headroom. Parallelising that test's cases is the next speed-up |
 | `policy-evidence` | case-evidence contract, producers, assets and Playwright parity | 10 min | about 36 s |
 | `policy-mutations` | `test-mutations.sh` | 25 min | about 470 s; 3x headroom (25 because main's `test-policy-aggregate.sh` anchors on that value) |
+| `classify` | the classifier, run from the base commit | 5 min | seconds (two checkouts and one script) |
+| `policy-docs` | the repository-contents check and `git diff --check`, for a documentation-only change | 5 min | about a minute; skipped on any other change |
 | `policy` (aggregate) | the two guards | 5 min | seconds once its `needs` end |
 
-The guards fail unless every `needs.<job>.result` is `success`, so a failed, skipped, cancelled or
-dropped shard cannot pass. `test-policy-aggregate.sh` proves the checkers refuse each weakening of
+The guards fail unless every job ended as the classification allows (next section), so a failed,
+cancelled or dropped shard cannot pass, and a skipped one passes only beside a successful
+classification that said the change is documentation only. `test-policy-aggregate.sh` proves the checkers refuse each weakening of
 that layout. A budget that a green run exceeds 80% of is a defect (ci-speed.md); the timeouts
 above leave over 100% headroom on measured durations because hosted runner speed varies.
+
+## Docs-only fast path
+
+A pull request that changes documentation only does not need the whole policy (about 40 minutes:
+the shards and the base pass, which runs `test-mutations.sh` again on the pull request's tree). It
+gets a short job instead. The required check keeps its name, "Validate workflow policy", and
+`paths-ignore` is not used: a required check that never reports leaves the pull request waiting
+forever, so every pull request still runs `policy`, which decides from what the other jobs report.
+
+**classify.** The first job of `validate-public-changes.yml`. It checks out the BASE commit's policy
+(`github.event.pull_request.base.sha`, pinned, `persist-credentials: false`, `contents: read`) and, in a
+second directory, the merge commit under test with its history, as data that is never executed. It
+runs `classify-docs-change.rb` *from the base checkout*, so a pull request cannot alter its own
+classification, and the result is `docs_only=true` or `docs_only=false`. Every doubt is false:
+
+- the event is not a pull request, a commit id is missing, or the merge commit is not the merge of
+  the event's base side with `github.event.pull_request.head.sha`;
+- no changed path, more than 2000 paths, or any git failure (the script catches every error and
+  answers false);
+- any changed path that is not `docs/**/*.md`, a top-level `*.md` or (only while the base has a
+  `plans/` directory) `plans/**/*.md`, written with plain path segments (a letter or digit first,
+  then letters, digits, dot, underscore, dash: no space, no leading dot, no non-ASCII letter);
+- a path on the exclusion list (below);
+- anything but an added, modified or deleted regular file of mode 100644: a rename (renames are not
+  followed, so one is a delete plus an add and each side is judged as its own path, which makes a
+  rename into or out of a code path false), a copy, a type change, a symlink, a submodule, a mode
+  change, an executable file or a binary file;
+- a base commit that predates the classifier (the step answers false when the file is not in the
+  base checkout, so the first pull request after the workflow change runs everything).
+
+The diff runs with a scrubbed git environment, no external diff and no text conversion, between the
+event's base commit and the merge commit, so a base that moved on with code after the pull request
+was opened is false (conservative) and the same pull request is true again once rebased.
+
+**The exclusion list.** A document that a script, test or workflow reads turns an edit of it into a
+policy change, so it can never be docs-only. `docs-fast-path-exclusions.rb` lists them
+(`EXCLUDED_DOCS`; today `docs/untrusted-readonly-cache.md`, which the spike gate of
+`check-cache-mode.rb` reads), and it is read from the base commit with the classifier.
+`check-docs-reads.rb` (a check, so the base pass runs main's copy over every pull request) greps
+`.github` for every way of naming a document: the file name of any existing document, or the docs
+directory as a path. Each such line outside a comment must be a read of an excluded document or be
+pinned with its exact text in `NAMED_NOT_READ` of the same file, where a reviewer decided it is a
+message, a description or a synthetic fixture. A new reader of any other document therefore fails
+the check until the document is excluded (it is read) or the line is pinned (it is not), and that
+decision is reviewed with the change. A reader that builds the path at run time (a variable, a
+glob the line does not name) is not found by a grep: review is the control for that, and
+`test-docs-reads.sh` pins the shapes the grep does find.
+
+**policy-docs.** Runs only when `docs_only` is `true`: `check-repository.sh` (allowed paths, the
+compiled-file sweep, credential patterns) and `check-docs-diff.sh`, which runs `git diff --check`
+between the first parent of the merge commit and the merge commit itself and fails on any checkout
+that is not a pull request merge commit. There is no markdown size or line check in this repository
+to add. It needs only `classify`, has a 5 minute timeout and holds no authority.
+
+**The skips.** The base pass and the four shards need `classify` and carry
+`if: needs.classify.outputs.docs_only != 'true'`, exactly. If classify failed, they are skipped
+because their dependency failed, and the aggregate fails because classify did.
+
+**The aggregate.** Both guards of `policy` read `needs.classify.result`, the output, and the
+results they guard, and accept exactly two outcomes:
+
+| classify | `docs_only` | base pass and four shards | `policy-docs` | `policy` |
+| --- | --- | --- | --- | --- |
+| success | `true` | all skipped | success | passes |
+| success | `false` | all success | skipped | passes |
+| failed, skipped, cancelled or missing | any | any | any | fails |
+| success | anything but `true` or `false` | any | any | fails |
+| success | `true` or `false` | any other mix (a skipped shard when `false`, a shard that ran when `true`, a failed or cancelled job) | | fails |
+
+`test-docs-fast-path-layout.sh` runs both guard scripts over this whole table (800 combinations).
+`docs-fast-path-shape.rb` is the one statement of the layout (the jobs, the gates, the two guards,
+the aggregate's `needs`); `check-policy-steps.rb` and `check-strict-structure.rb` pin the workflow to
+it exactly, and a half-made layout is refused. The classified layout landed in two steps
+(`DocsFastPathShape::REQUIRED`): the precursor taught the manifest, the checkers and the fixtures to
+accept both layouts and added the scripts, then the workflow change made the classified layout the
+only reviewed one.
+
+**What it does not cover.** A markdown file that nothing in `.github` names but that something reads
+by computed path; a top-level markdown file the repository forbids (the fast job fails on it:
+`check-repository.sh` rejects it, so it is safe but not fast); and a pull request that edits
+`classify-docs-change.rb` or the lists, which touches `.github` and so runs everything under review,
+like any policy change.
 
 ## Accepted residual risks
 

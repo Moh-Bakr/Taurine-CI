@@ -6,6 +6,13 @@ name: Validate public CI policy
 # rule and its rationale); this file only sequences them. Its job name, "Validate workflow
 # policy", is the required status check on main.
 #
+# A pull request that changes documentation only does not need the full policy, so the first job,
+# `classify`, decides from the changed paths whether it is one. When it is, a short job (policy-docs)
+# runs instead of the base pass and the four shards, and `policy` accepts exactly that outcome; when it
+# is not, or anything about the change is unusual, everything runs as before. `policy` keeps the
+# required check's name, and a skipped heavy job counts as a pass only beside a classification that
+# succeeded and said docs_only=true (docs/how-ci-works.md, "Docs-only fast path").
+#
 # A pull request carries its own copy of .github/policy/, so the policy it brings could be the
 # weakened one that lets it pass. On pull_request the same job therefore also checks out the
 # BASE commit's policy and runs every base check against the pull request's tree: a change must
@@ -30,15 +37,70 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Decides whether this pull request changes documentation only, from the changed paths between its base
+  # commit and the merge commit the other jobs check out. It runs the classifier from the BASE commit's
+  # checkout (the second checkout below holds the pull request's merge commit as data only, and nothing from
+  # it is run), so a pull request cannot alter its own classification, and every doubt is docs_only=false:
+  # a path outside the documentation allow-list, a document the policy reads (docs-fast-path-exclusions.rb),
+  # a rename, a symlink, a submodule, a mode change, a binary file, a failure to compute the diff, and any event
+  # other than a pull request. A base commit that predates the classifier answers false as well. This job holds
+  # no authority: only `policy` decides the required check.
+  classify:
+    permissions:
+      contents: read
+    name: Classify the change
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - name: Check out the base commit's policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: base-policy
+          fetch-depth: 1
+          persist-credentials: false
+
+      # The merge commit under test with its history, so the diff from the base commit can be read. Read-only,
+      # no credentials left behind, and nothing in it is executed.
+      - name: Check out the merge commit under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify the changed paths
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          classifier=base-policy/.github/policy/classify-docs-change.rb
+          if [[ ! -f "${classifier}" ]]; then
+            echo 'docs_only=false' >> "${GITHUB_OUTPUT}"
+            echo '::notice title=docs-only fast path::the base commit has no classifier, so the full policy runs'
+            exit 0
+          fi
+          ruby --disable-gems "${classifier}" --repo pr
+
   # The required status check, and nothing else: an aggregate. It runs no checkout and none of this
   # pull request's scripts, only the two guards below, so the result it reports cannot be changed by
   # anything the pull request carries. It needs the base pass (below) and every policy shard, and
-  # fails unless each ended in success; a skipped, cancelled or failed job is not a pass. All of them
+  # fails unless each ended as the classification allows: all of them success, and policy-docs skipped, or (a
+  # documentation-only change that classify succeeded in recognising) the base pass and the shards skipped and
+  # policy-docs success. A skipped, cancelled or failed job is not a pass anywhere else, and a classify job
+  # that failed, was skipped or answered anything but true or false fails the check. All of the heavy jobs
   # run at the same time, so the gate costs the longest of them, not their sum.
   policy:
     permissions: {}
     name: Validate workflow policy
-    needs: [base-pass, policy-evidence, policy-fixtures, policy-mutations, policy-structure]
+    needs: [base-pass, classify, policy-docs, policy-evidence, policy-fixtures, policy-mutations, policy-structure]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -55,16 +117,28 @@ jobs:
         shell: bash
         env:
           BASE_PASS_RESULT: ${{ needs.base-pass.result }}
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          DOCS_ONLY: ${{ needs.classify.outputs.docs_only }}
         run: |
           set -euo pipefail
-          if [[ "${BASE_PASS_RESULT}" != 'success' ]]; then
-            echo "::error::the base-policy workflow did not pass (result: ${BASE_PASS_RESULT})"
+          if [[ "${CLASSIFY_RESULT}" != 'success' ]]; then
+            echo "::error::the classify job did not pass (result: ${CLASSIFY_RESULT})"
             exit 1
           fi
-          echo 'base policy: the base-policy workflow passed'
+          case "${DOCS_ONLY}" in
+            true) expected=skipped ;;
+            false) expected=success ;;
+            *) echo "::error::the classification is neither true nor false (docs_only: '${DOCS_ONLY}')"; exit 1 ;;
+          esac
+          if [[ "${BASE_PASS_RESULT}" != "${expected}" ]]; then
+            echo "::error::the base-policy workflow ended ${BASE_PASS_RESULT}, expected ${expected} (docs_only: ${DOCS_ONLY})"
+            exit 1
+          fi
+          echo "base policy: the base-policy workflow ended ${BASE_PASS_RESULT}, as expected for docs_only=${DOCS_ONLY}"
 
-      # The same rule for this pull request's own policy, which runs in the four shards: every one must
-      # have succeeded, so a shard that is skipped, cancelled, failed or dropped from `needs` cannot pass.
+      # The same rule for this pull request's own policy, which runs in the four shards (or, for a
+      # documentation-only change, in policy-docs): each must have ended as the classification allows, so a shard
+      # that is skipped, cancelled, failed or dropped from `needs` cannot pass a change that is not docs-only.
       - name: Require every policy check shard to have passed
         if: ${{ always() }}
         shell: bash
@@ -73,26 +147,44 @@ jobs:
           POLICY_FIXTURES_RESULT: ${{ needs.policy-fixtures.result }}
           POLICY_MUTATIONS_RESULT: ${{ needs.policy-mutations.result }}
           POLICY_STRUCTURE_RESULT: ${{ needs.policy-structure.result }}
+          POLICY_DOCS_RESULT: ${{ needs.policy-docs.result }}
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          DOCS_ONLY: ${{ needs.classify.outputs.docs_only }}
         run: |
           set -euo pipefail
+          if [[ "${CLASSIFY_RESULT}" != 'success' ]]; then
+            echo "::error::the classify job did not pass (result: ${CLASSIFY_RESULT})"
+            exit 1
+          fi
+          case "${DOCS_ONLY}" in
+            true) expected=skipped; docs_expected=success ;;
+            false) expected=success; docs_expected=skipped ;;
+            *) echo "::error::the classification is neither true nor false (docs_only: '${DOCS_ONLY}')"; exit 1 ;;
+          esac
           failed=0
           for pair in "evidence:${POLICY_EVIDENCE_RESULT}" "fixtures:${POLICY_FIXTURES_RESULT}" "mutations:${POLICY_MUTATIONS_RESULT}" "structure:${POLICY_STRUCTURE_RESULT}"; do
-            if [[ "${pair#*:}" != 'success' ]]; then
-              echo "::error::the policy ${pair%%:*} shard did not pass (result: ${pair#*:})"
+            if [[ "${pair#*:}" != "${expected}" ]]; then
+              echo "::error::the policy ${pair%%:*} shard ended ${pair#*:}, expected ${expected} (docs_only: ${DOCS_ONLY})"
               failed=1
             fi
           done
+          if [[ "${POLICY_DOCS_RESULT}" != "${docs_expected}" ]]; then
+            echo "::error::the policy docs-only job ended ${POLICY_DOCS_RESULT}, expected ${docs_expected} (docs_only: ${DOCS_ONLY})"
+            failed=1
+          fi
           [[ "${failed}" -eq 0 ]] || exit 1
-          echo 'policy checks: every policy shard passed'
+          echo "policy checks: every policy job ended as expected for docs_only=${DOCS_ONLY}"
 
   # This pull request's own policy, shard 1: repository contents, lint, universal and
   # structure rules.
-  # Needs no other job: it runs beside the base pass and holds no authority;
-  # only `policy` decides the required check.
+  # Waits for classify only (it is skipped on a documentation-only change); it runs beside the base pass and
+  # holds no authority; only `policy` decides the required check.
   policy-structure:
     permissions:
       contents: read
     name: Policy structure and lint
+    needs: [classify]
+    if: needs.classify.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -158,12 +250,14 @@ jobs:
         run: bash .github/policy/test-rule-n-if-shape.sh
 
   # Shard 2: fixture and unit tests of the policy scripts, selectors, dispatch contracts and live-proof pins.
-  # Needs no other job: it runs beside the base pass and holds no authority;
-  # only `policy` decides the required check.
+  # Waits for classify only (it is skipped on a documentation-only change); it runs beside the base pass and
+  # holds no authority; only `policy` decides the required check.
   policy-fixtures:
     permissions:
       contents: read
     name: Policy fixtures and unit tests
+    needs: [classify]
+    if: needs.classify.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -372,13 +466,40 @@ jobs:
         shell: bash
         run: bash .github/policy/test-dispatch-dedup.sh
 
+      # The docs-only fast path: every document the policy reads is on its exclusion list, the classifier
+      # answers true only for plain documentation changes, the whitespace check reads only a pull request merge
+      # commit, and the classified layout of this workflow (with both aggregate guards over their whole truth
+      # table) is accepted while each weakening of it is refused. Added after the last reviewed step on purpose,
+      # as above.
+      - name: Check that every document the policy reads is excluded from the docs-only fast path
+        shell: bash
+        run: ruby .github/policy/check-docs-reads.rb
+
+      - name: Test the docs-read check against fixtures
+        shell: bash
+        run: bash .github/policy/test-docs-reads.sh
+
+      - name: Test the docs-only classifier against synthetic pull requests
+        shell: bash
+        run: bash .github/policy/test-classify-docs-change.sh
+
+      - name: Test the docs-only whitespace check against synthetic merge commits
+        shell: bash
+        run: bash .github/policy/test-docs-diff.sh
+
+      - name: Test the classified policy layout and both aggregate guards
+        shell: bash
+        run: bash .github/policy/test-docs-fast-path-layout.sh
+
   # Shard 3: the case-evidence contract, producers and Playwright parity tests.
-  # Needs no other job: it runs beside the base pass and holds no authority;
-  # only `policy` decides the required check.
+  # Waits for classify only (it is skipped on a documentation-only change); it runs beside the base pass and
+  # holds no authority; only `policy` decides the required check.
   policy-evidence:
     permissions:
       contents: read
     name: Policy case-evidence tests
+    needs: [classify]
+    if: needs.classify.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -427,12 +548,14 @@ jobs:
         run: bash .github/policy/test-case-evidence-admission.sh
 
   # Shard 4: every reviewed weakening applied to a copy of the tree and rejected.
-  # Needs no other job: it runs beside the base pass and holds no authority;
-  # only `policy` decides the required check.
+  # Waits for classify only (it is skipped on a documentation-only change); it runs beside the base pass and
+  # holds no authority; only `policy` decides the required check.
   policy-mutations:
     permissions:
       contents: read
     name: Policy mutations
+    needs: [classify]
+    if: needs.classify.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -455,7 +578,35 @@ jobs:
     permissions:
       contents: read
     name: Base policy
+    needs: [classify]
+    if: needs.classify.outputs.docs_only != 'true'
     # The policy gate never restores or saves a cache, whatever the trigger.
     cache-mode: none
     # Kept as ./ : the policy matches this exact form for protected reusable calls.
     uses: ./.github/workflows/base-policy.yml  # zizmor: ignore[self-repository]
+
+  # The whole policy for a documentation-only change, which classify recognised: the repository-contents check
+  # (allowed paths, the compiled-file sweep, credential patterns) and git's whitespace check over the change.
+  # It runs only then, and `policy` requires it only then. Needs only classify and holds no authority.
+  policy-docs:
+    permissions:
+      contents: read
+    name: Policy docs-only checks
+    needs: [classify]
+    if: needs.classify.outputs.docs_only == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out public policy repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Reject private-source and credential material in a documentation change
+        shell: bash
+        run: bash .github/policy/check-repository.sh
+
+      - name: Check the documentation change for whitespace errors
+        shell: bash
+        run: bash .github/policy/check-docs-diff.sh

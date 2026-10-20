@@ -219,3 +219,8 @@ __END__
 ["policy-fixtures","Check the tool pin list and Dependabot coverage","bash .github/policy/check-tools.sh",{}]
 ["policy-fixtures","Check the egress allow-list","bash .github/policy/check-egress-allowlist.sh",{}]
 ["policy-fixtures","Test the duplicate-dispatch guard against synthetic runs","bash .github/policy/test-dispatch-dedup.sh",{}]
+["policy-fixtures","Check that every document the policy reads is excluded from the docs-only fast path","ruby .github/policy/check-docs-reads.rb",{}]
+["policy-fixtures","Test the docs-read check against fixtures","bash .github/policy/test-docs-reads.sh",{}]
+["policy-fixtures","Test the docs-only classifier against synthetic pull requests","bash .github/policy/test-classify-docs-change.sh",{}]
+["policy-fixtures","Test the docs-only whitespace check against synthetic merge commits","bash .github/policy/test-docs-diff.sh",{}]
+["policy-fixtures","Test the classified policy layout and both aggregate guards","bash .github/policy/test-docs-fast-path-layout.sh",{}]

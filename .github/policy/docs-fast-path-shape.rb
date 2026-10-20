@@ -18,7 +18,7 @@
 # policy refuses the sharded layout: false while the layout is accepted beside the old one (the
 # precursor), true once the workflow has changed and the old layout is gone.
 module DocsFastPathShape
-  REQUIRED = false
+  REQUIRED = true
 
   CHECKOUT = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
   CHECKOUT_COMMENT = 'v7.0.1'

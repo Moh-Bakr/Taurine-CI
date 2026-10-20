@@ -1133,6 +1133,114 @@ mutation_by test-shell-artefact.sh '15. the MySQL fork allowed a direct openssl 
 mutation '16. the selector selects an always concern twice' .github/actions/select-concerns/action.yml "return always, 'partial', 'documentation only'" "return always + [always[0]], 'partial', 'documentation only'"
 mutation '16. the selector drops an always concern' .github/actions/select-concerns/action.yml "always = [c for c, s in concerns.items() if s.get('always')]" "always = [c for c, s in concerns.items() if s.get('always') and c != 'contracts' and not c.startswith('zz')]"
 
+# 21. The docs-only fast path (docs/how-ci-works.md, "Docs-only fast path"): a documentation-only pull request
+# runs a short job instead of the whole policy, so every way to let a code change ride that path, or to pass
+# the required check without the classification, must be refused. Classifier mutations are refused by the
+# classifier's own fixtures (they are not part of offline_policy, which does not run them); the workflow
+# mutations by the structure, step and layout checks.
+classifier=.github/policy/classify-docs-change.rb
+exclusions=.github/policy/docs-fast-path-exclusions.rb
+gate="    needs: [classify]
+    if: needs.classify.outputs.docs_only != 'true'
+"
+mutation '21. the classify job renamed away (no classification)' "${public}" '
+  classify:
+' '
+  classify-gone:
+'
+mutation '21. the classifier read from the pull request instead of the base commit' "${public}" 'classifier=base-policy/.github/policy/classify-docs-change.rb' 'classifier=pr/.github/policy/classify-docs-change.rb'
+mutation '21. the classifier taken from the pull request checkout path' "${public}" '          path: base-policy
+          fetch-depth: 1' '          path: pr
+          fetch-depth: 1'
+mutation '21. the base policy checked out at the pull request head' "${public}" "ref: \${{ github.event.pull_request.base.sha || github.sha }}" "ref: \${{ github.event.pull_request.head.sha }}"
+mutation '21. the merge commit checkout keeps its credentials' "${public}" '          path: pr
+          fetch-depth: 0
+          persist-credentials: false' '          path: pr
+          fetch-depth: 0
+          persist-credentials: true'
+mutation '21. the classify job given write permission' "${public}" '  classify:
+    permissions:
+      contents: read' '  classify:
+    permissions:
+      contents: write'
+mutation '21. a base commit without the classifier answers true' "${public}" "echo 'docs_only=false' >> \"\${GITHUB_OUTPUT}\"" "echo 'docs_only=true' >> \"\${GITHUB_OUTPUT}\""
+mutation '21. the classification step tolerating failure' "${public}" '      - name: Classify the changed paths
+        id: classify
+        shell: bash' '      - name: Classify the changed paths
+        id: classify
+        continue-on-error: true
+        shell: bash'
+mutation '21. the classification output made a constant' "${public}" 'docs_only: ${{ steps.classify.outputs.docs_only }}' "docs_only: 'true'"
+mutation '21. the base pass no longer gated' "${public}" "    name: Base policy
+${gate}" '    name: Base policy
+'
+mutation '21. the structure shard no longer gated' "${public}" "    name: Policy structure and lint
+${gate}" '    name: Policy structure and lint
+'
+mutation '21. the fixtures shard no longer gated' "${public}" "    name: Policy fixtures and unit tests
+${gate}" '    name: Policy fixtures and unit tests
+'
+mutation '21. the evidence shard no longer gated' "${public}" "    name: Policy case-evidence tests
+${gate}" '    name: Policy case-evidence tests
+'
+mutation '21. the mutations shard no longer gated' "${public}" "    name: Policy mutations
+${gate}" '    name: Policy mutations
+'
+mutation '21. the mutations shard skipped whatever the classification' "${public}" "    name: Policy mutations
+${gate}" '    name: Policy mutations
+    needs: [classify]
+    if: false
+'
+mutation '21. the fixtures shard gated by the opposite condition' "${public}" "    name: Policy fixtures and unit tests
+${gate}" "    name: Policy fixtures and unit tests
+    needs: [classify]
+    if: needs.classify.outputs.docs_only == 'true'
+"
+mutation '21. the docs-only job run on every change' "${public}" "    if: needs.classify.outputs.docs_only == 'true'" "    if: \${{ always() }}"
+mutation '21. the docs-only repository check turned into true' "${public}" '      - name: Reject private-source and credential material in a documentation change
+        shell: bash
+        run: bash .github/policy/check-repository.sh' '      - name: Reject private-source and credential material in a documentation change
+        shell: bash
+        run: "true"'
+mutation '21. the docs-only whitespace check turned into true' "${public}" 'run: bash .github/policy/check-docs-diff.sh' 'run: "true"'
+mutation '21. the aggregate no longer needs the classification' "${public}" '    needs: [base-pass, classify, policy-docs, policy-evidence, policy-fixtures, policy-mutations, policy-structure]' '    needs: [base-pass, policy-docs, policy-evidence, policy-fixtures, policy-mutations, policy-structure]'
+mutation '21. the aggregate no longer needs the docs-only job' "${public}" '    needs: [base-pass, classify, policy-docs, policy-evidence, policy-fixtures, policy-mutations, policy-structure]' '    needs: [base-pass, classify, policy-evidence, policy-fixtures, policy-mutations, policy-structure]'
+mutation '21. the shards guard passes a skipped shard when docs_only is false' "${public}" "            false) expected=success; docs_expected=skipped ;;
+            *) echo \"::error::the classification is neither true nor false (docs_only: '\${DOCS_ONLY}')\"; exit 1 ;;
+          esac
+          failed=0" "            false) expected=\${POLICY_FIXTURES_RESULT}; docs_expected=skipped ;;
+            *) echo \"::error::the classification is neither true nor false (docs_only: '\${DOCS_ONLY}')\"; exit 1 ;;
+          esac
+          failed=0"
+mutation '21. the base-pass guard passes a skipped base pass when docs_only is false' "${public}" '            false) expected=success ;;' '            false) expected=${BASE_PASS_RESULT} ;;'
+mutation '21. a guard that ignores a failed classification' "${public}" "if [[ \"\${CLASSIFY_RESULT}\" != 'success' ]]; then" "if [[ \"\${CLASSIFY_RESULT}\" == 'never' ]]; then"
+mutation '21. the classification read as a constant' "${public}" '          DOCS_ONLY: ${{ needs.classify.outputs.docs_only }}' "          DOCS_ONLY: 'false'"
+mutation '21. the docs-only result no longer read by the shards guard' "${public}" '          POLICY_DOCS_RESULT: ${{ needs.policy-docs.result }}
+' ''
+# The classifier's own fixtures refuse each loosening of it.
+mutation_by test-classify-docs-change.sh '21. a .github change marked docs-only (the allow-list widened)' "${classifier}" '  patterns = [%r{\Adocs/(?:#{SEGMENT}/)*#{SEGMENT}\.md\z}, /\A#{SEGMENT}\.md\z/]' '  patterns = [%r{\Adocs/(?:#{SEGMENT}/)*#{SEGMENT}\.md\z}, /\A#{SEGMENT}\.md\z/, %r{\A\.github/}]'
+mutation_by test-classify-docs-change.sh '21. any path accepted as documentation' "${classifier}" 'patterns.any? { |re| re.match?(path) }' 'true'
+mutation_by test-classify-docs-change.sh '21. the excluded documents ignored' "${classifier}" 'if excluded.include?(path.downcase)' 'if false'
+mutation_by test-classify-docs-change.sh '21. the excluded documents compared case-sensitively' "${classifier}" 'excluded = DocsFastPathExclusions::EXCLUDED_DOCS.map(&:downcase)' 'excluded = DocsFastPathExclusions::EXCLUDED_DOCS' "${classifier}" 'if excluded.include?(path.downcase)' 'if excluded.include?(path)'
+mutation_by test-classify-docs-change.sh '21. a symlink, a submodule or a mode change accepted' "${classifier}" 'unless modes_ok' 'if false'
+mutation_by test-classify-docs-change.sh '21. a binary document accepted' "${classifier}" 'if binaries.include?(path)' 'if false'
+mutation_by test-classify-docs-change.sh '21. a push or dispatch event accepted' "${classifier}" "unless env['EVENT_NAME'] == 'pull_request'" 'if false'
+mutation_by test-classify-docs-change.sh '21. a merge commit that is not the pull request head merged accepted' "${classifier}" 'unless parents.last == head' 'if false'
+mutation_by test-classify-docs-change.sh '21. an empty change accepted' "${classifier}" 'if changes.empty?' 'if false'
+mutation_by test-classify-docs-change.sh '21. a git failure read as docs-only' "${classifier}" '    verdict = false
+    reason = "doubt: #{e.message}"' '    verdict = true
+    reason = "doubt: #{e.message}"'
+mutation_by test-classify-docs-change.sh '21. plans/ always allowed' "${classifier}" "has_plans = !git(repo, 'ls-tree', '--name-only', base, 'plans').strip.empty?" 'has_plans = true'
+mutation_by test-classify-docs-change.sh '21. any path segment accepted' "${classifier}" "SEGMENT = '[A-Za-z0-9][A-Za-z0-9._-]*'" "SEGMENT = '[^/]+'"
+# The exclusion list, and the check that every document the policy reads is on it.
+mutation_by check-docs-reads.rb '21. the document the policy reads removed from the exclusion list' "${exclusions}" '    docs/untrusted-readonly-cache.md
+  ].freeze' '  ].freeze'
+mutation_by check-docs-reads.rb '21. a new reader of an unlisted document' .github/policy/check-sizes.sh 'set -euo pipefail' 'set -euo pipefail
+cat docs/how-ci-works.md > /dev/null'
+mutation_by check-docs-reads.rb '21. the spike-record reader switched to another document' .github/policy/check-cache-mode.rb "tree_doc = File.join(root, 'docs', 'untrusted-readonly-cache.md')" "tree_doc = File.join(root, 'docs', 'how-ci-works.md')"
+mutation_by test-docs-diff.sh '21. the whitespace check never fails' .github/policy/check-docs-diff.sh "if ! git diff --check 'HEAD^1' HEAD; then" 'if false; then'
+mutation_by test-docs-diff.sh '21. the whitespace check run on a checkout that is not a merge commit' .github/policy/check-docs-diff.sh "git rev-parse --verify --quiet 'HEAD^2^{commit}' > /dev/null || fail 'HEAD is not a merge commit of a pull request head'" ':'
+
 drain
 (( missed == 0 )) || { echo "${missed} mutation(s) passed the policy" >&2; exit 1; }
 echo "mutation tests: every reviewed weakening is rejected by the offline policy (${total} cases, ${max_jobs} job(s))"
