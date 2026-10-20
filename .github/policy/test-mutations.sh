@@ -202,9 +202,10 @@ _mutation() {
 mutation() { spawn "$1" _mutation "$@"; }
 # spike_mutation LABEL FILE OLD NEW [...]: like mutation, judged against the base without the spike
 # record, and rejected specifically by the spike gate (check-workflows.sh, with the gate's message).
-# The tree's record document is first normalised to hold exactly one record line (an existing one is
-# kept, a missing one is added), so the gate always reaches its base comparison whether the tree under
-# test has already merged the record or not; the base copy never holds one.
+# The tree's record document is first given a record line when it has none (any existing record is
+# kept as it is), so a tree with the one merged record and a tree without it both reach the gate's
+# base comparison; a tree with more than one record is refused by the gate's own count and ends as
+# WRONG CHECKER. The base copy never holds one.
 _spike_mutation() {
   local label="$1" by=''; shift
   fresh_tree
