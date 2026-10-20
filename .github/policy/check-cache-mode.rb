@@ -537,10 +537,12 @@ LOCAL_ACTION_FILE_SHA256 = {
     5d800b030a24f32029965c91075ac5ddeb720c7f93fa292872bc822027f7eedc
   ],
   'concern-report' => %w[49cd2af3e6c48d4e337de083a4bba64111d5578ca13c5ed33b35a187b7878273],
-  # second hash: next reviewed version (adds the legacy-tls feature assertion), ships with the cache-flip PR
+  # second hash: next reviewed version (adds the legacy-tls feature assertion), ships with the cache-flip PR;
+  # third hash: next reviewed version (a Java class file's cafebabe is not a fat Mach-O), ships next
   'shell-artefact' => %w[
     dcbc5b2590dba651c8a636ae4944977002d35b4154350ca64fcd361a1462a184
     7f32333abb9633e640ffafdb7e8a6e67d7dcb88474e98135a67cfa5759007e8a
+    2a0010d6c2b181a3b7c9312e283502f2d117aad99d14d3fc3606202e4f8580a5
   ],
   'scan-concern' => %w[4fc5337688e8fbff7f62cb8dca21d3ea6a2e8f1593b49979a98adcb845e96306],
   'verify-cargo-cache' => %w[6c38bdfe714317107def1f7cc2c58c5a6293381950b685a3762b2d09de3c1b8a],
